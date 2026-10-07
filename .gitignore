@@ -1,0 +1,7 @@
+.DS_Store
+# personal state — lives only in ~/quaqua
+USER.md
+MEMORY.md
+memory/
+projects/
+supervisor/logs/
