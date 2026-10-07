@@ -13,7 +13,7 @@ Anh gọi theo biệt danh → em spawn đúng `name` / kind / model / effort. S
 | tông sư | `tongsu` | `claude` | `--model claude-opus-5-5 --effort high` | Sửa bug, đuổi edge case, verify quan trọng, bug codebase cũ. **Chỉ spawn khi anh gọi** |
 | chưởng môn | `chuongmon` | `claude` | `--model claude-opus-5-5 --effort max` | Việc khó chạy trọn từ build đến verify, săn lỗ hổng. **Chỉ spawn khi anh gọi** |
 | đấng cứu thế | `dangcuuthe` | `codex` | `-m <astra-id> -c model_reasoning_effort=medium` | Second opinion, review nhanh, logic hóc |
-| lão sư | `reviewer` | `codex` | `-m gpt-6.1-sol -c model_reasoning_effort=high` | Review diff/PR kỹ, tìm bug; read-only. Báo repo path. `cd ~/agents/reviewer` |
+| lão sư | `reviewer` | `codex` | `-m gpt-6.1-sol -c model_reasoning_effort=high` | Review diff/PR kỹ, tìm bug; read-only. Spawn với `--cwd <repo>`, brief ghi rõ SHA. |
 
 Spawn: `herdr agent start <name> --kind <kind> --pane <id> -- <launch args>`.
 - Sư đệ (pi): sau `agent start` gửi `/advisor` để bật advisor gates (executor trùng deepseek nên không đổi model). Đệ tử/tiểu đệ: KHÔNG bật (advisor ép model về executor).

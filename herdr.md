@@ -24,7 +24,7 @@ Format and brief rules: `LEAD.md` § Assignment. Every prompt opens with "Read ~
 **Lifecycle**
 1. Startup prompts (update, trust hooks) → Skip, tell anh.
 2. Spawn/close → tell anh 1 line: who, model, why.
-3. Done → worker writes a handoff (what changed, decisions, open issues) into its report; I verify, absorb durable facts into `projects/<name>.md` (lessons → `MEMORY.md`), then close the pane right away unless the next task reuses its context.
+3. Done → worker writes the 6-field handback (`PEER.md` § Handback) into its report; I verify, absorb durable facts into `projects/<name>.md` (lessons → `MEMORY.md`), then close the pane right away unless the next task reuses its context.
 4. Restart/close a worker that holds useful context → ask anh first.
 5. Session end → `herdr agent list`, handoff + absorb + close every worker I spawned.
 

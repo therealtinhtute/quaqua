@@ -15,7 +15,7 @@ Set up a multi-agent orchestration workspace on this machine using the SLP model
   - Verifies the work before reporting to me.
 - **Peers** (worker agents, each in its own Herdr pane):
   - Implement or review exactly one scoped task.
-  - Implementation and review go to different agents.
+  - The writer never accepts its own work; the Lead accepts. Independent review (a different agent) only when risk or protocol requires it (see `LEAD.md`).
 - **Supervisor** (read-only, scheduled every ~2 days):
   - Looks at the Lead's activity and the workspace docs.
   - Flags drift and docs that have gone stale against the real code.

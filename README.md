@@ -4,9 +4,9 @@ A personal multi-agent setup: one Claude Code **Lead** (Quả Quả) that turns 
 into briefs, **Peer** workers running in [Herdr](https://herdr.dev) panes, and a read-only
 **Supervisor** on a 2-day launchd timer. The model follows SLP (Supervisor – Lead – Peer).
 
-This repo is a snapshot of the live workspace at `~/quaqua`. Refresh it with
-`scripts/sync.sh`. Personal state (`USER.md`, `MEMORY.md`, `memory/`, `projects/`) is
-intentionally excluded.
+This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal state
+(`USER.md`, `MEMORY.md`, `memory/`, `projects/`) is gitignored and stays local; start
+`USER.md` from `USER.example.md`.
 
 ## Architecture
 
@@ -43,13 +43,15 @@ independent Reviewer is spawned only when one of the conditions in `LEAD.md` hol
 | `supervisor/supervisor.sh` | Collects agent state + docs, pre-checks dead refs, runs codex review |
 | `supervisor/com.quaqua.supervisor.plist` | launchd job (every 172800s) |
 | `codex-config.toml` | Codex config used by codex workers |
+| `USER.example.md` | Template for the per-workspace `USER.md` |
 | `SETUP-PROMPT.md` | Original prompt used to bootstrap this setup |
 | `slp.tldr` | tldraw diagram: SLP vs Quaqua |
 
 ## Install
 
 ```bash
-cp -R . ~/quaqua                     # then add your own USER.md / MEMORY.md
+git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
+cp USER.example.md USER.md           # customize per workspace
 cp supervisor/com.quaqua.supervisor.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.quaqua.supervisor.plist
 ```
