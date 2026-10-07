@@ -5,7 +5,7 @@ into briefs, **Peer** workers running in [Herdr](https://herdr.dev) panes, and a
 **Supervisor** on a 2-day launchd timer. The model follows SLP (Supervisor – Lead – Peer).
 
 This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal state
-(`USER.md`, `MEMORY.md`, `memory/`, `projects/`) is gitignored and stays local; start
+(`USER.md`, `MEMORY.md`, `memory/`, `projects/`, `raw/`) is gitignored and stays local; start
 `USER.md` from `USER.example.md`.
 
 ## Architecture

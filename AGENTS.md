@@ -11,7 +11,7 @@
 4. Em điều phối, không tự implement. Code/sửa/test → giao worker qua Herdr; rule vận hành Herdr ở `herdr.md` (bắt buộc đọc trước khi spawn/drive worker), phán đoán SLP (brief, review, accept) ở `LEAD.md`, hợp đồng worker ở `PEER.md`, lệnh cụ thể ở skill `herdr-ops`. Ngoại lệ: file md của workspace này em tự sửa.
 5. Anh gọi worker bằng biệt danh → tra `models.md` (agent, model, effort) trước khi spawn.
 6. Skill global (brainstorm, think, to-plan, check) em dùng để suy nghĩ/duyệt; `work`/`hunt` → prompt worker làm. Không dùng Agent tool (deny ở `.claude/settings.json`).
-7. Memory: session bắt đầu trắng, file là ký ức. Rule/bài học lâu dài → `MEMORY.md` (≤2200 chars) · về anh → `USER.md` (≤1375 chars) · project → `projects/<name>.md` (index `projects/INDEX.md`) · log thô → `memory/YYYY-MM-DD.md`. Anh bảo "nhớ" → ghi NGAY trong turn này; không nói "đã lưu" khi chưa ghi.
+7. Memory: session bắt đầu trắng, file là ký ức. Rule/bài học lâu dài → `MEMORY.md` (≤2200 chars) · về anh → `USER.md` (≤1375 chars) · project → `projects/<name>.md` (index `projects/INDEX.md`) · log thô → `memory/YYYY-MM-DD.md` · bằng chứng gốc (handback) → `raw/`, không sửa. Fact trong `projects/` ghi kèm nguồn `(<sha> · raw/<file>)`. Anh bảo "nhớ" → ghi NGAY trong turn này; không nói "đã lưu" khi chưa ghi.
    - Vượt cap → gộp/xóa mục cũ trước khi thêm, không tăng cap.
    - Không ghi: chuyện vặt, thứ tra lại được (code, git, docs), dump thô, chuyện chỉ của session này, thứ đã có trong file context.
    - Single writer: session phụ chỉ append `memory/YYYY-MM-DD.md`; `MEMORY.md`/`USER.md` chỉ sửa khi anh bảo "nhớ" hoặc bảo gộp.

@@ -138,7 +138,12 @@ check_one_ref() {
   local f="$1" tok="$2" kind="" ok="" line=""
   case "$tok" in
     //*|*://*) return 0 ;;                          # URLs, not paths
-    ~*|/*)
+    *'<'*|*'>'*|*'*'*|*'$'*|*'{'*) return 0 ;;        # placeholders/globs, not real refs
+    /tmp/*) return 0 ;;                              # ephemeral by design
+    /*) case "$tok" in /Users/*|/opt/*|/Library/*|/usr/*|/etc/*|/Applications/*) ;; *) return 0 ;; esac
+      kind="path"
+      [ -e "$tok" ] && ok=yes || ok=no ;;
+    ~*)
       kind="path"
       [ -e "${tok/#\~/$HOME}" ] && ok=yes || ok=no ;;
     *--*)
@@ -147,7 +152,8 @@ check_one_ref() {
       cmd="${helptarget%% *}"
       case " $SAFE_CMDS " in *" $cmd "*) ;; *) return 0 ;; esac
       flag="$(printf '%s' "$tok" | grep -oE '\--[a-zA-Z-]+' | head -1)"
-      [ -z "$flag" ] && return 0
+      [ -z "$flag" ] || [ "$flag" = "--help" ] && return 0
+      [ "$cmd" = git ] && return 0                  # git -h omits most flags
       kind="cmd-flag"
       key="$(printf '%s' "$helptarget" | tr ' ' '_')"
       if [ -z "${HELP_CACHE[$key]+x}" ]; then
@@ -160,20 +166,17 @@ check_one_ref() {
         return 0                                    # unverifiable, not "dead"
       fi
       printf '%s' "${HELP_CACHE[$key]}" | grep -qF -- "$flag" && ok=yes || ok=no ;;
-    */*|*.md|*.ts|*.sh|*.json|*.toml|*.mjs|*.js|*.py|*.txt)
+    *[[:space:]]*) return 0 ;;                       # prose/command lines
+    */|*.md|*.ts|*.sh|*.json|*.toml|*.mjs|*.js|*.py|*.txt)
+      case "$f" in */projects/*) return 0 ;; esac   # relative to the project repo, not here
+      case "$tok" in */*) ;; *) return 0 ;; esac    # bare names (CLAUDE.md) mean "in the target repo"
+      case "$tok" in *YYYY*) return 0 ;; esac
       kind="rel-path"
       local d; d="$(dirname "$f")"
       if   [ -e "$d/$tok" ]; then ok=yes
       elif [ -e "$WORKSPACE/$tok" ]; then ok=yes
       elif [ -e "$HOME/$tok" ]; then ok=yes
       else ok=no; fi ;;
-    [a-zA-Z]*)
-      case "$tok" in
-        *[!a-zA-Z0-9_-]*) return 0 ;;
-      esac
-      [ "${#tok}" -gt 30 ] && return 0
-      kind="cmd"
-      command -v "$tok" >/dev/null 2>&1 && ok=yes || ok=no ;;
     *) return 0 ;;
   esac
   REFS_CHECKED=$((REFS_CHECKED + 1))
@@ -187,11 +190,13 @@ ref_check_file() {
   local f="$1"
   local toks tok
   toks="$( { grep -oE '`[^`]{1,120}`' "$f" 2>/dev/null | tr -d '`'
-            grep -oE '(~|/)[A-Za-z0-9_./-]{2,}' "$f" 2>/dev/null
+            grep -oE '(^|[[:space:](])~/[A-Za-z0-9_./-]{2,}' "$f" 2>/dev/null | sed -E 's/^[[:space:](]//'
+            grep -oE '(^|[[:space:](])/(Users|opt|Library|usr|etc)/[A-Za-z0-9_./-]{2,}' "$f" 2>/dev/null
             grep -oE "\b($SAFE_CMDS_RE)[[:space:]]+([a-z-]+[[:space:]]+)?--[a-zA-Z-]+" "$f" 2>/dev/null
           } | sort -u | head -40 )"
   while IFS= read -r tok; do
-    tok="${tok%%[.,;:)\]]*}"; tok="${tok##[(\[]*}"
+    while [[ "$tok" == *[.,\;:\)\]] ]]; do tok="${tok%?}"; done   # trailing punctuation only
+    tok="${tok#[(\[]}"
     [ -z "$tok" ] && continue
     check_one_ref "$f" "$tok"
   done <<< "$toks"
@@ -220,8 +225,9 @@ A table: | file | line | why | suggested action |
 Flag a doc when its content references files/commands/flags that no longer
 exist (the dead-reference precheck below is verified evidence — use it), when
 two files contradict each other, or when a file is old relative to the code or
-activity it describes (mtime ages are in the manifest; the workspace is NOT a
-git repo). No fixed line-count rule — judge content, not age alone.
+activity it describes (mtime ages are in the manifest). This is the lint pass
+of the workspace wiki: also flag facts in projects/*.md with no source
+(SHA or raw/ report), and project pages missing from projects/INDEX.md. No fixed line-count rule — judge content, not age alone.
 ## Decisions for me
 Numbered list of concrete choices the owner must make (keep/update/delete,
 which source of truth wins). Nothing here should be auto-fixable — this run is

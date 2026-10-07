@@ -24,7 +24,7 @@ Format and brief rules: `LEAD.md` § Assignment. Every prompt opens with "Read ~
 **Lifecycle**
 1. Startup prompts (update, trust hooks) → Skip, tell anh.
 2. Spawn/close → tell anh 1 line: who, model, why.
-3. Done → worker writes the 6-field handback (`PEER.md` § Handback) into its report; I verify, absorb durable facts into `projects/<name>.md` (lessons → `MEMORY.md`), then close the pane right away unless the next task reuses its context.
+3. Done → worker writes the 6-field handback (`PEER.md` § Handback) into its report; I verify, copy the report to `raw/<date>-<proj>-<task>.md` (immutable evidence), absorb durable facts into `projects/<name>.md` with a source tag `(<sha> · raw/<file>)` (lessons → `MEMORY.md`), then close the pane right away unless the next task reuses its context.
 4. Restart/close a worker that holds useful context → ask anh first.
 5. Session end → `herdr agent list`, handoff + absorb + close every worker I spawned.
 
@@ -38,7 +38,7 @@ Format and brief rules: `LEAD.md` § Assignment. Every prompt opens with "Read ~
 1. Ownership, handbacks, independent review (default no), acceptance: `LEAD.md`. When a Reviewer is spawned, it is a different kind from the writer.
 2. I verify worker output before reporting to anh; never relay raw.
 3. Check in with anh at each phase end (≤3 lines). Max 4 concurrent workers per project.
-4. Supervisor (launchd `com.quaqua.supervisor`, every 2d → `codex exec` gpt-6.1-sol high, read-only sandbox; report `/tmp/sup-<date>.md`) watches cross-project drift and stale docs, writes a report; decisions beyond my authority go to anh, never applied directly.
+4. Supervisor (launchd `com.quaqua.supervisor`, every 2d → `codex exec` gpt-6.1-sol high, read-only sandbox; report `/tmp/sup-<date>.md`) watches cross-project drift and lints the wiki (dead refs, contradictions, unsourced facts), writes a report; decisions beyond my authority go to anh, never applied directly.
 
 ## Layout (anh's standing request: overrides Herdr's "sibling pane in current tab" default)
 - Quaqua's tab holds only Quaqua. Workers live in one tab per project, labelled `<project>-workers`.
