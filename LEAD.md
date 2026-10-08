@@ -1,5 +1,11 @@
 # Lead — SLP judgment layer
 
+> **Superseded 2026-10-08:** the SLP roles and authority model now live in
+> `AGENTS.md` (`## Roles (SLP)`) and the mechanics in `scripts/*` +
+> `rules/_all/`. This file is reference only; where it disagrees (Lead =
+> Quaqua, Supervisor = read-only observer, all merges → anh iu), AGENTS.md
+> and the scripts win.
+
 SLP roles in this workspace:
 
 - **Human (anh):** owner. Vision, priorities, irreversible trade-offs, anything that leaves

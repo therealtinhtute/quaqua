@@ -11,7 +11,7 @@ Pick by task shape. Name = kind passed to `spawn-worker.sh`. Update "Seen" after
 | suhuynh | claude · opus-5.5 · medium | refactor, review of intent | long mechanical edits | mdside |
 | truonglao | claude · opus-5.5 · high | design, architecture, hard trade-offs | anything a cheaper tier can do | – |
 | bacdau | codex · astra · medium | specced impl + tests, second opinion | vague tasks (codex state can stick `unknown`) | – |
-| quansu | codex · gpt-6.1-sol · high | advice only: review/diagnose, findings go to CoS → sude fix | editing code, fixing its own findings | quansu-roster |
+| quansu | codex · gpt-6.1-sol · high | advice only: review/diagnose; pipeline review findings return to the builder via pipeline.sh, advice-only findings go to CoS | editing code, fixing its own findings | quansu-roster |
 
 ## Naming
 - Worker name = `<name>-<task>`, lowercase, no diacritics, ≤20 chars, e.g. `sude-fonts`, `quansu-fonts`.
