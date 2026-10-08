@@ -5,7 +5,7 @@ Anh gọi theo biệt danh → em spawn đúng `name` / kind / model / effort. S
 | Biệt danh | name | kind | Launch args (sau `--`) | Dùng cho |
 |---|---|---|---|---|
 | tiểu đệ | `tieude` | `pi` | `--model antigravity/gemini-3.8-flash` | Việc vặt: sửa nhỏ, docs, rename, chạy lệnh, tra cứu nhanh |
-| sư đệ | `sude` | `pi` | `--model devin/deepseek-v4-1-flash:max` | Việc rẻ cần suy luận sâu: tra cứu, audit/plan read-only, sửa nhỏ |
+| sư đệ | `sude` | `pi` | `--model devin/deepseek-v4.1-flash:max` | Việc rẻ cần suy luận sâu: tra cứu, audit/plan read-only, sửa nhỏ |
 | đệ tử ("đám worker") | `worker` | `pi` | `--model devin/swe-2:max` | Implementation mặc định; fan-out nhiều đệ tử |
 | hộ pháp | `hophap` | `claude` | `--model claude-sonnet-5-5 --effort medium` | Feature vừa, viết test, refactor có phạm vi |
 | mưu sĩ | `muusi` | `claude` | `--model claude-opus-5-5 --effort low` | Sketch, brainstorm, sửa dễ, cần trả lời nhanh |
