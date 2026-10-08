@@ -23,8 +23,8 @@ case "${1:-} ${2:-}" in
     if [ "${FAKE_GONE:-0}" = 1 ]; then
       printf '{"error":{"code":"agent_not_found"}}\n'; exit 1
     fi
-    printf '{"result":{"agent":{"agent_status":"%s","cwd":"%s"}}}\n' \
-      "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" ;;
+    printf '{"result":{"agent":{"agent_status":"%s","cwd":"%s","pane_id":"%s"}}}\n' \
+      "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" "${FAKE_WATCHER_PANE:-%1}" ;;
   "agent read")
     if [ "${FAKE_READ_ERR:-0}" = 1 ] && [[ $* == *recent-unwrapped* ]]; then
       printf '{"error":{"code":"agent_not_idle"}}\n'; exit 1
@@ -107,18 +107,20 @@ run sude-busy FAKE_DELAY=0 FAKE_ROTATE=1 PROMPT_WORKER_POLL_SEC=1 \
 grep -q 'WATCHDOG exit=4' "$T/err" || fail "sude-busy: no budget line"
 echo "ok: changing pane -> no stall, exit 4 at budget"
 
-# ── BUDGET: one nudge ~80%, then exit 4; sentinel written ───────────────────
+# ── BUDGET: one nudge past the pct mark, then exit 4; sentinel written ──────
+# (NUDGE_PCT=30 puts the nudge inside the first poll window — deterministic
+# instead of relying on iteration timing landing in a sub-second slot)
 run sude-budget FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
-  PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_MAX_SEC=60
+  PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_NUDGE_PCT=30 PROMPT_WORKER_MAX_SEC=60
 [[ $rc -eq 4 ]] || fail "sude-budget: exit $rc, want 4: $(cat "$T/err")"
 [[ $(nudges) -eq 1 ]] || fail "sude-budget: $(nudges) nudges, want 1: $(cat "$T/calls")"
 sentinel sude-budget || fail "sude-budget: no nudge sentinel"
 grep -q 'WATCHDOG nudge sent' "$T/err" || fail "sude-budget: no nudge notice"
-echo "ok: budget -> one nudge at 80%, sentinel, exit 4"
+echo "ok: budget -> one nudge past the pct mark, sentinel, exit 4"
 
 # ── nudge is once per task: resume does not re-nudge ────────────────────────
 resume sude-budget PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
-  PROMPT_WORKER_BUDGET_SEC=2 PROMPT_WORKER_MAX_SEC=60
+  PROMPT_WORKER_BUDGET_SEC=2 PROMPT_WORKER_NUDGE_PCT=30 PROMPT_WORKER_MAX_SEC=60
 [[ $rc -eq 4 ]] || fail "sude-budget resume: exit $rc, want 4: $(cat "$T/err")"
 [[ $(nudges) -eq 0 ]] || fail "sude-budget resume: re-nudged: $(cat "$T/calls")"
 echo "ok: --resume -> no second nudge (sentinel persists)"
@@ -186,19 +188,19 @@ echo "ok: heartbeat prints elapsed/status while waiting"
 # exit-3 paths (idle and stall) — budget/cap still bound the wait.
 sleep 300 & live_pid=$!
 true & dead_pid=$!; wait $dead_pid 2>/dev/null || true
-pipe_state() { printf 'finished=%s\npipeline_pid=%s\n' "$1" "$2" \
+pipe_state() { printf 'finished=%s\npipeline_pid=%s\nlead=%s\nlead_pane=%s\n' "$1" "$2" "$3" "$4" \
   > "$T/home/quaqua/runs/pipeline-isl.state"; }
 
-pipe_state 0 "$live_pid"
+pipe_state 0 "$live_pid" isl-lead '%1'
 run isl-lead FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
   PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_STALL_SEC=1 \
   PROMPT_WORKER_BUDGET_SEC=4 PROMPT_WORKER_MAX_SEC=60
 [[ $rc -eq 4 ]] || fail "isl-lead: exit $rc, want 4 (live pipeline = waiting): $(cat "$T/err")"
 ! grep -q 'exit=3' "$T/err" || fail "isl-lead: exit 3 fired on a waiting Lead: $(cat "$T/err")"
-echo "ok: -lead + live pipeline -> idle+stall exit 3 suppressed, exit 4 at budget"
+echo "ok: -lead + own live pipeline -> idle+stall exit 3 suppressed, exit 4 at budget"
 
 # a finished pipeline state does not protect the Lead
-pipe_state 1 "$live_pid"
+pipe_state 1 "$live_pid" isl-lead '%1'
 run isl-lead FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
   PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
 [[ $rc -eq 3 ]] || fail "isl-lead finished: exit $rc, want 3: $(cat "$T/err")"
@@ -206,20 +208,51 @@ grep -q 'agent idle' "$T/err" || fail "isl-lead finished: no idle reason: $(cat 
 echo "ok: -lead + finished=1 pipeline -> idle exit 3 as usual"
 
 # a paused pipeline (dead pid, e.g. plan-ready stop) is the Lead's turn: normal watchdog
-pipe_state 0 "$dead_pid"
+pipe_state 0 "$dead_pid" isl-lead '%1'
 run isl-lead FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
   PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
 [[ $rc -eq 3 ]] || fail "isl-lead paused: exit $rc, want 3: $(cat "$T/err")"
 grep -q 'agent idle' "$T/err" || fail "isl-lead paused: no idle reason: $(cat "$T/err")"
 echo "ok: -lead + dead pipeline pid -> idle exit 3 as usual"
 
+# F6: an unrelated project's live pipeline must not protect this Lead
+pipe_state 0 "$live_pid" beta-lead '%9'
+run isl-lead FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "isl-lead foreign: exit $rc, want 3 (foreign pipeline no exemption): $(cat "$T/err")"
+grep -q 'agent idle' "$T/err" || fail "isl-lead foreign: no idle reason: $(cat "$T/err")"
+echo "ok: foreign lead's live pipeline -> idle exit 3 as usual"
+
 # the exemption is only for *-lead agents: a plain worker beside the same live
 # pipeline still gets the fast idle exit
-pipe_state 0 "$live_pid"
+pipe_state 0 "$live_pid" isl-lead '%1'
 run sude-isl FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
   PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
 [[ $rc -eq 3 ]] || fail "sude-isl: exit $rc, want 3 (exemption is *-lead only): $(cat "$T/err")"
 echo "ok: non-lead worker with live pipeline -> idle exit 3 as usual"
 kill "$live_pid" 2>/dev/null || true; rm -f "$T/home/quaqua/runs/pipeline-isl.state"
+
+# ── F5: consumed budget persists across --resume — no fresh clock ───────────
+run sude-persist FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-persist run1: exit $rc, want 4: $(cat "$T/err")"
+[[ -s $T/home/quaqua/runs/.sude-persist.elapsed ]] || fail "sude-persist: no elapsed sidecar"
+el=$(cat "$T/home/quaqua/runs/.sude-persist.elapsed")
+(( el >= 3 )) || fail "sude-persist: elapsed $el < 3"
+# resume with a big budget: only ~1s of the 4s total remains -> fast exit 4,
+# never a fresh 9999s clock
+resume sude-persist PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=4 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-persist resume: exit $rc, want 4 fast: $(cat "$T/err")"
+grep -q 'elapsed=[0-2]s' "$T/err" \
+  || fail "sude-persist resume: took too long — resume restocked the budget: $(cat "$T/err")"
+echo "ok: --resume continues the same allowance (elapsed $el carried over), no fresh clock"
+
+# a fresh task prompt resets the clock (new invocation, new allowance)
+rm -f "$T/home/quaqua/runs/.sude-persist.elapsed"
+run sude-persist FAKE_WRITE=0 FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=2 PROMPT_WORKER_MAX_SEC=5
+[[ $rc -eq 4 ]] || fail "sude-persist fresh: exit $rc, want 4"
+echo "ok: fresh prompt -> clock reset to the new task's allowance"
 
 echo "PASS"

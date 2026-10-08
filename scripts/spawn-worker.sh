@@ -4,6 +4,11 @@
 #          (*-lead is the project Lead convention — spawn-lead.sh <slug>-lead)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
 #   --review      codex kinds (bacdau|quansu) only: repo read-only, $HOME/quaqua/runs writable
+#   Resume-safe: when $wt is already a registered worktree of <repo> (a
+#   previous attempt died after creating it) it is reused and startup
+#   continues with a fresh pane/agent. A pane this attempt created is closed
+#   if the agent never becomes ready; the worktree+branch stay for resume.
+#   A dir at $wt that is not a worktree of <repo> is refused, never reused.
 set -euo pipefail
 
 usage() { sed -n '2,5p' "$0" >&2; exit 1; }
@@ -43,10 +48,20 @@ if [[ ${base+x} ]]; then
     || { echo "error: --base '$base' is not a known commit-ish in $repo" >&2; exit 1; }
 fi
 
-git -C "$repo" worktree add -b "quaqua/$name" "$wt" ${base:+"$base"} >&2
+if [[ -d $wt ]]; then
+  if git -C "$repo" worktree list --porcelain | grep -qxF "worktree $wt"; then
+    echo "note: $wt already a registered worktree — reusing it (resumed spawn)" >&2
+  else
+    echo "error: $wt exists but is not a git worktree of $repo — remove it or pick another name" >&2
+    exit 1
+  fi
+else
+  git -C "$repo" worktree add -b "quaqua/$name" "$wt" ${base:+"$base"} >&2
+fi
 
 # worker rules: rules/_all/*.md + rules/<repo-basename>/*.md -> one file, injected as system prompt
 rules_dir="$HOME/quaqua/rules" rf="$HOME/quaqua/runs/$name.rules.md"
+mkdir -p "$(dirname "$rf")"   # fresh clones have no runs/ yet — create it before writing
 cat "$rules_dir"/_all/*.md "$rules_dir/$(basename "$repo")"/*.md 2>/dev/null > "$rf" || true
 codex_rules="developer_instructions=$(jq -Rs . < "$rf")"
 
@@ -66,6 +81,10 @@ fi
 split=$(herdr pane split --current --direction right --no-focus --cwd "$wt")
 pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
 
+# if the agent never becomes ready, roll back only what this attempt created
+# (the pane); the worktree+branch stay so a --resume can reuse them (F4)
+spawn_fail() { herdr pane close "$pane" >/dev/null 2>&1 || true; exit "${1:-1}"; }
+
 case $kind in
   tieude|sude|tieunhi)
     case $kind in
@@ -73,10 +92,10 @@ case $kind in
       sude) args=(--model devin/swe-2 --thinking max) ;;
       tieunhi) args=(--model antigravity/gemini-3.8-flash --thinking high) ;;
     esac
-    herdr agent start "$name" --kind pi --pane "$pane" --timeout 60000 -- "${args[@]}" --append-system-prompt "$rf" >/dev/null ;;
+    herdr agent start "$name" --kind pi --pane "$pane" --timeout 60000 -- "${args[@]}" --append-system-prompt "$rf" >/dev/null || spawn_fail ;;
   ni|suhuynh|truonglao)
     case $kind in ni) effort=low ;; suhuynh) effort=medium ;; truonglao) effort=high ;; esac
-    herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" --append-system-prompt-file "$rf" >/dev/null ;;
+    herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" --append-system-prompt-file "$rf" >/dev/null || spawn_fail ;;
   bacdau)
     herdr agent start "$name" --kind codex --pane "$pane" --timeout 60000 -- "${access[@]}" -m astra -c model_reasoning_effort=medium -c "$codex_rules" >/dev/null || true ;;
   quansu)
@@ -88,7 +107,7 @@ case $kind in bacdau|quansu)
   if herdr pane wait-output "$pane" --match "Trust this folder" --timeout 10000 >/dev/null 2>&1; then
     herdr pane send-keys "$pane" enter >/dev/null
   fi
-  herdr agent wait "$name" --until idle --timeout 60000 >/dev/null
+  herdr agent wait "$name" --until idle --timeout 60000 >/dev/null || spawn_fail
 esac
 
 # Grid hook (rules/_all/fanout-agent-grid.md): arrange the new worker's pane

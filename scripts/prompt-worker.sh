@@ -12,8 +12,16 @@
 #   Lead exemption: a <slug>-lead waits on a backgrounded pipeline.sh whose
 #   pane/cwd stay static for a whole build phase, so while an unfinished
 #   pipeline state (runs/pipeline-*.state, finished=0) names a live
-#   pipeline_pid, idle/quiet is treated as waiting — no exit 3. Budget/cap
-#   and blocked/gone still apply.
+#   pipeline_pid AND is bound to this watcher (lead=<name> or
+#   lead_pane=<its pane>), idle/quiet is treated as waiting — no exit 3.
+#   An unrelated project's pipeline never exempts a Lead. Budget/cap and
+#   blocked/gone still apply. Consumed budget/cap persists across --resume
+#   in runs/.<name>.elapsed — a resumed wait continues the same allowance,
+#   never a fresh clock; a new task prompt resets it.
+#   Reports publish atomically: a pre-existing runs file is archived on a
+#   new task, and the file must be byte-stable across a short window before
+#   it counts as complete. stdout carries only the final report path; the
+#   herdr submission response goes to runs/.<name>.submit.log.
 #   Exits 2-5 print a WATCHDOG status line on stderr; fix the cause, then
 #   `--resume` keeps waiting. The script never kills or re-prompts the worker.
 set -euo pipefail
@@ -38,6 +46,9 @@ else
 fi
 
 out="$HOME/quaqua/runs/$name.md"
+submit_log="$HOME/quaqua/runs/.$name.submit.log"
+elapsed_file="$HOME/quaqua/runs/.$name.elapsed"
+sentinel="$HOME/quaqua/runs/.$name.nudged"
 max=${PROMPT_WORKER_MAX_SEC:-7200}     poll=${PROMPT_WORKER_POLL_SEC:-30}
 stall=${PROMPT_WORKER_STALL_SEC:-600}  idle_sec=${PROMPT_WORKER_IDLE_SEC:-120}
 budget=${PROMPT_WORKER_BUDGET_SEC:-2700}
@@ -45,34 +56,54 @@ nudge_pct=${PROMPT_WORKER_NUDGE_PCT:-80}
 heartbeat=${PROMPT_WORKER_HEARTBEAT_SEC:-300}
 (( poll < 1 )) && poll=1
 mkdir -p "$(dirname "$out")"
-sentinel="$HOME/quaqua/runs/.$name.nudged"
 
-start=$(date +%s) deadline=$(( start + max )) budget_deadline=$(( start + budget ))
-nudge_at=$(( start + budget * nudge_pct / 100 ))
+if (( resume )); then
+  prev_elapsed=$(cat "$elapsed_file" 2>/dev/null || echo 0)
+  [[ $prev_elapsed =~ ^[0-9]+$ ]] || prev_elapsed=0
+else
+  # a new task gets a fresh report and a fresh clock: anything already at
+  # $out predates this invocation (previous task, crashed run) — archive it
+  prev_elapsed=0
+  rm -f "$elapsed_file" "$sentinel"
+  if [[ -e $out ]]; then
+    mv "$out" "$out.stale.$(date +%s)"
+    echo "archived pre-existing $out — a new task needs a fresh report" >&2
+  fi
+fi
+
+start=$(date +%s)
+rem_max=$(( max - prev_elapsed ));       (( rem_max < 1 )) && rem_max=1
+rem_budget=$(( budget - prev_elapsed )); (( rem_budget < 1 )) && rem_budget=1
+deadline=$(( start + rem_max )) budget_deadline=$(( start + rem_budget ))
+nudge_at=$(( start + budget * nudge_pct / 100 - prev_elapsed ))
+
+save_elapsed() { printf '%s\n' $(( prev_elapsed + $(date +%s) - start )) > "$elapsed_file"; }
 
 prompt_pid=''
 if (( ! resume )); then
   # Backgrounded so the watchdog below polls from second 0; the wait inside
   # herdr returning early is fine, the loop keeps waiting for the file. A
   # still-running herdr is left behind on early exits: it is a bounded local
-  # wait client, never the worker itself, and exits on its own.
-  herdr agent prompt "$name" "$task. When done, write summary (changes, test cmd+result, risks) to ~/quaqua/runs/$name.md; reply only the path." \
-    --wait --timeout 1800000 &
+  # wait client, never the worker itself, and exits on its own. Its CLI
+  # response is kept off stdout (path-only contract) in the submit log.
+  herdr agent prompt "$name" "$task. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/$name.md (publish it atomically, never a partial file); reply only the path." \
+    --wait --timeout 1800000 > "$submit_log" 2>&1 &
   prompt_pid=$!
 fi
 
-# Observe the worker. Sets: status ctx last_tool diffstat pane_text fp.
+# Observe the worker. Sets: status ctx last_tool diffstat pane_text fp watcher_pane.
 # Returns 1 when the agent cannot be observed at all (stall checks skipped;
 # cap/budget still apply).
-status=unknown ctx='?' last_tool='' diffstat='' pane_text='' fp=''
+status=unknown ctx='?' last_tool='' diffstat='' pane_text='' fp='' watcher_pane=''
 observe() {
-  status=unknown ctx='?' last_tool='' diffstat='' pane_text='' fp=''
+  status=unknown ctx='?' last_tool='' diffstat='' pane_text='' fp='' watcher_pane=''
   local get='' cwd='' body dh='' short unt
   get=$(herdr agent get "$name" 2>/dev/null) || true
   if [[ -n $get ]]; then
     if jq -e '.result.agent' <<<"$get" >/dev/null 2>&1; then
       status=$(jq -r '.result.agent.agent_status // "unknown"' <<<"$get" 2>/dev/null || echo unknown)
       cwd=$(jq -r '.result.agent.cwd // empty' <<<"$get" 2>/dev/null || true)
+      watcher_pane=$(jq -r '.result.agent.pane_id // empty' <<<"$get" 2>/dev/null || true)
     elif jq -e '.error.code == "agent_not_found"' <<<"$get" >/dev/null 2>&1; then
       status=gone
     fi
@@ -109,14 +140,22 @@ question_seen() {  # fallback for agents whose question UI isn't 'blocked'
   tail -15 <<<"$pane_text" | grep -qiE 'type something|esc to abandon|(^|[^[:alpha:]])[yYnN]/[yYnN]([^[:alpha:]]|$)|do you want to|(needs|requires?) (approval|permission)'
 }
 
-lead_waiting() {  # a <slug>-lead idle while a live pipeline runs is waiting
+lead_waiting() {  # a <slug>-lead idle while ITS live pipeline runs is waiting
   [[ $name == *-lead ]] || return 1
-  local f pid
+  local f pid owner opane
   for f in "$(dirname "$out")"/pipeline-*.state; do
     [[ -f $f ]] || continue
     grep -q '^finished=0$' "$f" || continue
     pid=$(sed -n 's/^pipeline_pid=\([0-9][0-9]*\).*/\1/p' "$f" | head -1)
-    [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null && return 0
+    [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null || continue
+    # the exemption is scoped to the orchestrating Lead: pipeline.sh records
+    # lead= (PIPELINE_LEAD) and lead_pane= (the caller's HERDR_PANE_ID). An
+    # unrelated project's live pipeline must not suppress this watcher's
+    # stall/idle detection.
+    owner=$(sed -n 's/^lead=\(.*\)/\1/p' "$f" | head -1)
+    opane=$(sed -n 's/^lead_pane=\(.*\)/\1/p' "$f" | head -1)
+    [[ -n $owner && $owner == "$name" ]] && return 0
+    [[ -n $opane && -n $watcher_pane && $opane == "$watcher_pane" ]] && return 0
   done
   return 1
 }
@@ -124,16 +163,27 @@ lead_waiting() {  # a <slug>-lead idle while a live pipeline runs is waiting
 watchdog_exit() {  # <code> <reason> — status line on stderr, stdout stays clean
   local code=$1 reason=$2 now
   now=$(date +%s)
+  save_elapsed   # consumed budget/cap carries over to --resume (F5)
   printf 'WATCHDOG exit=%d %s | name=%s elapsed=%ds status=%s ctx=%s quiet=%ds last=%s | diff=%s\n' \
     "$code" "$reason" "$name" "$(( now - start ))" "$status" "$ctx" \
     "$(( now - change_ts ))" "${last_tool:-none}" "${diffstat:-n/a}" >&2
   exit "$code"
 }
 
+report_ready() {  # -s AND byte-stable across a short window — a partial
+  # publish (writer mid-write) is not a complete phase acknowledgement
+  [[ -s $out ]] || return 1
+  local a b
+  a=$(stat -c '%s:%Y' "$out" 2>/dev/null) || return 1
+  sleep 0.4
+  b=$(stat -c '%s:%Y' "$out" 2>/dev/null) || return 1
+  [[ $a == "$b" ]]
+}
+
 prev_fp='' change_ts=$start idle_since=0 last_hb=$start nudged=0 blind_warned=0
 [[ -f $sentinel ]] && nudged=1
 echo "waiting for $out (poll ${poll}s, stall ${stall}s, idle ${idle_sec}s, budget ${budget}s, cap ${max}s)" >&2
-while [[ ! -s $out ]]; do
+while ! report_ready; do
   now=$(date +%s)
   (( now >= deadline )) && watchdog_exit 2 "error: no $out after ${max}s"
   if observe; then
@@ -162,7 +212,7 @@ while [[ ! -s $out ]]; do
     (( now >= budget_deadline )) && watchdog_exit 4 "time budget ${budget}s exceeded (agent unobservable)"
   fi
   if (( ! nudged && now >= nudge_at )); then
-    herdr agent prompt "$name" "Time check: you are past ${nudge_pct}% of this task's time budget. Wrap up now: finish the current step, commit your work, and write ~/quaqua/runs/$name.md with what is done plus a Blockers section for the rest. Reply only the path." \
+    herdr agent prompt "$name" "Time check: you are past ${nudge_pct}% of this task's time budget. Wrap up now: finish the current step, commit your work, and write ~/quaqua/runs/$name.md (via a temp file + rename) with what is done plus a Blockers section for the rest. Reply only the path." \
       >/dev/null 2>&1 || true
     : > "$sentinel"; nudged=1
     printf 'WATCHDOG nudge sent (once, at %s%% of %ss budget)\n' "$nudge_pct" "$budget" >&2
@@ -183,4 +233,5 @@ if [[ -n $prompt_pid ]]; then
     sleep 0.1
   done
 fi
+save_elapsed
 printf '%s\n' "$out"

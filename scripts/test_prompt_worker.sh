@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Sandbox test for prompt-worker.sh: arg validation, the exact herdr prompt
-# text, waiting for ~/quaqua/runs/<name>.md after herdr returns early, and the
-# PROMPT_WORKER_MAX_SEC cap. herdr is stubbed on PATH (it logs calls and can
-# fabricate the runs file after FAKE_DELAY seconds); HOME is a temp dir. No
-# real herdr, agent, or home touched.
+# text, waiting for ~/quaqua/runs/<name>.md after herdr returns early, the
+# PROMPT_WORKER_MAX_SEC cap, stale-report archiving on a new task, byte-
+# stability before a report counts as complete, and the stdout path-only
+# contract. herdr is stubbed on PATH (it logs calls and fabricates the runs
+# file via FAKE_WRITE/FAKE_DELAY/FAKE_PARTS); HOME is a temp dir. No real
+# herdr, agent, or home touched.
 # Usage: scripts/test_prompt_worker.sh   (exit 0 = pass)
 set -euo pipefail
 
@@ -18,8 +20,16 @@ mkdir -p "$T/bin" "$T/home/quaqua/runs"
 cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
-if [ "${FAKE_DELAY:-0}" != 0 ]; then
-  ( sleep "$FAKE_DELAY"; echo "fake summary" > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
+if [ "${1:-} ${2:-}" = "agent prompt" ]; then
+  [ -n "${FAKE_STDOUT:-}" ] && printf '%s\n' "$FAKE_STDOUT"
+  [ "${FAKE_WRITE:-0}" = 1 ] && echo "fake summary" > "$HOME/quaqua/runs/$FAKE_NAME.md"
+  if [ "${FAKE_PARTS:-0}" = 1 ]; then
+    ( echo part1 > "$HOME/quaqua/runs/$FAKE_NAME.md"; sleep 0.2
+      echo part2 >> "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
+  fi
+  if [ "${FAKE_DELAY:-0}" != 0 ]; then
+    ( sleep "$FAKE_DELAY"; echo "fake summary" > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
+  fi
 fi
 exit "${FAKE_RC:-0}"
 STUB
@@ -77,16 +87,46 @@ Current design: z"
 [[ ! -s $T/calls ]] || fail "non-brief task still called herdr: $(cat "$T/calls")"
 
 
-# ── happy path: file already written when herdr returns ─────────────────────
-echo "done" > "$T/home/quaqua/runs/sude-quick.md"
-prompt sude-quick "$brief"
+# ── happy path: file written during the prompt, fresh report returned ──────
+prompt sude-quick "$brief" FAKE_WRITE=1
 [[ $rc -eq 0 ]] || fail "sude-quick: exit $rc, want 0: $(cat "$T/err")"
 [[ "$(cat "$T/out")" == "$T/home/quaqua/runs/sude-quick.md" ]] \
   || fail "sude-quick: stdout not the runs path: $(cat "$T/out")"
-grep -qF "herdr agent prompt sude-quick $brief. When done, write summary (changes, test cmd+result, risks) to ~/quaqua/runs/sude-quick.md; reply only the path. --wait --timeout 1800000" "$T/calls" \
+grep -qF "herdr agent prompt sude-quick $brief. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/sude-quick.md (publish it atomically, never a partial file); reply only the path. --wait --timeout 1800000" "$T/calls" \
   || fail "sude-quick: wrong herdr call: $(cat "$T/calls")"
 grep -qF -- '--wait --timeout 1800000' "$T/calls" || fail "sude-quick: no --wait/--timeout"
+[[ "$(cat "$T/home/quaqua/runs/sude-quick.md")" == "fake summary" ]] \
+  || fail "sude-quick: returned file is not the fresh report"
 echo "ok: sude-quick -> prompt sent verbatim, runs path printed"
+
+# ── a pre-existing report is stale: archived, a fresh prompt is sent ─────────
+echo "OLD leftover report" > "$T/home/quaqua/runs/sude-stale.md"
+prompt sude-stale "$brief" FAKE_WRITE=1
+[[ $rc -eq 0 ]] || fail "sude-stale: exit $rc, want 0: $(cat "$T/err")"
+[[ "$(cat "$T/home/quaqua/runs/sude-stale.md")" == "fake summary" ]] \
+  || fail "sude-stale: stale file consumed instead of the fresh report"
+ls "$T"/home/quaqua/runs/sude-stale.md.stale.* >/dev/null 2>&1 \
+  || fail "sude-stale: old report not archived"
+grep -q 'OLD leftover report' "$T"/home/quaqua/runs/sude-stale.md.stale.* \
+  || fail "sude-stale: archive lost the old content"
+grep -q 'agent prompt sude-stale' "$T/calls" || fail "sude-stale: no fresh prompt sent"
+echo "ok: sude-stale -> old report archived, fresh prompt + fresh report"
+
+# ── a slow multi-write publisher: only the complete file counts ──────────────
+prompt sude-parts "$brief" FAKE_PARTS=1 PROMPT_WORKER_POLL_SEC=1
+[[ $rc -eq 0 ]] || fail "sude-parts: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'part2' "$T/home/quaqua/runs/sude-parts.md" \
+  || fail "sude-parts: report consumed mid-write (part2 missing)"
+echo "ok: sude-parts -> waited for a byte-stable file before accepting"
+
+# ── herdr's CLI response never reaches stdout: path only (F13) ───────────────
+prompt sude-noisy "$brief" FAKE_WRITE=1 FAKE_STDOUT='HERDR_SUBMISSION_RESPONSE'
+[[ $rc -eq 0 ]] || fail "sude-noisy: exit $rc, want 0: $(cat "$T/err")"
+[[ "$(cat "$T/out")" == "$T/home/quaqua/runs/sude-noisy.md" ]] \
+  || fail "sude-noisy: stdout polluted beyond the path: $(cat "$T/out")"
+grep -q 'HERDR_SUBMISSION_RESPONSE' "$T/home/quaqua/runs/.sude-noisy.submit.log" \
+  || fail "sude-noisy: submit response not captured in the log"
+echo "ok: sude-noisy -> stdout stays the report path, CLI response goes to the submit log"
 
 # ── early return: herdr exits before the file exists; script keeps waiting ──
 prompt sude-slow "Goal: slow task
