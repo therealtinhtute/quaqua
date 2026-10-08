@@ -238,7 +238,7 @@ expect "1 worker: already in place" 'rename w1:p5 tieude-alpha' "$actual"
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
 EOF
@@ -247,13 +247,13 @@ expect "2 workers: left|right" \
 'place w1:p5 new-tab label=workers
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 4. three workers -> A|B top + C full width below ─────────────────────────
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 worker sude-gamma codex w1:p7 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,50,50 w1:p5=50,0,50,50 w1:p6=100,0,50,50 w1:p7=150,0,50,50
@@ -264,14 +264,14 @@ expect "3 workers: A|B top + C below" \
 place w1:p7 split tab=@workers dir=down anchor=w1:p5 ratio=0.5
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta
+rename w1:p6 detu-beta
 rename w1:p7 sude-gamma' "$actual"
 
 # ── 5. four workers -> 2x2 ───────────────────────────────────────────────────
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 worker sude-gamma codex w1:p7 w1:t1 idle
 worker ni-delta pi w1:p8 w1:t1 idle
 tab w1:t1 1
@@ -284,7 +284,7 @@ place w1:p7 split tab=@workers dir=down anchor=w1:p5 ratio=0.5
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 place w1:p8 split tab=@workers dir=right anchor=w1:p7 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta
+rename w1:p6 detu-beta
 rename w1:p7 sude-gamma
 rename w1:p8 ni-delta' "$actual"
 
@@ -292,7 +292,7 @@ rename w1:p8 ni-delta' "$actual"
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
-worker tieunhi-beta pi w1:p6 w1:t3 idle
+worker detu-beta pi w1:p6 w1:t3 idle
 worker sude-gamma codex w1:p7 w1:t3 idle
 tab w1:t1 1
 tab w1:t3 workers
@@ -302,14 +302,14 @@ EOF
 )
 expect "3 workers: already in grid" \
 'rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta
+rename w1:p6 detu-beta
 rename w1:p7 sude-gamma' "$actual"
 
 # ── 7. 3 -> 4: the grid collapses to sude-gamma, ni-delta splits it (1 move) ─
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
-worker tieunhi-beta pi w1:p6 w1:t3 idle
+worker detu-beta pi w1:p6 w1:t3 idle
 worker sude-gamma codex w1:p7 w1:t3 idle
 worker ni-delta pi w1:p8 w1:t1 idle
 tab w1:t1 1
@@ -321,7 +321,7 @@ EOF
 expect "3->4: place ni-delta right of sude-gamma" \
 'place w1:p8 split tab=@workers dir=right anchor=w1:p7 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta
+rename w1:p6 detu-beta
 rename w1:p7 sude-gamma
 rename w1:p8 ni-delta' "$actual"
 
@@ -348,7 +348,7 @@ rename w1:p7 sude-gamma' "$actual"
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
-worker tieunhi-beta pi w1:p6 w1:t3 idle
+worker detu-beta pi w1:p6 w1:t3 idle
 worker sude-gamma codex w1:p7 w1:t1 idle
 tab w1:t1 1
 tab w1:t3 workers
@@ -363,7 +363,7 @@ place w1:p5 new-tab label=workers
 place w1:p7 split tab=@workers dir=down anchor=w1:p5 ratio=0.5
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta
+rename w1:p6 detu-beta
 rename w1:p7 sude-gamma' "$actual"
 
 # ── 10. back to one worker -> returns to the CoS tab ─────────────────────────
@@ -384,7 +384,7 @@ rename w1:p5 tieude-alpha' "$actual"
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 working
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
 EOF
@@ -393,7 +393,7 @@ expect "working worker skipped" \
 'warn skip tieude-alpha: agent is working
 place w1:p6 new-tab label=workers
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 12. lone working worker misplaced -> warn only ───────────────────────────
 actual=$(plan <<'EOF'
@@ -422,7 +422,7 @@ expect "cross-workspace agent ignored" 'rename w1:p5 tieude-alpha' "$actual"
 spec=$(cat <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 worker sude-gamma codex w1:p7 w1:t1 idle
 worker ni-delta pi w1:p8 w1:t1 idle
 worker suhuynh-eps pi w1:p9 w1:t1 idle
@@ -454,7 +454,7 @@ echo "ok: no workers -> no-op"
 actual=$(run <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
 EOF
@@ -463,7 +463,7 @@ expect "exec: 2 workers" \
 'move w1:p5 --new-tab --label workers --no-focus
 move w1:p6 --tab w1:t90 --split right --target-pane w1:p5 --ratio 0.5 --no-focus
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 17. execution: rebuild parks panes in a scratch tab first ────────────────
 actual=$(run <<'EOF'
@@ -503,7 +503,7 @@ rename w1:p5 tieude-alpha' "$actual"
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
 EOF
@@ -512,7 +512,7 @@ expect "names: two pi workers keep their own names" \
 'place w1:p5 new-tab label=workers
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 20. only registered worker names join the grid ───────────────────────────
 # an unnamed session, a named non-worker (e.g. tldraw) and a project Lead
@@ -538,7 +538,7 @@ rename w1:p6 tieude-alpha' "$actual"
 actual=$(HERDR_STUB_FLIP_STATUS=working run_fail <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
 EOF
@@ -551,7 +551,7 @@ echo "ok: recheck: replan hint on stderr"
 actual=$(HERDR_STUB_FLIP_STATUS=working HERDR_STUB_FLIP_AFTER=2 run_fail <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
 EOF
@@ -563,7 +563,7 @@ expect "recheck: flip after the first move -> one move, no renames" \
 actual=$(HERDR_STUB_MOVE_FAIL_AT=1 HERDR_STUB_MOVE_REASON=zoomed_tab run_fail <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
 EOF
@@ -577,7 +577,7 @@ echo "ok: move no-op: reason reported"
 actual=$(HERDR_STUB_MOVE_FAIL_AT=2 HERDR_STUB_MOVE_REASON=same_tab run_fail <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
 EOF
@@ -590,7 +590,7 @@ move w1:p6 --tab w1:t90 --split right --target-pane w1:p5 --ratio 0.5 --no-focus
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 workers
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
 EOF
@@ -599,13 +599,13 @@ expect "workers tab: CoS tab labelled workers is not reused" \
 'place w1:p5 new-tab label=workers
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 26. a tab holding a non-worker is not reused ─────────────────────────────
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t2 idle
-worker tieunhi-beta pi w1:p6 w1:t3 idle
+worker detu-beta pi w1:p6 w1:t3 idle
 tab w1:t1 1
 tab w1:t2 workers
 tab w1:t3 workers
@@ -619,7 +619,7 @@ expect "workers tab: tab with a plain shell is skipped" \
 place w1:p5 new-tab label=workers
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 27. pane ids that change on every move stay mapped to the original pane ──
 actual=$(HERDR_STUB_MOVE_SUFFIX=X run <<'EOF'
@@ -644,7 +644,7 @@ rename w1:p7XX sude-gamma' "$actual"
 actual=$(plan coucou-workers <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
 EOF
@@ -653,13 +653,13 @@ expect "--tab: new tab uses the project label" \
 'place w1:p5 new-tab label=coucou-workers
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 29. workers of another group in the same workspace are never touched ─────
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 worker truonglao-other1 pi w1:p7 w1:t4 idle
 worker bacdau-other2 pi w1:p8 w1:t4 idle
 tab w1:t1 1
@@ -672,7 +672,7 @@ expect "group: another project's workers are ignored" \
 'place w1:p5 new-tab label=workers
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 30. the CoS workers tab is not part of a project group ───────────────────
 actual=$(plan coucou-workers <<'EOF'
@@ -704,7 +704,7 @@ expect "group: agent in an unrelated tab is ignored" 'rename w1:p5 tieude-alpha'
 actual=$(plan coucou-workers <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
-worker tieunhi-beta pi w1:p6 w1:t3 idle
+worker detu-beta pi w1:p6 w1:t3 idle
 tab w1:t1 1
 tab w1:t3 coucou-workers
 layout w1:t1 200x50 w1:p1=0,0,200,50
@@ -713,7 +713,7 @@ EOF
 )
 expect "--tab: existing project grid reused" \
 'rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 33. execution: the scratch tab is per group ──────────────────────────────
 actual=$(run coucou-workers <<'EOF'
@@ -738,7 +738,7 @@ rename w1:p7 sude-gamma' "$actual"
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t9 idle
-worker tieunhi-beta pi w1:p6 w1:t1 idle
+worker detu-beta pi w1:p6 w1:t1 idle
 tab w1:t1 1
 tab w1:t9 grid-scratch-workers
 layout w1:t1 200x50 w1:p1=0,0,200,50 w1:p6=0,0,200,50
@@ -749,7 +749,7 @@ expect "scratch: parked worker rejoins the group" \
 'place w1:p5 new-tab label=workers
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 35. --tab without a value (or empty) -> usage error ──────────────────────
 mkstate <<'EOF' > "$T/state.json"
@@ -774,7 +774,7 @@ echo "ok: --tab without a value -> usage error"
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
-worker tieunhi-beta pi w1:p6 w1:t3 idle
+worker detu-beta pi w1:p6 w1:t3 idle
 worker - claude w1:p9 w1:t3 idle
 tab w1:t1 1
 tab w1:t3 workers
@@ -786,7 +786,7 @@ expect "names: workers tab with an unnamed session is not reused" \
 'place w1:p5 new-tab label=workers
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
-rename w1:p6 tieunhi-beta' "$actual"
+rename w1:p6 detu-beta' "$actual"
 
 # ── 37. --only: unlisted workers in the anchor tab are never touched ────────
 # a CoS worker (sude-cos1) sitting next to the Lead's builder stays put; only
