@@ -1,0 +1,6 @@
+[Unit]
+Description=quaqua Auditor — read-only drift audit (scripts/supervisor.sh)
+
+[Service]
+Type=oneshot
+ExecStart=%h/quaqua/scripts/supervisor.sh
