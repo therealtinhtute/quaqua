@@ -3,7 +3,7 @@
 A personal multi-agent setup following SLP (Supervisor – Lead – Peer) on [Herdr](https://herdr.dev).
 The owner is the **Principal**, outside the system; Quả Quả (Claude Code, CoS) is the
 **Supervisor**; each project gets a **Lead**; **Peers** are task workers in Herdr panes.
-A read-only **Auditor** runs on a 2-day launchd timer. Diagram: `slp.tldraw`.
+A read-only **Auditor** runs twice a day on a systemd user timer. Diagram: `slp.tldraw`.
 
 This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal state
 (`USER.md`, `MEMORY.md`, `memory/`, `projects/`, `raw/`) is gitignored and stays local; start
@@ -18,14 +18,14 @@ This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal 
         │ goal                ▲ digest
         ▼                     │
  Supervisor (CoS Quả Quả) — intake, sizing, brief, cross-project view ◄── report ── Auditor
-        │ small task (<15 min, 1 file, or needs live feedback) ──► one worker, no SLP   (launchd, 2d,
-        │ spawn Lead + brief                                                           read-only)
+        │ small task (<15 min, 1 file, or needs live feedback) ──► one worker, no SLP   (systemd
+        │ spawn Lead + brief                                                           timer, 2×/day)
         ▼
  Lead (<slug>-lead) — project state, plan approval, acceptance,
         │ task brief                   merges into the project integration branch
         ▼
  Peers — build (sude) ⇄ review (quansu, codex read-only), own worktree each
-        │ result                     max 2 review rounds; kill after ≥3 stuck iterations
+        │ result                     default 2 review rounds (--rounds overrides); kill after ≥3 stuck
         ▼
  runs/pipeline-<task>.md ──► Lead accepts / merges      runs/telemetry.jsonl (1 line per run)
 ```
@@ -43,16 +43,16 @@ Spec and rollout plan: `spec-raw/quaqua-slp-slim-lock.md`, `spec-raw/quaqua-slp-
 
 | File | Role |
 |---|---|
-| `AGENTS.md` | Lead entrypoint: persona override, hard rules, memory policy |
-| `IDENTITY.md`, `SOUL.md` | Lead persona and voice |
-| `LEAD.md` | SLP judgment layer: assignment format, handbacks, review, acceptance |
+| `AGENTS.md` | Entrypoint: SLP roles, memory policy, worker protocol |
+| `identity.md`, `SOUL.md` | CoS persona and voice |
+| `LEAD.md`, `herdr.md` | Legacy judgment/mechanics docs — superseded by AGENTS.md + scripts/* |
 | `PEER.md` | Worker contract: boundaries, contract-before-test, git commit gates, handback |
-| `herdr.md` | Herdr mechanics: spawn, layout, lifecycle, monitor, fan-out |
+| `rules/_all/` | Worker rules injected as the system prompt (brief shape, fanout grid, timebox) |
 | `models.md` | Worker roster: nickname → kind / model / effort |
 | `.claude/settings.json` | Denies the built-in `Agent` tool so all workers go through Herdr |
-| `.claude/skills/herdr-ops/` | Herdr command recipes |
-| `supervisor/supervisor.sh` | Collects agent state + docs, pre-checks dead refs, runs codex review |
-| `supervisor/com.quaqua.supervisor.plist` | launchd job (every 172800s) |
+| `.claude/skills/herdr-ops/`, `.claude/skills/herdr-orchestration/` | Herdr command recipes + the worker spawn/monitor/cleanup flow |
+| `scripts/supervisor.sh` | Auditor: read-only drift + pipeline-run audit → `reports/supervisor-*.md` |
+| `scripts/install-supervisor.sh`, `systemd/` | Auditor scheduling: symlinks the systemd user service+timer (2×/day) |
 | `codex-config.toml` | Codex config used by codex workers |
 | `USER.example.md` | Template for the per-workspace `USER.md` |
 | `SETUP-PROMPT.md` | Original prompt used to bootstrap this setup |
@@ -63,8 +63,11 @@ Spec and rollout plan: `spec-raw/quaqua-slp-slim-lock.md`, `spec-raw/quaqua-slp-
 ```bash
 git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
 cp USER.example.md USER.md           # customize per workspace
-cp supervisor/com.quaqua.supervisor.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.quaqua.supervisor.plist
+mkdir -p memory projects runs reports   # gitignored personal state AGENTS.md expects
+printf '| slug | repo | owner |\n|---|---|---|\n' > projects/INDEX.md   # one row per project
+scripts/install-supervisor.sh        # symlinks systemd/quaqua-supervisor.{service,timer}
+systemctl --user enable --now quaqua-supervisor.timer
 ```
 
-Run the Lead with Claude Code from `~/quaqua` inside Herdr (`HERDR_ENV=1`).
+Run CoS (Quả Quả) from `~/quaqua` inside Herdr (`HERDR_ENV=1`); it spawns project Leads with
+`scripts/spawn-lead.sh <slug>`.

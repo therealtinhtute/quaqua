@@ -1,6 +1,6 @@
 # quaqua SLP slim — Plan (2026-10-08)
 
-Lock: `spec-raw/quaqua-slp-slim-lock.md`. Repo: `~/quaqua`, base `master`.
+Lock: `spec-raw/quaqua-slp-slim-lock.md`. Repo: `~/quaqua`, base `main`.
 Each phase = one task worker on its own branch (`quaqua/<name>`); merge needs anh iu's approval. Each phase leaves quaqua usable alone.
 Gate for every phase: all `scripts/test_*.sh` PASS + the phase's new test.
 
@@ -23,7 +23,7 @@ Gate for every phase: all `scripts/test_*.sh` PASS + the phase's new test.
 5. Verify: `scripts/test_pipeline.sh` with fake herdr: clean, rounds exhausted, disputed, review skipped, watchdog exit, plan-ready pause → telemetry line each case.
 
 ## P4 — Lead spawn (lock §5) · worker `sude`
-1. `scripts/spawn-lead.sh <slug>`: Claude session `quaqua-<slug>-orchestrator` in `~/quaqua` (no worktree), split beside CoS, appends lead brief; refuses if one exists for slug; updates `projects/INDEX.md` owner → verify: `scripts/test_spawn_lead.sh` fake herdr.
+1. `scripts/spawn-lead.sh <slug>`: Claude session `<slug>-lead` in `~/quaqua` (no worktree), split beside CoS, appends lead brief; refuses if one exists for slug; updates `projects/INDEX.md` owner → verify: `scripts/test_spawn_lead.sh` fake herdr.
 2. Not counted toward the 4-worker cap (Lead is not a worker).
 
 ## P5 — Auditor checks (lock §3) · worker `sude`
@@ -36,5 +36,5 @@ CoS spawns a coucou-island Lead (P4), Lead runs one small real task through `pip
 P1 ∥ P2 (independent, 2 workers). P3 needs P2. P4 independent of P3 (can run ∥ P3). P5 needs P3 output format. P6 last.
 
 ## Risk
-- Plan-approval pause adds a round-trip per pipeline → telemetry field `plan_changed: bool`; drop it after ~10 runs if never true (Better-SLP).
+- Plan-approval pause adds a round-trip per pipeline → the `plan_changed` telemetry field was considered and dropped (see lock Amendments); the pause itself stays.
 - `spawn-lead.sh` is +1 script (entity delta); alternative reusing `spawn-worker.sh` rejected: Lead needs no worktree and isn't capped.

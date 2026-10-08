@@ -1,5 +1,11 @@
 # Herdr orchestration
 
+> **Superseded 2026-10-08:** roles and authority now live in `AGENTS.md`
+> (`## Roles (SLP)`); spawn/prompt/cleanup is scripted in `scripts/*` and the
+> `herdr-orchestration` skill. This file is kept for mechanics reference
+> (pane layout, monitoring) — where it disagrees (Supervisor role, all merges
+> → anh, `/tmp` handbacks), AGENTS.md and the scripts win.
+
 Check `test "${HERDR_ENV:-}" = 1` first. If it fails, tell anh to open Quaqua inside Herdr and stop.
 Command recipes: skill `herdr-ops`. `herdr --help` / `herdr <group>` are the syntax authority. Never run bare `herdr` (it attaches the TUI).
 
