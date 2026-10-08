@@ -1,8 +1,9 @@
 # Quaqua 🍑 — SLP orchestration on Herdr
 
-A personal multi-agent setup: one Claude Code **Lead** (Quả Quả) that turns the owner's vision
-into briefs, **Peer** workers running in [Herdr](https://herdr.dev) panes, and a read-only
-**Supervisor** on a 2-day launchd timer. The model follows SLP (Supervisor – Lead – Peer).
+A personal multi-agent setup following SLP (Supervisor – Lead – Peer) on [Herdr](https://herdr.dev).
+The owner is the **Principal**, outside the system; Quả Quả (Claude Code, CoS) is the
+**Supervisor**; each project gets a **Lead**; **Peers** are task workers in Herdr panes.
+A read-only **Auditor** runs on a 2-day launchd timer. Diagram: `slp.tldraw`.
 
 This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal state
 (`USER.md`, `MEMORY.md`, `memory/`, `projects/`, `raw/`) is gitignored and stays local; start
@@ -11,22 +12,30 @@ This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal 
 ## Architecture
 
 ```
-            Human (owner) — vision, priorities, irreversible / external actions
-              ▲  │                                   ▲
-   escalate   │  │ vision                            │ beyond-authority report
-              │  ▼                                   │
- Lead (Quả Quả, Claude Code)  ◄──── drift report ─── Supervisor (launchd, every 2d)
- framing → brief → route → accept                    codex exec, read-only sandbox
-              │  ▲                                   → /tmp/sup-<date>.md
-   Assignment │  │ Handback (6 fields)
-   via Herdr  ▼  │ COMPLETE · REOPEN_REQUEST · DEPENDENCY_REQUEST · BLOCKED
- Peers — one pane each in tab <project>-workers, roster in models.md
-   Engineer (write, own worktree, commits SHA) · Scout · Architect · Reviewer (read-only)
+ Principal (owner) — goal, priorities, trade-offs; approves push / merge to main
+        │ goal                ▲ digest
+        ▼                     │
+ Supervisor (CoS Quả Quả) — intake, sizing, brief, cross-project view ◄── report ── Auditor
+        │ small task (<15 min, 1 file, or needs live feedback) ──► one worker, no SLP   (launchd, 2d,
+        │ spawn Lead + brief                                                           read-only)
+        ▼
+ Lead (quaqua-<slug>-orchestrator) — project state, plan approval, acceptance,
+        │ task brief                   merges into the project integration branch
+        ▼
+ Peers — build (sude) ⇄ review (quansu, codex read-only), own worktree each
+        │ result                     max 2 review rounds; kill after ≥3 stuck iterations
+        ▼
+ runs/pipeline-<task>.md ──► Lead accepts / merges      runs/telemetry.jsonl (1 line per run)
 ```
 
-Invariants: one scope has one writer · every redirect flows through the Lead · the writer never
-accepts its own work · lifecycle status (idle, exit 0, tests pass) is not acceptance · an
-independent Reviewer is spawned only when one of the conditions in `LEAD.md` holds.
+Rules:
+- Brief has 5 sections: Goal / Constraints / Current design / Unknowns / Evidence; it never pre-solves.
+- Peers may challenge premises in a `## Challenge` section; the Lead resolves it before acceptance.
+- CoS never acts as Lead on pipeline-size work (no self-review); every redirect flows through CoS
+  and is recorded in Lead state.
+- Telemetry decides which mechanisms stay: a reviewer that rarely changes outcomes gets turned off.
+
+Spec and rollout plan: `spec-raw/quaqua-slp-slim-lock.md`, `spec-raw/quaqua-slp-slim-plan.md`.
 
 ## Files
 
@@ -45,7 +54,7 @@ independent Reviewer is spawned only when one of the conditions in `LEAD.md` hol
 | `codex-config.toml` | Codex config used by codex workers |
 | `USER.example.md` | Template for the per-workspace `USER.md` |
 | `SETUP-PROMPT.md` | Original prompt used to bootstrap this setup |
-| `slp.tldr` | tldraw diagram: SLP vs Quaqua |
+| `slp.tldraw` | tldraw diagram: Principal → CoS → Lead → Peers |
 
 ## Install
 
