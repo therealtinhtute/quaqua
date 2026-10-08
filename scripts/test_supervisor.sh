@@ -79,6 +79,22 @@ report=$(printf '%s\n' "$T"/repo/reports/supervisor-????-??-??-??.md)
 grep -q 'FAILED' "$report" || fail "failure: no failure report written"
 echo "ok: failure -> exit propagates, stub report notes the failure"
 
+# ── F8 packaging: exactly one Auditor entrypoint with all scheduling assets ──
+root=$(cd "$here/.." && pwd)
+[[ -f $root/systemd/quaqua-supervisor.service ]] || fail "pkg: no systemd service shipped"
+[[ -f $root/systemd/quaqua-supervisor.timer ]] || fail "pkg: no systemd timer shipped"
+grep -q 'scripts/supervisor.sh' "$root/systemd/quaqua-supervisor.service" \
+  || fail "pkg: service does not exec scripts/supervisor.sh"
+grep -q 'OnCalendar' "$root/systemd/quaqua-supervisor.timer" || fail "pkg: timer has no schedule"
+grep -q 'systemd' "$here/install-supervisor.sh" || fail "pkg: installer does not use systemd/"
+[[ ! -d $root/supervisor ]] || fail "pkg: legacy supervisor/ runner still installed"
+! grep -qi 'launchd\|LaunchAgents\|com\.quaqua\.supervisor\.plist' "$root/README.md" \
+  || fail "pkg: README still points at the launchd runner"
+! grep -qi 'launchd\|LaunchAgents' "$root/AGENTS.md" || fail "pkg: AGENTS still points at launchd"
+grep -q 'reports/supervisor-' "$root/AGENTS.md" \
+  || fail "pkg: AGENTS session-start glob missing reports/supervisor-"
+echo "ok: packaging -> systemd units ship the scripts/supervisor.sh entrypoint; legacy retired"
+
 # ── pipeline pre-checks: one fixture per flag + clean no-flag cases ─────────
 # Fixtures live in the sandbox repo (runs/, memory/); the stub codex logs argv,
 # so the deterministic flags are asserted on the embedded prompt text.
@@ -146,5 +162,33 @@ for absent in 'pipeline-ok.md' 'pipeline-skip.md' 'pipeline-handled.md' \
   grep -qF "$absent" <<<"$calls" && fail "precheck: false flag '$absent'"
 done
 echo "ok: precheck -> each flag raised; clean/handled/copied cases silent"
+
+# ── F9: commits resolve in the pipeline's recorded repo, not this checkout ───
+mkdir -p "$T/proj" "$T/proj2"
+git -C "$T/proj" init -q
+git -C "$T/proj" -c user.email=t@t -c user.name=t commit -qm p1 --allow-empty
+psha=$(git -C "$T/proj" rev-parse --short HEAD)
+git -C "$T/proj" -c user.email=t@t -c user.name=t commit -qm p2 --allow-empty
+psha2=$(git -C "$T/proj" rev-parse --short HEAD)
+rm -f "$T"/repo/runs/pipeline-*.md "$T/repo/memory/2026-10-08.md"
+# valid commit in the recorded project repo -> no flag
+printf -- '- task: xproj · repo: %s\n- review round 1: Verdict: clean (quansu-xprojr1.md)\n- status: clean · commit %s · elapsed 7m\n' \
+  "$T/proj" "$psha" > "$T/repo/runs/pipeline-xproj.md"
+# a sha that exists in the auditor repo but NOT in the recorded repo -> flag
+printf -- '- task: badproj · repo: %s\n- status: clean · commit %s · elapsed 4m\n' \
+  "$T/proj" "$sha" > "$T/repo/runs/pipeline-badproj.md"
+# a recorded repo that is missing entirely -> separate flag
+printf -- '- task: goneproj · repo: %s\n- status: clean · commit %s · elapsed 4m\n' \
+  "$T/proj-missing" "$psha" > "$T/repo/runs/pipeline-goneproj.md"
+run
+[[ $rc -eq 0 ]] || fail "F9: exit $rc: $(cat "$T/err")"
+calls=$(cat "$T/calls")
+grep -qF 'pipeline-xproj.md' <<<"$calls" \
+  && fail "F9: valid project-repo commit flagged: $(grep -o 'pipeline-xproj[^\"]*' <<<"$calls")"
+grep -qF "pipeline-badproj.md: status clean but commit '$sha' does not resolve in recorded repo $T/proj" <<<"$calls" \
+  || fail "F9: cross-repo false positive not detected"
+grep -qF "pipeline-goneproj.md: status clean but recorded repo '$T/proj-missing' is missing" <<<"$calls" \
+  || fail "F9: missing recorded repo not flagged separately"
+echo "ok: F9 -> commits verified in the recorded repo; missing repo flagged apart"
 
 echo "PASS"

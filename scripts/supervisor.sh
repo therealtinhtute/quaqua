@@ -49,9 +49,15 @@ for f in "$root"/runs/pipeline-*.md; do
         || flag "runs/$base.md: status $st but no memory/YYYY-MM-DD.md line names $base" ;;
     clean)
       sha=$(sed -nE 's/.*commit ([^ ]+).*/\1/p' <<<"$sline")
-      if [[ -z $sha || $sha == none || $sha == '?' ]] \
-          || ! git -C "$root" rev-parse --verify --quiet "${sha}^{commit}" >/dev/null 2>&1; then
-        flag "runs/$base.md: status clean but commit '${sha:-none}' does not resolve in this repo"
+      # pipelines build in their project repo, recorded in the report's
+      # '- repo:' header — resolve the commit THERE, not in this checkout
+      prepo=$(sed -nE 's/^- task: [^ ]+ · repo: (.+)$/\1/p' "$f" | head -1)
+      prepo=${prepo/#\~/$HOME}; prepo=${prepo:-$root}
+      if [[ ! -d $prepo ]]; then
+        flag "runs/$base.md: status clean but recorded repo '$prepo' is missing"
+      elif [[ -z $sha || $sha == none || $sha == '?' ]] \
+          || ! git -C "$prepo" rev-parse --verify --quiet "${sha}^{commit}" >/dev/null 2>&1; then
+        flag "runs/$base.md: status clean but commit '${sha:-none}' does not resolve in recorded repo $prepo"
       fi
       last_rev=$(grep -E 'review round [0-9]+:' "$f" | tail -1 || true)
       [[ -z $last_rev || $last_rev == *Verdict:* ]] \
@@ -104,7 +110,10 @@ Audit four things:
      `pipeline-<task>` (the CoS handling note, same convention as the
      `[supervisor]` report marker);
    - `status: clean` whose `commit` is `none`/`?` or that
-     `git rev-parse --verify <sha>^{commit}` cannot resolve in this repo;
+     `git rev-parse --verify <sha>^{commit}` cannot resolve in the pipeline's
+     recorded repo (the `- repo:` header in runs/pipeline-<task>.md — Peers
+     build in project repos, not this checkout; a missing recorded repo is a
+     separate flag);
    - `status: clean` where review ran (`- review round <N>:` lines — not
      `review: skipped`) but neither the last review-round line nor the
      reviewer runs file it names carries a `Verdict:` line;
