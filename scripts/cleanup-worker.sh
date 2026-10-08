@@ -25,4 +25,6 @@ pane=$(herdr agent get "$name" | jq -r '.result.agent.pane_id')
 herdr pane close "$pane" >/dev/null
 grid_hook
 git -C "$repo" worktree remove "$wt"
+runs_dir="${QUAQUA_RUNS_DIR:-$HOME/quaqua/runs}"
+rm -f "$runs_dir/$name.owner" "$runs_dir/$name.pipeline" "$runs_dir/$name.srt.json"
 echo "cleaned $name (branch quaqua/$name kept)"

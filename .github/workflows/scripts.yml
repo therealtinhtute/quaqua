@@ -1,0 +1,45 @@
+name: Script tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install modern Bash on macOS
+        if: runner.os == 'macOS'
+        run: brew install bash
+      - name: Select Bash and pin nested invocations
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            test_bash="$(brew --prefix bash)/bin/bash"
+          else
+            test_bash="$(command -v bash)"
+          fi
+          printf 'TEST_BASH=%s\n' "$test_bash" >> "$GITHUB_ENV"
+          dirname "$test_bash" >> "$GITHUB_PATH"
+      - name: Run every script test
+        shell: bash
+        run: |
+          "$TEST_BASH" --version
+          command -v git jq perl python3
+          failed=0
+          for test in scripts/test_*.sh; do
+            echo "::group::$test"
+            "$TEST_BASH" "$test" || failed=1
+            echo '::endgroup::'
+          done
+          exit "$failed"

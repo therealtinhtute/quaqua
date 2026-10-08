@@ -12,6 +12,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-spawn-worker.XXXXXX")
+T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -252,7 +253,7 @@ chmod +x "$T/bin2/herdr"
 # first spawn creates the real worktree
 : > "$T/calls"
 rc=0
-CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:/usr/bin:/bin" GRID_SKIP=1 \
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" GRID_SKIP=1 \
   bash "$T/scripts/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 spawn: exit $rc: $(cat "$T/err")"
 [[ -d $T/.wt/sude-rw1 ]] || fail "rw1: no worktree created"
@@ -261,7 +262,7 @@ CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:/usr/bin:/bin" GRID_SKIP=1 \
 rm -f "$T/failed-sude-rw1"
 : > "$T/calls"
 rc=0
-CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:/usr/bin:/bin" GRID_SKIP=1 \
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" GRID_SKIP=1 \
   bash "$T/scripts/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 respawn: exit $rc, want 0: $(cat "$T/err")"
 grep -q 'reusing it' "$T/err" || fail "rw1 respawn: no reuse note: $(cat "$T/err")"
@@ -272,7 +273,7 @@ echo "ok: respawn -> surviving worktree reused, agent start retried"
 mkdir -p "$T/.wt/sude-rw2"
 : > "$T/calls"
 rc=0
-CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:/usr/bin:/bin" GRID_SKIP=1 \
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" GRID_SKIP=1 \
   bash "$T/scripts/spawn-worker.sh" sude-rw2 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "rw2 foreign dir: exit $rc, want 1"
 grep -q 'not a git worktree' "$T/err" || fail "rw2: no refusal message: $(cat "$T/err")"

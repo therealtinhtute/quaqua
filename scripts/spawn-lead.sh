@@ -76,7 +76,7 @@ mkdir -p "$root/runs"
 rf="$root/runs/$name.rules.md"
 cat "$root"/rules/_all/*.md > "$rf" 2>/dev/null || true
 
-split=$(herdr pane split --current --direction right --no-focus --cwd "$root")
+split=$(herdr pane split --current --direction right --no-focus --cwd "$root" --env "QUAQUA_OWNER=$name")
 pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
 
 herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- \
@@ -94,7 +94,7 @@ awk -F'|' -v slug="$slug" -v owner="$name" 'BEGIN { OFS="|" }
   { print }' "$index" > "$tmp" && cat "$tmp" > "$index"
 rm -f "$tmp"
 
-herdr agent prompt "$name" "You are the Lead for project '$slug' — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).
+herdr agent prompt "$name" "You are the Lead for project '$slug' (QUAQUA_OWNER=$name) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).
 - Own the project card projects/$slug.md: read it now, then keep its '## Now' at the current truth after every outcome.
 - Pipeline-size work runs through scripts/pipeline.sh (usage in its header). Peers: scripts/spawn-worker.sh + scripts/grid-workers.sh with GRID_TAB=$slug-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.
 - You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch $integ (created from main if it was missing — spawn Peers --base $integ so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.
