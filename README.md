@@ -1,8 +1,9 @@
 # Quaqua 🍑 — SLP orchestration on Herdr
 
 A personal multi-agent setup following SLP (Supervisor – Lead – Peer) on [Herdr](https://herdr.dev).
-The owner is the **Principal**, outside the system; Quả Quả (Claude Code, CoS) is the
-**Supervisor**; each project gets a **Lead**; **Peers** are task workers in Herdr panes.
+The owner is the **Principal**, outside the system, and talks only to Quả Quả (Claude Code),
+the **CoS** that fills SLP's Supervisor slot and owns the full SDLC; each project gets an
+internal **Lead**; **Peers** are task workers in Herdr panes.
 A read-only **Auditor** runs at 07:00 and 19:00 local time via systemd (Linux) or launchd
 (macOS). Diagram: `docs/slp.png`.
 
@@ -18,7 +19,7 @@ This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal 
  Principal (owner) — goal, priorities, trade-offs; approves push / merge to main
         │ goal                ▲ digest
         ▼                     │
- Supervisor (CoS Quả Quả) — intake, sizing, brief, cross-project view ◄── report ── Auditor
+ CoS (Quả Quả) — full SDLC: intake, sizing, brief, verify, release  ◄── report ── Auditor
         │ small task (<15 min, 1 file, or needs live feedback) ──► one worker, no SLP   (systemd/launchd
         │ spawn Lead + brief                                                           2×/day)
         ▼
