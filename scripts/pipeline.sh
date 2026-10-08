@@ -11,14 +11,22 @@
 #   lines or touches >1 top-level dir; always/skip override) -> findings go
 #   straight back to the builder for a fix, then a fresh reviewer; at most
 #   <rounds> review rounds. Ends clean | disputed | blocked. '## Challenge' in
-#   any builder runs file stops the pipeline as disputed (Lead decides); a
-#   reviewer runs file without a 'Verdict: clean | <N> findings' line stops it
-#   as blocked. Reviewers are cleaned right after their runs file is read; the
+#   any worker runs file (builder or reviewer) stops the pipeline as disputed
+#   (Lead decides); a reviewer runs file without a 'Verdict: clean | <N>
+#   findings' line stops it as blocked. A phase report that declares itself
+#   unfinished ('Outcome: BLOCKED|PARTIAL|INCOMPLETE|FAILED' or a non-empty
+#   '## Blockers' section — e.g. written after the watchdog nudge) never
+#   advances: the pipeline stops blocked with the evidence copied in. After
+#   BUILD/FIX the branch tip must hold real commits in a clean worktree — the
+#   size gate and the reviewer are bound to that exact SHA; a builder that
+#   intentionally changed nothing says 'Outcome: no changes' (clean, review
+#   skipped). Reviewers are cleaned right after their runs file is read; the
 #   caller cleans the builder after re-running its test.
 #   Exit codes reuse prompt-worker.sh's watchdog meanings: 0 finished (status
 #   line on stdout + runs/pipeline-<task>.md) · 1 usage/state error · 2 cap ·
-#   3 stall/gone · 4 budget · 5 plan-ready pause or a worker blocked on a
-#   question. On 2-5 fix the cause (a stuck wait keeps waiting via
+#   3 stall/gone (also: resumable snapshot/spawn failures) · 4 budget · 5
+#   plan-ready pause, a mandatory grid-arrange pause, or a worker blocked on
+#   a question. On 2-5 fix the cause (a stuck wait keeps waiting via
 #   'prompt-worker.sh --resume <worker>'), then 'pipeline.sh --resume <task>
 #   <repo>' continues from runs/pipeline-<task>.state. Every stop appends one
 #   line to runs/telemetry.jsonl {ts,task,repo,builder,reviewer,
@@ -62,9 +70,10 @@ elapsed() { echo $(( start_elapsed + $(date +%s) - inv_start )); }
 save_state() {
   local v
   : > "$state"
-  for v in repo brief builder reviewer review rounds base wt base_sha planfile \
-           commit phase round prompted rounds_run review_run review_changed \
-           last_findings finished start_elapsed; do
+  for v in repo brief builder reviewer review rounds base wt base_sha head_sha planfile \
+           commit phase round prompted prompt_ts rounds_run review_run review_changed \
+           last_findings finished start_elapsed builder_spawned reviewer_spawned \
+           lead lead_pane; do
     printf '%s=%q\n' "$v" "${!v}" >> "$state"
   done
   # liveness signal for prompt-worker.sh: a Lead watching this pipeline is
@@ -74,8 +83,15 @@ save_state() {
 
 finish() {  # <status> <exit-code> — status line, telemetry, stdout summary
   local st=$1 code=$2 mins
-  mins=$(( $(elapsed) / 60 ))
   start_elapsed=$(elapsed)          # persist work time across pauses/resumes
+  # the clock is only re-checked at phase boundaries, so re-check before a
+  # success verdict: 'clean' over the whole-pipeline budget is not a success
+  # (lock §1: over -> stop + Blockers)
+  if [[ $st == clean && $code -eq 0 ]] && (( start_elapsed > MAX_SEC )); then
+    st=blocked
+    blocker=${blocker:-"total budget ${MAX_SEC}s of work time exceeded — outcome arrived over budget"}
+  fi
+  mins=$(( start_elapsed / 60 ))
   if (( code == 0 )); then finished=1; fi
   save_state
   plog "status: $st · commit ${commit:-none} · elapsed ${mins}m"
@@ -98,14 +114,72 @@ check_clock() {  # whole-pipeline budget, evaluated at phase boundaries
   finish blocked 4
 }
 
+archive_stale() {  # <file> — a report that predates this phase's prompt is stale
+  local f=$1
+  mv "$f" "$f.stale.$(date +%s)" \
+    && plog "archived stale report $(basename "$f") (predates this phase's prompt)"
+}
+
+blocked_outcome() {  # <file> — the report declares itself unfinished (nudge
+  # reports carry '## Blockers'; a worker may also write 'Outcome: BLOCKED')
+  grep -qiE '^(Outcome|Status|Result):[[:space:]]*(BLOCKED|PARTIAL|INCOMPLETE|FAILED)' "$1" \
+    && return 0
+  awk '/^## Blockers/{f=1; next} /^## /{f=0} f && NF {x=1} END{exit !x}' "$1"
+}
+
+log_blockers() {  # <file> — copy the worker's unfinished-evidence into the run file
+  printf '\n## Worker stopped early (from %s)\n' "$(basename "$1")" >> "$pfile"
+  { grep -inE '^(Outcome|Status|Result):[[:space:]]*[[:alnum:]]+' "$1" || true
+    awk '/^## Blockers/{f=1} /^## / && !/^## Blockers/ && f{exit} f' "$1"; } >> "$pfile"
+}
+
+check_impl() {  # <report> [prev-sha] — F2 gate: the delivered implementation is
+  # committed on quaqua/$builder-$task and the worktree is clean, so the size
+  # gate and the reviewer look at the same immutable snapshot ($head_sha).
+  # With [prev-sha] (FIX) the tip must also have advanced past it.
+  local report=$1 prev=${2:-} dirty
+  head_sha=$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo '?')
+  commit=${head_sha:0:7}
+  dirty=$(git -C "$wt" status --porcelain 2>/dev/null || echo '?')
+  if [[ $head_sha == '?' || $dirty == '?' ]]; then
+    blocker="cannot inspect $wt (git rev-parse/status failed) — fix the worktree, then '$0 --resume $task $repo'"
+    plog "$blocker"; finish blocked 3
+  fi
+  if [[ -n $prev && $head_sha == "$prev" ]]; then
+    blocker="fix produced no commits past ${prev:0:7} on quaqua/$builder-$task — a no-op answer to findings belongs in '## Challenge'. Commit the fixes, then '$0 --resume $task $repo'"
+    plog "$blocker"; finish blocked 3
+  fi
+  if [[ -z $prev && $head_sha == "$base_sha" ]]; then
+    if [[ -z $dirty ]] && grep -qiE '^Outcome:[[:space:]]*no[ -]?(op|changes)' "$report"; then
+      plog "build: no commits — builder declared 'Outcome: no changes'; nothing to review"
+      finish clean 0
+    fi
+    blocker="builder produced no commits on quaqua/$builder-$task (HEAD == base ${base_sha:0:7}) and did not declare 'Outcome: no changes' — commit the work (or fix the report), then '$0 --resume $task $repo'"
+    plog "$blocker"; finish blocked 3
+  fi
+  if [[ -n $dirty ]]; then
+    printf -- '- uncommitted/untracked in %s:\n%s\n' "$wt" "$dirty" >> "$pfile"
+    blocker="worktree dirty — the files above are missing from quaqua/$builder-$task, so the gate and the reviewer would see a different snapshot. Commit or clean them, then '$0 --resume $task $repo'"
+    finish blocked 3
+  fi
+}
+
 wait_file() {  # <worker> <prompt> <budget-sec> — prompt once, else resume the wait
-  local w=$1 prompt=$2 budget=$3 rc=0
-  [[ -s $runs/$w.md ]] && return 0
-  if (( prompted )); then
-    PROMPT_WORKER_BUDGET_SEC=$budget bash "$here/prompt-worker.sh" --resume "$w" >/dev/null || rc=$?
-  else
-    prompted=1; save_state   # the prompt is sent by this call; record it first
+  local w=$1 prompt=$2 budget=$3 f rc=0 rem
+  f=$runs/$w.md
+  rem=$(( MAX_SEC - $(elapsed) ))   # a phase never gets more than is left (F5)
+  (( rem < budget )) && budget=$rem
+  (( budget < 1 )) && budget=1
+  if (( ! prompted )); then
+    [[ -e $f ]] && archive_stale "$f"
+    prompted=1 prompt_ts=$(date +%s); save_state   # the prompt is sent below
     PROMPT_WORKER_BUDGET_SEC=$budget bash "$here/prompt-worker.sh" "$w" "$prompt" >/dev/null || rc=$?
+  else
+    # resume: consume the report only when it postdates the recorded prompt
+    if [[ -s $f && $(stat -c %Y "$f" 2>/dev/null || echo 0) -lt ${prompt_ts:-0} ]]; then
+      archive_stale "$f"
+    fi
+    PROMPT_WORKER_BUDGET_SEC=$budget bash "$here/prompt-worker.sh" --resume "$w" >/dev/null || rc=$?
   fi
   if (( rc )); then
     blocker="$phase wait for $w: watchdog exit $rc — fix the cause ('prompt-worker.sh --resume $w' keeps a live wait going), then '$0 --resume $task $repo'"
@@ -133,6 +207,7 @@ if [[ ${1:-} == --resume ]]; then
   if (( finished )); then
     die "pipeline '$task' already finished — see $pfile"
   fi
+  save_state   # refresh pipeline_pid so a watching Lead keeps its exemption
   plog "resumed: $(date -Iseconds) (phase=$phase)"
 else
   builder=sude reviewer=quansu review=auto rounds=2 brief='' base='' pos=()
@@ -177,8 +252,11 @@ else
   [[ ! -f $state ]] \
     || die "pipeline '$task' already has state — use --resume or a new task slug"
   wt="$(dirname "$repo")/.wt/$builder-$task"
-  phase=spawn round=0 prompted=0 rounds_run=0 review_run=skip review_changed=false
-  commit='' planfile='' base_sha='' last_findings=0 finished=0 start_elapsed=0
+  phase=spawn round=0 prompted=0 prompt_ts=0 rounds_run=0 review_run=skip review_changed=false
+  commit='' planfile='' base_sha='' head_sha='' last_findings=0 finished=0 start_elapsed=0
+  builder_spawned=0 reviewer_spawned=0
+  # shellcheck disable=SC2034  # consumed via ${!v} in save_state
+  lead=${PIPELINE_LEAD:-} lead_pane=${HERDR_PANE_ID:-}   # F6: bind the Lead exemption
   save_state
   {
     printf '# pipeline %s\n' "$task"
@@ -199,12 +277,17 @@ brief_text=$(cat "$brief" 2>/dev/null) || die "brief file unreadable: $brief"
 # spawn/cleanup scripts get GRID_SKIP=1: their unfiltered hook would sweep the
 # anchor tab. GRID_SKIP=1 disables the pipeline's own hook too (tests).
 grid_tab=${GRID_TAB:-"$(basename "$repo")-workers"}
-grid_hook() {  # grid_hook <name>[,<name>...] — best-effort, never fails a phase
+grid_hook() {  # grid_hook <name>[,<name>...] — returns the grid's rc; the
+  # caller decides: pre-prompt failure = pause (MANDATORY rule), post-cleanup
+  # failure = warning only
   [[ ${GRID_SKIP:-} == 1 ]] && return 0
-  local grid="$here/grid-workers.sh"
+  local grid="$here/grid-workers.sh" rc=0
   [[ -f $grid ]] || return 0
-  bash "$grid" --tab "$grid_tab" --only "$1" >&2 \
-    || echo "warning: grid-workers.sh failed (exit $?); arrange panes manually" >&2
+  bash "$grid" --tab "$grid_tab" --only "$1" >&2 || rc=$?
+  if (( rc )); then
+    echo "warning: grid-workers.sh failed (exit $rc); arrange panes manually" >&2
+  fi
+  return "$rc"
 }
 
 # ── phase machine ───────────────────────────────────────────────────────────
@@ -213,14 +296,20 @@ while :; do
   case $phase in
 
     spawn)
-      if [[ ! -d $wt ]]; then
+      # spawn completion is tracked in state — a worktree dir alone is not
+      # proof the agent started (spawn-worker.sh reuses a leftover worktree)
+      if (( ! builder_spawned )); then
         sargs=(); [[ -n $base ]] && sargs+=(--base "$base")
         if ! GRID_SKIP=1 bash "$here/spawn-worker.sh" "${sargs[@]}" "$builder-$task" "$builder" "$repo" >&2; then
           blocker="spawn-worker.sh failed for builder $builder-$task — fix the cause, then '$0 --resume $task $repo'"
           plog "$blocker"; finish blocked 3
         fi
+        builder_spawned=1; save_state
       fi
-      grid_hook "$builder-$task"
+      if ! grid_hook "$builder-$task"; then
+        blocker="grid-workers.sh failed for $builder-$task — arrange the pane per rules/_all/fanout-agent-grid.md, then '$0 --resume $task $repo'"
+        plog "$blocker"; save_state; finish blocked 5
+      fi
       base_sha=$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo unknown)
       plog "builder $builder-$task spawned (base $base_sha)"
       phase=plan prompted=0; save_state ;;
@@ -237,6 +326,11 @@ Pipeline phase: PLAN — write only the implementation plan (steps, files to tou
         blocker="builder challenged the premise at plan stage — Lead resolves the Challenge above"
         finish disputed 0
       fi
+      if blocked_outcome "$planfile"; then
+        log_blockers "$planfile"
+        blocker="builder's plan reports unfinished work — Lead decides how to proceed"
+        finish blocked 0
+      fi
       phase=build prompted=0; save_state
       printf 'PIPELINE plan-ready: approve %s then resume: %s --resume %s %s\n' \
         "$planfile" "$0" "$task" "$repo" >&2
@@ -245,25 +339,27 @@ Pipeline phase: PLAN — write only the implementation plan (steps, files to tou
     build)
       wait_file "$builder-$task" "$brief_text
 
-Pipeline phase: BUILD — your plan is approved ($planfile). Implement it in your worktree, commit on quaqua/$builder-$task, run the tests. If the premise or the plan proves wrong, stop and write '## Challenge' with evidence instead of forcing it." "$BUILD_BUDGET"
+Pipeline phase: BUILD — your plan is approved ($planfile). Implement it in your worktree, commit on quaqua/$builder-$task, run the tests. If the premise or the plan proves wrong, stop and write '## Challenge' with evidence instead of forcing it. If the work turns out to need no changes at all, say 'Outcome: no changes' in your runs file." "$BUILD_BUDGET"
       mv "$runs/$builder-$task.md" "$runs/$builder-$task.build.md"
-      commit=$(git -C "$wt" rev-parse --short HEAD 2>/dev/null || echo '?')
-      plog "build: commit $commit ($builder-$task.build.md)"
       if grep -q '^## Challenge' "$runs/$builder-$task.build.md"; then
         log_challenge "$runs/$builder-$task.build.md"
         blocker="builder challenged the premise during build — Lead resolves the Challenge above"
         finish disputed 0
       fi
-      if [[ $commit == "${base_sha:0:7}" ]]; then
-        plog "note: branch tip == base — builder may not have committed"
+      if blocked_outcome "$runs/$builder-$task.build.md"; then
+        log_blockers "$runs/$builder-$task.build.md"
+        blocker="builder's build report is unfinished (see above) — Lead decides how to proceed"
+        finish blocked 0
       fi
+      check_impl "$runs/$builder-$task.build.md"   # sets head_sha/commit; stops when invalid
+      plog "build: commit $commit ($builder-$task.build.md)"
       case $review in
         always) review_run=run ;;
         skip)   review_run=skip ;;
         auto)
-          lines=$(git -C "$wt" diff --numstat "$base_sha" 2>/dev/null \
+          lines=$(git -C "$wt" diff --numstat "$base_sha" "$head_sha" 2>/dev/null \
                   | awk '{a+=$1+$2} END{print a+0}')
-          dirs=$(git -C "$wt" diff --name-only "$base_sha" 2>/dev/null \
+          dirs=$(git -C "$wt" diff --name-only "$base_sha" "$head_sha" 2>/dev/null \
                  | awk -F/ 'NF>1{print $1; next}{print "."}' | sort -u | wc -l)
           plog "review gate: $lines changed lines, $dirs top-level dirs (run if >$REVIEW_LINES or >1)"
           if (( lines > REVIEW_LINES || dirs > 1 )); then review_run=run; else review_run=skip; fi ;;
@@ -272,31 +368,48 @@ Pipeline phase: BUILD — your plan is approved ($planfile). Implement it in you
         plog "review: skipped (gate: $review)"
         finish clean 0
       fi
-      phase=review round=1 prompted=0; save_state ;;
+      phase=review round=1 prompted=0 reviewer_spawned=0; save_state ;;
 
     review)
       revname="$reviewer-${task}r${round}"
-      if [[ ! -d "$(dirname "$repo")/.wt/$revname" && ! -s $runs/$revname.md ]]; then
-        if ! GRID_SKIP=1 bash "$here/spawn-worker.sh" --review --base "quaqua/$builder-$task" \
+      if (( ! reviewer_spawned )); then
+        # a report that predates this round's reviewer spawn is stale
+        [[ -s $runs/$revname.md ]] && archive_stale "$runs/$revname.md"
+        if ! GRID_SKIP=1 bash "$here/spawn-worker.sh" --review --base "$head_sha" \
              "$revname" "$reviewer" "$repo" >&2; then
           blocker="spawn-worker.sh failed for reviewer $revname — fix the cause, then '$0 --resume $task $repo'"
           plog "$blocker"; finish blocked 3
         fi
-        plog "review round $round: $revname spawned on quaqua/$builder-$task"
+        reviewer_spawned=1; save_state
+        plog "review round $round: $revname spawned on $head_sha (quaqua/$builder-$task tip)"
       fi
-      grid_hook "$builder-$task,$revname"
+      if ! grid_hook "$builder-$task,$revname"; then
+        blocker="grid-workers.sh failed for $revname — arrange the panes per rules/_all/fanout-agent-grid.md, then '$0 --resume $task $repo'"
+        plog "$blocker"; save_state; finish blocked 5
+      fi
       wait_file "$revname" "Goal: review the diff for task '$task' and report findings with file:line evidence
 Hard constraints: read-only — do not edit or create files outside ~/quaqua/runs; every finding must cite file:line in the diff.
 Current design (open to challenge): builder $builder-$task implemented the task on branch quaqua/$builder-$task — your worktree is on its tip; run 'git diff $base_sha' for the full change. Original brief: $brief (readable).
 Unknowns: whether the change meets the brief — verify correctness, missing tests, and scope creep against the diff, not the report.
-Evidence: a findings list, then the runs file MUST end with exactly one line: 'Verdict: clean' or 'Verdict: <N> findings'.
+Evidence: a findings list, then the runs file MUST end with exactly one line: 'Verdict: clean' or 'Verdict: <N> findings'. Write to a temp file and rename it to ~/quaqua/runs/$revname.md — publish atomically, never a partial file.
 Pipeline phase: REVIEW (round $round of $rounds)" "$REVIEW_BUDGET"
-      verdict=$(grep -E '^[[:space:]]*Verdict:' "$runs/$revname.md" | tail -1 || true)
       rounds_run=$round
+      # a reviewer is a Peer: its Challenge is resolved by the Lead before the
+      # verdict is read (a 'Verdict: clean' beside a Challenge is not clean)
+      if grep -q '^## Challenge' "$runs/$revname.md"; then
+        log_challenge "$runs/$revname.md"
+        plog "review round $round: $revname challenged the premise"
+        GRID_SKIP=1 bash "$here/cleanup-worker.sh" "$revname" "$repo" >&2 \
+          || echo "warning: cleanup $revname failed; clean it manually" >&2
+        grid_hook "$builder-$task" || true
+        blocker="reviewer $revname challenged the premise — Lead resolves the Challenge above"
+        finish disputed 0
+      fi
+      verdict=$(grep -E '^[[:space:]]*Verdict:' "$runs/$revname.md" | tail -1 || true)
       plog "review round $round: ${verdict:-NO VERDICT LINE} ($revname.md)"
       GRID_SKIP=1 bash "$here/cleanup-worker.sh" "$revname" "$repo" >&2 \
         || echo "warning: cleanup $revname failed; clean it manually" >&2
-      grid_hook "$builder-$task"
+      grid_hook "$builder-$task" || true
       if [[ $verdict =~ [Vv]erdict:[[:space:]]*([0-9]+)[[:space:]]*[Ff]indings? ]]; then
         last_findings=${BASH_REMATCH[1]}
       elif [[ $verdict =~ [Vv]erdict:[[:space:]]*[Cc]lean ]]; then
@@ -322,14 +435,19 @@ Unknowns: which findings are real — verify each against the code before changi
 Evidence: committed fixes + test output, or '## Challenge' per wrong finding.
 Pipeline phase: FIX (after review round $round)" "$FIX_BUDGET"
       mv "$runs/$builder-$task.md" "$runs/$builder-$task.fix$round.md"
-      commit=$(git -C "$wt" rev-parse --short HEAD 2>/dev/null || echo '?')
-      plog "fix $round: commit $commit ($builder-$task.fix$round.md)"
       if grep -q '^## Challenge' "$runs/$builder-$task.fix$round.md"; then
         log_challenge "$runs/$builder-$task.fix$round.md"
         blocker="builder disputed review findings — Lead resolves the Challenge above"
         finish disputed 0
       fi
-      phase=review round=$((round + 1)) prompted=0; save_state ;;
+      if blocked_outcome "$runs/$builder-$task.fix$round.md"; then
+        log_blockers "$runs/$builder-$task.fix$round.md"
+        blocker="builder's fix report is unfinished (see above) — Lead decides how to proceed"
+        finish blocked 0
+      fi
+      check_impl "$runs/$builder-$task.fix$round.md" "$head_sha"  # must advance past the reviewed sha
+      plog "fix $round: commit $commit ($builder-$task.fix$round.md)"
+      phase=review round=$((round + 1)) prompted=0 reviewer_spawned=0; save_state ;;
 
     *) die "corrupt state: phase=$phase ($state)" ;;
   esac

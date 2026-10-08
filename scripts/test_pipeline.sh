@@ -13,18 +13,34 @@ here="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-pipeline.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() { echo "FAIL: $*" >&2
+  { echo '--- out ---'; cat "$T/out"
+    echo '--- err ---'; tail -20 "$T/err"
+    echo '--- pfile ---'; tail -30 "$T"/home/quaqua/runs/pipeline-*.md
+    echo '--- calls ---'; tail -20 "$T/calls"; } >&2 2>/dev/null
+  exit 1; }
 
 # ── sandbox: stub git/herdr, temp HOME/quaqua/runs, dummy repo + brief ──────
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs"
+# git stub: rev-parse HEAD is keyed on the -C dir's basename; call #1 is the
+# spawn-time base, call #2 the post-build tip, call #3+ the post-fix tip.
+# FAKE_BASE_SHA/FAKE_HEAD_SHA/FAKE_HEAD2_SHA shape each; FAKE_PORCELAIN feeds
+# `status --porcelain` (empty = clean tree).
 cat > "$T/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
+dir='' prev=''
+for a in "$@"; do [ "$prev" = -C ] && dir=$a; prev=$a; done
+cf="$GITN-${dir##*/}"; n=$(cat "$cf" 2>/dev/null || echo 0)
 case " $* " in
+  *"status --porcelain"*)   printf '%s\n' "${FAKE_PORCELAIN:-}" ;;
   *"diff --numstat"*)       printf '%s\n' "${FAKE_NUMSTAT:-}" ;;
   *"diff --name-only"*)     printf '%s\n' "${FAKE_NAMES:-}" ;;
-  *"rev-parse --short HEAD"*) echo "${FAKE_COMMIT_SHA:-c0ffee1}" ;;
-  *"rev-parse HEAD"*)       echo "${FAKE_BASE_SHA:-ba5eba5}" ;;
+  *"rev-parse HEAD"*)
+    n=$((n+1)); echo "$n" > "$cf"
+    if (( n <= ${FAKE_BASECALLS:-1} )); then echo "${FAKE_BASE_SHA:-ba5eba5}";
+    elif (( n == 2 )); then echo "${FAKE_HEAD_SHA:-c0ffee1deadbeef0000000000000000000000}";
+    else echo "${FAKE_HEAD2_SHA:-f00dd00dbabe0000000000000000000000}"; fi ;;
 esac
 exit 0
 STUB
@@ -45,7 +61,11 @@ case "${1:-} ${2:-}" in
       *"phase: REVIEW"*) content=${FAKE_REVIEW_MD:-'Verdict: clean'} ;;
     esac
     if [ -n "$content" ] && [ "${FAKE_SILENT:-0}" != 1 ]; then
-      printf '%s\n' "$content" > "$HOME/quaqua/runs/$w.md"
+      if [ "${FAKE_DELAY:-0}" != 0 ]; then
+        ( sleep "$FAKE_DELAY"; printf '%s\n' "$content" > "$HOME/quaqua/runs/$w.md" ) &
+      else
+        printf '%s\n' "$content" > "$HOME/quaqua/runs/$w.md"
+      fi
     fi
     exit "${FAKE_RC:-0}" ;;
   "pane split") printf '{"result":{"pane":{"pane_id":"%%1"}}}\n' ;;
@@ -73,7 +93,7 @@ run_pipe() {
   [[ ${1:-} == -- ]] && shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" GRID_SKIP=1 \
+  CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
     env "${vars[@]}" bash "$here/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
@@ -131,9 +151,11 @@ run_pipe FAKE_NUMSTAT=$'200\t10\tsrc/a.c\n5\t0\tsrc/b.c' \
          -- --resume isl "$T/repo"
 [[ $rc -eq 0 ]] || fail "isl resume: exit $rc, want 0: $(cat "$T/err")"
 grep -q 'status=clean' "$T/out" || fail "isl resume: stdout not clean: $(cat "$T/out")"
-# reviewer spawned on the builder branch, read-only profile, then cleaned
-grep -q 'worktree add -b quaqua/quansu-islr1 .* quaqua/sude-isl' "$T/calls" \
-  || fail "isl resume: reviewer not based on builder branch: $(cat "$T/calls")"
+# reviewer spawned on the exact committed tip the gate measured (F2), read-only
+grep -q 'worktree add -b quaqua/quansu-islr1 .* c0ffee1deadbeef' "$T/calls" \
+  || fail "isl resume: reviewer not based on the gated head sha: $(cat "$T/calls")"
+grep -q 'commit c0ffee1' "$runsdir/pipeline-isl.md" \
+  || fail "isl resume: committed head sha not recorded in the report"
 grep -q 'quaqua-review' "$T/calls" \
   || fail "isl resume: reviewer spawned without read-only profile"
 ! grep -q 'agent start sude-isl' "$T/calls" || fail "isl resume: builder respawned"
@@ -236,6 +258,7 @@ cp "$here/pipeline.sh" "$here/prompt-worker.sh" "$here/spawn-worker.sh" \
 cat > "$T/p2/scripts/grid-workers.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'grid %s\n' "$*" >> "$CALLS"
+if [ -n "${GRID_FAIL_ON:-}" ] && [[ $* == *"$GRID_FAIL_ON"* ]]; then exit 1; fi
 exit "${GRID_FAKE_RC:-0}"
 EOF
 chmod +x "$T/p2/scripts/grid-workers.sh"
@@ -246,7 +269,7 @@ run_pipe2() {  # like run_pipe, but against $T/p2/scripts and without GRID_SKIP
   [[ ${1:-} == -- ]] && shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+  CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
     env "${vars[@]}" bash "$T/p2/scripts/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
@@ -287,12 +310,179 @@ glines | grep -qx 'grid --tab my-tab --only sude-gto' \
   || fail "gto: unfiltered grid call leaked: $(glines)"
 echo "ok: GRID_TAB overrides the workers tab label"
 
-# a failing grid never fails the pipeline (best-effort hook)
+# a failing grid PAUSES the pipeline before any prompt (F12, MANDATORY rule)
 run_pipe2 GRID_FAKE_RC=1 -- gfx "$T/repo" --brief "$T/brief.md"
-[[ $rc -eq 5 ]] || fail "gfx: exit $rc, want 5 despite grid failure: $(cat "$T/err")"
+[[ $rc -eq 5 ]] || fail "gfx: exit $rc, want 5 (grid pause): $(cat "$T/err")"
 grep -q 'warning: grid-workers.sh failed' "$T/err" \
   || fail "gfx: no grid-failure warning: $(cat "$T/err")"
-echo "ok: grid failure warns, pipeline continues"
+! grep -q 'agent prompt' "$T/calls" \
+  || fail "gfx: worker prompted despite grid failure: $(cat "$T/calls")"
+grep -q 'status: blocked' "$runsdir/pipeline-gfx.md" \
+  || fail "gfx: pause not recorded as blocked"
+run_pipe2 -- --resume gfx "$T/repo"
+[[ $rc -eq 5 ]] || fail "gfx resume: exit $rc, want 5 plan-ready: $(cat "$T/err")"
+grep -q 'agent prompt sude-gfx' "$T/calls" \
+  || fail "gfx resume: plan prompt not sent after arrange"
+echo "ok: grid failure pauses pre-prompt; resume after arranging continues"
+
+# the reviewer-phase grid failure also pauses before the review prompt
+run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
+          -- gfr "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "gfr run1: exit $rc, want 5"
+run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' GRID_FAIL_ON=quansu \
+          FAKE_REVIEW_MD=$'ok\nVerdict: clean' -- --resume gfr "$T/repo"
+[[ $rc -eq 5 ]] || fail "gfr: exit $rc, want 5 (reviewer-grid pause): $(cat "$T/err")"
+grep -q 'grid-workers.sh failed' "$T/err" || fail "gfr: no grid warning"
+! grep -q 'agent prompt quansu-gfr' "$T/calls" \
+  || fail "gfr: reviewer prompted despite grid failure: $(cat "$T/calls")"
+run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
+          FAKE_REVIEW_MD=$'ok\nVerdict: clean' -- --resume gfr "$T/repo"
+[[ $rc -eq 0 ]] || fail "gfr resume: exit $rc: $(cat "$T/err")"
+grep -q 'status=clean' "$T/out" || fail "gfr: not clean after arrange"
+echo "ok: reviewer-spawn grid failure pauses pre-prompt; resume completes review"
+
+# state binds the Lead exemption to this pipeline's orchestrator (F6)
+run_pipe2 PIPELINE_LEAD=st6-lead HERDR_PANE_ID=w1:p9 -- st6 "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "st6 run1: exit $rc"
+grep -q '^lead=st6-lead' "$runsdir/pipeline-st6.state" || fail "st6: lead not recorded"
+grep -q '^lead_pane=w1:p9' "$runsdir/pipeline-st6.state" || fail "st6: lead_pane not recorded"
+pid1=$(sed -n 's/^pipeline_pid=//p' "$runsdir/pipeline-st6.state")
+run_pipe2 FAKE_NUMSTAT=$'20\t5\tAGENTS.md' FAKE_NAMES='AGENTS.md' -- --resume st6 "$T/repo"
+pid2=$(sed -n 's/^pipeline_pid=//p' "$runsdir/pipeline-st6.state")
+[[ -n $pid1 && -n $pid2 && $pid1 != "$pid2" ]] \
+  || fail "st6: --resume did not refresh pipeline_pid ($pid1 -> $pid2)"
+echo "ok: state carries lead/lead_pane; --resume refreshes pipeline_pid"
+
+# ── F1: an unfinished phase report never advances (Outcome/## Blockers) ─────
+run_pipe FAKE_PLAN_MD=$'plan v1\n\n## Blockers\n- cannot plan without the spec\n' \
+         -- pb1 "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 0 ]] || fail "pb1: exit $rc, want 0"
+grep -q 'status=blocked' "$T/out" || fail "pb1: stdout not blocked: $(cat "$T/out")"
+grep -q 'cannot plan without the spec' "$runsdir/pipeline-pb1.md" \
+  || fail "pb1: blocker evidence not copied"
+! grep -q 'phase: BUILD' "$T/calls" || fail "pb1: build prompted despite blocked plan"
+echo "ok: blocked plan report -> blocked, evidence copied, no build prompt"
+
+run_pipe -- pb2 "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "pb2 run1: exit $rc, want 5"
+run_pipe FAKE_BUILD_MD=$'Outcome: BLOCKED\n\n## Blockers\n- implementation incomplete\n' \
+         -- --resume pb2 "$T/repo"
+[[ $rc -eq 0 ]] || fail "pb2 resume: exit $rc"
+grep -q 'status=blocked' "$T/out" || fail "pb2: stdout not blocked: $(cat "$T/out")"
+grep -q 'implementation incomplete' "$runsdir/pipeline-pb2.md" || fail "pb2: evidence not copied"
+! grep -q 'agent start quansu' "$T/calls" || fail "pb2: reviewer spawned on a blocked build"
+tail -1 "$tele" | grep -q '"status":"blocked"' || fail "pb2: telemetry not blocked"
+echo "ok: Outcome: BLOCKED build (nudge-style report) -> blocked, no reviewer"
+
+run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' -- pb3 "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "pb3 run1: exit $rc, want 5"
+run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
+         FAKE_REVIEW_MD=$'src/a.c:1 wrong\nVerdict: 1 findings' \
+         FAKE_FIX_MD=$'tried\n\n## Blockers\n- fix needs schema access\n' \
+         -- --resume pb3 "$T/repo"
+[[ $rc -eq 0 ]] || fail "pb3 resume: exit $rc"
+grep -q 'status=blocked' "$T/out" || fail "pb3: stdout not blocked: $(cat "$T/out")"
+grep -q 'fix needs schema access' "$runsdir/pipeline-pb3.md" || fail "pb3: evidence not copied"
+! grep -q 'agent start quansu-pb3r2' "$T/calls" || fail "pb3: round-2 reviewer spawned"
+echo "ok: blocked fix report -> blocked, no next review round"
+
+# ── F2: no committed snapshot / dirty tree -> resumable blocked, not clean ───
+run_pipe -- ncm "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "ncm run1: exit $rc, want 5"
+run_pipe FAKE_HEAD_SHA=ba5eba5 -- --resume ncm "$T/repo"   # tip == base: no commits
+[[ $rc -eq 3 ]] || fail "ncm: exit $rc, want 3 (resumable block): $(cat "$T/out")"
+grep -q 'status=blocked' "$T/out" || fail "ncm: not blocked"
+grep -q 'produced no commits' "$runsdir/pipeline-ncm.md" || fail "ncm: no-commit reason missing"
+! grep -q 'agent start quansu' "$T/calls" || fail "ncm: reviewer spawned with no commits"
+echo "ok: zero commits after build -> resumable blocked, no reviewer"
+
+run_pipe -- nop "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "nop run1: exit $rc, want 5"
+run_pipe FAKE_HEAD_SHA=ba5eba5 FAKE_BUILD_MD=$'looked carefully\nOutcome: no changes\n' \
+         -- --resume nop "$T/repo"
+[[ $rc -eq 0 ]] || fail "nop: exit $rc"
+grep -q 'status=clean' "$T/out" || fail "nop: declared no-op did not finish clean: $(cat "$T/out")"
+grep -q 'no commits.*no changes' "$runsdir/pipeline-nop.md" || fail "nop: no-op note missing"
+! grep -q 'agent start quansu' "$T/calls" || fail "nop: reviewer spawned for a no-op"
+echo "ok: explicit 'Outcome: no changes' -> clean, review skipped"
+
+run_pipe -- dty "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "dty run1: exit $rc, want 5"
+run_pipe FAKE_PORCELAIN=$' M src/a.c\n?? newfile.c' -- --resume dty "$T/repo"
+[[ $rc -eq 3 ]] || fail "dty: exit $rc, want 3"
+grep -q 'status=blocked' "$T/out" || fail "dty: not blocked"
+grep -q 'uncommitted/untracked' "$runsdir/pipeline-dty.md" || fail "dty: dirty evidence not logged"
+grep -q '?? newfile.c' "$runsdir/pipeline-dty.md" || fail "dty: untracked file not listed"
+! grep -q 'agent start quansu' "$T/calls" || fail "dty: reviewer spawned on dirty tree"
+echo "ok: dirty worktree (tracked + untracked) -> blocked, evidence logged"
+
+run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' -- fxc "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "fxc run1: exit $rc, want 5"
+run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
+         FAKE_REVIEW_MD=$'src/a.c:1 wrong\nVerdict: 1 findings' \
+         FAKE_HEAD2_SHA=c0ffee1deadbeef0000000000000000000000 \
+         -- --resume fxc "$T/repo"   # post-fix tip identical to the reviewed tip
+[[ $rc -eq 3 ]] || fail "fxc: exit $rc, want 3: $(cat "$T/out")"
+grep -q 'no commits past' "$runsdir/pipeline-fxc.md" || fail "fxc: no-advance reason missing"
+echo "ok: fix without a new commit -> resumable blocked (no-op fix is a Challenge)"
+
+# ── F3: a reviewer Challenge reaches the Lead before any verdict ─────────────
+run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' -- rch "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "rch run1: exit $rc, want 5"
+run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
+         FAKE_REVIEW_MD=$'the diff contradicts the spec\n\n## Challenge\nspec section 3 requires Y, diff does X (evidence)\n\nVerdict: clean' \
+         -- --resume rch "$T/repo"
+[[ $rc -eq 0 ]] || fail "rch: exit $rc"
+grep -q 'status=disputed' "$T/out" || fail "rch: reviewer challenge did not dispute: $(cat "$T/out")"
+grep -q 'spec section 3 requires Y' "$runsdir/pipeline-rch.md" || fail "rch: challenge not copied"
+grep -q 'pane close' "$T/calls" || fail "rch: reviewer not cleaned"
+echo "ok: reviewer Challenge + clean verdict -> disputed, copied, reviewer cleaned"
+
+run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' -- rchf "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "rchf run1: exit $rc, want 5"
+run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
+         FAKE_REVIEW_MD=$'## Challenge\npremise wrong\n\nVerdict: 2 findings' \
+         -- --resume rchf "$T/repo"
+[[ $rc -eq 0 ]] || fail "rchf: exit $rc"
+grep -q 'status=disputed' "$T/out" || fail "rchf: challenge+findings not disputed"
+echo "ok: reviewer Challenge + findings verdict -> still disputed"
+
+# ── F5: a phase never gets more than the whole-pipeline remainder ────────────
+run_pipe -- clk "$T/repo" --brief "$T/brief.md" --review skip
+[[ $rc -eq 5 ]] || fail "clk run1: exit $rc, want 5"
+sed -i 's/^start_elapsed=.*/start_elapsed=7180/' "$runsdir/pipeline-clk.state"
+run_pipe PIPELINE_MAX_SEC=7200 -- --resume clk "$T/repo"
+grep -q 'budget 20s' "$T/err" \
+  || fail "clk: phase budget not clamped to remainder (want 20s): $(cat "$T/err")"
+[[ $rc -eq 0 ]] || fail "clk: exit $rc inside the allowance"
+echo "ok: phase budget clamped to pipeline remainder (20s of 2700s)"
+
+run_pipe -- clk2 "$T/repo" --brief "$T/brief.md" --review skip
+[[ $rc -eq 5 ]] || fail "clk2 run1: exit $rc, want 5"
+sed -i 's/^start_elapsed=.*/start_elapsed=7190/' "$runsdir/pipeline-clk2.state"
+run_pipe PIPELINE_MAX_SEC=7195 FAKE_DELAY=7 -- --resume clk2 "$T/repo"
+[[ $rc -eq 4 ]] || fail "clk2: exit $rc, want 4 (wait over remainder): $(cat "$T/out")"
+grep -q 'status=blocked' "$T/out" || fail "clk2: not blocked"
+grep -q 'budget 5s' "$T/err" || fail "clk2: remainder budget not applied"
+echo "ok: file landing past the total budget -> watchdog 4 + blocked, never clean"
+
+# ── F7: a report predating the prompt is archived, never consumed ────────────
+printf 'stale content from an old task\n' > "$runsdir/sude-sta.md"
+run_pipe -- sta "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "sta: exit $rc, want 5"
+ls "$runsdir"/sude-sta.md.stale.* >/dev/null 2>&1 || fail "sta: stale report not archived"
+grep -q 'stale content' "$runsdir"/sude-sta.md.stale.* || fail "sta: archive lost content"
+grep -q 'agent prompt sude-sta ' "$T/calls" || fail "sta: no fresh prompt after archive"
+echo "ok: stale report archived before the fresh prompt"
+
+run_pipe FAKE_SILENT=1 PROMPT_WORKER_MAX_SEC=2 -- fst "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 2 ]] || fail "fst run1: exit $rc, want 2: $(cat "$T/err")"
+printf 'stale\n' > "$runsdir/sude-fst.md"
+touch -d '1 hour ago' "$runsdir/sude-fst.md"
+run_pipe FAKE_SILENT=1 PROMPT_WORKER_MAX_SEC=2 -- --resume fst "$T/repo"
+ls "$runsdir"/sude-fst.md.stale.* >/dev/null 2>&1 \
+  || fail "fst: report older than the recorded prompt time not archived on resume"
+echo "ok: resume archives a report older than the recorded prompt time"
 
 # ── telemetry: every line valid jsonl with the lock §2 fields ────────────────
 while IFS= read -r l; do
@@ -302,5 +492,128 @@ while IFS= read -r l; do
     || fail "telemetry line malformed: $l"
 done < "$tele"
 echo "ok: telemetry -> every stop line is valid jsonl with all lock §2 fields"
+
+# ══ real-Git fixture: snapshot binding + spawn resume (F2/F4) ══════════════
+# Only herdr is stubbed; git is real, so worktrees, commits and SHAs behave
+# like production. The stub makes the builder's commit while its prompt runs
+# (FAKE_DO_COMMIT=<wt>), and can fail agent start/wait once per name.
+mkdir -p "$T/rgbin" "$T/rg/repo"
+git -C "$T/rg/repo" init -q
+git -C "$T/rg/repo" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
+cat > "$T/rgbin/herdr" <<'STUB'
+#!/usr/bin/env bash
+echo "herdr $*" >> "$CALLS"
+case "${1:-} ${2:-}" in
+  "agent get")
+    printf '{"result":{"agent":{"agent_status":"working","cwd":"%s","pane_id":"%%1"}}}\n' "$HOME" ;;
+  "agent read") printf 'working\n' ;;
+  "agent prompt")
+    w=$3; content=''
+    case "$4" in
+      *"phase: PLAN"*)   content=${FAKE_PLAN_MD:-fake plan} ;;
+      *"phase: BUILD"*)  content=${FAKE_BUILD_MD:-fake build} ;;
+      *"phase: FIX"*)    content=${FAKE_FIX_MD:-fake fix} ;;
+      *"phase: REVIEW"*) content=${FAKE_REVIEW_MD:-'Verdict: clean'} ;;
+    esac
+    case "$4" in
+      *"phase: BUILD"*|*"phase: FIX"*)
+        if [ -n "${FAKE_DO_COMMIT:-}" ]; then
+          ( cd "$FAKE_DO_COMMIT" && echo "$(date +%s%N)" >> impl.txt \
+            && git add impl.txt && git -c user.email=t@t -c user.name=t commit -qm impl ) || true
+        fi
+        [ -n "${FAKE_DIRTY:-}" ] && echo scratch >> "$FAKE_DO_COMMIT/dirty.txt" ;;
+    esac
+    if [ -n "$content" ] && [ "${FAKE_SILENT:-0}" != 1 ]; then
+      printf '%s\n' "$content" > "$HOME/quaqua/runs/$w.md"
+    fi
+    exit "${FAKE_RC:-0}" ;;
+  "agent start")
+    if [ "$3" = "${FAKE_FAIL_START:-}" ] && [ ! -f "$T/failed-$3" ]; then
+      : > "$T/failed-$3"; exit 1
+    fi ;;
+  "agent wait")
+    if [ "$3" = "${FAKE_FAIL_WAIT:-}" ] && [ ! -f "$T/failedw-$3" ]; then
+      : > "$T/failedw-$3"; exit 1
+    fi ;;
+  "pane split") printf '{"result":{"pane":{"pane_id":"%%1"}}}\n' ;;
+  "pane wait-output") exit 1 ;;
+esac
+exit 0
+STUB
+chmod +x "$T/rgbin/herdr"
+
+run_rg() {  # real-git run (only herdr stubbed); sets rc, $T/out, $T/err, $T/calls
+  local vars=()
+  while (($#)) && [[ $1 != -- ]]; do vars+=("$1"); shift; done
+  [[ ${1:-} == -- ]] && shift
+  : > "$T/calls"
+  rc=0
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/rgbin:/usr/bin:/bin" GRID_SKIP=1 \
+    PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+    PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 T="$T" \
+    env "${vars[@]}" bash "$here/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+}
+
+# F2: the reviewer worktree is created at exactly the committed tip the gate saw
+run_rg -- rgb "$T/rg/repo" --brief "$T/brief.md" --review always
+[[ $rc -eq 5 ]] || fail "rgb run1: exit $rc, want 5: $(cat "$T/err")"
+wt_rgb="$T/rg/.wt/sude-rgb"
+run_rg FAKE_DO_COMMIT="$wt_rgb" FAKE_REVIEW_MD=$'ok\nVerdict: clean' \
+       -- --resume rgb "$T/rg/repo"
+[[ $rc -eq 0 ]] || fail "rgb resume: exit $rc: $(cat "$T/err")"
+grep -q 'status=clean' "$T/out" || fail "rgb: not clean: $(cat "$T/out")"
+head_rgb=$(git -C "$wt_rgb" rev-parse HEAD)
+grep -q "spawned on $head_rgb" "$runsdir/pipeline-rgb.md" \
+  || fail "rgb: reviewer not spawned on the committed tip $head_rgb: $(cat "$runsdir/pipeline-rgb.md")"
+grep -q 'review round 1: Verdict: clean' "$runsdir/pipeline-rgb.md" || fail "rgb: review did not run"
+grep -q "commit ${head_rgb:0:7}" "$runsdir/pipeline-rgb.md" || fail "rgb: tip not recorded"
+echo "ok: real git — reviewer spawned on the exact committed tip (gate SHA == base)"
+
+# F2: uncommitted leftovers are missing from the reviewed snapshot -> blocked
+run_rg -- rgd "$T/rg/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "rgd run1: exit $rc, want 5"
+wt_rgd="$T/rg/.wt/sude-rgd"
+run_rg FAKE_DO_COMMIT="$wt_rgd" FAKE_DIRTY=1 -- --resume rgd "$T/rg/repo"
+[[ $rc -eq 3 ]] || fail "rgd: exit $rc, want 3 (dirty tree): $(cat "$T/err")"
+grep -q 'status=blocked' "$T/out" || fail "rgd: not blocked"
+grep -q 'uncommitted/untracked' "$runsdir/pipeline-rgd.md" || fail "rgd: dirty not logged"
+echo "ok: real git — dirty worktree blocked (untracked file kept off the branch)"
+
+# F2: a build with zero commits is blocked, not a clean no-op
+run_rg -- rgn "$T/rg/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "rgn run1: exit $rc, want 5"
+run_rg -- --resume rgn "$T/rg/repo"
+[[ $rc -eq 3 ]] || fail "rgn: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'produced no commits' "$runsdir/pipeline-rgn.md" || fail "rgn: no-commit reason missing"
+echo "ok: real git — zero commits after build is blocked"
+
+run_rg -- rgp "$T/rg/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "rgp run1: exit $rc, want 5"
+run_rg FAKE_BUILD_MD=$'checked\nOutcome: no changes\n' -- --resume rgp "$T/rg/repo"
+[[ $rc -eq 0 ]] || fail "rgp: exit $rc"
+grep -q 'status=clean' "$T/out" || fail "rgp: declared no-op not clean: $(cat "$T/out")"
+echo "ok: real git — declared no-op finishes clean, no reviewer spawned"
+
+# F4: agent-start failure keeps the worktree; --resume finishes the startup
+run_rg FAKE_FAIL_START=sude-rsf -- rsf "$T/rg/repo" --brief "$T/brief.md"
+[[ $rc -eq 3 ]] || fail "rsf: exit $rc, want 3 (spawn failure): $(cat "$T/err")"
+[[ -d $T/rg/.wt/sude-rsf ]] || fail "rsf: worktree should survive the failed start"
+run_rg -- --resume rsf "$T/rg/repo"
+[[ $rc -eq 5 ]] || fail "rsf resume: exit $rc, want 5 plan-ready: $(cat "$T/err")"
+grep -q 'agent start sude-rsf' "$T/calls" || fail "rsf: agent start not retried"
+grep -q 'reusing it' "$T/err" || fail "rsf: worktree reuse note missing: $(cat "$T/err")"
+echo "ok: failed agent start -> resume reuses worktree, retries start, prompts plan"
+
+# F4 (reviewer): wait-ready failure keeps the worktree; --resume retries
+run_rg -- rsv "$T/rg/repo" --brief "$T/brief.md" --review always
+[[ $rc -eq 5 ]] || fail "rsv run1: exit $rc, want 5"
+run_rg FAKE_DO_COMMIT="$T/rg/.wt/sude-rsv" FAKE_FAIL_WAIT=quansu-rsvr1 \
+       -- --resume rsv "$T/rg/repo"
+[[ $rc -eq 3 ]] || fail "rsv: exit $rc, want 3 (reviewer spawn failure): $(cat "$T/err")"
+[[ -d $T/rg/.wt/quansu-rsvr1 ]] || fail "rsv: reviewer worktree should survive"
+run_rg FAKE_REVIEW_MD=$'ok\nVerdict: clean' -- --resume rsv "$T/rg/repo"
+[[ $rc -eq 0 ]] || fail "rsv resume: exit $rc: $(cat "$T/err")"
+grep -q 'status=clean' "$T/out" || fail "rsv: not clean after reviewer retry"
+echo "ok: reviewer spawn failure -> resume reuses worktree, reviews, finishes clean"
 
 echo "PASS"
