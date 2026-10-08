@@ -229,4 +229,54 @@ grep -q '^# Usage:' "$T/err" || fail "trailing --base: no usage on stderr"
 [[ ! -s "$T/calls" ]] || fail "trailing --base: git/herdr called: $(cat "$T/calls")"
 echo "ok: trailing --base w/o value -> exit 1, no git/herdr"
 
+# ── fresh clone: no pre-existing ~/quaqua/runs — spawn must still succeed ────
+rm -rf "$T/home/quaqua"
+spawn tieude-fresh tieude
+[[ $rc -eq 0 ]] || fail "fresh clone: exit $rc, want 0: $(cat "$T/err")"
+[[ -f $T/home/quaqua/runs/tieude-fresh.rules.md ]] \
+  || fail "fresh clone: rules dump not written under a brand-new runs/"
+echo "ok: fresh clone -> runs/ created before the rules dump, spawn succeeds"
+
+# ── real git: a surviving worktree is reused, a foreign dir is refused ────────
+mkdir -p "$T/bin2" "$T/rgrepo"
+git -C "$T/rgrepo" init -q
+git -C "$T/rgrepo" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
+cat > "$T/bin2/herdr" <<'STUB'
+#!/usr/bin/env bash
+echo "herdr $*" >> "$CALLS"
+[ "${1:-} ${2:-}" = "pane split" ] && echo '{"result":{"pane":{"pane_id":"%1"}}}'
+exit 0
+STUB
+chmod +x "$T/bin2/herdr"
+
+# first spawn creates the real worktree
+: > "$T/calls"
+rc=0
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:/usr/bin:/bin" GRID_SKIP=1 \
+  bash "$T/scripts/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 0 ]] || fail "rw1 spawn: exit $rc: $(cat "$T/err")"
+[[ -d $T/.wt/sude-rw1 ]] || fail "rw1: no worktree created"
+
+# a second spawn reuses the registered worktree instead of failing on '-b'
+rm -f "$T/failed-sude-rw1"
+: > "$T/calls"
+rc=0
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:/usr/bin:/bin" GRID_SKIP=1 \
+  bash "$T/scripts/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 0 ]] || fail "rw1 respawn: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'reusing it' "$T/err" || fail "rw1 respawn: no reuse note: $(cat "$T/err")"
+grep -q 'agent start sude-rw1' "$T/calls" || fail "rw1 respawn: agent start not retried"
+echo "ok: respawn -> surviving worktree reused, agent start retried"
+
+# a foreign dir at the worktree path is refused, never reused
+mkdir -p "$T/.wt/sude-rw2"
+: > "$T/calls"
+rc=0
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:/usr/bin:/bin" GRID_SKIP=1 \
+  bash "$T/scripts/spawn-worker.sh" sude-rw2 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 1 ]] || fail "rw2 foreign dir: exit $rc, want 1"
+grep -q 'not a git worktree' "$T/err" || fail "rw2: no refusal message: $(cat "$T/err")"
+! grep -q 'agent start' "$T/calls" || fail "rw2: agent started over a foreign dir"
+echo "ok: foreign dir at worktree path -> refused before any agent start"
+
 echo "PASS"
