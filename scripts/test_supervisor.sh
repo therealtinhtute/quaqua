@@ -10,6 +10,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-supervisor.XXXXXX")
+T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -88,12 +89,13 @@ grep -q 'scripts/supervisor.sh' "$root/systemd/quaqua-supervisor.service" \
 grep -q 'OnCalendar' "$root/systemd/quaqua-supervisor.timer" || fail "pkg: timer has no schedule"
 grep -q 'systemd' "$here/install-supervisor.sh" || fail "pkg: installer does not use systemd/"
 [[ ! -d $root/supervisor ]] || fail "pkg: legacy supervisor/ runner still installed"
-! grep -qi 'launchd\|LaunchAgents\|com\.quaqua\.supervisor\.plist' "$root/README.md" \
-  || fail "pkg: README still points at the launchd runner"
-! grep -qi 'launchd\|LaunchAgents' "$root/AGENTS.md" || fail "pkg: AGENTS still points at launchd"
+[[ -f $root/launchd/com.quaqua.supervisor.plist.in ]] || fail "pkg: no launchd template shipped"
+grep -q 'scripts/supervisor.sh' "$root/launchd/com.quaqua.supervisor.plist.in" \
+  || fail "pkg: launchd template does not use the same auditor entrypoint"
+grep -qi 'launchd' "$root/README.md" || fail "pkg: README omits macOS launchd installation"
 grep -q 'reports/supervisor-' "$root/AGENTS.md" \
   || fail "pkg: AGENTS session-start glob missing reports/supervisor-"
-echo "ok: packaging -> systemd units ship the scripts/supervisor.sh entrypoint; legacy retired"
+echo "ok: packaging -> systemd + launchd share scripts/supervisor.sh; legacy retired"
 
 # ── pipeline pre-checks: one fixture per flag + clean no-flag cases ─────────
 # Fixtures live in the sandbox repo (runs/, memory/); the stub codex logs argv,

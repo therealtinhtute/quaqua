@@ -9,6 +9,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-prompt-watchdog.XXXXXX")
+T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -30,7 +31,9 @@ case "${1:-} ${2:-}" in
       printf '{"error":{"code":"agent_not_idle"}}\n'; exit 1
     fi
     if [ "${FAKE_ROTATE:-0}" = 1 ]; then
-      printf 'tool line %s\n' "$(date +%s%N | md5sum | head -c8)"
+      # Each read runs in a new process. Hash its PID so digit normalization
+      # cannot erase the changing text; no GNU date %N/md5sum dependency.
+      printf 'tool line %s\n' "$(perl -MDigest::MD5=md5_hex -e 'print md5_hex($ARGV[0])' "$$")"
     else
       printf '%s\n' "${FAKE_PANE:-some pane text}"
     fi ;;

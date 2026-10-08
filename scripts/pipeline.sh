@@ -54,6 +54,14 @@ FIX_BUDGET=${PIPELINE_FIX_BUDGET_SEC:-1200}
 MAX_SEC=${PIPELINE_MAX_SEC:-7200}
 REVIEW_LINES=${PIPELINE_REVIEW_LINES:-150}
 
+file_mtime() {  # GNU first, then BSD/macOS
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+iso_timestamp() {  # GNU first; BSD versions without -I still emit ISO 8601
+  date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z'
+}
+
 harness_of() {  # worker kind -> harness family (models.md)
   case $1 in
     tieude|tieunhi|sude)  echo pi ;;
@@ -96,7 +104,7 @@ finish() {  # <status> <exit-code> — status line, telemetry, stdout summary
   save_state
   plog "status: $st · commit ${commit:-none} · elapsed ${mins}m"
   if [[ -n ${blocker:-} ]]; then printf '\n## Blockers\n- %s\n' "$blocker" >> "$pfile"; fi
-  jq -nc --arg ts "$(date -Iseconds)" --arg task "$task" --arg repo "$repo" \
+  jq -nc --arg ts "$(iso_timestamp)" --arg task "$task" --arg repo "$repo" \
     --arg builder "$builder" --arg reviewer "$reviewer" --arg review "$review_run" \
     --arg status "$st" --argjson rounds "$rounds_run" \
     --argjson changed "$review_changed" --argjson minutes "$mins" \
@@ -176,7 +184,7 @@ wait_file() {  # <worker> <prompt> <budget-sec> — prompt once, else resume the
     PROMPT_WORKER_BUDGET_SEC=$budget bash "$here/prompt-worker.sh" "$w" "$prompt" >/dev/null || rc=$?
   else
     # resume: consume the report only when it postdates the recorded prompt
-    if [[ -s $f && $(stat -c %Y "$f" 2>/dev/null || echo 0) -lt ${prompt_ts:-0} ]]; then
+    if [[ -s $f && $(file_mtime "$f" || echo 0) -lt ${prompt_ts:-0} ]]; then
       archive_stale "$f"
     fi
     PROMPT_WORKER_BUDGET_SEC=$budget bash "$here/prompt-worker.sh" --resume "$w" >/dev/null || rc=$?
@@ -208,7 +216,7 @@ if [[ ${1:-} == --resume ]]; then
     die "pipeline '$task' already finished — see $pfile"
   fi
   save_state   # refresh pipeline_pid so a watching Lead keeps its exemption
-  plog "resumed: $(date -Iseconds) (phase=$phase)"
+  plog "resumed: $(iso_timestamp) (phase=$phase)"
 else
   builder=sude reviewer=quansu review=auto rounds=2 brief='' base='' pos=()
   while (($#)); do
@@ -263,7 +271,7 @@ else
     printf -- '- task: %s · repo: %s\n' "$task" "$repo"
     printf -- '- builder: %s-%s (%s) · reviewer: %s (%s) · review: %s · max rounds: %d\n' \
       "$builder" "$task" "$bh" "$reviewer" "$rh" "$review" "$rounds"
-    printf -- '- started: %s\n' "$(date -Iseconds)"
+    printf -- '- started: %s\n' "$(iso_timestamp)"
   } > "$pfile"
 fi
 

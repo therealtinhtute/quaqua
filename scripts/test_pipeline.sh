@@ -11,6 +11,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-pipeline.XXXXXX")
+T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2
@@ -450,7 +451,7 @@ echo "ok: reviewer Challenge + findings verdict -> still disputed"
 # ── F5: a phase never gets more than the whole-pipeline remainder ────────────
 run_pipe -- clk "$T/repo" --brief "$T/brief.md" --review skip
 [[ $rc -eq 5 ]] || fail "clk run1: exit $rc, want 5"
-sed -i 's/^start_elapsed=.*/start_elapsed=7180/' "$runsdir/pipeline-clk.state"
+perl -pi -e 's/^start_elapsed=.*/start_elapsed=7180/' "$runsdir/pipeline-clk.state"
 run_pipe PIPELINE_MAX_SEC=7200 -- --resume clk "$T/repo"
 grep -q 'budget 20s' "$T/err" \
   || fail "clk: phase budget not clamped to remainder (want 20s): $(cat "$T/err")"
@@ -459,7 +460,7 @@ echo "ok: phase budget clamped to pipeline remainder (20s of 2700s)"
 
 run_pipe -- clk2 "$T/repo" --brief "$T/brief.md" --review skip
 [[ $rc -eq 5 ]] || fail "clk2 run1: exit $rc, want 5"
-sed -i 's/^start_elapsed=.*/start_elapsed=7190/' "$runsdir/pipeline-clk2.state"
+perl -pi -e 's/^start_elapsed=.*/start_elapsed=7190/' "$runsdir/pipeline-clk2.state"
 run_pipe PIPELINE_MAX_SEC=7195 FAKE_DELAY=7 -- --resume clk2 "$T/repo"
 [[ $rc -eq 4 ]] || fail "clk2: exit $rc, want 4 (wait over remainder): $(cat "$T/out")"
 grep -q 'status=blocked' "$T/out" || fail "clk2: not blocked"
@@ -478,11 +479,23 @@ echo "ok: stale report archived before the fresh prompt"
 run_pipe FAKE_SILENT=1 PROMPT_WORKER_MAX_SEC=2 -- fst "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 2 ]] || fail "fst run1: exit $rc, want 2: $(cat "$T/err")"
 printf 'stale\n' > "$runsdir/sude-fst.md"
-touch -d '1 hour ago' "$runsdir/sude-fst.md"
+perl -e 'utime time-3600,time-3600,@ARGV or die "utime: $!"' "$runsdir/sude-fst.md"
 run_pipe FAKE_SILENT=1 PROMPT_WORKER_MAX_SEC=2 -- --resume fst "$T/repo"
 ls "$runsdir"/sude-fst.md.stale.* >/dev/null 2>&1 \
   || fail "fst: report older than the recorded prompt time not archived on resume"
 echo "ok: resume archives a report older than the recorded prompt time"
+
+# The paired positive case protects against BSD stat being misread as mtime 0:
+# a report arriving after a paused wait must be consumed, not always archived.
+run_pipe FAKE_SILENT=1 PROMPT_WORKER_MAX_SEC=2 -- cur "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 2 ]] || fail "cur run1: exit $rc, want 2"
+printf 'fresh plan arriving after the prompt\n' > "$runsdir/sude-cur.md"
+run_pipe FAKE_SILENT=1 PROMPT_WORKER_MAX_SEC=2 -- --resume cur "$T/repo"
+[[ $rc -eq 5 ]] || fail "cur resume: exit $rc, want 5 plan-ready: $(cat "$T/err")"
+grep -q 'fresh plan' "$runsdir/sude-cur.plan.md" || fail "cur: fresh report not consumed"
+! compgen -G "$runsdir/sude-cur.md.stale.*" >/dev/null || fail "cur: fresh report archived as stale"
+! grep -q 'agent prompt' "$T/calls" || fail "cur: resumed wait re-prompted"
+echo "ok: resume consumes a fresh post-prompt report without archiving or re-prompting"
 
 # ── telemetry: every line valid jsonl with the lock §2 fields ────────────────
 while IFS= read -r l; do
@@ -518,7 +531,7 @@ case "${1:-} ${2:-}" in
     case "$4" in
       *"phase: BUILD"*|*"phase: FIX"*)
         if [ -n "${FAKE_DO_COMMIT:-}" ]; then
-          ( cd "$FAKE_DO_COMMIT" && echo "$(date +%s%N)" >> impl.txt \
+          ( cd "$FAKE_DO_COMMIT" && echo "$(date +%s)-$$" >> impl.txt \
             && git add impl.txt && git -c user.email=t@t -c user.name=t commit -qm impl ) || true
         fi
         [ -n "${FAKE_DIRTY:-}" ] && echo scratch >> "$FAKE_DO_COMMIT/dirty.txt" ;;
@@ -548,7 +561,7 @@ run_rg() {  # real-git run (only herdr stubbed); sets rc, $T/out, $T/err, $T/cal
   [[ ${1:-} == -- ]] && shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/rgbin:/usr/bin:/bin" GRID_SKIP=1 \
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/rgbin:$PATH" GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 T="$T" \
     env "${vars[@]}" bash "$here/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: supervisor.sh
-#   Read-only drift audit of this repo, run by the quaqua-supervisor systemd
-#   user timer (2x/day, see systemd/quaqua-supervisor.timer). Builds the prompt,
+#   Read-only drift audit of this repo, run by systemd (Linux) or launchd
+#   (macOS), 2x/day. See systemd/ and launchd/. Builds the prompt,
 #   runs `codex exec` in a read-only sandbox, and writes the agent's final
 #   message to reports/supervisor-YYYY-MM-DD-HH.md via --output-last-message.
 #   The agent cannot edit anything; this script is the only writer.
@@ -148,7 +148,7 @@ rc=0
 codex "${args[@]}" 2>"$log" >/dev/null || rc=$?
 if (( rc != 0 )); then
   cat "$log" >&2
-  [[ -s $out ]] || printf '# Supervisor %s — FAILED\n\n`codex exec` exited %d; stderr went to the journal.\n' \
+  [[ -s $out ]] || printf '# Supervisor %s — FAILED\n\n`codex exec` exited %d; see scheduler stderr logs (journal or Library/Logs/quaqua-supervisor.log).\n' \
     "$(date '+%F %H:%M')" "$rc" > "$out"
   exit "$rc"
 fi

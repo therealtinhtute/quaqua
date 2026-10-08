@@ -6,6 +6,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-grid-workers.XXXXXX")
+T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
