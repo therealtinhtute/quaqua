@@ -33,6 +33,10 @@ done
 ! grep -rn 'quaqua-[a-z*-]*-orchestrator' "$root/AGENTS.md" "$root/README.md" \
     "$root/spec-raw" "$root/models.md" \
   || fail "stale 'quaqua-<slug>-orchestrator' role name survives"
+# rename leaves no dangling refs in tracked docs, scripts, systemd, or launchd
+! grep -rn 'super''visor' "$root/README.md" "$root/scripts" "$root/systemd" "$root/launchd" \
+    --exclude="test_docs.sh" --exclude="test_worker_cap.sh" \
+  || fail "dangling legacy references survive in docs/scripts"
 # acceptance authority: Lead merges into the integration branch, anh iu owns push
 grep -q 'quaqua/<slug>-integ' "$root/AGENTS.md" || fail "integration-branch acceptance missing from AGENTS.md"
 echo "ok: consolidated orchestration references; one role naming; acceptance authority consistent"
@@ -44,18 +48,18 @@ grep -q 'Verdict: clean' "$root/scripts/pipeline.sh" || fail "pipeline.sh lost t
 echo "ok: report-tail contract documented for workers and pipeline reviewers"
 
 # ── scheduling assets: exactly one Auditor entrypoint (F8/F10) ───────────────
-[[ -f $root/systemd/quaqua-supervisor.service && -f $root/systemd/quaqua-supervisor.timer \
-   && -f $root/launchd/com.quaqua.supervisor.plist.in ]] \
+[[ -f $root/systemd/quaqua-auditor.service && -f $root/systemd/quaqua-auditor.timer \
+   && -f $root/launchd/com.quaqua.auditor.plist.in ]] \
   || fail "systemd or launchd auditor scheduling assets missing"
-grep -q 'scripts/supervisor.sh' "$root/systemd/quaqua-supervisor.service" \
-  || fail "auditor service does not exec scripts/supervisor.sh"
-grep -q 'scripts/supervisor.sh' "$root/launchd/com.quaqua.supervisor.plist.in" \
+grep -q 'scripts/auditor.sh' "$root/systemd/quaqua-auditor.service" \
+  || fail "auditor service does not exec scripts/auditor.sh"
+grep -q 'scripts/auditor.sh' "$root/launchd/com.quaqua.auditor.plist.in" \
   || fail "launchd template does not exec the same auditor entrypoint"
-grep -q 'install-supervisor.sh' "$root/README.md" || fail "README install skips the auditor installer"
+grep -q 'install-auditor.sh' "$root/README.md" || fail "README install skips the auditor installer"
 grep -qi 'launchd' "$root/README.md" || fail "README install omits launchd"
 grep -qi 'systemd' "$root/README.md" || fail "README install omits systemd"
-grep -q 'reports/supervisor-\*\.md\|reports/supervisor-' "$root/AGENTS.md" \
-  || fail "AGENTS session-start glob != scripts/supervisor.sh output"
+grep -q 'reports/audit-\*\.md\|reports/audit-' "$root/AGENTS.md" \
+  || fail "AGENTS session-start glob != scripts/auditor.sh output"
 echo "ok: auditor entrypoint + scheduling assets + README install agree"
 
 # ── routing consistency: quansu findings flow through the pipeline ────────────

@@ -32,7 +32,7 @@ This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal 
 ```
 
 Rules:
-- Brief has 5 sections: Goal / Constraints / Current design / Unknowns / Evidence; it never pre-solves.
+- Brief has 5 sections: Goal / Hard constraints / Current design / Unknowns / Evidence; it never pre-solves.
 - Peers may challenge premises in a `## Challenge` section; the Lead resolves it before acceptance.
 - CoS never acts as Lead on pipeline-size work (no self-review); every redirect flows through CoS
   and is recorded in Lead state.
@@ -51,8 +51,8 @@ Decision lock: `spec-raw/quaqua-slp-slim-lock.md`.
 | `models.md` | Worker roster: nickname → kind / model / effort |
 | `.claude/settings.json` | Denies the built-in `Agent` tool so all workers go through Herdr |
 | `.claude/skills/herdr-orchestration/` | Worker flow + consolidated command, recovery, and assignment/acceptance references |
-| `scripts/supervisor.sh` | Auditor: read-only drift + pipeline-run audit → `reports/supervisor-*.md` |
-| `scripts/install-supervisor.sh`, `systemd/`, `launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
+| `scripts/auditor.sh` | Auditor: read-only drift + pipeline-run audit → `reports/audit-*.md` |
+| `scripts/install-auditor.sh`, `systemd/`, `launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
 | `codex-config.toml` | Codex config used by codex workers |
 | `USER.example.md` | Template for the per-workspace `USER.md` |
 | `SETUP-PROMPT.md` | Original prompt used to bootstrap this setup |
@@ -65,21 +65,21 @@ git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
 cp USER.example.md USER.md           # customize per workspace
 mkdir -p memory projects runs reports   # gitignored personal state AGENTS.md expects
 printf '| slug | repo | owner |\n|---|---|---|\n' > projects/INDEX.md   # one row per project
-bash scripts/install-supervisor.sh  # installs scheduling files; prints manual activation command
+bash scripts/install-auditor.sh  # installs scheduling files; prints manual activation command
 ```
 
 Linux: the installer symlinks the user service/timer and calls only
 `systemctl --user daemon-reload`. Activate manually with
-`systemctl --user enable --now quaqua-supervisor.timer`.
+`systemctl --user enable --now quaqua-auditor.timer`.
 
 macOS: install a current Bash (e.g. `brew install bash`), then put its `bin` directory
 first on PATH (`export PATH="$(brew --prefix bash)/bin:$PATH"` for Homebrew).
-Run `bash scripts/install-supervisor.sh` with `codex` on PATH. The installer requires
+Run `bash scripts/install-auditor.sh` with `codex` on PATH. The installer requires
 Bash >= 4.4 from `command -v bash` and refuses the macOS system Bash 3.2.
-It renders `launchd/com.quaqua.supervisor.plist.in` into
-`~/Library/LaunchAgents/com.quaqua.supervisor.plist`, pinning the discovered Bash,
-this checkout's absolute `scripts/supervisor.sh` path, and the install-time PATH (including
-codex's directory). Logs go to `~/Library/Logs/quaqua-supervisor.log`; reports still go
+It renders `launchd/com.quaqua.auditor.plist.in` into
+`~/Library/LaunchAgents/com.quaqua.auditor.plist`, pinning the discovered Bash,
+this checkout's absolute `scripts/auditor.sh` path, and the install-time PATH (including
+codex's directory). Logs go to `~/Library/Logs/quaqua-auditor.log`; reports still go
 in this checkout's `reports/`. It never calls launchctl; run the printed bootstrap
 command yourself. Reinstall after moving the checkout or changing toolchain paths.
 Calendar intervals run at 07:00/19:00; unlike systemd's `Persistent=true`, launchd does

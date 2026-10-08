@@ -3,14 +3,14 @@
 # Requires python3 to parse the generated plist independently of the renderer.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d "${TMPDIR:-/tmp}/test-install-supervisor.XXXXXX")
+T=$(mktemp -d "${TMPDIR:-/tmp}/test-install-auditor.XXXXXX")
 T=$(cd "$T" && pwd -P)
 trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 root="$T/repo & <mac> \"quoted\" | back\\slash"
 mkdir -p "$root/scripts" "$T/bin" "$T/codex & tools" "$T/home"
-cp "$here/install-supervisor.sh" "$root/scripts/"
+cp "$here/install-auditor.sh" "$root/scripts/"
 cp -R "$here/../systemd" "$root/"
 if [[ -d $here/../launchd ]]; then cp -R "$here/../launchd" "$root/"; fi
 ln -s "$BASH" "$T/bin/bash"  # proves the installer discovers, rather than hardcodes, Bash
@@ -38,25 +38,25 @@ run() {
   rc=0
   TEST_OS=$1 CALLS="$T/calls" HOME="${TEST_HOME:-$T/home}" \
     PATH="$T/bin:$T/codex & tools:$PATH" \
-    "$BASH" "$root/scripts/install-supervisor.sh" > "$T/out" 2> "$T/err" || rc=$?
+    "$BASH" "$root/scripts/install-auditor.sh" > "$T/out" 2> "$T/err" || rc=$?
 }
 
 run Linux
 [[ $rc -eq 0 ]] || fail "Linux: exit $rc: $(cat "$T/err")"
-for unit in quaqua-supervisor.service quaqua-supervisor.timer; do
+for unit in quaqua-auditor.service quaqua-auditor.timer; do
   dst="$T/home/.config/systemd/user/$unit"
   [[ -L $dst && $(readlink "$dst") == "$root/systemd/$unit" ]] \
     || fail "Linux: wrong unit symlink: $unit"
 done
 [[ $(cat "$T/calls") == 'systemctl --user daemon-reload' ]] \
   || fail "Linux: unexpected manager calls: $(cat "$T/calls")"
-grep -q 'systemctl --user enable --now quaqua-supervisor.timer' "$T/out" \
+grep -q 'systemctl --user enable --now quaqua-auditor.timer' "$T/out" \
   || fail "Linux: no manual enable instruction"
 echo 'ok: Linux -> existing systemd symlinks + daemon-reload, no enable/start'
 
 run Darwin
 [[ $rc -eq 0 ]] || fail "Darwin: exit $rc: $(cat "$T/err")"
-plist="$T/home/Library/LaunchAgents/com.quaqua.supervisor.plist"
+plist="$T/home/Library/LaunchAgents/com.quaqua.auditor.plist"
 [[ -f $plist ]] || fail 'Darwin: no LaunchAgents plist'
 [[ -d $T/home/Library/Logs ]] || fail 'Darwin: log directory not created'
 [[ ! -s $T/calls ]] || fail "Darwin: invoked a manager or codex: $(cat "$T/calls")"
@@ -65,15 +65,15 @@ import pathlib, plistlib, sys
 plist, root, home, codex_dir, bash_bin = sys.argv[1:]
 with open(plist, 'rb') as f:
     p = plistlib.load(f)
-assert p['Label'] == 'com.quaqua.supervisor', p
-assert p['ProgramArguments'] == [bash_bin, root + '/scripts/supervisor.sh'], p
+assert p['Label'] == 'com.quaqua.auditor', p
+assert p['ProgramArguments'] == [bash_bin, root + '/scripts/auditor.sh'], p
 assert all(pathlib.Path(v).is_absolute() for v in p['ProgramArguments']), p
 assert p['StartCalendarInterval'] == [{'Hour': 7, 'Minute': 0}, {'Hour': 19, 'Minute': 0}], p
 paths = p['EnvironmentVariables']['PATH'].split(':')
 assert str(pathlib.Path(bash_bin).parent) in paths and codex_dir in paths, paths
 assert '/usr/bin' in paths and '/bin' in paths, paths
 for k in ['StandardOutPath', 'StandardErrorPath']:
-    assert p[k] == home + '/Library/Logs/quaqua-supervisor.log', p
+    assert p[k] == home + '/Library/Logs/quaqua-auditor.log', p
     assert pathlib.Path(p[k]).is_absolute(), p
 assert not p.get('RunAtLoad') and not p.get('KeepAlive'), p
 print('ok: Darwin -> valid XML, absolute pinned argv, PATH, 07:00/19:00, external logs')
@@ -123,7 +123,7 @@ ln -s "$BASH" "$T/bin/bash"
 rc=0
 TEST_OS=Darwin CALLS="$T/calls" HOME="$T/missing-codex-home" \
   PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-  "$BASH" "$root/scripts/install-supervisor.sh" > "$T/out" 2> "$T/err" || rc=$?
+  "$BASH" "$root/scripts/install-auditor.sh" > "$T/out" 2> "$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "missing codex: exit $rc, want 1"
 grep -q 'codex must be on PATH' "$T/err" || fail 'missing codex: no diagnostic'
 [[ ! -d $T/missing-codex-home ]] || fail 'missing codex: installed anyway'

@@ -10,8 +10,8 @@ herdr pane split --current --direction right --cwd <owned-worktree> --no-focus
 # Read .result.pane.pane_id; never reuse a pane rooted in someone else's checkout.
 herdr agent start <name> --kind <kind> --pane <pane_id> -- <launch args from models.md>
 
-# Normally use prompt-worker.sh for the watchdog and file-only stdout contract.
-herdr agent prompt <name> "<brief>" --wait --timeout 1800000
+# Always use prompt-worker.sh (never raw herdr agent prompt) for the watchdog and file-only stdout contract.
+scripts/prompt-worker.sh <name> "<brief>"
 herdr agent get <name>
 herdr agent read <name> --source recent-unwrapped --lines 150
 herdr agent read <name> --source visible --lines 80

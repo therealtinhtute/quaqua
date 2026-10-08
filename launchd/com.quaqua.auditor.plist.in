@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Template: install-supervisor.sh resolves paths; never bootstrap this file directly. -->
+<!-- Template: install-auditor.sh resolves paths; never bootstrap this file directly. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.quaqua.supervisor</string>
+  <string>com.quaqua.auditor</string>
   <key>ProgramArguments</key>
   <array>
     <string>@BASH@</string>
-    <string>@ROOT@/scripts/supervisor.sh</string>
+    <string>@ROOT@/scripts/auditor.sh</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -27,8 +27,8 @@
     </dict>
   </array>
   <key>StandardOutPath</key>
-  <string>@HOME@/Library/Logs/quaqua-supervisor.log</string>
+  <string>@HOME@/Library/Logs/quaqua-auditor.log</string>
   <key>StandardErrorPath</key>
-  <string>@HOME@/Library/Logs/quaqua-supervisor.log</string>
+  <string>@HOME@/Library/Logs/quaqua-auditor.log</string>
 </dict>
 </plist>

@@ -48,6 +48,88 @@ if [[ ${base+x} ]]; then
     || { echo "error: --base '$base' is not a known commit-ish in $repo" >&2; exit 1; }
 fi
 
+# Worker cap: max 4 task workers per orchestrator; pipelines reserve 2
+owner=${QUAQUA_OWNER:-cos}
+runs_dir="$HOME/quaqua/runs"
+mkdir -p "$runs_dir"
+
+count_owner_slots() {
+  local o=${1:-cos} exclude=${2:-}
+  local agents live_workers=() o_live=0 res_slots=0
+
+  agents=$(herdr agent list 2>/dev/null || true)
+  if jq -e . >/dev/null 2>&1 <<<"$agents"; then
+    while IFS= read -r a_name; do
+      [[ -n $a_name ]] || continue
+      [[ $a_name == "$exclude" ]] && continue
+      live_workers+=("$a_name")
+    done < <(jq -r '.result.agents[]?
+      | select((.agent_status // "") != "dead")
+      | select((.name // "") | test("^(tieude|tieunhi|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not))
+      | .name' <<<"$agents" 2>/dev/null || true)
+  fi
+
+  local o_workers=()
+  for w in ${live_workers[@]+"${live_workers[@]}"}; do
+    local w_owner
+    w_owner=$(cat "$runs_dir/$w.owner" 2>/dev/null || true)
+    w_owner=${w_owner:-cos}
+    if [[ "$w_owner" == "$o" ]]; then
+      (( o_live++ )) || true
+      o_workers+=("$w")
+    fi
+  done
+
+  for s in "$runs_dir"/pipeline-*.state; do
+    [[ -f $s ]] || continue
+    grep -q '^finished=0$' "$s" || continue
+    local p_lead p_o p_pid p_b p_t p_bname p_alive=0
+    p_lead=$(sed -n 's/^lead=\(.*\)/\1/p' "$s" | head -1)
+    p_o=${p_lead:-cos}
+    [[ "$p_o" == "$o" ]] || continue
+
+    p_pid=$(sed -n 's/^pipeline_pid=\([0-9][0-9]*\).*/\1/p' "$s" | head -1)
+    p_b=$(sed -n 's/^builder=\(.*\)/\1/p' "$s" | head -1)
+    p_t=$(sed -n 's/^task=\(.*\)/\1/p' "$s" | head -1)
+    p_bname="$p_b-$p_t"
+
+    if [[ -n $p_pid ]] && kill -0 "$p_pid" 2>/dev/null; then
+      p_alive=1
+    else
+      for a in ${live_workers[@]+"${live_workers[@]}"}; do
+        if [[ "$a" == "$p_bname" ]]; then
+          p_alive=1
+          break
+        fi
+      done
+    fi
+
+    if (( p_alive )); then
+      local p_cur_live=0
+      for w in ${o_workers[@]+"${o_workers[@]}"}; do
+        local w_pipe
+        w_pipe=$(cat "$runs_dir/$w.pipeline" 2>/dev/null || true)
+        if [[ "$w_pipe" == "$p_t" || "$w" == "$p_bname" || "$w" == *-pr[0-9]* || "$w" == *-${p_t}r[0-9]* ]]; then
+          (( p_cur_live++ )) || true
+        fi
+      done
+      if (( p_cur_live < 2 )); then
+        (( res_slots += (2 - p_cur_live) )) || true
+      fi
+    fi
+  done
+
+  echo $(( o_live + res_slots ))
+}
+
+if [[ -z "${PIPELINE_TASK:-}" ]]; then
+  slots_used=$(count_owner_slots "$owner" "$name")
+  if (( slots_used >= 4 )); then
+    echo "error: worker cap exceeded ($slots_used live worker slots for owner '$owner'; cap is 4) — cannot spawn $name" >&2
+    exit 1
+  fi
+fi
+
 if [[ -d $wt ]]; then
   if git -C "$repo" worktree list --porcelain | grep -qxF "worktree $wt"; then
     echo "note: $wt already a registered worktree — reusing it (resumed spawn)" >&2
@@ -65,6 +147,13 @@ mkdir -p "$(dirname "$rf")"   # fresh clones have no runs/ yet — create it bef
 cat "$rules_dir"/_all/*.md "$rules_dir/$(basename "$repo")"/*.md 2>/dev/null > "$rf" || true
 codex_rules="developer_instructions=$(jq -Rs . < "$rf")"
 
+# Record owner, pipeline association, and sandbox marker
+echo "$owner" > "$runs_dir/$name.owner"
+[[ -n "${PIPELINE_TASK:-}" ]] && echo "$PIPELINE_TASK" > "$runs_dir/$name.pipeline"
+iso_now=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')
+printf '{"name":"%s","kind":"%s","created":"%s","sandbox":true,"owner":"%s"}\n' \
+  "$name" "$kind" "$iso_now" "$owner" > "$runs_dir/$name.srt.json"
+
 # codex access args. --review keeps the repo read-only and $HOME/quaqua/runs writable
 # via a permission profile extending the built-in :read-only one. Plain
 # `-s read-only` cannot do this: codex only honours --add-dir under
@@ -78,7 +167,7 @@ else
   access=(--approve-for-me --add-dir "$HOME/quaqua/runs")
 fi
 
-split=$(herdr pane split --current --direction right --no-focus --cwd "$wt")
+split=$(herdr pane split --current --direction right --no-focus --cwd "$wt" --env "QUAQUA_SANDBOX=1" --env "QUAQUA_OWNER=$owner")
 pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
 
 # if the agent never becomes ready, roll back only what this attempt created

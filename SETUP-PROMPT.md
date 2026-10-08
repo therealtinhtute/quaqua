@@ -16,7 +16,7 @@ Set up a multi-agent orchestration workspace on this machine using the SLP model
 - **Peers** (worker agents, each in its own Herdr pane):
   - Implement or review exactly one scoped task.
   - The writer never accepts its own work; the Lead accepts. Independent review (a different agent) only when risk or protocol requires it (see `AGENTS.md` and `.claude/skills/herdr-orchestration/references/judgment.md`).
-- **Supervisor** (read-only, scheduled every ~2 days):
+- **Auditor** (read-only, scheduled every ~2 days):
   - Looks at the Lead's activity and the workspace docs.
   - Flags drift and docs that have gone stale against the real code.
   - Writes a report. Decisions go to me; it never applies changes.
@@ -26,10 +26,10 @@ Set up a multi-agent orchestration workspace on this machine using the SLP model
 - One scope has one owner. No two workers on the same files, and the Lead doesn't patch a scope it delegated.
 - Every brief has 3 parts: **Goal**, **Hard constraints**, and **Current design** (open to challenge). Never pre-solve the task.
 - Peers may push back with evidence (a repo or a test). Pushback is a right, not a duty. The Lead then changes the plan, keeps it with a stated reason, or escalates to me.
-- Every redirect, whether from me or from the Supervisor, flows through the Lead.
+- Every redirect, whether from me or from the Auditor, flows through the Lead.
 - Keep it simple: no heavy process, no issue tracking, no redundant docs. Work directly on the code.
 
 ## Done when
 - The Lead can spawn a worker in Herdr, brief it, and read back its result.
-- The Supervisor produces one report.
+- The Auditor produces one report.
 - You report back in 5 lines or fewer.

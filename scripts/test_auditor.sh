@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Sandbox test for supervisor.sh: report naming, the codex exec invocation
+# Sandbox test for auditor.sh: report naming, the codex exec invocation
 # (read-only sandbox, -C repo root, -o report path, quansu-tier model), the
-# prompt contents, SUPERVISOR_MODEL/SUPERVISOR_OUT overrides, codex failure
+# prompt contents, AUDITOR_MODEL/AUDITOR_OUT overrides, codex failure
 # handling, and that nothing but the report lands in the repo tree. codex is
 # stubbed on PATH (it logs argv and writes a fake final message to the -o
 # file); the repo is a temp dir. No real codex, repo, or reports touched.
-# Usage: scripts/test_supervisor.sh   (exit 0 = pass)
+# Usage: scripts/test_auditor.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-T=$(mktemp -d "${TMPDIR:-/tmp}/test-supervisor.XXXXXX")
+T=$(mktemp -d "${TMPDIR:-/tmp}/test-auditor.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# ── sandbox: stub codex + fake repo with scripts/supervisor.sh ───────────────
+# ── sandbox: stub codex + fake repo with scripts/auditor.sh ──────────────────
 mkdir -p "$T/bin" "$T/repo/scripts" "$T/repo/memory" "$T/repo/projects"
-cp "$here/supervisor.sh" "$T/repo/scripts/supervisor.sh"
+cp "$here/auditor.sh" "$T/repo/scripts/auditor.sh"
 cat > "$T/bin/codex" <<'STUB'
 #!/usr/bin/env bash
 echo "codex $*" >> "$CALLS"
@@ -38,15 +38,15 @@ run() {  # run [VAR=val...]; sets rc, $T/out, $T/err, $T/calls
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" PATH="$T/bin:$PATH" \
-    env "$@" bash "$T/repo/scripts/supervisor.sh" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" bash "$T/repo/scripts/auditor.sh" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── happy path: report file, read-only sandbox invocation, prompt contents ──
 before=$(find "$T/repo" -type f | sort)
 run
 [[ $rc -eq 0 ]] || fail "happy: exit $rc, want 0: $(cat "$T/err")"
-report=$(printf '%s\n' "$T"/repo/reports/supervisor-????-??-??-??.md)
-[[ -f $report && $report != *\** ]] || fail "happy: no reports/supervisor-YYYY-MM-DD-HH.md in repo"
+report=$(printf '%s\n' "$T"/repo/reports/audit-????-??-??-??.md)
+[[ -f $report && $report != *\** ]] || fail "happy: no reports/audit-YYYY-MM-DD-HH.md in repo"
 grep -q 'Verdict: clean' "$report" || fail "happy: agent final message not in report"
 [[ $(cat "$T/out") == "$report" ]] || fail "happy: stdout not the report path: $(cat "$T/out")"
 calls=$(cat "$T/calls")
@@ -56,46 +56,46 @@ grep -q -- "-C $T/repo" <<<"$calls" || fail "happy: not rooted at repo (-C)"
 grep -q -- "-o $report" <<<"$calls" || fail "happy: no -o <report path>"
 grep -q -- '-m gpt-6.1-sol' <<<"$calls" || fail "happy: default model not the quansu tier"
 for kw in 'memory/' 'projects/' 'git log' 'READ-ONLY' \
-    '## Unhandled' '[supervisor]' '## Lessons' 'runs/'; do
+    '## Unhandled' '[audit]' '## Lessons' 'runs/'; do
   grep -qF "$kw" <<<"$calls" || fail "happy: prompt missing '$kw'"
 done
 after=$(find "$T/repo" -type f | sort)
 [[ $(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after")) == "$report" ]] \
   || fail "happy: repo tree changed beyond the report file"
-echo "ok: happy -> report written, codex exec --sandbox read-only, prompt covers all three audits"
+echo "ok: happy -> report written, codex exec --sandbox read-only, prompt covers all audits"
 
-# ── overrides: SUPERVISOR_MODEL + SUPERVISOR_OUT ────────────────────────────
+# ── overrides: AUDITOR_MODEL + AUDITOR_OUT ──────────────────────────────────
 rm -rf "$T/repo/reports"
-run SUPERVISOR_MODEL=other-model SUPERVISOR_OUT="$T/custom.md"
+run AUDITOR_MODEL=other-model AUDITOR_OUT="$T/custom.md"
 [[ $rc -eq 0 ]] || fail "overrides: exit $rc: $(cat "$T/err")"
-[[ -f $T/custom.md ]] || fail "overrides: SUPERVISOR_OUT ignored"
-grep -q -- '-m other-model' "$T/calls" || fail "overrides: SUPERVISOR_MODEL ignored"
+[[ -f $T/custom.md ]] || fail "overrides: AUDITOR_OUT ignored"
+grep -q -- '-m other-model' "$T/calls" || fail "overrides: AUDITOR_MODEL ignored"
 [[ ! -d $T/repo/reports ]] || fail "overrides: default reports dir still used"
 echo "ok: overrides -> model + output path honored"
 
 # ── codex failure: nonzero exit, failure report, stderr passthrough ─────────
 run FAKE_RC=3
 [[ $rc -eq 3 ]] || fail "failure: exit $rc, want 3"
-report=$(printf '%s\n' "$T"/repo/reports/supervisor-????-??-??-??.md)
+report=$(printf '%s\n' "$T"/repo/reports/audit-????-??-??-??.md)
 grep -q 'FAILED' "$report" || fail "failure: no failure report written"
 echo "ok: failure -> exit propagates, stub report notes the failure"
 
 # ── F8 packaging: exactly one Auditor entrypoint with all scheduling assets ──
 root=$(cd "$here/.." && pwd)
-[[ -f $root/systemd/quaqua-supervisor.service ]] || fail "pkg: no systemd service shipped"
-[[ -f $root/systemd/quaqua-supervisor.timer ]] || fail "pkg: no systemd timer shipped"
-grep -q 'scripts/supervisor.sh' "$root/systemd/quaqua-supervisor.service" \
-  || fail "pkg: service does not exec scripts/supervisor.sh"
-grep -q 'OnCalendar' "$root/systemd/quaqua-supervisor.timer" || fail "pkg: timer has no schedule"
-grep -q 'systemd' "$here/install-supervisor.sh" || fail "pkg: installer does not use systemd/"
-[[ ! -d $root/supervisor ]] || fail "pkg: legacy supervisor/ runner still installed"
-[[ -f $root/launchd/com.quaqua.supervisor.plist.in ]] || fail "pkg: no launchd template shipped"
-grep -q 'scripts/supervisor.sh' "$root/launchd/com.quaqua.supervisor.plist.in" \
+[[ -f $root/systemd/quaqua-auditor.service ]] || fail "pkg: no systemd service shipped"
+[[ -f $root/systemd/quaqua-auditor.timer ]] || fail "pkg: no systemd timer shipped"
+grep -q 'scripts/auditor.sh' "$root/systemd/quaqua-auditor.service" \
+  || fail "pkg: service does not exec scripts/auditor.sh"
+grep -q 'OnCalendar' "$root/systemd/quaqua-auditor.timer" || fail "pkg: timer has no schedule"
+grep -q 'systemd' "$here/install-auditor.sh" || fail "pkg: installer does not use systemd/"
+[[ ! -d "$root/super""visor" ]] || fail "pkg: legacy runner still installed"
+[[ -f $root/launchd/com.quaqua.auditor.plist.in ]] || fail "pkg: no launchd template shipped"
+grep -q 'scripts/auditor.sh' "$root/launchd/com.quaqua.auditor.plist.in" \
   || fail "pkg: launchd template does not use the same auditor entrypoint"
 grep -qi 'launchd' "$root/README.md" || fail "pkg: README omits macOS launchd installation"
-grep -q 'reports/supervisor-' "$root/AGENTS.md" \
-  || fail "pkg: AGENTS session-start glob missing reports/supervisor-"
-echo "ok: packaging -> systemd + launchd share scripts/supervisor.sh; legacy retired"
+grep -q 'reports/audit-' "$root/AGENTS.md" \
+  || fail "pkg: AGENTS session-start glob missing reports/audit-"
+echo "ok: packaging -> systemd + launchd share scripts/auditor.sh; legacy retired"
 
 # ── pipeline pre-checks: one fixture per flag + clean no-flag cases ─────────
 # Fixtures live in the sandbox repo (runs/, memory/); the stub codex logs argv,
@@ -192,5 +192,35 @@ grep -qF "pipeline-badproj.md: status clean but commit '$sha' does not resolve i
 grep -qF "pipeline-goneproj.md: status clean but recorded repo '$T/proj-missing' is missing" <<<"$calls" \
   || fail "F9: missing recorded repo not flagged separately"
 echo "ok: F9 -> commits verified in the recorded repo; missing repo flagged apart"
+
+# ── live-worker sandbox audit check ──────────────────────────────────────────
+cat > "$T/bin/herdr" <<'HERDR'
+#!/usr/bin/env bash
+if [[ "$1" == "agent" && "$2" == "list" ]]; then
+  cat <<'JSON'
+{"result":{"agents":[
+  {"name":"sude-unsandboxed","agent_status":"idle","pane_id":"p1"},
+  {"name":"sude-sandboxed","agent_status":"idle","pane_id":"p2"},
+  {"name":"coucou-island-lead","agent_status":"idle","pane_id":"p3"}
+]}}
+JSON
+  exit 0
+fi
+exit 0
+HERDR
+chmod +x "$T/bin/herdr"
+mkdir -p "$T/repo/runs"
+touch "$T/repo/runs/sude-sandboxed.srt.json"
+rm -f "$T/repo/runs/sude-unsandboxed.srt.json"
+run
+[[ $rc -eq 0 ]] || fail "sandbox check: exit $rc: $(cat "$T/err")"
+calls=$(cat "$T/calls")
+grep -qF "live worker 'sude-unsandboxed': not started through sandbox wrapper (missing runs/sude-unsandboxed.srt.json)" <<<"$calls" \
+  || fail "sandbox check: unsandboxed live worker not flagged"
+! grep -qF "sude-sandboxed" <<<"$calls" \
+  || fail "sandbox check: sandboxed worker falsely flagged"
+! grep -qF "coucou-island-lead" <<<"$calls" \
+  || fail "sandbox check: Lead falsely flagged"
+echo "ok: live worker sandbox audit -> unsandboxed worker flagged; sandboxed worker and Lead silent"
 
 echo "PASS"

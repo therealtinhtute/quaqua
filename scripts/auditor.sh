@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# Usage: supervisor.sh
+# Usage: auditor.sh
 #   Read-only drift audit of this repo, run by systemd (Linux) or launchd
 #   (macOS), 2x/day. See systemd/ and launchd/. Builds the prompt,
 #   runs `codex exec` in a read-only sandbox, and writes the agent's final
-#   message to reports/supervisor-YYYY-MM-DD-HH.md via --output-last-message.
+#   message to reports/audit-YYYY-MM-DD-HH.md via --output-last-message.
 #   The agent cannot edit anything; this script is the only writer.
 #   Before the prompt it runs cheap deterministic pre-checks on pipeline runs
 #   (runs/pipeline-*.md, spec-raw/quaqua-slp-slim-lock.md §3): unhandled
 #   disputed|blocked, clean with an unresolvable commit or no reviewer
-#   'Verdict:', and unresolved '## Challenge' sections. Findings are embedded
-#   in the prompt for the agent to verify, correct, and extend.
-#   Env: SUPERVISOR_MODEL overrides the model (default gpt-6.1-sol, the quansu
-#   tier); SUPERVISOR_OUT overrides the output path (tests).
+#   'Verdict:', and unresolved '## Challenge' sections. It also flags any
+#   live task worker in herdr not started through the sandbox wrapper
+#   (missing runs/<name>.srt.json). Findings are embedded in the prompt for
+#   the agent to verify, correct, and extend.
+#   Env: AUDITOR_MODEL overrides the model (default gpt-6.1-sol, the quansu
+#   tier); AUDITOR_OUT overrides the output path (tests).
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-out=${SUPERVISOR_OUT:-"$root/reports/supervisor-$(date +%F-%H).md"}
+out=${AUDITOR_OUT:-${SUPERVISOR_OUT:-"$root/reports/audit-$(date +%F-%H).md"}}
 mkdir -p "$(dirname "$out")"
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
@@ -23,7 +25,7 @@ trap 'rm -f "$log"' EXIT
 # ── deterministic pipeline-run pre-checks ───────────────────────────────────
 # Findings are advisory: the agent re-verifies them against the repo. The
 # "handled" marker for a pipeline outcome is a memory/YYYY-MM-DD.md line
-# naming pipeline-<task> (same convention as the [supervisor] report marker).
+# naming pipeline-<task> (same convention as the [audit] report marker).
 # runs/*.rules.md are rule dumps injected into worker prompts — they always
 # contain a literal '## Challenge' describing the rule, so they are excluded.
 precheck=''
@@ -85,13 +87,24 @@ for f in "$root"/runs/*.md; do
   fi
 done
 
+# ── deterministic live-worker sandbox pre-checks ────────────────────────────
+agents=$(herdr agent list 2>/dev/null || true)
+if jq -e . >/dev/null 2>&1 <<<"$agents"; then
+  while IFS= read -r w; do
+    [[ -n $w ]] || continue
+    if [[ ! -f "$root/runs/$w.srt.json" ]]; then
+      flag "live worker '$w': not started through sandbox wrapper (missing runs/$w.srt.json)"
+    fi
+  done < <(jq -r '.result.agents[]? | select((.name // "") | test("^(tieude|tieunhi|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not)) | .name' <<<"$agents")
+fi
+
 prompt=$(cat <<'EOF'
 You are the Auditor for the quaqua repo. READ-ONLY: inspect and report only.
 Do not edit, create, or delete any file; do not run mutating commands; do not
 contact, prompt, or instruct any agent. If a redirect is needed, flag it in the
 report — the CoS routes it.
 
-Audit four things:
+Audit five things:
 1. Drift in CoS activity. Read memory/ files from the last 2 days, projects/*.md,
    and recent `git log` (last ~30 commits). Flag: claimed outcomes the code or
    git history does not back; project "Now"/"Log" entries contradicted by repo
@@ -99,8 +112,8 @@ Audit four things:
 2. Stale docs vs real code/scripts. Flag: AGENTS.md, memory/rules.md, models.md,
    rules/ entries that reference removed scripts/behaviors or describe a flow the
    scripts no longer implement; scripts or docs/plans that contradict each other.
-3. Unhandled memory. Flag: reports/supervisor-*.md with no
-   `- [supervisor] <report file>:` line in any memory/YYYY-MM-DD.md (the
+3. Unhandled memory. Flag: reports/audit-*.md with no
+   `- [audit] <report file>:` line in any memory/YYYY-MM-DD.md (the
    handled marker CoS writes, see AGENTS.md); `## Lessons` lines (other than
    `none`) in runs/*.md from the last 2 days that no rules/ file cites as
    `runs/<name>.md`.
@@ -108,7 +121,7 @@ Audit four things:
    last `- status:` line is the outcome). Flag:
    - `status: disputed|blocked` with no memory/YYYY-MM-DD.md line naming
      `pipeline-<task>` (the CoS handling note, same convention as the
-     `[supervisor]` report marker);
+     `[audit]` report marker);
    - `status: clean` whose `commit` is `none`/`?` or that
      `git rev-parse --verify <sha>^{commit}` cannot resolve in the pipeline's
      recorded repo (the `- repo:` header in runs/pipeline-<task>.md — Peers
@@ -123,13 +136,15 @@ Audit four things:
      before acceptance; no handling line = still open. A Challenge already
      copied into a pipeline file's `## Challenge (from <file>)` section is
      covered by that file's flag — do not report it twice.
+5. Live workers. Flag any live task worker in herdr not started through the
+   sandbox wrapper (missing runs/<name>.srt.json).
    Deterministic pre-check — the script already ran the cheap greps; list
-   each finding below under `## Pipeline` unless repo evidence contradicts
-   it, and add any flag the greps missed:
+   each finding below under `## Pipeline` or `## Workers` unless repo evidence
+   contradicts it, and add any flag the greps missed:
 __PRECHECK__
 
 Write your whole report as the final message — it becomes the report file.
-Format: `## Drift`, `## Stale docs`, `## Unhandled` and `## Pipeline`
+Format: `## Drift`, `## Stale docs`, `## Unhandled`, `## Pipeline`, and `## Workers`
 sections, each `- file: finding + evidence` (cite path/commit), one line each.
 No findings in a section → write `- none`. End with one line
 `Verdict: clean | N findings`. Terse, technical.
@@ -141,14 +156,15 @@ prompt=${prompt//__PRECHECK__/${pc:-- none}}
 args=(exec --ephemeral -C "$root" --sandbox read-only
   -c project_doc_max_bytes=0
   -o "$out")
-[[ -n ${SUPERVISOR_MODEL:-} ]] && args+=(-m "$SUPERVISOR_MODEL") || args+=(-m gpt-6.1-sol)
+auditor_model=${AUDITOR_MODEL:-${SUPERVISOR_MODEL:-gpt-6.1-sol}}
+args+=(-m "$auditor_model")
 args+=("$prompt")
 
 rc=0
 codex "${args[@]}" 2>"$log" >/dev/null || rc=$?
 if (( rc != 0 )); then
   cat "$log" >&2
-  [[ -s $out ]] || printf '# Supervisor %s — FAILED\n\n`codex exec` exited %d; see scheduler stderr logs (journal or Library/Logs/quaqua-supervisor.log).\n' \
+  [[ -s $out ]] || printf '# Auditor %s — FAILED\n\n`codex exec` exited %d; see scheduler stderr logs (journal or Library/Logs/quaqua-auditor.log).\n' \
     "$(date '+%F %H:%M')" "$rc" > "$out"
   exit "$rc"
 fi
