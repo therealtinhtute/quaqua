@@ -1,25 +1,26 @@
-# Worker roster
+# Workers — routing
 
-Anh gọi theo biệt danh → em spawn đúng `name` / kind / model / effort. Split pane với `--cwd <repo>`.
+Pick by task shape. Name = kind passed to `spawn-worker.sh`. Update "Seen" after each run (from `runs/*.md` + project Log).
 
-| Biệt danh | name | kind | Launch args (sau `--`) | Dùng cho |
-|---|---|---|---|---|
-| tiểu đệ | `tieude` | `pi` | `--model antigravity/gemini-3.8-flash` | Việc vặt: sửa nhỏ, docs, rename, chạy lệnh, tra cứu nhanh |
-| sư đệ | `sude` | `pi` | `--model devin/deepseek-v4.1-flash:max` | Việc rẻ cần suy luận sâu: tra cứu, audit/plan read-only, sửa nhỏ |
-| đệ tử ("đám worker") | `worker` | `pi` | `--model devin/swe-2:max` | Implementation mặc định; fan-out nhiều đệ tử |
-| hộ pháp | `hophap` | `claude` | `--model claude-sonnet-5-5 --effort medium` | Feature vừa, viết test, refactor có phạm vi |
-| mưu sĩ | `muusi` | `claude` | `--model claude-opus-5-5 --effort low` | Sketch, brainstorm, sửa dễ, cần trả lời nhanh |
-| cao thủ | `caothu` | `claude` | `--model claude-opus-5-5 --effort medium` | Làm feature, việc hằng ngày. **Chỉ spawn khi anh gọi** |
-| tông sư | `tongsu` | `claude` | `--model claude-opus-5-5 --effort high` | Sửa bug, đuổi edge case, verify quan trọng, bug codebase cũ. **Chỉ spawn khi anh gọi** |
-| chưởng môn | `chuongmon` | `claude` | `--model claude-opus-5-5 --effort max` | Việc khó chạy trọn từ build đến verify, săn lỗ hổng. **Chỉ spawn khi anh gọi** |
-| đấng cứu thế | `dangcuuthe` | `codex` | `-m <astra-id> -c model_reasoning_effort=medium` | Second opinion, review nhanh, logic hóc |
-| lão sư | `reviewer` | `codex` | `-m gpt-6.1-sol -c model_reasoning_effort=high` | Review diff/PR kỹ, tìm bug; read-only. Spawn với `--cwd <repo>`, brief ghi rõ SHA. |
+| name | harness · model · effort | Use for | Avoid | Seen |
+|------|--------------------------|---------|-------|------|
+| tieude | pi · devin/deepseek-v4.1-flash · max | cheap well-specced impl, QA passes | ambiguous design | mdqa, mdchip, mdbold |
+| tieunhi | pi · antigravity/gemini-3.8-flash · high | quick lookup, research, read-only scan | implementation | – |
+| sude | pi · devin/swe-2 · max | **default**: every cheap task, hard multi-file impl, audits | – | mdtree, mdstatus, mdflat |
+| ni | claude · opus-5.5 · low | small Claude edits, quick answers | design, long work | – |
+| suhuynh | claude · opus-5.5 · medium | refactor, review of intent | long mechanical edits | mdside |
+| truonglao | claude · opus-5.5 · high | design, architecture, hard trade-offs | anything a cheaper tier can do | – |
+| bacdau | codex · astra · medium | specced impl + tests, second opinion | vague tasks (codex state can stick `unknown`) | – |
+| quansu | codex · gpt-6.1-sol · high | advice only: review/diagnose, findings go to CoS → sude fix | editing code, fixing its own findings | quansu-roster |
 
-Spawn: `herdr agent start <name> --kind <kind> --pane <id> -- <launch args>`.
-- Sư đệ (pi): sau `agent start` gửi `/advisor` để bật advisor gates (executor trùng deepseek nên không đổi model). Đệ tử/tiểu đệ: KHÔNG bật (advisor ép model về executor).
-- pi (pi-mono) qua Herdr integration v9; extension: pi-advisor-flow (advisor swe-2, gates plan/failure/completion/loop, `~/.pi/agent/advisor.json`), pi-supervisor (`/supervise <goal>`, model per-cwd `.pi/supervisor-config.json`). `agent_prompt_stalled` → vẫn `agent read`, không resend.
-- `<astra-id>`: TODO anh xác nhận model id chính xác của Astra (và `gemini-3.8-flash`).
+## Naming
+- Worker name = `<name>-<task>`, lowercase, no diacritics, ≤20 chars, e.g. `sude-fonts`, `quansu-fonts`.
+- Task must not end in `-lead` — `*-lead` names are project Leads (`scripts/spawn-lead.sh <slug>` → `<slug>-lead`, pane beside CoS, no worktree); herdr caps agent names at 32 chars, so slugs are ≤27.
+- Spawn: `scripts/spawn-worker.sh [--base <ref>] sude-fonts sude <repo>` → branch `quaqua/sude-fonts` (from <ref>, default HEAD), report `runs/sude-fonts.md`.
+- Old names (`mdtree`, `mdqa`…) stay as-is.
 
-Rules:
-- Implementation and review go to different kinds when possible.
-- Keep 1–3 workers alive at once per project (up to 4 per project during fan-out, see `herdr.md`). Close idle ones.
+## Rules
+- No name given → `sude`, per `memory/rules.md`.
+- Implementer and reviewer must be different harnesses (e.g. sude builds → quansu reviews).
+- Read-only question → `tieunhi`; design unclear → `truonglao` before any builder.
+- Unsure between two → cheaper tier first (tieude < sude < ni < suhuynh < truonglao); escalate only on a failed run.

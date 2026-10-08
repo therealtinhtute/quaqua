@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# Sandbox test for spawn-lead.sh (SLP P4): slug validation (charset, the
+# projects/INDEX.md row, the projects/<slug>.md card), the one-Lead-per-slug
+# refusal via `herdr agent get`, the split/start/prompt call sequence (pane
+# beside the caller's, cwd = the script's repo root, no worktree), the
+# INDEX.md owner-column update, and the LEAD_MODEL/LEAD_EFFORT overrides.
+# herdr and git are stubbed on PATH and log every call; the script runs
+# against a temp repo root. No real herdr, INDEX.md, or pane touched.
+# Usage: scripts/test_spawn_lead.sh   (exit 0 = pass)
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+T=$(mktemp -d "${TMPDIR:-/tmp}/test-spawn-lead.XXXXXX")
+trap 'rm -rf "$T"' EXIT
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# ── sandbox: temp quaqua root (script copy under scripts/) + stub herdr/git ─
+mkdir -p "$T/bin" "$T/scripts" "$T/projects" "$T/rules/_all"
+cp "$here/spawn-lead.sh" "$T/scripts/spawn-lead.sh"
+
+cat > "$T/projects/INDEX.md" <<'EOF'
+# Projects
+
+| slug | repo | owner | status | one-line goal |
+|------|------|-------|--------|---------------|
+| mono | ~/Lab/mono | cos | idle | prefix of mono-desk |
+| mono-desk | ~/Lab/mono-desk | quaqua-monodesk-orchestrator | PR merged | desktop demo |
+| coucou-island | ~/Lab/coucou-island | cos | M12 done | media island |
+| no-card | ~/Lab/no-card | cos | idle | row without a card file |
+| aaaaaaaaaaaaaaaaaaaaaaaaaaa | ~/Lab/a27 | cos | idle | 27-char slug -> 32-char Lead name |
+| aaaaaaaaaaaaaaaaaaaaaaaaaaaa | ~/Lab/a28 | cos | idle | 28-char slug -> 33-char Lead name |
+EOF
+for s in mono mono-desk coucou-island aaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaa; do printf '# %s\n' "$s" > "$T/projects/$s.md"; done
+printf '# all rules\n- r1 stay in the project\n' > "$T/rules/_all/all.md"
+cp "$T/projects/INDEX.md" "$T/INDEX.orig"
+
+cat > "$T/bin/git" <<'STUB'
+#!/usr/bin/env bash
+echo "git $*" >> "$CALLS"
+case " $* " in
+  *"rev-parse --verify"*"refs/heads/quaqua/"*) exit "${GIT_INTEG_MISSING:-0}" ;;
+  *"rev-parse --verify"*"refs/heads/main"*)     exit "${GIT_MAIN_MISSING:-0}" ;;
+  *" branch quaqua/"*)                          exit "${GIT_BRANCH_FAIL:-0}" ;;
+esac
+exit 0
+STUB
+cat > "$T/bin/herdr" <<'STUB'
+#!/usr/bin/env bash
+echo "herdr $*" >> "$CALLS"
+case "${1:-} ${2:-}" in
+  "agent get")
+    # names in $HERDR_LIVE exist; anything else is agent_not_found (rc 1)
+    if [[ " ${HERDR_LIVE:-} " == *" ${3:-} "* ]]; then
+      printf '{"result":{"agent":{"name":"%s","agent_status":"idle","pane_id":"w1:p9"}}}\n' "$3"
+    else
+      printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "${3:-}"
+      exit 1
+    fi ;;
+  "pane split") echo '{"result":{"pane":{"pane_id":"%7"}}}' ;;
+esac
+exit 0
+STUB
+chmod +x "$T/bin/git" "$T/bin/herdr"
+
+spawn() {  # spawn <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
+  local slug=$1; shift
+  : > "$T/calls"
+  rc=0
+  CALLS="$T/calls" PATH="$T/bin:$PATH" env "$@" \
+    bash "$T/scripts/spawn-lead.sh" "$slug" >"$T/out" 2>"$T/err" || rc=$?
+}
+
+ln() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }  # first matching call line
+
+# ── happy path: get -> split -> start -> prompt; INDEX owner updated ────────
+spawn coucou-island
+[[ $rc -eq 0 ]] || fail "happy: exit $rc, want 0: $(cat "$T/err")"
+grep -qx 'lead=coucou-island-lead slug=coucou-island pane=%7' "$T/out" \
+  || fail "happy: no success line: $(cat "$T/out")"
+[[ $(ln 'agent get') -lt $(ln 'pane split') ]] \
+  && [[ $(ln 'pane split') -lt $(ln 'agent start') ]] \
+  && [[ $(ln 'agent start') -lt $(ln 'agent prompt') ]] \
+  || fail "happy: bad call order: $(cat "$T/calls")"
+grep -q 'agent get coucou-island-lead' "$T/calls" \
+  || fail "happy: no duplicate check: $(cat "$T/calls")"
+grep -qF "pane split --current --direction right --no-focus --cwd $T" "$T/calls" \
+  || fail "happy: split not beside the caller at the repo root: $(cat "$T/calls")"
+grep -q 'agent start coucou-island-lead --kind claude --pane %7 --timeout 60000' "$T/calls" \
+  || fail "happy: bad agent start: $(cat "$T/calls")"
+grep -q -- '--model claude-opus-5-5 --effort high' "$T/calls" \
+  || fail "happy: default model/effort missing: $(cat "$T/calls")"
+grep -qF -- "--append-system-prompt-file $T/runs/coucou-island-lead.rules.md" "$T/calls" \
+  || fail "happy: no rules file arg: $(cat "$T/calls")"
+grep -q 'r1 stay in the project' "$T/runs/coucou-island-lead.rules.md" \
+  || fail "happy: rules file missing rules/_all content"
+grep -q 'agent prompt coucou-island-lead' "$T/calls" \
+  || fail "happy: no brief prompt: $(cat "$T/calls")"
+for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'pipeline.sh' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ'; do
+  grep -qF "$frag" "$T/calls" || fail "happy: brief missing '$frag'"
+done
+# integration-branch check happens before the pane split; no worktree is made
+[[ $(ln 'agent get') -lt $(ln 'rev-parse --verify') ]] \
+  && [[ $(ln 'rev-parse --verify') -lt $(ln 'pane split') ]] \
+  || fail "happy: integ check order wrong: $(cat "$T/calls")"
+grep -qF "git -C $HOME/Lab/coucou-island rev-parse --verify --quiet refs/heads/quaqua/coucou-island-integ" "$T/calls" \
+  || fail "happy: no integration-branch check on the project repo: $(cat "$T/calls")"
+! grep -q '^git .*worktree' "$T/calls" || fail "happy: git worktree called — a Lead gets no worktree: $(cat "$T/calls")"
+grep -qE '^\| coucou-island \| ~/Lab/coucou-island \| coucou-island-lead \| M12 done \|' \
+  "$T/projects/INDEX.md" || fail "happy: owner cell not updated: $(cat "$T/projects/INDEX.md")"
+diff <(grep -v '| coucou-island |' "$T/INDEX.orig") \
+     <(grep -v '| coucou-island |' "$T/projects/INDEX.md") >/dev/null \
+  || fail "happy: lines outside the slug row changed"
+echo "ok: happy path -> get/split/start/prompt order, claude args, rules file, owner updated"
+
+# ── duplicate: a registered Lead for the slug is refused before side effects ─
+cp "$T/projects/INDEX.md" "$T/INDEX.prev"
+spawn coucou-island HERDR_LIVE=coucou-island-lead
+[[ $rc -ne 0 ]] || fail "duplicate: exit $rc, want non-zero"
+grep -q "a Lead for 'coucou-island' already exists" "$T/err" \
+  || fail "duplicate: no clear refusal: $(cat "$T/err")"
+[[ $(grep -c '^herdr ' "$T/calls") -eq 1 ]] \
+  || fail "duplicate: side effects after the refusal: $(cat "$T/calls")"
+cmp -s "$T/projects/INDEX.md" "$T/INDEX.prev" \
+  || fail "duplicate: INDEX.md touched"
+echo "ok: duplicate -> refused after agent get, no split/start, INDEX untouched"
+
+# ── bad slugs: usage/die before any herdr call ──────────────────────────────
+expect_reject() {  # expect_reject <slug> <label> <stderr-fragment>
+  spawn "$1"
+  [[ $rc -eq 1 ]] || fail "$2: exit $rc, want 1: $(cat "$T/err")"
+  grep -q "$3" "$T/err" || fail "$2: no '$3' on stderr: $(cat "$T/err")"
+  [[ ! -s "$T/calls" ]] || fail "$2: herdr/git called before rejection: $(cat "$T/calls")"
+  echo "ok: $2 -> exit 1, no herdr/git"
+}
+expect_reject Foo 'uppercase slug' '^# Usage:'
+expect_reject bad_slug 'underscore slug' '^# Usage:'
+expect_reject --bogus '--flag arg' '^# Usage:'
+expect_reject -x 'single-dash slug' '^# Usage:'
+expect_reject ghost 'unknown slug' "unknown project slug 'ghost'"
+expect_reject no-card 'row but no card' 'no project card'
+expect_reject aaaaaaaaaaaaaaaaaaaaaaaaaaaa 'lead name >32 chars (registered slug)' 'at most 32'
+
+# ── boundary: 27-char slug -> 32-char Lead name is still accepted ───────────
+spawn aaaaaaaaaaaaaaaaaaaaaaaaaaa
+[[ $rc -eq 0 ]] || fail "boundary: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'agent start aaaaaaaaaaaaaaaaaaaaaaaaaaa-lead ' "$T/calls" \
+  || fail "boundary: 32-char name not started: $(cat "$T/calls")"
+echo "ok: 32-char lead name (27-char slug) accepted"
+
+# ── INDEX update is exact-cell: 'mono' must not touch the mono-desk row ─────
+spawn mono
+[[ $rc -eq 0 ]] || fail "mono: exit $rc, want 0: $(cat "$T/err")"
+grep -qE '^\| mono \| ~/Lab/mono \| mono-lead \|' "$T/projects/INDEX.md" \
+  || fail "mono: owner cell not updated: $(cat "$T/projects/INDEX.md")"
+grep -qE '^\| mono-desk \| ~/Lab/mono-desk \| quaqua-monodesk-orchestrator \|' "$T/projects/INDEX.md" \
+  || fail "mono: mono-desk row was touched: $(cat "$T/projects/INDEX.md")"
+echo "ok: 'mono' updates only its own row (mono-desk untouched)"
+
+# ── LEAD_MODEL / LEAD_EFFORT override the claude args ───────────────────────
+spawn coucou-island LEAD_MODEL=claude-haiku-4 LEAD_EFFORT=low
+[[ $rc -eq 0 ]] || fail "env: exit $rc, want 0: $(cat "$T/err")"
+grep -q -- '--model claude-haiku-4 --effort low' "$T/calls" \
+  || fail "env: overrides not passed: $(cat "$T/calls")"
+echo "ok: LEAD_MODEL/LEAD_EFFORT override the defaults"
+
+# ── integration branch: created from main when missing, before side effects ─
+spawn coucou-island GIT_INTEG_MISSING=1
+[[ $rc -eq 0 ]] || fail "integ: exit $rc, want 0: $(cat "$T/err")"
+grep -qF "git -C $HOME/Lab/coucou-island branch quaqua/coucou-island-integ main" "$T/calls" \
+  || fail "integ: branch not created from main: $(cat "$T/calls")"
+[[ $(ln 'branch quaqua/') -lt $(ln 'pane split') ]] \
+  || fail "integ: branch creation must precede the pane split: $(cat "$T/calls")"
+echo "ok: missing quaqua/<slug>-integ -> created from main before the split"
+
+# the project repo has no main -> refuse before any pane/agent side effect
+spawn coucou-island GIT_INTEG_MISSING=1 GIT_MAIN_MISSING=1
+[[ $rc -eq 1 ]] || fail "no main: exit $rc, want 1: $(cat "$T/err")"
+grep -q "no 'main' branch" "$T/err" || fail "no main: unclear message: $(cat "$T/err")"
+! grep -q 'pane split' "$T/calls" || fail "no main: pane split despite failure"
+echo "ok: no main in the project repo -> refused before side effects"
+
+# ── a stale owner cell does not block respawn when no agent is registered ───
+spawn mono-desk
+[[ $rc -eq 0 ]] || fail "stale owner: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'agent start mono-desk-lead' "$T/calls" \
+  || fail "stale owner: start not called: $(cat "$T/calls")"
+echo "ok: stale owner cell -> respawn allowed (agent registry is the truth)"
+
+echo "PASS"

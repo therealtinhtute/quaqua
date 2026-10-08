@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# Sandbox test for prompt-worker.sh watchdog: --resume mode, stall detection
+# (exit 3), idle-without-runfile (exit 3), time budget + one-shot nudge
+# (exit 4), blocked/question (exit 5). herdr is stubbed on PATH: it logs calls,
+# answers agent get/read/prompt from FAKE_* vars. HOME is a temp dir. No real
+# herdr, agent, or home touched.
+# Usage: scripts/test_prompt_worker_watchdog.sh   (exit 0 = pass)
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+T=$(mktemp -d "${TMPDIR:-/tmp}/test-prompt-watchdog.XXXXXX")
+trap 'rm -rf "$T"' EXIT
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# ── sandbox: stub herdr, temp HOME/quaqua/runs ──────────────────────────────
+mkdir -p "$T/bin" "$T/home/quaqua/runs"
+cat > "$T/bin/herdr" <<'STUB'
+#!/usr/bin/env bash
+echo "herdr $*" >> "$CALLS"
+case "${1:-} ${2:-}" in
+  "agent get")
+    if [ "${FAKE_GONE:-0}" = 1 ]; then
+      printf '{"error":{"code":"agent_not_found"}}\n'; exit 1
+    fi
+    printf '{"result":{"agent":{"agent_status":"%s","cwd":"%s"}}}\n' \
+      "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" ;;
+  "agent read")
+    if [ "${FAKE_READ_ERR:-0}" = 1 ] && [[ $* == *recent-unwrapped* ]]; then
+      printf '{"error":{"code":"agent_not_idle"}}\n'; exit 1
+    fi
+    if [ "${FAKE_ROTATE:-0}" = 1 ]; then
+      printf 'tool line %s\n' "$(date +%s%N | md5sum | head -c8)"
+    else
+      printf '%s\n' "${FAKE_PANE:-some pane text}"
+    fi ;;
+  "agent prompt")
+    if [ "${FAKE_DELAY:-0}" != 0 ]; then
+      ( sleep "$FAKE_DELAY"; echo "fake summary" > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
+    fi
+    exit "${FAKE_RC:-0}" ;;
+esac
+exit 0
+STUB
+chmod +x "$T/bin/herdr"
+
+brief='Goal: do the thing
+Hard constraints: keep tests passing
+Current design (open to challenge): via the existing helper'
+
+# run <name> [VAR=val...] — full submit+watch; sets rc, $T/out, $T/err, $T/calls
+run() {
+  local name=$1; shift
+  : > "$T/calls"
+  rc=0
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
+    env "$@" bash "$here/prompt-worker.sh" "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
+}
+# resume <name> [VAR=val...] — resume wait; same capture
+resume() {
+  local name=$1; shift
+  : > "$T/calls"
+  rc=0
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
+    env "$@" bash "$here/prompt-worker.sh" --resume "$name" >"$T/out" 2>"$T/err" || rc=$?
+}
+sentinel() { [[ -f $T/home/quaqua/runs/.$1.nudged ]]; }
+nudges()   { grep -c 'agent prompt.*Time check' "$T/calls" || true; }
+
+# ── --resume arg validation ─────────────────────────────────────────────────
+rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+  bash "$here/prompt-worker.sh" --resume >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 1 ]] || fail "--resume no name: exit $rc, want 1"
+grep -q '^# Usage:' "$T/err" || fail "--resume no name: no usage on stderr"
+rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+  bash "$here/prompt-worker.sh" --resume 'bad_name' >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 1 ]] || fail "--resume bad name: exit $rc, want 1"
+echo "ok: --resume arg validation -> exit 1, usage on stderr"
+
+# ── resume happy path: file already there, no prompt ever sent ──────────────
+echo done > "$T/home/quaqua/runs/sude-rdone.md"
+resume sude-rdone
+[[ $rc -eq 0 ]] || fail "sude-rdone: exit $rc: $(cat "$T/err")"
+[[ "$(cat "$T/out")" == "$T/home/quaqua/runs/sude-rdone.md" ]] \
+  || fail "sude-rdone: stdout not the runs path"
+grep -q 'agent prompt' "$T/calls" && fail "sude-rdone: --resume still prompted"
+echo "ok: --resume -> waits without re-prompting, prints runs path"
+
+# ── resume waits for the file, cap still exit 2 ──────────────────────────────
+resume sude-rnever FAKE_DELAY=0 PROMPT_WORKER_MAX_SEC=2 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 2 ]] || fail "sude-rnever: exit $rc, want 2: $(cat "$T/err")"
+grep -q 'WATCHDOG exit=2' "$T/err" || fail "sude-rnever: no WATCHDOG line"
+echo "ok: --resume no file -> exit 2 at cap with WATCHDOG line"
+
+# ── STALL: static pane, working status -> exit 3 ────────────────────────────
+run sude-stall FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=2 \
+  PROMPT_WORKER_BUDGET_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 3 ]] || fail "sude-stall: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'WATCHDOG exit=3 stall' "$T/err" || fail "sude-stall: no stall line: $(cat "$T/err")"
+echo "ok: static pane + working -> exit 3 stall"
+
+# ── progress resets the stall clock: rotating pane outlives STALL_SEC ────────
+run sude-busy FAKE_DELAY=0 FAKE_ROTATE=1 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=1 PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-busy: exit $rc, want 4 (changing pane must beat stall): $(cat "$T/err")"
+grep -q 'WATCHDOG exit=4' "$T/err" || fail "sude-busy: no budget line"
+echo "ok: changing pane -> no stall, exit 4 at budget"
+
+# ── BUDGET: one nudge ~80%, then exit 4; sentinel written ───────────────────
+run sude-budget FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-budget: exit $rc, want 4: $(cat "$T/err")"
+[[ $(nudges) -eq 1 ]] || fail "sude-budget: $(nudges) nudges, want 1: $(cat "$T/calls")"
+sentinel sude-budget || fail "sude-budget: no nudge sentinel"
+grep -q 'WATCHDOG nudge sent' "$T/err" || fail "sude-budget: no nudge notice"
+echo "ok: budget -> one nudge at 80%, sentinel, exit 4"
+
+# ── nudge is once per task: resume does not re-nudge ────────────────────────
+resume sude-budget PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=2 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-budget resume: exit $rc, want 4: $(cat "$T/err")"
+[[ $(nudges) -eq 0 ]] || fail "sude-budget resume: re-nudged: $(cat "$T/calls")"
+echo "ok: --resume -> no second nudge (sentinel persists)"
+
+# ── QUESTION: agent_status=blocked -> exit 5 ────────────────────────────────
+run sude-blocked FAKE_DELAY=0 FAKE_STATUS=blocked PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 5 ]] || fail "sude-blocked: exit $rc, want 5: $(cat "$T/err")"
+grep -q 'WATCHDOG exit=5' "$T/err" || fail "sude-blocked: no blocked line"
+[[ $(nudges) -eq 0 ]] || fail "sude-blocked: nudged a blocked agent"
+echo "ok: agent_status=blocked -> exit 5, no nudge"
+
+# ── QUESTION fallback: working status but pane shows a question ──────────────
+run sude-ask FAKE_DELAY=0 FAKE_STATUS=working PROMPT_WORKER_POLL_SEC=1 \
+  FAKE_PANE='Choose an option:
+> A
+> B
+Type something.' PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 5 ]] || fail "sude-ask: exit $rc, want 5: $(cat "$T/err")"
+echo "ok: pane question fallback -> exit 5"
+
+# ── IDLE: agent done/idle without run file -> fast exit 3 ───────────────────
+run sude-idle FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "sude-idle: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'agent idle' "$T/err" || fail "sude-idle: no idle reason: $(cat "$T/err")"
+echo "ok: agent idle without run file -> exit 3"
+
+# ── read fallback: recent-unwrapped errors -> visible still observed ────────
+run sude-vis FAKE_DELAY=0 FAKE_READ_ERR=1 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=2 PROMPT_WORKER_BUDGET_SEC=9999 FAKE_PANE='static screen'
+[[ $rc -eq 3 ]] || fail "sude-vis: exit $rc, want 3 via visible fallback: $(cat "$T/err")"
+echo "ok: recent-unwrapped error -> falls back to visible, stall still fires"
+
+# ── agent gone: cleaned mid-wait -> fast exit 3, no blind stall ─────────────
+run sude-gone FAKE_DELAY=0 FAKE_GONE=1 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "sude-gone: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'no longer exists' "$T/err" || fail "sude-gone: no gone reason: $(cat "$T/err")"
+echo "ok: agent_not_found -> exit 3 agent gone"
+
+# ── status line carries elapsed/status/context/last/diff ─────────────────────
+run sude-stat FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=1 \
+  FAKE_PANE='Thinking...
+▸ bash cargo test
+── ⠧ Working ──
+👾 SWE-2 · max · ━── 37% ·' PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "sude-stat: exit $rc, want 3"
+grep -q 'elapsed=[0-9]' "$T/err" || fail "sude-stat: no elapsed"
+grep -q 'status=working' "$T/err" || fail "sude-stat: no status"
+grep -q 'ctx=37%' "$T/err" || fail "sude-stat: ctx not parsed: $(cat "$T/err")"
+grep -q 'bash cargo test' "$T/err" || fail "sude-stat: no last tool: $(cat "$T/err")"
+echo "ok: WATCHDOG line has elapsed/status/ctx/last-tool"
+
+# ── heartbeat line on stderr while waiting ──────────────────────────────────
+run sude-hb FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_HEARTBEAT_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=3
+[[ $rc -eq 4 ]] || fail "sude-hb: exit $rc, want 4"
+grep -q 'WATCHDOG heartbeat' "$T/err" || fail "sude-hb: no heartbeat line: $(cat "$T/err")"
+echo "ok: heartbeat prints elapsed/status while waiting"
+
+# ── Lead exemption: <slug>-lead idle on a live pipeline is waiting, not dead ──
+# pipeline.sh writes runs/pipeline-<task>.state with finished=0 + pipeline_pid
+# while running; a <name>-lead agent idle+static beside it is suppressing both
+# exit-3 paths (idle and stall) — budget/cap still bound the wait.
+sleep 300 & live_pid=$!
+true & dead_pid=$!; wait $dead_pid 2>/dev/null || true
+pipe_state() { printf 'finished=%s\npipeline_pid=%s\n' "$1" "$2" \
+  > "$T/home/quaqua/runs/pipeline-isl.state"; }
+
+pipe_state 0 "$live_pid"
+run isl-lead FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_STALL_SEC=1 \
+  PROMPT_WORKER_BUDGET_SEC=4 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "isl-lead: exit $rc, want 4 (live pipeline = waiting): $(cat "$T/err")"
+! grep -q 'exit=3' "$T/err" || fail "isl-lead: exit 3 fired on a waiting Lead: $(cat "$T/err")"
+echo "ok: -lead + live pipeline -> idle+stall exit 3 suppressed, exit 4 at budget"
+
+# a finished pipeline state does not protect the Lead
+pipe_state 1 "$live_pid"
+run isl-lead FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "isl-lead finished: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'agent idle' "$T/err" || fail "isl-lead finished: no idle reason: $(cat "$T/err")"
+echo "ok: -lead + finished=1 pipeline -> idle exit 3 as usual"
+
+# a paused pipeline (dead pid, e.g. plan-ready stop) is the Lead's turn: normal watchdog
+pipe_state 0 "$dead_pid"
+run isl-lead FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "isl-lead paused: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'agent idle' "$T/err" || fail "isl-lead paused: no idle reason: $(cat "$T/err")"
+echo "ok: -lead + dead pipeline pid -> idle exit 3 as usual"
+
+# the exemption is only for *-lead agents: a plain worker beside the same live
+# pipeline still gets the fast idle exit
+pipe_state 0 "$live_pid"
+run sude-isl FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "sude-isl: exit $rc, want 3 (exemption is *-lead only): $(cat "$T/err")"
+echo "ok: non-lead worker with live pipeline -> idle exit 3 as usual"
+kill "$live_pid" 2>/dev/null || true; rm -f "$T/home/quaqua/runs/pipeline-isl.state"
+
+echo "PASS"
