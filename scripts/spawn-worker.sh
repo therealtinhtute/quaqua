@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|tieunhi|sude|ni|suhuynh|truonglao|bacdau|quansu> <repo-path>
+# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu> <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — spawn-lead.sh <slug>-lead)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
@@ -26,7 +26,7 @@ if [[ ${base+x} && ( -z $base || $base == -* ) ]]; then usage; fi
 if ((${#pos[@]} < 3)); then usage; fi
 name=${pos[0]} kind=${pos[1]} repo=$(realpath "${pos[2]}")
 case $kind in
-  tieude|tieunhi|sude|ni|suhuynh|truonglao|bacdau|quansu) ;;
+  tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu) ;;
   *) sed -n '2p' "$0" >&2; exit 1 ;;
 esac
 if [[ ! $name =~ ^$kind-[abcdefghijklmnopqrstuvwxyz0123456789-]+$ ]] || (( ${#name} > 20 )) \
@@ -65,7 +65,7 @@ count_owner_slots() {
       live_workers+=("$a_name")
     done < <(jq -r '.result.agents[]?
       | select((.agent_status // "") != "dead")
-      | select((.name // "") | test("^(tieude|tieunhi|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not))
+      | select((.name // "") | test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not))
       | .name' <<<"$agents" 2>/dev/null || true)
   fi
 
@@ -175,11 +175,11 @@ pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
 spawn_fail() { herdr pane close "$pane" >/dev/null 2>&1 || true; exit "${1:-1}"; }
 
 case $kind in
-  tieude|sude|tieunhi)
+  tieude|sude|detu)
     case $kind in
       tieude) args=(--model devin/deepseek-v4.1-flash --thinking max) ;;
       sude) args=(--model devin/swe-2 --thinking max) ;;
-      tieunhi) args=(--model antigravity/gemini-3.8-flash --thinking high) ;;
+      detu) args=(--model antigravity/gemini-3.8-flash --thinking high) ;;
     esac
     herdr agent start "$name" --kind pi --pane "$pane" --timeout 60000 -- "${args[@]}" --append-system-prompt "$rf" >/dev/null || spawn_fail ;;
   ni|suhuynh|truonglao)

@@ -4,7 +4,7 @@
 # The anchor is the caller's pane: the CoS, or a project orchestrator. Workers
 # are the agents in the anchor's tab plus the agents in the group's tab (the
 # 2-4 worker tab, label --tab, default "workers") and its scratch tab whose
-# registered name matches the worker pattern <kind>- (tieude, tieunhi, sude,
+# registered name matches the worker pattern <kind>- (tieude, detu, sude,
 # ni, suhuynh, truonglao, bacdau, quansu), excluding *-lead names (a project
 # Lead, <slug>-lead, is never a worker); agents in any other tab — another
 # orchestrator's workers, the CoS tab — and unnamed or non-worker agents are
@@ -106,7 +106,7 @@ gather_state() {  # gather_state <workers-tab-label> <only-csv>
       (try (capture(":p(?<s>[0-9A-Za-z]+)$").s) catch "") as $s
       | ("123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0" | split("")) as $alpha
       | reduce ($s | split("")[]) as $c (0; . * 36 + (($alpha | index($c)) + 1));
-    def worker_name: test("^(tieude|tieunhi|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not);
+    def worker_name: test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not);
     [ $tabs.result.tabs[]
       | select(.workspace_id == $ws and .tab_id != $atab)
       | select(.label == $label or .label == $scratch)
