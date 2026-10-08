@@ -95,6 +95,14 @@ fi
 # Returns 1 when the agent cannot be observed at all (stall checks skipped;
 # cap/budget still apply).
 status=unknown ctx='?' last_tool='' diffstat='' pane_text='' fp='' watcher_pane=''
+hash_text() {  # GNU first, then BSD/macOS; stdin is read only once
+  if command -v md5sum >/dev/null 2>&1; then
+    md5sum | cut -d' ' -f1
+  else
+    md5 -q
+  fi
+}
+
 observe() {
   status=unknown ctx='?' last_tool='' diffstat='' pane_text='' fp='' watcher_pane=''
   local get='' cwd='' body dh='' short unt
@@ -127,12 +135,12 @@ observe() {
   last_tool=$(grep -E '▸|⏺' <<<"$pane_text" | tail -1 | sed 's/^[[:space:]]*//' | cut -c1-90 || true)
   if [[ -n $cwd ]] && git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
     dh=$( { git -C "$cwd" status --porcelain=v1 2>/dev/null
-           git -C "$cwd" diff HEAD --stat 2>/dev/null; } | md5sum | cut -d' ' -f1)
+           git -C "$cwd" diff HEAD --stat 2>/dev/null; } | hash_text)
     short=$(git -C "$cwd" diff HEAD --shortstat 2>/dev/null || true)
     unt=$(git -C "$cwd" status --porcelain=v1 2>/dev/null | grep -c '^??' || true)
     diffstat=${short:-clean}; [[ $unt -gt 0 ]] && diffstat+=", $unt untracked" || true
   fi
-  fp="$(md5sum <<<"$body" | cut -d' ' -f1)|$dh"
+  fp="$(hash_text <<<"$body")|$dh"
   return 0
 }
 
@@ -170,13 +178,17 @@ watchdog_exit() {  # <code> <reason> — status line on stderr, stdout stays cle
   exit "$code"
 }
 
+report_stat() {  # GNU first, then BSD/macOS: size + mtime
+  stat -c '%s:%Y' "$1" 2>/dev/null || stat -f '%z:%m' "$1" 2>/dev/null
+}
+
 report_ready() {  # -s AND byte-stable across a short window — a partial
   # publish (writer mid-write) is not a complete phase acknowledgement
   [[ -s $out ]] || return 1
   local a b
-  a=$(stat -c '%s:%Y' "$out" 2>/dev/null) || return 1
+  a=$(report_stat "$out") || return 1
   sleep 0.4
-  b=$(stat -c '%s:%Y' "$out" 2>/dev/null) || return 1
+  b=$(report_stat "$out") || return 1
   [[ $a == "$b" ]]
 }
 

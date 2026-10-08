@@ -22,7 +22,7 @@ Source: https://vhlam.com/article/agent-orchestration-multi-agent-slp — roles 
 
 ### 3. Rules diet + naming
 - Remove from `memory/rules.md` rules already enforced by scripts (pane layout, herdr move mechanics, stale 15-min watchdog note); merge duplicates with `rules/_all/`.
-- Rename the role of `scripts/supervisor.sh` to **Auditor** in docs (CoS holds the Supervisor role; anh iu is Principal, outside SLP). Auditor also flags: `runs/pipeline-*.md` `disputed|blocked` with no memory handling line; `clean` pipelines with no matching commit or reviewer `Verdict`.
+- Rename the role of `scripts/auditor.sh` to **Auditor** in docs (CoS holds the Supervisor role; anh iu is Principal, outside SLP). Auditor also flags: `runs/pipeline-*.md` `disputed|blocked` with no memory handling line; `clean` pipelines with no matching commit or reviewer `Verdict`.
 
 ### 4. Brief + small-task shortcut
 - `rules/_all/brief.md` sections: `Goal` / `Constraints` (hard, from anh iu) / `Current design` (may be challenged) / `Unknowns` (+ how to verify) / `Evidence` (what to return). No pre-solving: brief never fixes the cause or the solution.

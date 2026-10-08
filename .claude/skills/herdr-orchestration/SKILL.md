@@ -1,21 +1,23 @@
 ---
 name: herdr-orchestration
-description: Spawn, prompt, monitor, and clean up worker agents through herdr. Use for every delegation — never native subagents.
+description: Herdr command recipes and worker spawn, prompt, monitoring, recovery, and cleanup. Use before every delegation or herdr pane/agent/tab command; never native subagents.
 ---
 
-# herdr orchestration
+# Herdr orchestration
 
-Precondition: `test "${HERDR_ENV:-}" = 1`, else tell anh iu and stop.
+Authority: `AGENTS.md`, `models.md`, and `rules/_all/`; references explain mechanics, not new roles.
+Precondition: `test "${HERDR_ENV:-}" = 1`, else tell anh iu and stop. Never run bare `herdr` (it attaches the TUI). `herdr --help` / `herdr <group>` are the syntax authority.
 
 ## Flow
-1. Pick kind from `models.md`. Max 3 live workers (`herdr agent list`).
-2. `scripts/spawn-worker.sh <name> <kind> <repo>` → prints pane + worktree. **MANDATORY: then `scripts/grid-workers.sh` before any prompt** (rules/_all/fanout-agent-grid.md). It injects `rules/_all/*.md` + `rules/<repo-basename>/*.md` as the worker's system prompt (copy at `runs/<name>.rules.md`); don't repeat those rules in the prompt.
-3. Prompt with objective + constraints + evidence required:
-   `herdr agent prompt <name> "<task>. When done, write summary (changes, test cmd+result, risks) to ~/quaqua/runs/<name>.md; reply only the path." --wait --timeout 1800000`
-4. Read `runs/<name>.md`; re-run its test yourself. Then update memory per AGENTS.md (rewrite card `## Now`, one line in today's `memory/YYYY-MM-DD.md`).
-5. Cleanup right after the run is verified (report read + test re-run passes), no approval needed: `scripts/cleanup-worker.sh <name> <repo>`, then `scripts/grid-workers.sh`. Branch kept; merge/push/branch delete still need approval.
+1. Pick kind from `models.md`. Max 4 task workers per orchestrator; a pipeline counts as 2. Project Leads do not count toward that cap. Query `herdr agent list`, never infer live names from memory.
+2. `scripts/spawn-worker.sh [--base <ref>] <name> <kind> <repo>` → prints pane + worktree. **MANDATORY: then `scripts/grid-workers.sh` before any prompt** (`rules/_all/fanout-agent-grid.md`). It injects `rules/_all/*.md` + `rules/<repo-basename>/*.md` as the worker's system prompt (`runs/<name>.rules.md`); don't repeat those rules in the brief.
+3. Use the five-part brief from `rules/_all/brief.md`; set `PROMPT_WORKER_BUDGET_SEC` to its time budget. Call `scripts/prompt-worker.sh <name> "<brief>"`, never raw `herdr agent prompt` (single authority: wraps `herdr agent prompt --wait`, watchdog, and atomic report delivery). A pipeline-size builder plans before code; its project Lead approves via `pipeline.sh --resume` after the plan-ready pause.
+4. Read the report and re-run its test yourself before reporting completion. Update the project card's `## Now` and today's `memory/YYYY-MM-DD.md` per `AGENTS.md`.
+5. Cleanup immediately after the verified outcome, no extra approval: `scripts/cleanup-worker.sh <name> <repo>`, then `scripts/grid-workers.sh`. Branch kept. Only the project Lead accepts into its integration branch; main merge, push, and branch deletion need the Principal's approval.
 
-Name: `[a-z][a-z0-9_-]{0,31}`, unique, and branch `quaqua/<name>` must not exist yet.
+Worker names: `<kind>-<task>`, ASCII `[a-z0-9-]`, at most 20 characters, never ending `-lead` (`spawn-worker.sh`). A failed startup may reuse its registered worktree; a foreign directory is refused. Lead names: `<slug>-lead`, Herdr's 32-character limit (`spawn-lead.sh`).
 
-## When something goes wrong
-Wait returned `blocked`, `timeout`, `agent_prompt_stalled`, `agent_not_ready`, or state `unknown` → read `references/recovery.md` before any input.
+## References
+- Read `references/operations.md` before manual pane/tab commands, layout recovery, plugin operations, or launcher/environment advice.
+- Read `references/recovery.md` on watchdog exits 2–5, blocked/timeout/stalled/not-ready/unknown state, before any input.
+- Read `references/judgment.md` for neutral assignments, ownership, risk-driven extra review, and acceptance evidence. Independent bounded-task handbacks retain the contract in `PEER.md`.
