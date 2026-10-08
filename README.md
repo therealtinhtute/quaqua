@@ -11,6 +11,8 @@ This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal 
 
 ## Architecture
 
+![SLP architecture](docs/slp.png)
+
 ```
  Principal (owner) — goal, priorities, trade-offs; approves push / merge to main
         │ goal                ▲ digest
@@ -19,7 +21,7 @@ This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal 
         │ small task (<15 min, 1 file, or needs live feedback) ──► one worker, no SLP   (launchd, 2d,
         │ spawn Lead + brief                                                           read-only)
         ▼
- Lead (quaqua-<slug>-orchestrator) — project state, plan approval, acceptance,
+ Lead (<slug>-lead) — project state, plan approval, acceptance,
         │ task brief                   merges into the project integration branch
         ▼
  Peers — build (sude) ⇄ review (quansu, codex read-only), own worktree each
