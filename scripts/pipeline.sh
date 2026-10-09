@@ -64,7 +64,7 @@ iso_timestamp() {  # GNU first; BSD versions without -I still emit ISO 8601
 
 harness_of() {  # worker kind -> harness family (models.md)
   case $1 in
-    tieude|tieunhi|sude)  echo pi ;;
+    tieude|detu|sude)  echo pi ;;
     ni|suhuynh|truonglao) echo claude ;;
     bacdau|quansu)        echo codex ;;
     *) return 1 ;;
@@ -83,7 +83,7 @@ count_owner_slots() {
       live_workers+=("$a_name")
     done < <(jq -r '.result.agents[]?
       | select((.agent_status // "") != "dead")
-      | select((.name // "") | test("^(tieude|tieunhi|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not))
+      | select((.name // "") | test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not))
       | .name' <<<"$agents" 2>/dev/null || true)
   fi
 

@@ -6,7 +6,9 @@
 #   worker until that file exists (poll PROMPT_WORKER_POLL_SEC, default 30).
 #   Exit: 0 runs file (path on stdout) · 1 usage · 2 cap PROMPT_WORKER_MAX_SEC
 #   (7200) · 3 stall (no pane/worktree change for PROMPT_WORKER_STALL_SEC, 600;
-#   or agent idle/done for PROMPT_WORKER_IDLE_SEC, 120) · 4 time budget
+#   or agent idle/done for PROMPT_WORKER_IDLE_SEC, 120; or agent not found /
+#   status unknown / unobservable for PROMPT_WORKER_AGENT_GONE_SEC, 60) ·
+#   4 time budget
 #   PROMPT_WORKER_BUDGET_SEC (2700; one soft nudge at PROMPT_WORKER_NUDGE_PCT,
 #   80%) · 5 agent blocked on a question/permission.
 #   Lead exemption: a <slug>-lead waits on a backgrounded pipeline.sh whose
@@ -51,6 +53,7 @@ elapsed_file="$HOME/quaqua/runs/.$name.elapsed"
 sentinel="$HOME/quaqua/runs/.$name.nudged"
 max=${PROMPT_WORKER_MAX_SEC:-7200}     poll=${PROMPT_WORKER_POLL_SEC:-30}
 stall=${PROMPT_WORKER_STALL_SEC:-600}  idle_sec=${PROMPT_WORKER_IDLE_SEC:-120}
+gone_sec=${PROMPT_WORKER_AGENT_GONE_SEC:-60}
 budget=${PROMPT_WORKER_BUDGET_SEC:-2700}
 nudge_pct=${PROMPT_WORKER_NUDGE_PCT:-80}
 heartbeat=${PROMPT_WORKER_HEARTBEAT_SEC:-300}
@@ -107,12 +110,17 @@ observe() {
   status=unknown ctx='?' last_tool='' diffstat='' pane_text='' fp='' watcher_pane=''
   local get='' cwd='' body dh='' short unt
   get=$(herdr agent get "$name" 2>/dev/null) || true
+  # herdr reports errors (agent_not_found included) on stderr, not stdout —
+  # without this a dead agent stayed 'unknown' and unobservable until the
+  # budget fired (truonglao-pr1: quiet=1441s, exit 4 at the 1800s budget)
+  [[ -z $get ]] && get=$(herdr agent get "$name" 2>&1 >/dev/null) || true
   if [[ -n $get ]]; then
     if jq -e '.result.agent' <<<"$get" >/dev/null 2>&1; then
       status=$(jq -r '.result.agent.agent_status // "unknown"' <<<"$get" 2>/dev/null || echo unknown)
       cwd=$(jq -r '.result.agent.cwd // empty' <<<"$get" 2>/dev/null || true)
       watcher_pane=$(jq -r '.result.agent.pane_id // empty' <<<"$get" 2>/dev/null || true)
-    elif jq -e '.error.code == "agent_not_found"' <<<"$get" >/dev/null 2>&1; then
+    elif jq -e '.error.code == "agent_not_found"' <<<"$get" >/dev/null 2>&1 \
+      || [[ $get == *agent_not_found* ]]; then
       status=gone
     fi
   fi
@@ -192,14 +200,22 @@ report_ready() {  # -s AND byte-stable across a short window — a partial
   [[ $a == "$b" ]]
 }
 
-prev_fp='' change_ts=$start idle_since=0 last_hb=$start nudged=0 blind_warned=0
+prev_fp='' change_ts=$start idle_since=0 last_hb=$start nudged=0 blind_warned=0 gone_since=0
 [[ -f $sentinel ]] && nudged=1
 echo "waiting for $out (poll ${poll}s, stall ${stall}s, idle ${idle_sec}s, budget ${budget}s, cap ${max}s)" >&2
 while ! report_ready; do
   now=$(date +%s)
   (( now >= deadline )) && watchdog_exit 2 "error: no $out after ${max}s"
   if observe; then
-    [[ $status == gone ]] && watchdog_exit 3 "agent no longer exists (cleaned up or crashed)"
+    # gone clock: not_found, or status unknown with nothing on the pane —
+    # must hold for AGENT_GONE_SEC so a transient blip never kills the wait
+    if [[ $status == gone || ( $status == unknown && -z $pane_text ) ]]; then
+      (( gone_since )) || gone_since=$now
+      (( now - gone_since >= gone_sec )) && \
+        watchdog_exit 3 "agent gone: status=$status for $(( now - gone_since ))s"
+    else
+      gone_since=0
+    fi
     [[ $status == blocked ]] && watchdog_exit 5 "agent blocked (question/permission pending)"
     question_seen && watchdog_exit 5 "pane shows a pending question/permission prompt"
     (( now >= budget_deadline )) && watchdog_exit 4 "time budget ${budget}s exceeded"
@@ -220,7 +236,12 @@ while ! report_ready; do
       watchdog_exit 3 "stall: no pane/worktree change for $(( now - change_ts ))s"
     fi
   else
-    (( blind_warned )) || { printf 'WATCHDOG observe failed (no agent get/read); only cap/budget apply\n' >&2; blind_warned=1; }
+    # nothing observable at all — same gone clock, or a dead agent waits for
+    # the full budget again; cap/budget still apply
+    (( gone_since )) || gone_since=$now
+    (( now - gone_since >= gone_sec )) && \
+      watchdog_exit 3 "agent gone: unobservable (no get/read) for $(( now - gone_since ))s"
+    (( blind_warned )) || { printf 'WATCHDOG observe failed (no agent get/read); only cap/budget/agent-gone apply\n' >&2; blind_warned=1; }
     (( now >= budget_deadline )) && watchdog_exit 4 "time budget ${budget}s exceeded (agent unobservable)"
   fi
   if (( ! nudged && now >= nudge_at )); then

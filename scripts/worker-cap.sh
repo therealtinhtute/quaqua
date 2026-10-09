@@ -21,7 +21,7 @@ if jq -e . >/dev/null 2>&1 <<<"$agents"; then
     live_workers+=("$a_name")
   done < <(jq -r '.result.agents[]?
     | select((.agent_status // "") != "dead")
-    | select((.name // "") | test("^(tieude|tieunhi|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not))
+    | select((.name // "") | test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not))
     | .name' <<<"$agents" 2>/dev/null || true)
 fi
 
