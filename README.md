@@ -54,6 +54,7 @@ Decision lock: `spec-raw/quaqua-slp-slim-lock.md`.
 | `.claude/skills/herdr-orchestration/` | Worker flow + consolidated command, recovery, and assignment/acceptance references |
 | `scripts/auditor.sh` | Auditor: read-only drift + pipeline-run audit → `reports/audit-*.md` |
 | `scripts/install-auditor.sh`, `systemd/`, `launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
+| `scripts/commit-memory.sh` | CoS notes commit on the current branch: stages only `memory/ projects/ raw/`, refuses foreign staged paths, never pushes or amends |
 | `codex-config.toml` | Codex config used by codex workers |
 | `USER.example.md` | Template for the per-workspace `USER.md` |
 | `SETUP-PROMPT.md` | Original prompt used to bootstrap this setup |
