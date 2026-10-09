@@ -40,8 +40,15 @@ cat > "$T/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
 case " $* " in
+  *"symbolic-ref"*"refs/remotes/origin/HEAD"*)
+    [[ -n ${GIT_ORIGIN_HEAD:-} ]] || exit 1
+    printf '%s\n' "$GIT_ORIGIN_HEAD"; exit 0 ;;
+  *"rev-parse --verify"*"refs/remotes/origin/"*)
+    exit "${GIT_ORIGIN_HEAD_LOCAL:-1}" ;;
+  *"rev-parse --verify"*"refs/heads/develop"*)  exit "${GIT_DEVELOP_MISSING:-0}" ;;
   *"rev-parse --verify"*"refs/heads/quaqua/"*) exit "${GIT_INTEG_MISSING:-0}" ;;
   *"rev-parse --verify"*"refs/heads/main"*)     exit "${GIT_MAIN_MISSING:-0}" ;;
+  *"rev-parse --verify"*"refs/heads/master"*)   exit "${GIT_MASTER_MISSING:-0}" ;;
   *" branch quaqua/"*)                          exit "${GIT_BRANCH_FAIL:-0}" ;;
 esac
 exit 0
@@ -97,9 +104,12 @@ grep -q 'r1 stay in the project' "$T/runs/coucou-island-lead.rules.md" \
   || fail "happy: rules file missing rules/_all content"
 grep -q 'agent prompt coucou-island-lead' "$T/calls" \
   || fail "happy: no brief prompt: $(cat "$T/calls")"
-for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'pipeline.sh' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ'; do
+for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'pipeline.sh' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ' 'reaches you through the CoS'; do
   grep -qF "$frag" "$T/calls" || fail "happy: brief missing '$frag'"
 done
+! grep -qF 'record steering from anh iu or CoS' "$T/calls" \
+  || fail "happy: brief still routes steering from anh iu around the CoS"
+echo "ok: brief -> redirects reach the Lead through the CoS only"
 # integration-branch check happens before the pane split; no worktree is made
 [[ $(ln 'agent get') -lt $(ln 'rev-parse --verify') ]] \
   && [[ $(ln 'rev-parse --verify') -lt $(ln 'pane split') ]] \
@@ -165,7 +175,8 @@ grep -q -- '--model claude-haiku-4 --effort low' "$T/calls" \
   || fail "env: overrides not passed: $(cat "$T/calls")"
 echo "ok: LEAD_MODEL/LEAD_EFFORT override the defaults"
 
-# ── integration branch: created from main when missing, before side effects ─
+# ── integration branch: created from the default branch before side effects ─
+# no origin/HEAD, main present -> main
 spawn coucou-island GIT_INTEG_MISSING=1
 [[ $rc -eq 0 ]] || fail "integ: exit $rc, want 0: $(cat "$T/err")"
 grep -qF "git -C $HOME/Lab/coucou-island branch quaqua/coucou-island-integ main" "$T/calls" \
@@ -174,12 +185,38 @@ grep -qF "git -C $HOME/Lab/coucou-island branch quaqua/coucou-island-integ main"
   || fail "integ: branch creation must precede the pane split: $(cat "$T/calls")"
 echo "ok: missing quaqua/<slug>-integ -> created from main before the split"
 
-# the project repo has no main -> refuse before any pane/agent side effect
+# master-only repo (no origin/HEAD, no main) -> master
 spawn coucou-island GIT_INTEG_MISSING=1 GIT_MAIN_MISSING=1
-[[ $rc -eq 1 ]] || fail "no main: exit $rc, want 1: $(cat "$T/err")"
-grep -q "no 'main' branch" "$T/err" || fail "no main: unclear message: $(cat "$T/err")"
-! grep -q 'pane split' "$T/calls" || fail "no main: pane split despite failure"
-echo "ok: no main in the project repo -> refused before side effects"
+[[ $rc -eq 0 ]] || fail "master: exit $rc, want 0: $(cat "$T/err")"
+grep -qF "git -C $HOME/Lab/coucou-island branch quaqua/coucou-island-integ master" "$T/calls" \
+  || fail "master: branch not created from master: $(cat "$T/calls")"
+echo "ok: master-only repo -> integration branch created from master"
+
+# origin/HEAD wins over an existing main
+expect_origin_head() {  # <label> <base-arg> [VAR=val...]
+  local label=$1 basearg=$2; shift 2
+  spawn coucou-island GIT_INTEG_MISSING=1 GIT_ORIGIN_HEAD_LOCAL=0 "$@"
+  [[ $rc -eq 0 ]] || fail "$label: exit $rc, want 0: $(cat "$T/err")"
+  grep -qF "git -C $HOME/Lab/coucou-island branch quaqua/coucou-island-integ $basearg" "$T/calls" \
+    || fail "$label: branch not created from $basearg: $(cat "$T/calls")"
+  echo "ok: $label -> integration branch created from $basearg"
+}
+expect_origin_head 'origin/HEAD set' 'develop' GIT_ORIGIN_HEAD=origin/develop
+# origin/HEAD names a branch with no local ref -> its remote-tracking ref
+expect_origin_head 'origin/HEAD without a local ref' 'origin/develop' \
+  GIT_ORIGIN_HEAD=origin/develop GIT_DEVELOP_MISSING=1
+# origin/HEAD set but that branch is gone everywhere -> fall back to main
+expect_origin_head 'origin/HEAD stale' 'main' \
+  GIT_ORIGIN_HEAD=origin/develop GIT_DEVELOP_MISSING=1 GIT_ORIGIN_HEAD_LOCAL=1
+
+echo "ok: origin/HEAD set -> integration branch created from it (precedence over main)"
+
+# no default branch at all -> refuse before any pane/agent side effect
+spawn coucou-island GIT_INTEG_MISSING=1 GIT_MAIN_MISSING=1 GIT_MASTER_MISSING=1
+[[ $rc -eq 1 ]] || fail "no default: exit $rc, want 1: $(cat "$T/err")"
+grep -q 'no default branch' "$T/err" || fail "no default: unclear message: $(cat "$T/err")"
+! grep -q 'pane split' "$T/calls" || fail "no default: pane split despite failure"
+echo "ok: no default branch in the project repo -> refused before side effects"
 
 # ── a stale owner cell does not block respawn when no agent is registered ───
 spawn mono-desk
@@ -187,5 +224,20 @@ spawn mono-desk
 grep -q 'agent start mono-desk-lead' "$T/calls" \
   || fail "stale owner: start not called: $(cat "$T/calls")"
 echo "ok: stale owner cell -> respawn allowed (agent registry is the truth)"
+
+# ── the INDEX '~/repo' cell expands against HOME verbatim ───────────────────
+# bash >= 5.2 patsub_replacement gives '&' in an unquoted replacement the
+# meaning "the matched text", so a HOME containing '&' used to corrupt the
+# path silently ("~/x" -> "<HOME with ~ for &>/x"). The replacement must be
+# quoted; HOME is not guaranteed to be a plain path.
+amp="$T/home&co"
+mkdir -p "$amp"
+spawn coucou-island HOME="$amp"
+[[ $rc -eq 0 ]] || fail "tilde: exit $rc, want 0: $(cat "$T/err")"
+grep -qF "git -C $amp/Lab/coucou-island rev-parse" "$T/calls" \
+  || fail "tilde: '~' not expanded to a literal HOME path: $(grep 'git -C' "$T/calls")"
+! grep -qF '~' <<<"$(grep 'git -C' "$T/calls")" \
+  || fail "tilde: a '~' survived expansion in a git path: $(grep 'git -C' "$T/calls")"
+echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corruption)"
 
 echo "PASS"

@@ -8,8 +8,9 @@
 #   appended system prompt (the spawn-worker convention); the first prompt
 #   is a short lead brief pointing at AGENTS.md, projects/<slug>.md and
 #   scripts/pipeline.sh. The project integration branch quaqua/<slug>-integ
-#   is created from the project repo's main when missing (Peers branch from
-#   it --base and are merged back into it at acceptance). Refuses when
+#   is created from the project repo's default branch when missing —
+#   origin/HEAD if set, else main, else master (Peers branch from it --base
+#   and are merged back into it at acceptance). Refuses when
 #   <slug> is unknown (no row in projects/INDEX.md or no projects/<slug>.md
 #   card), when its Lead is already registered with herdr, or when
 #   <slug>-lead would exceed herdr's 32-char agent-name limit; on success
@@ -53,9 +54,10 @@ fi
 
 # Integration branch convention (AGENTS.md '## Roles (SLP)'): Peers branch
 # from quaqua/<slug>-integ (--base) and merge back into it at acceptance.
-# Create it from the project repo's main when missing — before any pane/agent
-# side effect, so a repo problem fails fast. The INDEX repo cell may carry a
-# leading ~/ which git -C does not expand.
+# Create it from the project repo's default branch when missing — origin/HEAD
+# if set, else main, else master — before any pane/agent side effect, so a repo
+# problem fails fast. The INDEX repo cell may carry a leading ~/ which git -C
+# does not expand.
 repo=$(awk -F'|' -v slug="$slug" '
   /^[[:space:]]*\|/ {
     s=$2; r=$3
@@ -65,9 +67,23 @@ repo=$(awk -F'|' -v slug="$slug" '
 repo=${repo/#\~/"$HOME"}
 integ="quaqua/$slug-integ"
 if ! git -C "$repo" rev-parse --verify --quiet "refs/heads/$integ" >/dev/null 2>&1; then
-  git -C "$repo" rev-parse --verify --quiet refs/heads/main >/dev/null 2>&1 \
-    || die "cannot create $integ: $repo has no 'main' branch"
-  git -C "$repo" branch "$integ" main >/dev/null \
+  # the repo's default branch: origin/HEAD if set (local ref, else its
+  # remote-tracking ref), else main, else master
+  base=""
+  origin_head=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||') || true
+  for cand in "$origin_head" main master; do
+    [[ -n $cand ]] || continue
+    if git -C "$repo" rev-parse --verify --quiet "refs/heads/$cand" >/dev/null 2>&1; then
+      base=$cand; break
+    fi
+    if [[ $cand == "$origin_head" ]] \
+        && git -C "$repo" rev-parse --verify --quiet "refs/remotes/origin/$cand" >/dev/null 2>&1; then
+      base="origin/$cand"; break
+    fi
+  done
+  [[ -n $base ]] \
+    || die "cannot create $integ: $repo has no default branch (no origin/HEAD, main, or master)"
+  git -C "$repo" branch "$integ" "$base" >/dev/null \
     || die "cannot create $integ in $repo"
 fi
 
@@ -97,8 +113,8 @@ rm -f "$tmp"
 herdr agent prompt "$name" "You are the Lead for project '$slug' (QUAQUA_OWNER=$name) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).
 - Own the project card projects/$slug.md: read it now, then keep its '## Now' at the current truth after every outcome.
 - Pipeline-size work runs through scripts/pipeline.sh (usage in its header). Peers: scripts/spawn-worker.sh + scripts/grid-workers.sh with GRID_TAB=$slug-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.
-- You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch $integ (created from main if it was missing — spawn Peers --base $integ so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.
-- Resolve any '## Challenge' in runs/<worker>.md before acceptance; record steering from anh iu or CoS in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.
+- You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch $integ (created from the repo's default branch if it was missing — spawn Peers --base $integ so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.
+- Resolve any '## Challenge' in runs/<worker>.md before acceptance; every redirect (from anh iu, the Auditor, or any report) reaches you through the CoS — record CoS steering in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.
 Reply 'ready' once the card is read." >/dev/null
 
 echo "lead=$name slug=$slug pane=$pane"
