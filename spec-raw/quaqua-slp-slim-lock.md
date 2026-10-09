@@ -31,7 +31,7 @@ Source: https://vhlam.com/article/agent-orchestration-multi-agent-slp — roles 
 ### 5. SLP roles (added 2026-10-08, sources: vhlam, Addy Osmani Code Agent Orchestra, Anthropic/Cognition)
 | Role | Who | Owns | Authority |
 |---|---|---|---|
-| Principal | anh iu | goal, priorities, trade-offs | approve push / merge main; may steer any agent, steering recorded in Lead state |
+| Principal | anh iu | goal, priorities, trade-offs | talks only to the CoS; approve push / merge main |
 | Supervisor | CoS Quả Quả | intake, sizing, brief, cross-project view (cap, CPU/benchmark contention), digest | spawn Lead; verify Lead result (re-run test); escalate goal/cost changes to anh iu |
 | Lead | `<slug>-lead` (spawned by CoS via `scripts/spawn-lead.sh <slug>`) | project state, ownership, dependencies, evidence review | run `pipeline.sh`, spawn ≤4 Peers, approve Peer plans, **merge into project integration branch** (acceptance) |
 | Peer | task workers (sude build, quansu review, …) | one task in own worktree | commit on own branch; may challenge premises with evidence |
@@ -40,7 +40,7 @@ Source: https://vhlam.com/article/agent-orchestration-multi-agent-slp — roles 
 - Challenge channel: Peer writes `## Challenge` (premise + evidence) in `runs/<name>.md`; Lead must resolve it before acceptance. Right to challenge, not duty.
 - Plan approval: pipeline-size tasks → builder writes a short plan first; Lead approves before code.
 - Kill criteria: same error ≥3 iterations → kill, spawn a fresh worker (alongside the watchdog).
-- Steering from anh iu or CoS directly to a Peer must be recorded in Lead state (`runs/pipeline-<task>.md`).
+- Superseded by AGENTS.md: every redirect flows through the CoS; anh iu never steers a Peer directly.
 
 ## Amendments (2026-10-08, post-review)
 - Callers corrected to project Leads only (was "CoS + project orchestrators") — AGENTS.md forbids CoS leading pipeline-size work.
