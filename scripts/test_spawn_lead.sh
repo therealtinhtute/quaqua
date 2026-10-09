@@ -104,9 +104,12 @@ grep -q 'r1 stay in the project' "$T/runs/coucou-island-lead.rules.md" \
   || fail "happy: rules file missing rules/_all content"
 grep -q 'agent prompt coucou-island-lead' "$T/calls" \
   || fail "happy: no brief prompt: $(cat "$T/calls")"
-for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'pipeline.sh' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ'; do
+for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'pipeline.sh' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ' 'reaches you through the CoS'; do
   grep -qF "$frag" "$T/calls" || fail "happy: brief missing '$frag'"
 done
+! grep -qF 'record steering from anh iu or CoS' "$T/calls" \
+  || fail "happy: brief still routes steering from anh iu around the CoS"
+echo "ok: brief -> redirects reach the Lead through the CoS only"
 # integration-branch check happens before the pane split; no worktree is made
 [[ $(ln 'agent get') -lt $(ln 'rev-parse --verify') ]] \
   && [[ $(ln 'rev-parse --verify') -lt $(ln 'pane split') ]] \
@@ -221,5 +224,20 @@ spawn mono-desk
 grep -q 'agent start mono-desk-lead' "$T/calls" \
   || fail "stale owner: start not called: $(cat "$T/calls")"
 echo "ok: stale owner cell -> respawn allowed (agent registry is the truth)"
+
+# ── the INDEX '~/repo' cell expands against HOME verbatim ───────────────────
+# bash >= 5.2 patsub_replacement gives '&' in an unquoted replacement the
+# meaning "the matched text", so a HOME containing '&' used to corrupt the
+# path silently ("~/x" -> "<HOME with ~ for &>/x"). The replacement must be
+# quoted; HOME is not guaranteed to be a plain path.
+amp="$T/home&co"
+mkdir -p "$amp"
+spawn coucou-island HOME="$amp"
+[[ $rc -eq 0 ]] || fail "tilde: exit $rc, want 0: $(cat "$T/err")"
+grep -qF "git -C $amp/Lab/coucou-island rev-parse" "$T/calls" \
+  || fail "tilde: '~' not expanded to a literal HOME path: $(grep 'git -C' "$T/calls")"
+! grep -qF '~' <<<"$(grep 'git -C' "$T/calls")" \
+  || fail "tilde: a '~' survived expansion in a git path: $(grep 'git -C' "$T/calls")"
+echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corruption)"
 
 echo "PASS"
