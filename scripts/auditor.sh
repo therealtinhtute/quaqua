@@ -95,7 +95,7 @@ if jq -e . >/dev/null 2>&1 <<<"$agents"; then
     if [[ ! -f "$root/runs/$w.srt.json" ]]; then
       flag "live worker '$w': not started through sandbox wrapper (missing runs/$w.srt.json)"
     fi
-  done < <(jq -r '.result.agents[]? | select((.name // "") | test("^(tieude|tieunhi|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not)) | .name' <<<"$agents")
+  done < <(jq -r '.result.agents[]? | select((.name // "") | test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not)) | .name' <<<"$agents")
 fi
 
 prompt=$(cat <<'EOF'

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Sandbox test for prompt-worker.sh watchdog: --resume mode, stall detection
-# (exit 3), idle-without-runfile (exit 3), time budget + one-shot nudge
+# (exit 3), idle-without-runfile (exit 3), agent gone/unknown for
+# AGENT_GONE_SEC (exit 3), time budget + one-shot nudge
 # (exit 4), blocked/question (exit 5). herdr is stubbed on PATH: it logs calls,
 # answers agent get/read/prompt from FAKE_* vars. HOME is a temp dir. No real
 # herdr, agent, or home touched.
@@ -19,14 +20,28 @@ mkdir -p "$T/bin" "$T/home/quaqua/runs"
 cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
+gone_now() {  # is this agent gone this call? (FAKE_GONE always; _AFTER n> ; _AT once)
+  n=$(grep -c "^herdr agent get" "$CALLS" 2>/dev/null || true)
+  [ "${FAKE_GONE:-0}" = 1 ] && return 0
+  [ -n "${FAKE_GONE_AFTER:-}" ] && [ "$n" -gt "$FAKE_GONE_AFTER" ] && return 0
+  [ -n "${FAKE_GONE_AT:-}" ] && [ "$n" -eq "$FAKE_GONE_AT" ] && return 0
+  return 1
+}
 case "${1:-} ${2:-}" in
   "agent get")
-    if [ "${FAKE_GONE:-0}" = 1 ]; then
-      printf '{"error":{"code":"agent_not_found"}}\n'; exit 1
+    # real herdr prints error JSON on stderr, not stdout — keep it that way so
+    # the watcher's stderr capture is what is actually tested
+    gcalls=$(grep -c '^herdr agent get' "$CALLS" 2>/dev/null || true)
+    if [ -n "${FAKE_BLANK_AT:-}" ] && [ "$gcalls" -eq "$FAKE_BLANK_AT" ]; then
+      exit 1   # silent failure once -> status=unknown for a single poll
+    fi
+    if gone_now; then
+      printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3" >&2; exit 1
     fi
     printf '{"result":{"agent":{"agent_status":"%s","cwd":"%s","pane_id":"%s"}}}\n' \
       "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" "${FAKE_WATCHER_PANE:-%1}" ;;
   "agent read")
+    gone_now && { printf '{"error":{"code":"agent_not_found"}}\n' >&2; exit 1; }
     if [ "${FAKE_READ_ERR:-0}" = 1 ] && [[ $* == *recent-unwrapped* ]]; then
       printf '{"error":{"code":"agent_not_idle"}}\n'; exit 1
     fi
@@ -160,10 +175,38 @@ echo "ok: recent-unwrapped error -> falls back to visible, stall still fires"
 
 # ── agent gone: cleaned mid-wait -> fast exit 3, no blind stall ─────────────
 run sude-gone FAKE_DELAY=0 FAKE_GONE=1 PROMPT_WORKER_POLL_SEC=1 \
-  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+  PROMPT_WORKER_AGENT_GONE_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=9999
 [[ $rc -eq 3 ]] || fail "sude-gone: exit $rc, want 3: $(cat "$T/err")"
-grep -q 'no longer exists' "$T/err" || fail "sude-gone: no gone reason: $(cat "$T/err")"
-echo "ok: agent_not_found -> exit 3 agent gone"
+grep -q 'agent gone' "$T/err" || fail "sude-gone: no gone reason: $(cat "$T/err")"
+echo "ok: agent_not_found (stderr) -> exit 3 agent gone"
+
+# ── agent vanishes mid-wait: healthy polls, then not_found -> exit 3 within ──
+#    AGENT_GONE_SEC instead of the budget (truonglao-pr1 regression)
+run sude-vanish FAKE_DELAY=0 FAKE_GONE_AFTER=2 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_AGENT_GONE_SEC=2 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 3 ]] || fail "sude-vanish: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'agent gone' "$T/err" || fail "sude-vanish: no gone reason: $(cat "$T/err")"
+grep -qE 'elapsed=[0-9]s ' "$T/err" \
+  || fail "sude-vanish: took too long — gone clock did not fire fast: $(cat "$T/err")"
+echo "ok: agent vanishes mid-wait -> exit 3 within AGENT_GONE_SEC"
+
+# ── transient agent_not_found once, then recovers -> no exit 3 ──────────────
+run sude-blink FAKE_DELAY=5 FAKE_GONE_AT=2 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_AGENT_GONE_SEC=3 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=30 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 0 ]] || fail "sude-blink: exit $rc, want 0 (transient blip must not trip agent-gone): $(cat "$T/err")"
+! grep -q 'exit=3' "$T/err" || fail "sude-blink: exit 3 on a transient blip: $(cat "$T/err")"
+echo "ok: single agent_not_found then recovery -> no exit 3"
+
+# ── transient silent get failure once (status=unknown) then recovers -> ok ──
+run sude-unk FAKE_DELAY=5 FAKE_BLANK_AT=2 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_AGENT_GONE_SEC=3 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=30 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 0 ]] || fail "sude-unk: exit $rc, want 0 (one unknown poll must not trip agent-gone): $(cat "$T/err")"
+! grep -q 'exit=3' "$T/err" || fail "sude-unk: exit 3 on a transient unknown: $(cat "$T/err")"
+echo "ok: single unknown-status poll then recovery -> no exit 3"
 
 # ── status line carries elapsed/status/context/last/diff ─────────────────────
 run sude-stat FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=1 \

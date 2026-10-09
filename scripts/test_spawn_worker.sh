@@ -91,12 +91,12 @@ expect_accept tieude-spawnguard tieude "17 chars"
 expect_accept tieude-abcdefghijklm tieude "20 chars (boundary)"
 expect_accept sude-leadname sude "leadname suffix is not -lead"
 
-# ── tieunhi model must be provider-qualified (bare name -> venice, no key) ────
-spawn tieunhi-lookup tieunhi
-[[ $rc -eq 0 ]] || fail "tieunhi: exit $rc, want 0: $(cat "$T/err")"
+# ── detu model must be provider-qualified (bare name -> venice, no key) ────
+spawn detu-lookup detu
+[[ $rc -eq 0 ]] || fail "detu: exit $rc, want 0: $(cat "$T/err")"
 grep -q -- '--kind pi .*--model antigravity/gemini-3.8-flash' "$T/calls" \
-  || fail "tieunhi: model not antigravity/gemini-3.8-flash: $(cat "$T/calls")"
-echo "ok: tieunhi -> --model antigravity/gemini-3.8-flash"
+  || fail "detu: model not antigravity/gemini-3.8-flash: $(cat "$T/calls")"
+echo "ok: detu -> --model antigravity/gemini-3.8-flash"
 
 # ── grid hook: a successful spawn arranges the new worker's pane ─────────────
 spawn tieude-gridhook tieude
