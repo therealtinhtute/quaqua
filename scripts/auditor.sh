@@ -8,10 +8,12 @@
 #   Before the prompt it runs cheap deterministic pre-checks on pipeline runs
 #   (runs/pipeline-*.md, spec-raw/quaqua-slp-slim-lock.md §3): unhandled
 #   disputed|blocked, clean with an unresolvable commit or no reviewer
-#   'Verdict:', and unresolved '## Challenge' sections. It also flags any
-#   live task worker in herdr not started through the sandbox wrapper
-#   (missing runs/<name>.srt.json). Findings are embedded in the prompt for
-#   the agent to verify, correct, and extend.
+#   'Verdict:' (on the last review-round line or in the reviewer runs file it
+#   names), and unresolved '## Challenge' sections. It also flags any live
+#   task worker in herdr not started through the sandbox wrapper (missing
+#   runs/<name>.srt.json) — and reports a failing `herdr agent list` instead
+#   of silently finding nothing. Findings are embedded in the prompt for the
+#   agent to verify, correct, and extend.
 #   Env: AUDITOR_MODEL overrides the model (default gpt-6.1-sol, the quansu
 #   tier); AUDITOR_OUT overrides the output path (tests).
 set -euo pipefail
@@ -20,7 +22,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 out=${AUDITOR_OUT:-${SUPERVISOR_OUT:-"$root/reports/audit-$(date +%F-%H).md"}}
 mkdir -p "$(dirname "$out")"
 log=$(mktemp)
-trap 'rm -f "$log"' EXIT
+herdr_err=$(mktemp)
+trap 'rm -f "$log" "$herdr_err"' EXIT
 
 # ── deterministic pipeline-run pre-checks ───────────────────────────────────
 # Findings are advisory: the agent re-verifies them against the repo. The
@@ -54,7 +57,7 @@ for f in "$root"/runs/pipeline-*.md; do
       # pipelines build in their project repo, recorded in the report's
       # '- repo:' header — resolve the commit THERE, not in this checkout
       prepo=$(sed -nE 's/^- task: [^ ]+ · repo: (.+)$/\1/p' "$f" | head -1)
-      prepo=${prepo/#\~/$HOME}; prepo=${prepo:-$root}
+      prepo=${prepo/#\~/"$HOME"}; prepo=${prepo:-$root}
       if [[ ! -d $prepo ]]; then
         flag "runs/$base.md: status clean but recorded repo '$prepo' is missing"
       elif [[ -z $sha || $sha == none || $sha == '?' ]] \
@@ -62,8 +65,16 @@ for f in "$root"/runs/pipeline-*.md; do
         flag "runs/$base.md: status clean but commit '${sha:-none}' does not resolve in recorded repo $prepo"
       fi
       last_rev=$(grep -E 'review round [0-9]+:' "$f" | tail -1 || true)
-      [[ -z $last_rev || $last_rev == *Verdict:* ]] \
-        || flag "runs/$base.md: status clean, review ran, but no 'Verdict:' on the last review-round line" ;;
+      # the verdict may live in the reviewer runs file the round line names:
+      # either '(<file>.md)' or '<name> spawned on ...' -> runs/<name>.md
+      if [[ -n $last_rev && $last_rev != *Verdict:* ]]; then
+        revfile=$(grep -oE '\([^)]+\.md\)' <<<"$last_rev" | tail -1 | tr -d '()' || true)
+        if [[ -z $revfile && $last_rev == *' spawned on '* ]]; then
+          revfile=$(sed -nE 's/.*: ([^ ]+) spawned on .*/\1.md/p' <<<"$last_rev")
+        fi
+        [[ -n $revfile ]] && grep -qE '^[[:space:]]*Verdict:' "$root/runs/$revfile" \
+          || flag "runs/$base.md: status clean, review ran, but no 'Verdict:' on the last review-round line or in the reviewer runs file it names"
+      fi ;;
   esac   # plan-ready pauses and unfinished runs are not outcomes — skip
 done
 for f in "$root"/runs/*.md; do
@@ -88,8 +99,14 @@ for f in "$root"/runs/*.md; do
 done
 
 # ── deterministic live-worker sandbox pre-checks ────────────────────────────
-agents=$(herdr agent list 2>/dev/null || true)
-if jq -e . >/dev/null 2>&1 <<<"$agents"; then
+agents='' herdr_rc=0
+agents=$(herdr agent list 2>"$herdr_err") || herdr_rc=$?
+if (( herdr_rc != 0 )); then
+  herdr_msg=$(head -n 1 "$herdr_err" | cut -c1-200)
+  flag "herdr agent list failed (exit $herdr_rc${herdr_msg:+: $herdr_msg}) — live-worker sandbox audit skipped"
+elif ! jq -e . >/dev/null 2>&1 <<<"$agents"; then
+  flag "herdr agent list returned no JSON — live-worker sandbox audit skipped"
+else
   while IFS= read -r w; do
     [[ -n $w ]] || continue
     if [[ ! -f "$root/runs/$w.srt.json" ]]; then
@@ -137,7 +154,8 @@ Audit five things:
      copied into a pipeline file's `## Challenge (from <file>)` section is
      covered by that file's flag — do not report it twice.
 5. Live workers. Flag any live task worker in herdr not started through the
-   sandbox wrapper (missing runs/<name>.srt.json).
+   sandbox wrapper (missing runs/<name>.srt.json); a `herdr agent list`
+   failure is itself a finding — never report 'none' for it.
    Deterministic pre-check — the script already ran the cheap greps; list
    each finding below under `## Pipeline` or `## Workers` unless repo evidence
    contradicts it, and add any flag the greps missed:
@@ -151,7 +169,7 @@ No findings in a section → write `- none`. End with one line
 EOF
 )
 pc=${precheck%$'\n'}
-prompt=${prompt//__PRECHECK__/${pc:-- none}}
+prompt=${prompt//__PRECHECK__/"${pc:-- none}"}
 
 args=(exec --ephemeral -C "$root" --sandbox read-only
   -c project_doc_max_bytes=0

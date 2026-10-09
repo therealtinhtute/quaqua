@@ -34,6 +34,21 @@ exit "${FAKE_RC:-0}"
 STUB
 chmod +x "$T/bin/codex"
 
+# ── precheck runs are hermetic: no real herdr on PATH yet, so stub a failing
+#    one. Without this the prechecks would consult the host's herdr, and a
+#    host failure would inject a 'herdr agent list failed' flag into fixtures
+#    that assert exact flags. The sandbox section below replaces this stub
+#    with a working one.
+cat > "$T/bin/herdr" <<'HERDR'
+#!/usr/bin/env bash
+if [[ "$1" == "agent" && "$2" == "list" ]]; then
+  printf 'herdr: no agent registry in the precheck sandbox\n' >&2
+  exit 1
+fi
+exit 0
+HERDR
+chmod +x "$T/bin/herdr"
+
 run() {  # run [VAR=val...]; sets rc, $T/out, $T/err, $T/calls
   : > "$T/calls"
   rc=0
@@ -114,9 +129,22 @@ printf -- '- review: skipped (gate: auto)\n- status: clean · commit none · ela
   > "$T/repo/runs/pipeline-nocommit.md"
 printf -- '- review: skipped (gate: auto)\n- status: clean · commit deadbeef · elapsed 4m\n' \
   > "$T/repo/runs/pipeline-badsha.md"
-# flagged: clean, review ran, no Verdict on the last review-round line
+# flagged: clean, review ran, no Verdict on the last review-round line AND
+# no reviewer runs file behind it
 printf -- '- review round 1: NO VERDICT LINE (quansu-noverdictr1.md)\n- status: clean · commit %s · elapsed 6m\n' "$sha" \
   > "$T/repo/runs/pipeline-noverdict.md"
+# flagged: same, but the named reviewer file exists without a Verdict line
+printf -- '- review round 1: NO VERDICT LINE (quansu-novlineR1.md)\n- status: clean · commit %s · elapsed 6m\n' "$sha" \
+  > "$T/repo/runs/pipeline-novline.md"
+printf -- '# quansu-novlineR1\n\n## Findings\n- one thing\n' > "$T/repo/runs/quansu-novlineR1.md"
+# no flag: the Verdict lives in the reviewer runs file the round line names —
+# both the '(file.md)' shape and the '<name> spawned on ...' shape
+printf -- '- review round 1: NO VERDICT LINE (quansu-revfiler1.md)\n- status: clean · commit %s · elapsed 6m\n' "$sha" \
+  > "$T/repo/runs/pipeline-revfile.md"
+printf -- '# quansu-revfiler1\n\nVerdict: clean\n' > "$T/repo/runs/quansu-revfiler1.md"
+printf -- '- review round 1: quansu-revspawnr1 spawned on %s (quaqua/sude-revspawn tip)\n- status: clean · commit %s · elapsed 6m\n' "$sha" "$sha" \
+  > "$T/repo/runs/pipeline-revspawn.md"
+printf -- '# quansu-revspawnr1\n\nVerdict: 2 findings\n' > "$T/repo/runs/quansu-revspawnr1.md"
 # flagged: unresolved ## Challenge in a worker runs file
 printf -- '# x\n## Challenge\n- premise wrong, evidence\n' > "$T/repo/runs/worker-chal.md"
 # flagged: disputed + copied Challenge (also covers sude-copied.build.md)
@@ -151,7 +179,8 @@ for want in \
   "pipeline-blocked.md: '## Challenge' unresolved" \
   'pipeline-nocommit.md: status clean but commit' \
   "pipeline-badsha.md: status clean but commit 'deadbeef'" \
-  "pipeline-noverdict.md: status clean, review ran, but no 'Verdict:'" \
+  "pipeline-noverdict.md: status clean, review ran, but no 'Verdict:' on the last review-round line or in the reviewer runs file it names" \
+  "pipeline-novline.md: status clean, review ran, but no 'Verdict:' on the last review-round line or in the reviewer runs file it names" \
   'pipeline-copied.md: status disputed' \
   "pipeline-copied.md: '## Challenge' unresolved" \
   "worker-chal.md: '## Challenge' unresolved" \
@@ -160,10 +189,12 @@ for want in \
 done
 for absent in 'pipeline-ok.md' 'pipeline-skip.md' 'pipeline-handled.md' \
     'pipeline-paused.md' 'worker-ok.md' 'sude-copied.build.md' 'sude-phs' \
-    'x.rules' ; do
+    'x.rules' 'pipeline-revfile.md' 'pipeline-revspawn.md' \
+    'quansu-revfiler1' 'quansu-revspawnr1' ; do
   grep -qF "$absent" <<<"$calls" && fail "precheck: false flag '$absent'"
 done
 echo "ok: precheck -> each flag raised; clean/handled/copied cases silent"
+echo "ok: precheck Verdict -> accepted from the reviewer runs file (both round-line shapes)"
 
 # ── F9: commits resolve in the pipeline's recorded repo, not this checkout ───
 mkdir -p "$T/proj" "$T/proj2"
@@ -197,6 +228,11 @@ echo "ok: F9 -> commits verified in the recorded repo; missing repo flagged apar
 cat > "$T/bin/herdr" <<'HERDR'
 #!/usr/bin/env bash
 if [[ "$1" == "agent" && "$2" == "list" ]]; then
+  if [[ -n ${HERDR_LIST_RC:-} ]]; then
+    [[ -n ${HERDR_LIST_ERR:-} ]] && printf '%s\n' "$HERDR_LIST_ERR" >&2
+    exit "$HERDR_LIST_RC"
+  fi
+  if [[ -n ${HERDR_LIST_OUT:-} ]]; then printf '%s\n' "$HERDR_LIST_OUT"; exit 0; fi
   cat <<'JSON'
 {"result":{"agents":[
   {"name":"sude-unsandboxed","agent_status":"idle","pane_id":"p1"},
@@ -221,6 +257,30 @@ grep -qF "live worker 'sude-unsandboxed': not started through sandbox wrapper (m
   || fail "sandbox check: sandboxed worker falsely flagged"
 ! grep -qF "coucou-island-lead" <<<"$calls" \
   || fail "sandbox check: Lead falsely flagged"
+! grep -qF 'herdr agent list failed' <<<"$calls" \
+  || fail "sandbox check: working herdr reported as failed"
 echo "ok: live worker sandbox audit -> unsandboxed worker flagged; sandboxed worker and Lead silent"
+
+# ── herdr agent list failure is reported, never silently 'none' ─────────────
+# Under launchd/codex the herdr socket call can fail (EPERM). A silent skip
+# reads as "no live workers" — the failure itself must become a finding.
+run HERDR_LIST_RC=1 HERDR_LIST_ERR='herdr: Operation not permitted'
+[[ $rc -eq 0 ]] || fail "herdr EPERM: exit $rc: $(cat "$T/err")"
+calls=$(cat "$T/calls")
+grep -qF 'herdr agent list failed (exit 1: herdr: Operation not permitted) — live-worker sandbox audit skipped' <<<"$calls" \
+  || fail "herdr EPERM: failure not reported: $(cat "$T/calls")"
+! grep -qF 'live worker' <<<"$calls" \
+  || fail "herdr EPERM: worker scan ran despite the failure"
+echo "ok: herdr agent list EPERM -> failure reported, scan skipped"
+
+# herdr succeeds but emits garbage (proxy banner, truncated output) -> also a flag
+run HERDR_LIST_OUT='not json'
+[[ $rc -eq 0 ]] || fail "herdr garbage: exit $rc: $(cat "$T/err")"
+calls=$(cat "$T/calls")
+grep -qF 'herdr agent list returned no JSON — live-worker sandbox audit skipped' <<<"$calls" \
+  || fail "herdr garbage: non-JSON output not reported: $(cat "$T/calls")"
+! grep -qF 'live worker' <<<"$calls" \
+  || fail "herdr garbage: worker scan ran despite non-JSON output"
+echo "ok: herdr agent list non-JSON -> failure reported, scan skipped"
 
 echo "PASS"
