@@ -67,7 +67,7 @@ chmod +x "$T/bin/herdr"
 spawn() {
   local name=$1 kind=$2; shift 2
   rc=0
-  HOME="$T/home" PATH="$T/bin:$PATH" GRID_SKIP=1 \
+  HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     env "$@" bash "$here/spawn-worker.sh" "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 

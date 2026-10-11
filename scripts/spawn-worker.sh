@@ -198,17 +198,35 @@ case $kind in bacdau|quansu)
   fi
   herdr agent wait "$name" --until idle --timeout 60000 >/dev/null || spawn_fail
 esac
+case $kind in tieude|sude|detu)
+  # project MCP config -> pi asks "Allow project MCP server <name>?" once per
+  # server while herdr already reports idle; a prompt sent then lands in the
+  # dialog and is lost. Answer Allow (anh iu, 2026-10-11) before any prompt.
+  if [[ -f $wt/.mcp.json || -f $wt/.pi/mcp.json || -f $wt/.vscode/mcp.json ]]; then
+    wait_ms=10000
+    for _ in 1 2 3 4 5 6 7 8; do
+      herdr pane wait-output "$pane" --source visible --match "Allow project MCP server" \
+        --timeout "$wait_ms" >/dev/null 2>&1 || break
+      herdr pane send-keys "$pane" down enter >/dev/null
+      wait_ms=3000; sleep 1
+    done
+  fi ;;
+esac
 
 # Grid hook (rules/_all/fanout-agent-grid.md): arrange the new worker's pane
 # around the caller's pane. Best-effort: a grid failure warns, never fails the
-# spawn. GRID_TAB=<label> selects the 2-4 worker tab; GRID_SKIP=1 disables.
+# spawn. 2-4 workers go to tab GRID_TAB (default <repo-basename>-workers).
+# GRID_SKIP=1 is honoured only for callers that grid themselves (pipeline.sh,
+# PIPELINE_TASK set) or tests (QUAQUA_TEST=1); otherwise it is ignored.
 grid_hook() {
-  [[ "${GRID_SKIP:-}" == 1 ]] && return 0
-  local grid args=()
+  if [[ "${GRID_SKIP:-}" == 1 ]]; then
+    [[ -n "${PIPELINE_TASK:-}" || "${QUAQUA_TEST:-}" == 1 ]] && return 0
+    echo "warning: GRID_SKIP=1 ignored outside pipeline.sh/tests (rules/_all/fanout-agent-grid.md)" >&2
+  fi
+  local grid
   grid="$(dirname "$0")/grid-workers.sh"
   [[ -f "$grid" ]] || return 0
-  [[ -n "${GRID_TAB:-}" ]] && args=(--tab "$GRID_TAB")
-  bash "$grid" "${args[@]}" >&2 \
+  bash "$grid" --tab "${GRID_TAB:-"$(basename "$repo")-workers"}" >&2 \
     || echo "warning: grid-workers.sh failed (exit $?); worker $name spawned, arrange panes manually" >&2
 }
 

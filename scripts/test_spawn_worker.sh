@@ -31,12 +31,20 @@ echo "git $*" >> "$CALLS"
 # a ref containing "badref" does not exist: rev-parse --verify fails, and a
 # worktree-add start point with it would too
 case " $* " in *badref*) exit 1 ;; esac
+# MKMCP=1: the new worktree ships a project .mcp.json
+if [ -n "${MKMCP:-}" ] && [ "${3:-} ${4:-}" = "worktree add" ]; then
+  for a in "$@"; do case $a in */.wt/*) mkdir -p "$a" && echo '{}' > "$a/.mcp.json" ;; esac; done
+fi
 exit 0
 STUB
 cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
 [ "${1:-} ${2:-}" = "pane split" ] && echo '{"result":{"pane":{"pane_id":"%1"}}}'
+if [ "${1:-} ${2:-}" = "pane wait-output" ]; then  # $DIALOGS = dialogs left to show
+  n=$(cat "${DIALOGS:-/dev/null}" 2>/dev/null || echo 0); [ "${n:-0}" -gt 0 ] || exit 1
+  echo $((n - 1)) > "$DIALOGS"
+fi
 exit 0
 STUB
 chmod +x "$T/bin/git" "$T/bin/herdr"
@@ -101,7 +109,7 @@ echo "ok: detu -> --model antigravity/gemini-3.8-flash"
 # ── grid hook: a successful spawn arranges the new worker's pane ─────────────
 spawn tieude-gridhook tieude
 [[ $rc -eq 0 ]] || fail "grid hook: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/gridcalls")" == "grid" ]] || fail "grid hook: not called: $(cat "$T/gridcalls")"
+[[ "$(cat "$T/gridcalls")" == "grid --tab repo-workers" ]] || fail "grid hook: not called: $(cat "$T/gridcalls")"
 grep -q "worker=tieude-gridhook" "$T/out" || fail "grid hook: no success line"
 echo "ok: grid hook -> called after a successful spawn"
 
@@ -111,10 +119,29 @@ spawn tieude-gridtab tieude GRID_TAB=coucou-workers
   || fail "GRID_TAB: not passed as --tab: $(cat "$T/gridcalls")"
 echo "ok: GRID_TAB -> grid-workers.sh --tab coucou-workers"
 
-spawn tieude-gridskip tieude GRID_SKIP=1
+spawn tieude-gridskip tieude QUAQUA_TEST=1 GRID_SKIP=1
 [[ $rc -eq 0 ]] || fail "GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"
 [[ ! -s "$T/gridcalls" ]] || fail "GRID_SKIP=1: grid called: $(cat "$T/gridcalls")"
-echo "ok: GRID_SKIP=1 -> grid not called"
+spawn tieude-gridskip tieude PIPELINE_TASK=t GRID_SKIP=1
+[[ ! -s "$T/gridcalls" ]] || fail "pipeline GRID_SKIP=1: grid called: $(cat "$T/gridcalls")"
+echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not called"
+
+spawn tieude-gridskip tieude GRID_SKIP=1
+[[ $rc -eq 0 ]] || fail "bare GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"
+[[ "$(cat "$T/gridcalls")" == "grid --tab repo-workers" ]] || fail "bare GRID_SKIP=1: grid not called: $(cat "$T/gridcalls")"
+grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
+echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid called"
+
+# ── pi + project MCP config: each "Allow project MCP server" dialog -> Allow ─
+echo 2 > "$T/dialogs"
+spawn tieude-mcp tieude DIALOGS="$T/dialogs" MKMCP=1
+[[ $rc -eq 0 ]] || fail "mcp dialog: exit $rc, want 0: $(cat "$T/err")"
+[[ $(grep -c 'pane send-keys %1 down enter' "$T/calls") -eq 2 ]] \
+  || fail "mcp dialog: want 2 Allow answers: $(grep send-keys "$T/calls")"
+echo "ok: pi + .mcp.json -> each MCP approval dialog answered Allow"
+spawn tieude-nomcp tieude
+! grep -q 'wait-output' "$T/calls" || fail "no .mcp.json: dialog wait ran"
+echo "ok: pi without project MCP config -> no dialog wait"
 
 spawn tieude-gridfail tieude GRID_FAKE_RC=1
 [[ $rc -eq 0 ]] || fail "grid failure: exit $rc, want 0: $(cat "$T/err")"
@@ -253,7 +280,7 @@ chmod +x "$T/bin2/herdr"
 # first spawn creates the real worktree
 : > "$T/calls"
 rc=0
-CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" GRID_SKIP=1 \
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
   bash "$T/scripts/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 spawn: exit $rc: $(cat "$T/err")"
 [[ -d $T/.wt/sude-rw1 ]] || fail "rw1: no worktree created"
@@ -262,7 +289,7 @@ CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" GRID_SKIP=1 \
 rm -f "$T/failed-sude-rw1"
 : > "$T/calls"
 rc=0
-CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" GRID_SKIP=1 \
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
   bash "$T/scripts/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 respawn: exit $rc, want 0: $(cat "$T/err")"
 grep -q 'reusing it' "$T/err" || fail "rw1 respawn: no reuse note: $(cat "$T/err")"
@@ -273,7 +300,7 @@ echo "ok: respawn -> surviving worktree reused, agent start retried"
 mkdir -p "$T/.wt/sude-rw2"
 : > "$T/calls"
 rc=0
-CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" GRID_SKIP=1 \
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
   bash "$T/scripts/spawn-worker.sh" sude-rw2 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "rw2 foreign dir: exit $rc, want 1"
 grep -q 'not a git worktree' "$T/err" || fail "rw2: no refusal message: $(cat "$T/err")"
