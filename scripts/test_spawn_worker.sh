@@ -111,13 +111,17 @@ spawn tieude-gridhook tieude
 [[ $rc -eq 0 ]] || fail "grid hook: exit $rc, want 0: $(cat "$T/err")"
 [[ "$(cat "$T/gridcalls")" == "grid --tab repo-workers" ]] || fail "grid hook: not called: $(cat "$T/gridcalls")"
 grep -q "worker=tieude-gridhook" "$T/out" || fail "grid hook: no success line"
-echo "ok: grid hook -> called after a successful spawn"
+[[ "$(cat "$T/home/quaqua/runs/tieude-gridhook.grid")" == repo-workers ]] \
+  || fail "grid hook: runs/<name>.grid not <repo>-workers"
+echo "ok: grid hook -> called after a successful spawn, group recorded"
 
 spawn tieude-gridtab tieude GRID_TAB=coucou-workers
 [[ $rc -eq 0 ]] || fail "GRID_TAB: exit $rc, want 0: $(cat "$T/err")"
 [[ "$(cat "$T/gridcalls")" == "grid --tab coucou-workers" ]] \
   || fail "GRID_TAB: not passed as --tab: $(cat "$T/gridcalls")"
-echo "ok: GRID_TAB -> grid-workers.sh --tab coucou-workers"
+[[ "$(cat "$T/home/quaqua/runs/tieude-gridtab.grid")" == coucou-workers ]] \
+  || fail "GRID_TAB: runs/<name>.grid not coucou-workers"
+echo "ok: GRID_TAB -> grid-workers.sh --tab coucou-workers, group recorded"
 
 spawn tieude-gridskip tieude QUAQUA_TEST=1 GRID_SKIP=1
 [[ $rc -eq 0 ]] || fail "GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"

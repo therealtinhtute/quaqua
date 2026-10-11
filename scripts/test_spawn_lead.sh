@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Sandbox test for spawn-lead.sh (SLP P4): slug validation (charset, the
 # projects/INDEX.md row, the projects/<slug>.md card), the one-Lead-per-slug
-# refusal via `herdr agent get`, the split/start/prompt call sequence (pane
-# beside the caller's, cwd = the script's repo root, no worktree), the
+# refusal via `herdr agent get`, the tab/start/prompt call sequence (own
+# <slug> tab, cwd = the script's repo root, no worktree), the
 # INDEX.md owner-column update, and the LEAD_MODEL/LEAD_EFFORT overrides.
 # herdr and git are stubbed on PATH and log every call; the script runs
 # against a temp repo root. No real herdr, INDEX.md, or pane touched.
@@ -65,7 +65,7 @@ case "${1:-} ${2:-}" in
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "${3:-}"
       exit 1
     fi ;;
-  "pane split") echo '{"result":{"pane":{"pane_id":"%7"}}}' ;;
+  "tab create") echo '{"result":{"tab":{"tab_id":"w1:t7"},"root_pane":{"pane_id":"%7"}}}' ;;
 esac
 exit 0
 STUB
@@ -81,19 +81,19 @@ spawn() {  # spawn <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
 
 ln() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }  # first matching call line
 
-# ── happy path: get -> split -> start -> prompt; INDEX owner updated ────────
+# ── happy path: get -> tab -> start -> prompt; INDEX owner updated ────────
 spawn coucou-island
 [[ $rc -eq 0 ]] || fail "happy: exit $rc, want 0: $(cat "$T/err")"
 grep -qx 'lead=coucou-island-lead slug=coucou-island pane=%7' "$T/out" \
   || fail "happy: no success line: $(cat "$T/out")"
-[[ $(ln 'agent get') -lt $(ln 'pane split') ]] \
-  && [[ $(ln 'pane split') -lt $(ln 'agent start') ]] \
+[[ $(ln 'agent get') -lt $(ln 'tab create') ]] \
+  && [[ $(ln 'tab create') -lt $(ln 'agent start') ]] \
   && [[ $(ln 'agent start') -lt $(ln 'agent prompt') ]] \
   || fail "happy: bad call order: $(cat "$T/calls")"
 grep -q 'agent get coucou-island-lead' "$T/calls" \
   || fail "happy: no duplicate check: $(cat "$T/calls")"
-grep -qF "pane split --current --direction right --no-focus --cwd $T" "$T/calls" \
-  || fail "happy: split not beside the caller at the repo root: $(cat "$T/calls")"
+grep -qF "tab create --label coucou-island --no-focus --cwd $T --env QUAQUA_OWNER=coucou-island-lead" "$T/calls" \
+  || fail "happy: Lead not in its own <slug> tab at the repo root: $(cat "$T/calls")"
 grep -q 'agent start coucou-island-lead --kind claude --pane %7 --timeout 60000' "$T/calls" \
   || fail "happy: bad agent start: $(cat "$T/calls")"
 grep -q -- '--model claude-opus-5-5 --effort high' "$T/calls" \
@@ -110,9 +110,9 @@ done
 ! grep -qF 'record steering from anh iu or CoS' "$T/calls" \
   || fail "happy: brief still routes steering from anh iu around the CoS"
 echo "ok: brief -> redirects reach the Lead through the CoS only"
-# integration-branch check happens before the pane split; no worktree is made
+# integration-branch check happens before the tab create; no worktree is made
 [[ $(ln 'agent get') -lt $(ln 'rev-parse --verify') ]] \
-  && [[ $(ln 'rev-parse --verify') -lt $(ln 'pane split') ]] \
+  && [[ $(ln 'rev-parse --verify') -lt $(ln 'tab create') ]] \
   || fail "happy: integ check order wrong: $(cat "$T/calls")"
 grep -qF "git -C $HOME/Lab/coucou-island rev-parse --verify --quiet refs/heads/quaqua/coucou-island-integ" "$T/calls" \
   || fail "happy: no integration-branch check on the project repo: $(cat "$T/calls")"
@@ -122,7 +122,7 @@ grep -qE '^\| coucou-island \| ~/Lab/coucou-island \| coucou-island-lead \| M12 
 diff <(grep -v '| coucou-island |' "$T/INDEX.orig") \
      <(grep -v '| coucou-island |' "$T/projects/INDEX.md") >/dev/null \
   || fail "happy: lines outside the slug row changed"
-echo "ok: happy path -> get/split/start/prompt order, claude args, rules file, owner updated"
+echo "ok: happy path -> get/tab/start/prompt order, claude args, rules file, owner updated"
 
 # ── duplicate: a registered Lead for the slug is refused before side effects ─
 cp "$T/projects/INDEX.md" "$T/INDEX.prev"
@@ -134,7 +134,7 @@ grep -q "a Lead for 'coucou-island' already exists" "$T/err" \
   || fail "duplicate: side effects after the refusal: $(cat "$T/calls")"
 cmp -s "$T/projects/INDEX.md" "$T/INDEX.prev" \
   || fail "duplicate: INDEX.md touched"
-echo "ok: duplicate -> refused after agent get, no split/start, INDEX untouched"
+echo "ok: duplicate -> refused after agent get, no tab/start, INDEX untouched"
 
 # ── bad slugs: usage/die before any herdr call ──────────────────────────────
 expect_reject() {  # expect_reject <slug> <label> <stderr-fragment>
@@ -181,9 +181,9 @@ spawn coucou-island GIT_INTEG_MISSING=1
 [[ $rc -eq 0 ]] || fail "integ: exit $rc, want 0: $(cat "$T/err")"
 grep -qF "git -C $HOME/Lab/coucou-island branch quaqua/coucou-island-integ main" "$T/calls" \
   || fail "integ: branch not created from main: $(cat "$T/calls")"
-[[ $(ln 'branch quaqua/') -lt $(ln 'pane split') ]] \
-  || fail "integ: branch creation must precede the pane split: $(cat "$T/calls")"
-echo "ok: missing quaqua/<slug>-integ -> created from main before the split"
+[[ $(ln 'branch quaqua/') -lt $(ln 'tab create') ]] \
+  || fail "integ: branch creation must precede the tab create: $(cat "$T/calls")"
+echo "ok: missing quaqua/<slug>-integ -> created from main before the tab"
 
 # master-only repo (no origin/HEAD, no main) -> master
 spawn coucou-island GIT_INTEG_MISSING=1 GIT_MAIN_MISSING=1
@@ -215,7 +215,7 @@ echo "ok: origin/HEAD set -> integration branch created from it (precedence over
 spawn coucou-island GIT_INTEG_MISSING=1 GIT_MAIN_MISSING=1 GIT_MASTER_MISSING=1
 [[ $rc -eq 1 ]] || fail "no default: exit $rc, want 1: $(cat "$T/err")"
 grep -q 'no default branch' "$T/err" || fail "no default: unclear message: $(cat "$T/err")"
-! grep -q 'pane split' "$T/calls" || fail "no default: pane split despite failure"
+! grep -q 'tab create' "$T/calls" || fail "no default: tab create despite failure"
 echo "ok: no default branch in the project repo -> refused before side effects"
 
 # ── a stale owner cell does not block respawn when no agent is registered ───
