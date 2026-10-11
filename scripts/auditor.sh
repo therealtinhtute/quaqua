@@ -12,7 +12,8 @@
 #   names), and unresolved '## Challenge' sections. It also flags any live
 #   task worker in herdr not started through the sandbox wrapper (missing
 #   runs/<name>.srt.json) — and reports a failing `herdr agent list` instead
-#   of silently finding nothing. Findings are embedded in the prompt for the
+#   of silently finding nothing — and flags instruction docs over 100 lines
+#   (doc-rot). Findings are embedded in the prompt for the
 #   agent to verify, correct, and extend.
 #   Env: AUDITOR_MODEL overrides the model (default gpt-6.1-sol, the quansu
 #   tier); AUDITOR_OUT overrides the output path (tests).
@@ -115,6 +116,19 @@ else
   done < <(jq -r '.result.agents[]? | select((.name // "") | test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not)) | .name' <<<"$agents")
 fi
 
+# ── deterministic doc-rot pre-check ─────────────────────────────────────────
+# Docs agents read as instructions drift from the code they describe once they
+# grow long; agents then trust the stale doc over the code. Flag only — the
+# CoS decides what to trim. Logs, evidence and reports (memory/YYYY-MM-DD.md,
+# raw/, runs/, reports/, spec-raw/) are excluded.
+for f in "$root"/*.md "$root"/rules/*/*.md "$root"/projects/*.md "$root"/memory/rules.md; do
+  [[ -f $f ]] || continue
+  n=$(wc -l <"$f"); n=${n//[[:space:]]/}
+  if (( n > 100 )); then
+    flag "${f#"$root/"}: $n lines (>100) — doc-rot risk, trim or split"
+  fi
+done
+
 prompt=$(cat <<'EOF'
 You are the Auditor for the quaqua repo. READ-ONLY: inspect and report only.
 Do not edit, create, or delete any file; do not run mutating commands; do not
@@ -128,7 +142,8 @@ Audit five things:
    state; memory rules or lessons that rest on stale facts.
 2. Stale docs vs real code/scripts. Flag: AGENTS.md, memory/rules.md, models.md,
    rules/ entries that reference removed scripts/behaviors or describe a flow the
-   scripts no longer implement; scripts or docs/plans that contradict each other.
+   scripts no longer implement; scripts or docs/plans that contradict each other;
+   instruction docs over 100 lines (doc-rot: agents trust them over the code).
 3. Unhandled memory. Flag: reports/audit-*.md with no
    `- [audit] <report file>:` line in any memory/YYYY-MM-DD.md (the
    handled marker CoS writes, see AGENTS.md); `## Lessons` lines (other than
@@ -157,7 +172,8 @@ Audit five things:
    sandbox wrapper (missing runs/<name>.srt.json); a `herdr agent list`
    failure is itself a finding — never report 'none' for it.
    Deterministic pre-check — the script already ran the cheap greps; list
-   each finding below under `## Pipeline` or `## Workers` unless repo evidence
+   each finding below under `## Pipeline`, `## Workers` or (doc-rot)
+   `## Stale docs` unless repo evidence
    contradicts it, and add any flag the greps missed:
 __PRECHECK__
 

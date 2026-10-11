@@ -283,4 +283,24 @@ grep -qF 'herdr agent list returned no JSON — live-worker sandbox audit skippe
   || fail "herdr garbage: worker scan ran despite non-JSON output"
 echo "ok: herdr agent list non-JSON -> failure reported, scan skipped"
 
+# ── doc-rot: instruction docs over 100 lines are flagged; logs are not ───────
+mkdir -p "$T/repo/rules/_all" "$T/repo/raw"
+seq 101 > "$T/repo/LONG.md"
+seq 100 > "$T/repo/SHORT.md"
+seq 150 > "$T/repo/rules/_all/long-rule.md"
+seq 150 > "$T/repo/projects/long-card.md"
+seq 150 > "$T/repo/memory/2026-10-11.md"
+seq 150 > "$T/repo/raw/2026-10-11-x.md"
+run
+[[ $rc -eq 0 ]] || fail "doc-rot: exit $rc: $(cat "$T/err")"
+calls=$(cat "$T/calls")
+for want in 'LONG.md: 101 lines (>100)' 'rules/_all/long-rule.md: 150 lines' \
+    'projects/long-card.md: 150 lines'; do
+  grep -qF "$want" <<<"$calls" || fail "doc-rot: prompt missing '$want'"
+done
+for absent in 'SHORT.md' 'memory/2026-10-11.md' 'raw/2026-10-11-x.md'; do
+  grep -qF "$absent" <<<"$calls" && fail "doc-rot: false flag '$absent'"
+done
+echo "ok: doc-rot -> >100-line instruction docs flagged; 100-line doc, logs, raw silent"
+
 echo "PASS"
