@@ -82,4 +82,12 @@ err=$(run_cleanup zz-clean GRID_FAKE_RC=1 2>&1 >/dev/null) || fail "cleanup fail
 [[ ! -d "$T/.wt/zz-clean" ]] || fail "grid failure: worktree not removed"
 echo "ok: grid failure -> warning only, cleanup succeeds"
 
+# ── 5. cleanup drops the worker's runs metadata (.owner/.grid) ──────────────
+mkdir -p "$T/runs"
+worktree "$T/quaqua" zz-clean
+echo cos > "$T/runs/zz-clean.owner"; echo quaqua-workers > "$T/runs/zz-clean.grid"
+run_cleanup zz-clean QUAQUA_RUNS_DIR="$T/runs" >/dev/null || fail "cleanup failed with runs metadata"
+[[ ! -e "$T/runs/zz-clean.owner" && ! -e "$T/runs/zz-clean.grid" ]] || fail "runs metadata left: $(ls "$T/runs")"
+echo "ok: cleanup -> runs/<name>.owner and .grid removed"
+
 echo "PASS"

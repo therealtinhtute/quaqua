@@ -2,17 +2,24 @@
 # grid-workers.sh — arrange worker panes around the anchor pane (herdr).
 #
 # The anchor is the caller's pane: the CoS, or a project orchestrator. Workers
-# are the agents in the anchor's tab plus the agents in the group's tab (the
-# 2-4 worker tab, label --tab, default "workers") and its scratch tab whose
-# registered name matches the worker pattern <kind>- (tieude, detu, sude,
-# ni, suhuynh, truonglao, bacdau, quansu), excluding *-lead names (a project
-# Lead, <slug>-lead, is never a worker); agents in any other tab — another
-# orchestrator's workers, the CoS tab — and unnamed or non-worker agents are
-# never touched, so groups sharing a workspace stay separate.
+# are the agents owned by the caller (runs/<name>.owner == QUAQUA_OWNER,
+# default cos; no .owner file = cos) whose registered name matches the worker
+# pattern <kind>- (tieude, detu, sude, ni, suhuynh, truonglao, bacdau,
+# quansu), excluding *-lead names (a project Lead, <slug>-lead, is never a
+# worker), and whose pane is in the anchor's tab or in a group tab: a tab
+# labelled with a known group label (--tab, default "workers", or any
+# runs/<name>.grid) or its scratch tab. Agents in any other tab, another
+# owner's workers, and unnamed or non-worker agents are never touched.
+#
+# Each worker belongs to the group runs/<name>.grid (spawn-worker.sh writes
+# <repo>-workers), else the group of the tab it sits in, else --tab. Groups
+# are arranged one after another.
 #
 # Layout rules:
-#   1 worker    -> same tab as the anchor, split right; anchor 2/5, worker 3/5.
-#   2-4 workers -> all workers in a tab labelled <label>:
+#   1 worker in total -> same tab as the anchor, split right; anchor 2/5,
+#                        worker 3/5.
+#   otherwise   -> each group in its own tab labelled <group> (a group of
+#                  1 = one full pane):
 #                    2 = left|right
 #                    3 = A|B top + C full width below
 #                    4 = 2x2
@@ -20,7 +27,7 @@
 #                  reused only if it is not the anchor tab and holds nothing
 #                  but workers.
 #   back to 1   -> the worker returns to the anchor tab.
-#   >4 workers  -> error exit.
+#   >4 workers in a group -> error exit.
 # A pane whose agent is working is never moved (skipped with a warning). The
 # run stops (exit 1) if a pane starts working between planning and moving, or
 # if herdr reports a move that changed nothing — re-run to replan.
@@ -30,9 +37,9 @@
 #
 # Usage: grid-workers.sh [--tab <label>] [--only <names>] [--dry-run]
 #   --tab <label>  label of the 2-4 worker tab (default: workers)
-#   --only <names> comma-separated worker names: restrict the group to these
-#                  agents (e.g. a pipeline's own builder+reviewer); unlisted
-#                  agents in the anchor tab are never touched
+#   --only <names> comma-separated worker names: the listed agents are the
+#                  whole set, as one group <label> (e.g. a pipeline's own
+#                  builder+reviewer); unlisted agents are never touched
 #   --dry-run      print the planned actions and exit without touching any pane.
 #
 # Requires herdr and jq; run inside a herdr pane or set HERDR_PANE_ID.
@@ -42,25 +49,26 @@ PROG=${0##*/}
 
 usage() {
   cat <<'EOF'
-Usage: grid-workers.sh [--tab <label>] [--dry-run]
+Usage: grid-workers.sh [--tab <label>] [--only <names>] [--dry-run]
 
-Arrange worker panes around the anchor pane (the caller's pane):
-  1 worker    same tab as the anchor, split right (anchor 2/5, worker 3/5)
-  2-4 workers tab <label> (default "workers"): 2 = left|right, 3 = A|B top +
-              C below, 4 = 2x2
-  >4 workers  error
-Workers are the agents in the anchor's tab plus the agents in the tab labelled
-<label> (and its scratch tab) whose registered name matches <kind>- (but not a
-<slug>-lead — a project Lead is never a worker); other tabs — another
-orchestrator's workers, the CoS tab — and unnamed or non-worker agents are
-never touched.
+Arrange the caller's worker panes around the anchor pane (the caller's pane):
+  1 worker in total  same tab as the anchor, split right (anchor 2/5, worker 3/5)
+  otherwise          one tab per group (runs/<name>.grid, else --tab, default
+                     "workers"): 1 = full, 2 = left|right, 3 = A|B top +
+                     C below, 4 = 2x2
+  >4 in a group      error
+Workers are the agents owned by QUAQUA_OWNER (default cos; runs/<name>.owner)
+in the anchor's tab or a group tab whose registered name matches <kind>- (but
+not a <slug>-lead — a project Lead is never a worker); other tabs, other
+owners' workers, and unnamed or non-worker agents are never touched.
 Panes whose agent is working are never moved (skipped with a warning). If a
 pane starts working mid-run, or a move changes nothing, the run stops and asks
 for a replan.
 
   --tab <label>  label of the 2-4 worker tab (default: workers)
-  --only <names> comma-separated worker names: restrict the group to these
-                 agents; unlisted agents in the anchor tab are never touched
+  --only <names> comma-separated worker names: the listed agents are the
+                 whole set, as one group <label>; unlisted agents are never
+                 touched
   --dry-run      print the planned actions and exit without touching any pane.
 EOF
 }
@@ -70,8 +78,18 @@ die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # gather_state — read live herdr state, print one JSON state object.
 # ---------------------------------------------------------------------------
-gather_state() {  # gather_state <workers-tab-label> <only-csv>
-  local label=${1:-workers} only_csv=${2:-}
+# runs_meta — {<name>: {owner, grid}} from runs/<name>.owner and .grid.
+runs_meta() {
+  local dir=${QUAQUA_RUNS_DIR:-$HOME/quaqua/runs} f b
+  for f in "$dir"/*.owner "$dir"/*.grid; do
+    [ -f "$f" ] || continue
+    b=${f##*/}
+    printf '%s\t%s\t%s\n' "${b%.*}" "${b##*.}" "$(head -n 1 "$f")"
+  done | jq -Rnc 'reduce (inputs | split("\t")) as $e ({}; .[$e[0]][$e[1]] = $e[2])'
+}
+
+gather_state() {  # gather_state <group-label> <default-label> <only-csv>
+  local label=$1 dlabel=$2 only_csv=${3:-}
   local anchor_pane=${HERDR_PANE_ID:-}
   if [ -z "$anchor_pane" ]; then
     anchor_pane=$(herdr pane current 2>/dev/null | jq -r '.result.pane.pane_id // empty') || true
@@ -88,37 +106,47 @@ gather_state() {  # gather_state <workers-tab-label> <only-csv>
   panes=$(herdr pane list --workspace "$anchor_ws")
   tabs=$(herdr tab list --workspace "$anchor_ws")
 
-  # Workers: agents in the anchor's workspace whose pane is in the anchor's tab
-  # or in a tab of this group (label <label>, or its scratch tab) and whose
-  # registered name matches the worker pattern <kind>- (the spawn-worker
-  # roster). Agents in other tabs — another orchestrator's workers, the CoS
-  # tab — and unnamed or non-worker agents are never touched. A name ending
+  # Members: the caller's (QUAQUA_OWNER) agents in the anchor's workspace whose
+  # pane is in the anchor's tab or in a group tab (a known group label, or its
+  # scratch tab) and whose registered name matches the worker pattern <kind>-
+  # (the spawn-worker roster). Agents in other tabs, other owners' workers, and
+  # unnamed or non-worker agents are never touched. A name ending
   # in -lead is a project Lead (spawn-lead.sh names it <slug>-lead), never a
   # worker — without the exclusion a slug like sude-x would put its Lead in
   # the grid. Pane ids are allocated in creation order; the suffix alphabet
   # is 1-9, A-Z, 0 (base 36, zero last).
-  local only workers
+  # Group: runs/<name>.grid, else the group tab it sits in, else <default-label>;
+  # with --only every member is in group <default-label>.
+  local only meta members workers
   only=$(jq -nc --arg csv "$only_csv" '$csv | split(",") | map(select(. != ""))')
-  workers=$(jq -c --arg anchor "$anchor_pane" --arg ws "$anchor_ws" --arg atab "$anchor_tab" \
-    --arg label "$label" --arg scratch "grid-scratch-$label" --argjson tabs "$tabs" \
-    --argjson only "$only" '
+  meta=$(runs_meta)
+  members=$(jq -c --arg anchor "$anchor_pane" --arg ws "$anchor_ws" --arg atab "$anchor_tab" \
+    --arg dlabel "$dlabel" --arg me "${QUAQUA_OWNER:-cos}" --argjson tabs "$tabs" \
+    --argjson only "$only" --argjson meta "$meta" '
     def pane_seq:
       (try (capture(":p(?<s>[0-9A-Za-z]+)$").s) catch "") as $s
       | ("123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0" | split("")) as $alpha
       | reduce ($s | split("")[]) as $c (0; . * 36 + (($alpha | index($c)) + 1));
     def worker_name: test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not);
-    [ $tabs.result.tabs[]
-      | select(.workspace_id == $ws and .tab_id != $atab)
-      | select(.label == $label or .label == $scratch)
-      | .tab_id ] as $group_tabs
+    ([ $meta[] | .grid // empty ] + [$dlabel] | unique) as $known
+    | ( [ $tabs.result.tabs[]
+          | select(.workspace_id == $ws and .tab_id != $atab)
+          | (.label | ltrimstr("grid-scratch-")) as $g
+          | select($known | index($g))
+          | {key: .tab_id, value: $g} ] | from_entries ) as $group_of_tab
     | [ .result.agents[]
         | select(.pane_id != $anchor and .workspace_id == $ws)
-        | select(.tab_id == $atab or (.tab_id as $t | $group_tabs | index($t)))
+        | select(.tab_id == $atab or $group_of_tab[.tab_id] != null)
         | select((.name // "") | worker_name)
-        | select(($only | length) == 0 or ((.name // "") as $n | $only | index($n)))
+        | ($meta[.name] // {}) as $m
+        | select(($m.owner // "cos") == $me)
+        | select(($only | length) == 0 or (.name as $n | $only | index($n)))
         | { name: .name, pane: .pane_id, tab: .tab_id,
-            status: .agent_status, seq: (.pane_id | pane_seq) } ]
+            status: .agent_status, seq: (.pane_id | pane_seq),
+            group: (if ($only | length) > 0 then $dlabel
+                    else ($m.grid // $group_of_tab[.tab_id] // $dlabel) end) } ]
     | sort_by(.seq)' <<<"$agents")
+  workers=$(jq -c --arg g "$label" '[ .[] | select(.group == $g) ]' <<<"$members")
 
   # The group's workers tab: a tab labelled <label> that is not the anchor tab
   # and whose occupants are all expected workers. The anchor tab, and tabs
@@ -150,11 +178,13 @@ gather_state() {  # gather_state <workers-tab-label> <only-csv>
   jq -n -c \
     --arg anchor_pane "$anchor_pane" --arg anchor_tab "$anchor_tab" --arg anchor_ws "$anchor_ws" \
     --argjson workers "$workers" --arg workers_tab "$workers_tab" --arg label "$label" \
-    --argjson anchor_layout "$anchor_layout" --argjson wt_layout "$wt_layout" '
+    --argjson members "$members" --argjson anchor_layout "$anchor_layout" --argjson wt_layout "$wt_layout" '
     def rects($l): [ $l.result.layout.panes[] | {key: .pane_id, value: .rect} ] | from_entries;
     {
       anchor_pane: $anchor_pane, anchor_tab: $anchor_tab, anchor_ws: $anchor_ws,
       workers: $workers,
+      total: ($members | length),
+      groups: ($members | map(.group) | unique),
       workers_tab: (if $workers_tab == "" then null else $workers_tab end),
       workers_tab_label: $label,
       anchor_area: $anchor_layout.result.layout.area,
@@ -208,12 +238,14 @@ def containers($a):
 # whose subtree it is the first worker of (the subtree collapsed to it).
 def allowed($n; $i; $a):
   (cells($n; $a)) as $c | (containers($a)) as $k
-  | [ $c[$i] ]
-    + (if $i == 0 then (if $n == 2 then [$k.root] else [$k.top, $k.root] end) else [] end)
-    + (if $n == 4 and $i == 2 then [$k.bottom] else [] end);
+  | if $n == 1 then [$k.root]
+    else [ $c[$i] ]
+      + (if $i == 0 then (if $n == 2 then [$k.root] else [$k.top, $k.root] end) else [] end)
+      + (if $n == 4 and $i == 2 then [$k.bottom] else [] end)
+    end;
 
 # Construction order: parents before children.
-def build_order($n): if $n == 2 then [0,1] elif $n == 3 then [0,2,1] else [0,2,1,3] end;
+def build_order($n): if $n == 1 then [0] elif $n == 2 then [0,1] elif $n == 3 then [0,2,1] else [0,2,1,3] end;
 
 def placement($n; $i; $label):
   if $i == 0 then {mode:"new-tab", label:$label}
@@ -232,11 +264,12 @@ def rename_actions($ws): [ $ws[] | {action:"rename", pane:.pane, label:.name} ];
 . as $s
 | ($s.workers) as $ws
 | ($ws | length) as $n
-| (if $n == 1 then $s.anchor_tab else $s.workers_tab end) as $target
-| (if $n == 1 then $s.anchor_area else $s.wt_area end) as $area
-| (if $n == 1 then $s.anchor_rects else $s.wt_rects end) as $rects0
+| ($n == 1 and $s.total == 1) as $beside
+| (if $beside then $s.anchor_tab else $s.workers_tab end) as $target
+| (if $beside then $s.anchor_area else $s.wt_area end) as $area
+| (if $beside then $s.anchor_rects else $s.wt_rects end) as $rects0
 | (if $rects0 == null then {} else $rects0 end) as $rects
-| if $n == 1 then
+| if $beside then
     ($ws[0]) as $w
     | (($w.tab == $s.anchor_tab)
        and ($rects[$w.pane] != null) and ($rects[$s.anchor_pane] != null)
@@ -437,23 +470,29 @@ main() {
   done
   [ -n "$label" ] || { usage >&2; exit 2; }
 
-  local state n plan
-  state=$(gather_state "$label" "$only_csv")
-  n=$(jq -r '.workers | length' <<<"$state")
-  if [ "$n" -gt 4 ]; then
-    die "too many workers ($n); the grid supports at most 4"
-  fi
-  if [ "$n" -eq 0 ]; then
+  local state n plan g groups=()
+  state=$(gather_state "$label" "$label" "$only_csv")
+  if [ "$(jq -r '.total' <<<"$state")" -eq 0 ]; then
     printf '%s: no workers to arrange\n' "$PROG" >&2
     exit 0
   fi
+  mapfile -t groups < <(jq -r --arg l "$label" '[$l] + (.groups - [$l]) | .[]' <<<"$state")
 
-  plan=$(jq -c "$PLAN_JQ" <<<"$state")
-  if [ "$dry_run" = 1 ]; then
-    render_plan <<<"$plan"
-    exit 0
-  fi
-  execute_plan "$plan" "$state"
+  # one group at a time; each later group replans from fresh state
+  for g in "${groups[@]}"; do
+    [ "$g" = "$label" ] || state=$(gather_state "$g" "$label" "$only_csv")
+    n=$(jq -r '.workers | length' <<<"$state")
+    if [ "$n" -gt 4 ]; then
+      die "too many workers ($n) in group $g; the grid supports at most 4"
+    fi
+    [ "$n" -gt 0 ] || continue
+    plan=$(jq -c "$PLAN_JQ" <<<"$state")
+    if [ "$dry_run" = 1 ]; then
+      render_plan <<<"$plan"
+    else
+      execute_plan "$plan" "$state"
+    fi
+  done
 }
 
 main "$@"

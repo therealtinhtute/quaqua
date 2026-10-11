@@ -147,8 +147,11 @@ mkdir -p "$(dirname "$rf")"   # fresh clones have no runs/ yet — create it bef
 cat "$rules_dir"/_all/*.md "$rules_dir/$(basename "$repo")"/*.md 2>/dev/null > "$rf" || true
 codex_rules="developer_instructions=$(jq -Rs . < "$rf")"
 
-# Record owner, pipeline association, and sandbox marker
+# Record owner, grid group (grid-workers.sh groups by owner + project tab),
+# pipeline association, and sandbox marker
+grid_tab=${GRID_TAB:-"$(basename "$repo")-workers"}
 echo "$owner" > "$runs_dir/$name.owner"
+echo "$grid_tab" > "$runs_dir/$name.grid"
 [[ -n "${PIPELINE_TASK:-}" ]] && echo "$PIPELINE_TASK" > "$runs_dir/$name.pipeline"
 iso_now=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')
 printf '{"name":"%s","kind":"%s","created":"%s","sandbox":true,"owner":"%s"}\n' \
@@ -215,7 +218,7 @@ esac
 
 # Grid hook (rules/_all/fanout-agent-grid.md): arrange the new worker's pane
 # around the caller's pane. Best-effort: a grid failure warns, never fails the
-# spawn. 2-4 workers go to tab GRID_TAB (default <repo-basename>-workers).
+# spawn. The worker's group tab is GRID_TAB (default <repo-basename>-workers).
 # GRID_SKIP=1 is honoured only for callers that grid themselves (pipeline.sh,
 # PIPELINE_TASK set) or tests (QUAQUA_TEST=1); otherwise it is ignored.
 grid_hook() {
@@ -226,7 +229,7 @@ grid_hook() {
   local grid
   grid="$(dirname "$0")/grid-workers.sh"
   [[ -f "$grid" ]] || return 0
-  bash "$grid" --tab "${GRID_TAB:-"$(basename "$repo")-workers"}" >&2 \
+  bash "$grid" --tab "$grid_tab" >&2 \
     || echo "warning: grid-workers.sh failed (exit $?); worker $name spawned, arrange panes manually" >&2
 }
 
