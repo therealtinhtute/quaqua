@@ -4,7 +4,7 @@ Pick by task shape. Name = kind passed to `spawn-worker.sh`. Update "Seen" after
 
 | name | harness · model · effort | Use for | Avoid | Seen |
 |------|--------------------------|---------|-------|------|
-| tieude | pi · devin/deepseek-v4.1-flash · max | cheap well-specced impl, QA passes | ambiguous design | mdqa, mdchip, mdbold |
+| tieude | pi · devin/deepseek-v4.1-flash · max | cheap well-specced impl, QA passes | ambiguous design | mdqa, mdchip, mdbold, dashcards |
 | detu | pi · antigravity/gemini-3.8-flash · high | quick lookup, research, read-only scan | implementation | – |
 | sude | pi · devin/swe-2 · max | **default**: every cheap task, hard multi-file impl, audits | – | mdtree, mdstatus, mdflat |
 | ni | claude · opus-5.5 · low | small Claude edits, quick answers | design, long work | – |
