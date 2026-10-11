@@ -1,0 +1,1 @@
+- Full build is `bun run build` (`bun build` hits Bun's bundler: "Missing entrypoints"); pass `--force` to turbo gates so evidence is not cache hits — 2026-10-11, runs/tieude-dashcards.md
