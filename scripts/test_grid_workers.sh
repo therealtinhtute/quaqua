@@ -11,6 +11,10 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# owner/group metadata (runs/<name>.owner|.grid): empty unless a case adds it
+export QUAQUA_RUNS_DIR="$T/runs" QUAQUA_OWNER=cos
+mkdir -p "$QUAQUA_RUNS_DIR"
+
 # ── stub herdr: reads $HERDR_STUB_STATE, logs mutations to $HERDR_STUB_LOG ───
 mkdir -p "$T/bin"
 cat > "$T/bin/herdr" <<'STUB'
@@ -50,6 +54,8 @@ case "$cmd" in
             workers) newtab="w1:t90" ;;
             grid-scratch-workers) newtab="w1:t91" ;;
             coucou-workers) newtab="w1:t92" ;;
+            mono-workers) newtab="w1:t94" ;;
+            bp-workers) newtab="w1:t95" ;;
             grid-scratch-coucou-workers) newtab="w1:t93" ;;
             *) newtab="w1:t99" ;;
           esac
@@ -65,9 +71,13 @@ case "$cmd" in
           changed=false; reason=${HERDR_STUB_MOVE_REASON:-zoomed_tab}
         fi
         if [ "$changed" = true ]; then
-          # keep the state consistent: the pane keeps its agent under the new id
-          jq -c --arg p "$pane" --arg np "$newpane" --arg t "$newtab" \
-            '.agents |= map(if .pane_id == $p then .pane_id = $np | .tab_id = $t else . end)
+          # keep the state consistent: the pane keeps its agent under the new id;
+          # a new tab is listed with its label
+          jq -c --arg p "$pane" --arg np "$newpane" --arg t "$newtab" --arg l "$label" \
+            '(.panes[] | select(.pane_id == $p) | .workspace_id) as $w
+             | (if $l != "" and all(.tabs[]; .tab_id != $t)
+                then .tabs += [{tab_id:$t, label:$l, workspace_id:$w}] else . end)
+             | .agents |= map(if .pane_id == $p then .pane_id = $np | .tab_id = $t else . end)
              | .panes |= map(if .pane_id == $p then .pane_id = $np | .tab_id = $t else . end)' \
             "$state" > "$state.next" && mv "$state.next" "$state"
         fi
@@ -864,5 +874,58 @@ if err=$(HERDR_STUB_STATE="$T/state.json" HERDR_PANE_ID=w1:p1 PATH="$T/bin:$PATH
 fi
 [[ "$err" == *"Usage:"* ]] || fail "--only without a value: no usage on stderr (got: $err)"
 echo "ok: --only without a value -> usage error"
+
+# owner/group cases: each gets a fresh runs dir
+runs_case() { export QUAQUA_RUNS_DIR="$T/runs-$1"; mkdir -p "$QUAQUA_RUNS_DIR"; }
+
+# ── 42. another owner's worker in the anchor tab is never touched ────────────
+runs_case 42
+echo baroiplayer-lead > "$QUAQUA_RUNS_DIR/sude-bpga.owner"
+actual=$(plan <<'EOF'
+anchor w1:p1
+worker tieude-alpha pi w1:p5 w1:t1 idle
+worker sude-bpga pi w1:p6 w1:t1 idle
+tab w1:t1 1
+layout w1:t1 200x50 w1:p1=0,0,80,50 w1:p5=80,0,60,50 w1:p6=140,0,60,50
+EOF
+)
+expect "owner: a foreign-owner worker is ignored, mine stays beside the anchor" \
+'evict w1:p5
+place w1:p5 split tab=@anchor dir=right anchor=w1:p1 ratio=0.4
+rename w1:p5 tieude-alpha' "$actual"
+
+# ── 43. one owner, two projects -> one tab per project, even a lone worker ───
+runs_case 43
+echo mono-workers > "$QUAQUA_RUNS_DIR/tieude-alpha.grid"
+echo bp-workers > "$QUAQUA_RUNS_DIR/sude-beta.grid"
+actual=$(run <<'EOF'
+anchor w1:p1
+worker tieude-alpha pi w1:p5 w1:t1 idle
+worker sude-beta pi w1:p6 w1:t1 idle
+tab w1:t1 1
+layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
+EOF
+)
+expect "groups: each project gets its own tab" \
+'move w1:p6 --new-tab --label bp-workers --no-focus
+rename w1:p6 sude-beta
+move w1:p5 --new-tab --label mono-workers --no-focus
+rename w1:p5 tieude-alpha' "$actual"
+
+# ── 44. the owner's only worker, stranded in its project tab, comes back ─────
+runs_case 44
+echo mono-workers > "$QUAQUA_RUNS_DIR/suhuynh-x.grid"
+actual=$(plan bp-workers <<'EOF'
+anchor w1:p1
+worker suhuynh-x claude w1:p5 w1:t11 idle
+tab w1:t1 1
+tab w1:t11 mono-workers
+layout w1:t1 200x50 w1:p1=0,0,200,50
+layout w1:t11 200x50 w1:p5=0,0,200,50
+EOF
+)
+expect "groups: a lone stranded worker returns beside the anchor" \
+'place w1:p5 split tab=@anchor dir=right anchor=w1:p1 ratio=0.4
+rename w1:p5 suhuynh-x' "$actual"
 
 echo "PASS"

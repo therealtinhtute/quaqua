@@ -3,8 +3,9 @@
 #   Start the project Lead for <slug> (AGENTS.md '## Roles (SLP)'): a claude
 #   session named <slug>-lead running in the quaqua checkout this script
 #   belongs to (normally ~/quaqua). The Lead is not a worker — no worktree,
-#   no slot in the 4-worker cap, no grid hook: its pane splits right beside
-#   the caller's (CoS) pane and stays there. rules/_all/*.md are the
+#   no slot in the 4-worker cap, no grid hook: it opens in its own tab
+#   labelled <slug> (its Peers grid beside it or in <repo>-workers), never in
+#   the caller's (CoS) tab. rules/_all/*.md are the
 #   appended system prompt (the spawn-worker convention); the first prompt
 #   is a short lead brief pointing at AGENTS.md, projects/<slug>.md and
 #   scripts/pipeline.sh. The project integration branch quaqua/<slug>-integ
@@ -92,8 +93,8 @@ mkdir -p "$root/runs"
 rf="$root/runs/$name.rules.md"
 cat "$root"/rules/_all/*.md > "$rf" 2>/dev/null || true
 
-split=$(herdr pane split --current --direction right --no-focus --cwd "$root" --env "QUAQUA_OWNER=$name")
-pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
+tab=$(herdr tab create --label "$slug" --no-focus --cwd "$root" --env "QUAQUA_OWNER=$name")
+pane=$(printf '%s\n' "$tab" | jq -r '.result.root_pane.pane_id')
 
 herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- \
   --model "${LEAD_MODEL:-claude-opus-5-5}" --effort "${LEAD_EFFORT:-high}" \
