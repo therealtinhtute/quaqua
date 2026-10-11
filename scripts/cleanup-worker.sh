@@ -10,14 +10,18 @@ wt="$(dirname "$repo")/.wt/$name"
 
 # Grid hook (rules/_all/fanout-agent-grid.md): re-arrange the remaining workers
 # around the caller's pane. Best-effort: a grid failure warns, never blocks the
-# cleanup. GRID_TAB=<label> selects the 2-4 worker tab; GRID_SKIP=1 disables.
+# cleanup. 2-4 workers stay in tab GRID_TAB (default <repo-basename>-workers).
+# GRID_SKIP=1 is honoured only for pipeline.sh (PIPELINE_TASK) or tests
+# (QUAQUA_TEST=1); otherwise it is ignored.
 grid_hook() {
-  [[ "${GRID_SKIP:-}" == 1 ]] && return 0
-  local grid args=()
+  if [[ "${GRID_SKIP:-}" == 1 ]]; then
+    [[ -n "${PIPELINE_TASK:-}" || "${QUAQUA_TEST:-}" == 1 ]] && return 0
+    echo "warning: GRID_SKIP=1 ignored outside pipeline.sh/tests (rules/_all/fanout-agent-grid.md)" >&2
+  fi
+  local grid
   grid="$(dirname "$0")/grid-workers.sh"
   [[ -f "$grid" ]] || return 0
-  [[ -n "${GRID_TAB:-}" ]] && args=(--tab "$GRID_TAB")
-  bash "$grid" "${args[@]}" >&2 \
+  bash "$grid" --tab "${GRID_TAB:-"$(basename "$repo")-workers"}" >&2 \
     || echo "warning: grid-workers.sh failed (exit $?); arrange panes manually" >&2
 }
 
