@@ -17,16 +17,19 @@ for c in 'herdr pane split --current --direction right' \
          'herdr pane move w1:p5 --new-tab --label x' \
          'herdr tab create --label x --no-focus' \
          'herdr agent start sude-x --kind pi --pane w1:p5' \
+         'herdr workspace create --label baro --no-focus' \
+         'herdr workspace close w7' \
          'cd ~/quaqua && herdr pane split --current' \
          'X=$(herdr tab create --label y)'; do
   [[ $(gate "$c") == 2 ]] || fail "not blocked: $c"
 done
-echo "ok: direct herdr split/move/tab create/agent start -> blocked"
+echo "ok: direct herdr split/move/tab+workspace create/workspace close/agent start -> blocked"
 
 for c in 'scripts/spawn-worker.sh sude-x sude ~/repo' \
          'scripts/grid-workers.sh --tab x-workers --dry-run' \
          'herdr agent list' 'herdr agent read sude-x --lines 80' \
          'herdr pane send-keys w1:p5 enter' 'herdr tab list' \
+         'herdr workspace list' 'herdr workspace get w7' 'scripts/cleanup-lead.sh baro' \
          'grep -n "herdr pane split" scripts/spawn-worker.sh'; do
   [[ $(gate "$c") == 0 ]] || fail "wrongly blocked: $c"
 done

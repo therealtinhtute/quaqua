@@ -3,9 +3,11 @@
 #   Start the project Lead for <slug> (AGENTS.md '## Roles (SLP)'): a claude
 #   session named <slug>-lead running in the quaqua checkout this script
 #   belongs to (normally ~/quaqua). The Lead is not a worker — no worktree,
-#   no slot in the 4-worker cap, no grid hook: it opens in its own tab
-#   labelled <slug> (its Peers grid beside it or in <repo>-workers), never in
-#   the caller's (CoS) tab. rules/_all/*.md are the
+#   no slot in the 4-worker cap, no grid hook: each SLP team gets its own
+#   herdr workspace labelled <slug> (the Lead in its first tab, its Peers grid
+#   beside it or in <repo>-workers there); the CoS stays the one Supervisor in
+#   its own workspace and reaches the Lead by agent name. scripts/cleanup-lead.sh
+#   closes the workspace when the project is done. rules/_all/*.md are the
 #   appended system prompt (the spawn-worker convention); the first prompt
 #   is a short lead brief pointing at AGENTS.md, projects/<slug>.md and
 #   scripts/pipeline.sh. The project integration branch quaqua/<slug>-integ
@@ -19,7 +21,7 @@
 #   Env: LEAD_MODEL (default claude-opus-5-5) · LEAD_EFFORT (default high).
 set -euo pipefail
 
-usage() { sed -n '2,15p' "$0" >&2; exit 1; }
+usage() { sed -n '2,17p' "$0" >&2; exit 1; }
 die()   { echo "error: $*" >&2; exit 1; }
 
 (( $# == 1 )) || usage
@@ -93,8 +95,9 @@ mkdir -p "$root/runs"
 rf="$root/runs/$name.rules.md"
 cat "$root"/rules/_all/*.md > "$rf" 2>/dev/null || true
 
-tab=$(herdr tab create --label "$slug" --no-focus --cwd "$root" --env "QUAQUA_OWNER=$name")
-pane=$(printf '%s\n' "$tab" | jq -r '.result.root_pane.pane_id')
+ws=$(herdr workspace create --label "$slug" --no-focus --cwd "$root" --env "QUAQUA_OWNER=$name")
+pane=$(printf '%s\n' "$ws" | jq -r '.result.root_pane.pane_id')
+wsid=$(printf '%s\n' "$ws" | jq -r '.result.workspace.workspace_id')
 
 herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- \
   --model "${LEAD_MODEL:-claude-opus-5-5}" --effort "${LEAD_EFFORT:-high}" \
@@ -118,4 +121,4 @@ herdr agent prompt "$name" "You are the Lead for project '$slug' (QUAQUA_OWNER=$
 - Resolve any '## Challenge' in runs/<worker>.md before acceptance; every redirect (from anh iu, the Auditor, or any report) reaches you through the CoS — record CoS steering in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.
 Reply 'ready' once the card is read." >/dev/null
 
-echo "lead=$name slug=$slug pane=$pane"
+echo "lead=$name slug=$slug workspace=$wsid pane=$pane"
