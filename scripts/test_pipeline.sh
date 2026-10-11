@@ -94,7 +94,7 @@ run_pipe() {
   [[ ${1:-} == -- ]] && shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" GRID_SKIP=1 \
+  CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
     env "${vars[@]}" bash "$here/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
@@ -561,7 +561,7 @@ run_rg() {  # real-git run (only herdr stubbed); sets rc, $T/out, $T/err, $T/cal
   [[ ${1:-} == -- ]] && shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/rgbin:$PATH" GRID_SKIP=1 \
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/rgbin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 T="$T" \
     env "${vars[@]}" bash "$here/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?

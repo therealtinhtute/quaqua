@@ -36,7 +36,7 @@
 #   900 · _FIX_ 1200 · PIPELINE_MAX_SEC 7200 (work time; time between
 #   invocations does not count) · PIPELINE_REVIEW_LINES 150.
 #   Grid: after each spawn/cleanup its own workers are arranged into tab
-#   GRID_TAB (default <repo-basename>-workers); GRID_SKIP=1 disables.
+#   GRID_TAB (default <repo-basename>-workers); GRID_SKIP=1 with QUAQUA_TEST=1 disables (tests).
 set -euo pipefail
 
 usage() { sed -n '2,29p' "$0" >&2; exit 1; }
@@ -360,12 +360,12 @@ brief_text=$(cat "$brief" 2>/dev/null) || die "brief file unreadable: $brief"
 # --only scopes the grid's sweep to this pipeline's workers, so workers of
 # another orchestrator sitting in the same (CoS) tab are never touched. Child
 # spawn/cleanup scripts get GRID_SKIP=1: their unfiltered hook would sweep the
-# anchor tab. GRID_SKIP=1 disables the pipeline's own hook too (tests).
+# anchor tab. GRID_SKIP=1 + QUAQUA_TEST=1 disables the pipeline's own hook (tests only).
 grid_tab=${GRID_TAB:-"$(basename "$repo")-workers"}
 grid_hook() {  # grid_hook <name>[,<name>...] — returns the grid's rc; the
   # caller decides: pre-prompt failure = pause (MANDATORY rule), post-cleanup
   # failure = warning only
-  [[ ${GRID_SKIP:-} == 1 ]] && return 0
+  [[ ${GRID_SKIP:-} == 1 && ${QUAQUA_TEST:-} == 1 ]] && return 0
   local grid="$here/grid-workers.sh" rc=0
   [[ -f $grid ]] || return 0
   bash "$grid" --tab "$grid_tab" --only "$1" >&2 || rc=$?
@@ -484,7 +484,7 @@ Pipeline phase: REVIEW (round $round of $rounds)" "$REVIEW_BUDGET"
       if grep -q '^## Challenge' "$runs/$revname.md"; then
         log_challenge "$runs/$revname.md"
         plog "review round $round: $revname challenged the premise"
-        GRID_SKIP=1 bash "$here/cleanup-worker.sh" "$revname" "$repo" >&2 \
+        PIPELINE_TASK="$task" GRID_SKIP=1 bash "$here/cleanup-worker.sh" "$revname" "$repo" >&2 \
           || echo "warning: cleanup $revname failed; clean it manually" >&2
         grid_hook "$builder-$task" || true
         blocker="reviewer $revname challenged the premise — Lead resolves the Challenge above"
@@ -492,7 +492,7 @@ Pipeline phase: REVIEW (round $round of $rounds)" "$REVIEW_BUDGET"
       fi
       verdict=$(grep -E '^[[:space:]]*Verdict:' "$runs/$revname.md" | tail -1 || true)
       plog "review round $round: ${verdict:-NO VERDICT LINE} ($revname.md)"
-      GRID_SKIP=1 bash "$here/cleanup-worker.sh" "$revname" "$repo" >&2 \
+      PIPELINE_TASK="$task" GRID_SKIP=1 bash "$here/cleanup-worker.sh" "$revname" "$repo" >&2 \
         || echo "warning: cleanup $revname failed; clean it manually" >&2
       grid_hook "$builder-$task" || true
       if [[ $verdict =~ [Vv]erdict:[[:space:]]*([0-9]+)[[:space:]]*[Ff]indings? ]]; then
