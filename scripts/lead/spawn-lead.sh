@@ -22,8 +22,8 @@
 #   Env: LEAD_MODEL (default claude-opus-5-5) · LEAD_EFFORT (default high).
 set -euo pipefail
 
-usage() { sed -n '2,19p' "$0" >&2; exit 1; }
-die()   { echo "error: $*" >&2; exit 1; }
+USAGE_LAST=19
+. "$(dirname "$0")/../lib/common.sh"
 
 (( $# == 1 )) || usage
 slug=$1
