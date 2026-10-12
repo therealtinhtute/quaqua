@@ -21,6 +21,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # ── sandbox: stub git/herdr that log every call, temp HOME, dummy repo ───────
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/scripts/worker"
 cp "$src/worker/spawn-worker.sh" "$T/scripts/worker/spawn-worker.sh"
+cp -R "$src/lib" "$T/scripts/"
 cat > "$T/scripts/worker/grid-workers.sh" <<'STUB'
 #!/usr/bin/env bash
 printf 'grid%s\n' "${*:+ $*}" >> "$GRID_CALLS"
