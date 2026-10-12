@@ -36,9 +36,10 @@ done
 ! grep -rn 'quaqua-[a-z*-]*-orchestrator' "$root/AGENTS.md" \
     "$root/spec-raw" "$root/models.md" \
   || fail "stale 'quaqua-<slug>-orchestrator' role name survives"
-# rename leaves no dangling refs in tracked docs, scripts, systemd, or launchd
+# rename leaves no dangling refs in tracked docs, scripts (incl. the auditor's
+# systemd/launchd units), or tests
 # (memory/ is tracked here but is dated history — excluded, as in test_worker_cap.sh)
-! grep -rn 'super''visor' "$root/scripts" "$root/tests" "$root/systemd" "$root/launchd" \
+! grep -rn 'super''visor' "$root/scripts" "$root/tests" \
     --exclude="test_docs.sh" --exclude="test_worker_cap.sh" \
   || fail "dangling legacy references survive in docs/scripts"
 # acceptance authority: Lead merges into the integration branch, anh iu owns push
@@ -69,12 +70,12 @@ grep -q 'Verdict: clean' "$root/scripts/lead/pipeline.sh" || fail "pipeline.sh l
 echo "ok: report-tail contract documented for workers and pipeline reviewers"
 
 # ── scheduling assets: exactly one Auditor entrypoint (F8/F10) ───────────────
-[[ -f $root/systemd/quaqua-auditor.service && -f $root/systemd/quaqua-auditor.timer \
-   && -f $root/launchd/com.quaqua.auditor.plist.in ]] \
+[[ -f $root/scripts/auditor/systemd/quaqua-auditor.service && -f $root/scripts/auditor/systemd/quaqua-auditor.timer \
+   && -f $root/scripts/auditor/launchd/com.quaqua.auditor.plist.in ]] \
   || fail "systemd or launchd auditor scheduling assets missing"
-grep -q 'scripts/auditor/auditor.sh' "$root/systemd/quaqua-auditor.service" \
+grep -q 'scripts/auditor/auditor.sh' "$root/scripts/auditor/systemd/quaqua-auditor.service" \
   || fail "auditor service does not exec scripts/auditor/auditor.sh"
-grep -q 'scripts/auditor/auditor.sh' "$root/launchd/com.quaqua.auditor.plist.in" \
+grep -q 'scripts/auditor/auditor.sh' "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" \
   || fail "launchd template does not exec the same auditor entrypoint"
 # README.md is GitHub-side only (not tracked here) — install coverage is
 # asserted via the shipped template + installer instead (test_install_auditor.sh).

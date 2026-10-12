@@ -12,8 +12,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 root="$T/repo & <mac> \"quoted\" | back\\slash"
 mkdir -p "$root/scripts/auditor" "$T/bin" "$T/codex & tools" "$T/home"
 cp "$src/auditor/install-auditor.sh" "$root/scripts/auditor/"
-cp -R "$here/../systemd" "$root/"
-if [[ -d $here/../launchd ]]; then cp -R "$here/../launchd" "$root/"; fi
+cp -R "$here/../scripts/auditor/systemd" "$root/scripts/auditor/"
+if [[ -d $here/../scripts/auditor/launchd ]]; then cp -R "$here/../scripts/auditor/launchd" "$root/scripts/auditor/"; fi
 ln -s "$BASH" "$T/bin/bash"  # proves the installer discovers, rather than hardcodes, Bash
 cat > "$T/bin/uname" <<'EOF'
 #!/bin/sh
@@ -46,7 +46,7 @@ run Linux
 [[ $rc -eq 0 ]] || fail "Linux: exit $rc: $(cat "$T/err")"
 for unit in quaqua-auditor.service quaqua-auditor.timer; do
   dst="$T/home/.config/systemd/user/$unit"
-  [[ -L $dst && $(readlink "$dst") == "$root/systemd/$unit" ]] \
+  [[ -L $dst && $(readlink "$dst") == "$root/scripts/auditor/systemd/$unit" ]] \
     || fail "Linux: wrong unit symlink: $unit"
 done
 [[ $(cat "$T/calls") == 'systemctl --user daemon-reload' ]] \
