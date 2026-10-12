@@ -107,7 +107,8 @@ grep -q 'systemd' "$here/install-auditor.sh" || fail "pkg: installer does not us
 [[ -f $root/launchd/com.quaqua.auditor.plist.in ]] || fail "pkg: no launchd template shipped"
 grep -q 'scripts/auditor.sh' "$root/launchd/com.quaqua.auditor.plist.in" \
   || fail "pkg: launchd template does not use the same auditor entrypoint"
-grep -qi 'launchd' "$root/README.md" || fail "pkg: README omits macOS launchd installation"
+# README.md is GitHub-side only (not tracked in this repo) — launchd install
+# coverage is asserted via the template + installer instead.
 grep -q 'reports/audit-' "$root/AGENTS.md" \
   || fail "pkg: AGENTS session-start glob missing reports/audit-"
 echo "ok: packaging -> systemd + launchd share scripts/auditor.sh; legacy retired"

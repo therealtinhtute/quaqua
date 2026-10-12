@@ -5,6 +5,9 @@
 # advertised report/skill contracts match what the scripts implement.
 # Runs against the real repo root — no sandbox needed, nothing is written.
 # Usage: scripts/test_docs.sh   (exit 0 = pass)
+# Local deviations from upstream: README.md is GitHub-side only (untracked
+# here) and memory/ is tracked here, so the README assertions and the memory/
+# exclusion are dropped/kept accordingly.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -30,11 +33,12 @@ for f in operations.md judgment.md recovery.md; do
 done
 # the retired Lead name must not reappear in contracts (amendments name the
 # replacement, never the old label)
-! grep -rn 'quaqua-[a-z*-]*-orchestrator' "$root/AGENTS.md" "$root/README.md" \
+! grep -rn 'quaqua-[a-z*-]*-orchestrator' "$root/AGENTS.md" \
     "$root/spec-raw" "$root/models.md" \
   || fail "stale 'quaqua-<slug>-orchestrator' role name survives"
 # rename leaves no dangling refs in tracked docs, scripts, systemd, or launchd
-! grep -rn 'super''visor' "$root/README.md" "$root/scripts" "$root/systemd" "$root/launchd" \
+# (memory/ is tracked here but is dated history — excluded, as in test_worker_cap.sh)
+! grep -rn 'super''visor' "$root/scripts" "$root/systemd" "$root/launchd" \
     --exclude="test_docs.sh" --exclude="test_worker_cap.sh" \
   || fail "dangling legacy references survive in docs/scripts"
 # acceptance authority: Lead merges into the integration branch, anh iu owns push
@@ -55,12 +59,11 @@ grep -q 'scripts/auditor.sh' "$root/systemd/quaqua-auditor.service" \
   || fail "auditor service does not exec scripts/auditor.sh"
 grep -q 'scripts/auditor.sh' "$root/launchd/com.quaqua.auditor.plist.in" \
   || fail "launchd template does not exec the same auditor entrypoint"
-grep -q 'install-auditor.sh' "$root/README.md" || fail "README install skips the auditor installer"
-grep -qi 'launchd' "$root/README.md" || fail "README install omits launchd"
-grep -qi 'systemd' "$root/README.md" || fail "README install omits systemd"
+# README.md is GitHub-side only (not tracked here) — install coverage is
+# asserted via the shipped template + installer instead (test_install_auditor.sh).
 grep -q 'reports/audit-\*\.md\|reports/audit-' "$root/AGENTS.md" \
   || fail "AGENTS session-start glob != scripts/auditor.sh output"
-echo "ok: auditor entrypoint + scheduling assets + README install agree"
+echo "ok: auditor entrypoint + scheduling assets agree"
 
 # ── routing consistency: quansu findings flow through the pipeline ────────────
 ! grep -q 'to CoS → sude fix\|to CoS -> sude fix' "$root/models.md" \
