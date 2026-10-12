@@ -20,7 +20,7 @@ die()   { echo "error: $*" >&2; exit 1; }
 slug=$1
 [[ $slug =~ ^[a-z0-9][a-z0-9-]*$ ]] || usage
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/../.." && pwd)
 runs_dir="${QUAQUA_RUNS_DIR:-$root/runs}"
 name="$slug-lead"
 

@@ -19,7 +19,7 @@
 #   tier); AUDITOR_OUT overrides the output path (tests).
 set -euo pipefail
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/../.." && pwd)
 out=${AUDITOR_OUT:-${SUPERVISOR_OUT:-"$root/reports/audit-$(date +%F-%H).md"}}
 mkdir -p "$(dirname "$out")"
 log=$(mktemp)
@@ -149,7 +149,7 @@ Audit five things:
    handled marker CoS writes, see AGENTS.md); `## Lessons` lines (other than
    `none`) in runs/*.md from the last 2 days that no rules/ file cites as
    `runs/<name>.md`.
-4. Pipeline runs (runs/pipeline-*.md, written by scripts/pipeline.sh; the
+4. Pipeline runs (runs/pipeline-*.md, written by scripts/lead/pipeline.sh; the
    last `- status:` line is the outcome). Flag:
    - `status: disputed|blocked` with no memory/YYYY-MM-DD.md line naming
      `pipeline-<task>` (the CoS handling note, same convention as the

@@ -1,6 +1,6 @@
 # Worker briefs
 
-Every worker brief has these five parts, in this order (the first three are machine-checked by `scripts/prompt-worker.sh`):
+Every worker brief has these five parts, in this order (the first three are machine-checked by `scripts/worker/prompt-worker.sh`):
 
 ```
 Goal: <what must be true at the end>

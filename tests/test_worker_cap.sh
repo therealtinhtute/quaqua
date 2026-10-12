@@ -69,7 +69,7 @@ spawn() {
   local name=$1 kind=$2; shift 2
   rc=0
   HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-    env "$@" bash "$src/spawn-worker.sh" "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" bash "$src/worker/spawn-worker.sh" "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── 1. Cap refusal: 4 live workers for cos -> 5th refused ───────────────────
@@ -178,7 +178,7 @@ Current design: test
 EOF
 prc=0
 HOME="$T/home" PATH="$T/bin:$PATH" GRID_SKIP=1 QUAQUA_OWNER=cos \
-  bash "$src/pipeline.sh" pipetest "$T/repo" --brief "$brief" >"$T/out" 2>"$T/err" || prc=$?
+  bash "$src/lead/pipeline.sh" pipetest "$T/repo" --brief "$brief" >"$T/out" 2>"$T/err" || prc=$?
 [[ $prc -eq 2 ]] || fail "pipeline cap refusal: exit $prc, want 2: $(cat "$T/err")"
 grep -q 'worker cap exceeded' "$T/err" || fail "pipeline cap refusal: missing error message: $(cat "$T/err")"
 echo "ok: pipeline counts as 2 -> owner with 3 workers cannot start pipeline (needs 2, cap is 4)"

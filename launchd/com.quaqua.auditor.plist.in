@@ -8,7 +8,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>@BASH@</string>
-    <string>@ROOT@/scripts/auditor.sh</string>
+    <string>@ROOT@/scripts/auditor/auditor.sh</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

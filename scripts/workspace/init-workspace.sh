@@ -19,7 +19,7 @@
 #   silent success.
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/.." && pwd -P)"
+root="$(cd "$(dirname "$0")/../.." && pwd -P)"
 [[ -d $root/templates ]] || { echo "init-workspace: no templates/ in $root" >&2; exit 1; }
 
 # gitignored personal-state dirs (AGENTS.md '## Memory')

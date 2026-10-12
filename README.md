@@ -52,9 +52,9 @@ Decision lock: `spec-raw/quaqua-slp-slim-lock.md`.
 | `models.md` | Worker roster: nickname → kind / model / effort |
 | `.claude/settings.json` | Denies the built-in `Agent` tool so all workers go through Herdr |
 | `.claude/skills/herdr-orchestration/` | Worker flow + consolidated command, recovery, and assignment/acceptance references |
-| `scripts/auditor.sh` | Auditor: read-only drift + pipeline-run audit → `reports/audit-*.md` |
-| `scripts/install-auditor.sh`, `systemd/`, `launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
-| `scripts/init-workspace.sh`, `templates/` | Bootstraps a fresh clone's gitignored personal state (dirs + `memory/rules.md`, `projects/INDEX.md`, `_template.md`, `USER.md`); idempotent, never overwrites |
+| `scripts/auditor/auditor.sh` | Auditor: read-only drift + pipeline-run audit → `reports/audit-*.md` |
+| `scripts/auditor/install-auditor.sh`, `systemd/`, `launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
+| `scripts/workspace/init-workspace.sh`, `templates/` | Bootstraps a fresh clone's gitignored personal state (dirs + `memory/rules.md`, `projects/INDEX.md`, `_template.md`, `USER.md`); idempotent, never overwrites |
 | `tests/` | Sandboxed test suite: `tests/run.sh` runs every `tests/test_*.sh` and exits non-zero on any failure |
 | `codex-config.toml` | Codex config used by codex workers |
 | `USER.example.md` | Template for the per-workspace `USER.md` |
@@ -70,7 +70,7 @@ them. Bootstrap the skeleton — the dirs plus `memory/rules.md`,
 
 ```bash
 git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
-bash scripts/init-workspace.sh
+bash scripts/workspace/init-workspace.sh
 ```
 
 `init-workspace.sh` is idempotent and never overwrites an existing file, so it
@@ -84,8 +84,8 @@ card), and continue with the auditor install below. Templates live in
 
 ```bash
 git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
-bash scripts/init-workspace.sh     # dirs + rules.md, INDEX.md, _template.md, USER.md
-bash scripts/install-auditor.sh  # installs scheduling files; prints manual activation command
+bash scripts/workspace/init-workspace.sh     # dirs + rules.md, INDEX.md, _template.md, USER.md
+bash scripts/auditor/install-auditor.sh  # installs scheduling files; prints manual activation command
 ```
 
 Linux: the installer symlinks the user service/timer and calls only
@@ -94,11 +94,11 @@ Linux: the installer symlinks the user service/timer and calls only
 
 macOS: install a current Bash (e.g. `brew install bash`), then put its `bin` directory
 first on PATH (`export PATH="$(brew --prefix bash)/bin:$PATH"` for Homebrew).
-Run `bash scripts/install-auditor.sh` with `codex` on PATH. The installer requires
+Run `bash scripts/auditor/install-auditor.sh` with `codex` on PATH. The installer requires
 Bash >= 4.4 from `command -v bash` and refuses the macOS system Bash 3.2.
 It renders `launchd/com.quaqua.auditor.plist.in` into
 `~/Library/LaunchAgents/com.quaqua.auditor.plist`, pinning the discovered Bash,
-this checkout's absolute `scripts/auditor.sh` path, and the install-time PATH (including
+this checkout's absolute `scripts/auditor/auditor.sh` path, and the install-time PATH (including
 codex's directory). Logs go to `~/Library/Logs/quaqua-auditor.log`; reports still go
 in this checkout's `reports/`. It never calls launchctl; run the printed bootstrap
 command yourself. Reinstall after moving the checkout or changing toolchain paths.
@@ -117,4 +117,4 @@ tests/run.sh   # PASS/FAIL per test, then a count; exits non-zero on any failure
 Tests run locally only (no CI).
 
 Run CoS (Quả Quả) from `~/quaqua` inside Herdr (`HERDR_ENV=1`); it spawns project Leads with
-`scripts/spawn-lead.sh <slug>`.
+`scripts/lead/spawn-lead.sh <slug>`.

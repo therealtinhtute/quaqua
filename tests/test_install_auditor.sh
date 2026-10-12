@@ -10,8 +10,8 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 root="$T/repo & <mac> \"quoted\" | back\\slash"
-mkdir -p "$root/scripts" "$T/bin" "$T/codex & tools" "$T/home"
-cp "$src/install-auditor.sh" "$root/scripts/"
+mkdir -p "$root/scripts/auditor" "$T/bin" "$T/codex & tools" "$T/home"
+cp "$src/auditor/install-auditor.sh" "$root/scripts/auditor/"
 cp -R "$here/../systemd" "$root/"
 if [[ -d $here/../launchd ]]; then cp -R "$here/../launchd" "$root/"; fi
 ln -s "$BASH" "$T/bin/bash"  # proves the installer discovers, rather than hardcodes, Bash
@@ -39,7 +39,7 @@ run() {
   rc=0
   TEST_OS=$1 CALLS="$T/calls" HOME="${TEST_HOME:-$T/home}" \
     PATH="$T/bin:$T/codex & tools:$PATH" \
-    "$BASH" "$root/scripts/install-auditor.sh" > "$T/out" 2> "$T/err" || rc=$?
+    "$BASH" "$root/scripts/auditor/install-auditor.sh" > "$T/out" 2> "$T/err" || rc=$?
 }
 
 run Linux
@@ -67,7 +67,7 @@ plist, root, home, codex_dir, bash_bin = sys.argv[1:]
 with open(plist, 'rb') as f:
     p = plistlib.load(f)
 assert p['Label'] == 'com.quaqua.auditor', p
-assert p['ProgramArguments'] == [bash_bin, root + '/scripts/auditor.sh'], p
+assert p['ProgramArguments'] == [bash_bin, root + '/scripts/auditor/auditor.sh'], p
 assert all(pathlib.Path(v).is_absolute() for v in p['ProgramArguments']), p
 assert p['StartCalendarInterval'] == [{'Hour': 7, 'Minute': 0}, {'Hour': 19, 'Minute': 0}], p
 paths = p['EnvironmentVariables']['PATH'].split(':')
@@ -124,7 +124,7 @@ ln -s "$BASH" "$T/bin/bash"
 rc=0
 TEST_OS=Darwin CALLS="$T/calls" HOME="$T/missing-codex-home" \
   PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-  "$BASH" "$root/scripts/install-auditor.sh" > "$T/out" 2> "$T/err" || rc=$?
+  "$BASH" "$root/scripts/auditor/install-auditor.sh" > "$T/out" 2> "$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "missing codex: exit $rc, want 1"
 grep -q 'codex must be on PATH' "$T/err" || fail 'missing codex: no diagnostic'
 [[ ! -d $T/missing-codex-home ]] || fail 'missing codex: installed anyway'

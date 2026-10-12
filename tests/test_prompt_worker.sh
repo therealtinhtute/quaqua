@@ -43,14 +43,14 @@ prompt() {  # prompt <name> <task> [VAR=val...]; sets rc, $T/out, $T/err, $T/cal
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "$@" bash "$src/prompt-worker.sh" "$name" "$task" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" bash "$src/worker/prompt-worker.sh" "$name" "$task" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 reject() {  # reject <label> [args...]
   local label=$1; shift
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-    bash "$src/prompt-worker.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    bash "$src/worker/prompt-worker.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
   [[ $rc -eq 1 ]] || fail "$label: exit $rc, want 1"
   grep -q '^# Usage:' "$T/err" || fail "$label: no usage on stderr"
   echo "ok: $label -> exit 1, usage on stderr"
@@ -64,7 +64,7 @@ reject_brief() {  # reject_brief <label> <task>: missing headers -> exit 1
   local label=$1 task=$2
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-    bash "$src/prompt-worker.sh" sude-brief "$task" >"$T/out" 2>"$T/err" || rc=$?
+    bash "$src/worker/prompt-worker.sh" sude-brief "$task" >"$T/out" 2>"$T/err" || rc=$?
   [[ $rc -eq 1 ]] || fail "$label: exit $rc, want 1"
   grep -q 'Goal.*Hard constraints.*Current design' "$T/err" \
     || fail "$label: no brief error on stderr: $(cat "$T/err")"
@@ -95,7 +95,7 @@ check_brief() {  # check_brief <task> [VAR=val...]; sets rc, $T/out, $T/err
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-    env "$@" bash "$src/prompt-worker.sh" --check-brief "$task" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" bash "$src/worker/prompt-worker.sh" --check-brief "$task" >"$T/out" 2>"$T/err" || rc=$?
 }
 check_brief "$brief"
 [[ $rc -eq 0 ]] || fail "check-brief valid: exit $rc, want 0: $(cat "$T/err")"
@@ -115,7 +115,7 @@ check_brief "fix the flaky test"
 grep -q 'Goal.*Hard constraints.*Current design' "$T/err" \
   || fail "check-brief invalid: no brief error: $(cat "$T/err")"
 rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-  bash "$src/prompt-worker.sh" --check-brief >"$T/out" 2>"$T/err" || rc=$?
+  bash "$src/worker/prompt-worker.sh" --check-brief >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "check-brief no arg: exit $rc, want 1"
 [[ ! -s $T/calls ]] || fail "--check-brief called herdr: $(cat "$T/calls")"
 echo "ok: --check-brief -> validates headers, resolves budget (brief/env/default), no herdr"

@@ -15,8 +15,8 @@ Pick by task shape. Name = kind passed to `spawn-worker.sh`. Update "Seen" after
 
 ## Naming
 - Worker name = `<name>-<task>`, lowercase, no diacritics, ≤20 chars, e.g. `sude-fonts`, `quansu-fonts`.
-- Task must not end in `-lead` — `*-lead` names are project Leads (`scripts/spawn-lead.sh <slug>` → `<slug>-lead`, own `<slug>` workspace, no worktree); herdr caps agent names at 32 chars, so slugs are ≤27.
-- Spawn: `scripts/spawn-worker.sh [--base <ref>] tieude-fonts tieude <repo>` → branch `quaqua/tieude-fonts` (from <ref>, default HEAD), report `runs/tieude-fonts.md`.
+- Task must not end in `-lead` — `*-lead` names are project Leads (`scripts/lead/spawn-lead.sh <slug>` → `<slug>-lead`, own `<slug>` workspace, no worktree); herdr caps agent names at 32 chars, so slugs are ≤27.
+- Spawn: `scripts/worker/spawn-worker.sh [--base <ref>] tieude-fonts tieude <repo>` → branch `quaqua/tieude-fonts` (from <ref>, default HEAD), report `runs/tieude-fonts.md`.
 - Old names (`mdtree`, `mdqa`…) stay as-is.
 
 ## Rules
