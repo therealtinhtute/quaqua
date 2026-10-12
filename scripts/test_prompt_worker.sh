@@ -2,10 +2,11 @@
 # Sandbox test for prompt-worker.sh: arg validation, the exact herdr prompt
 # text, waiting for ~/quaqua/runs/<name>.md after herdr returns early, the
 # PROMPT_WORKER_MAX_SEC cap, stale-report archiving on a new task, byte-
-# stability before a report counts as complete, and the stdout path-only
-# contract. herdr is stubbed on PATH (it logs calls and fabricates the runs
-# file via FAKE_WRITE/FAKE_DELAY/FAKE_PARTS); HOME is a temp dir. No real
-# herdr, agent, or home touched.
+# stability before a report counts as complete, the stdout path-only
+# contract, and budget resolution (--check-brief, brief `Time budget:`,
+# PROMPT_WORKER_BUDGET_SEC override). herdr is stubbed on PATH (it logs calls
+# and fabricates the runs file via FAKE_WRITE/FAKE_DELAY/FAKE_PARTS); HOME is a
+# temp dir. No real herdr, agent, or home touched.
 # Usage: scripts/test_prompt_worker.sh   (exit 0 = pass)
 set -euo pipefail
 
@@ -86,6 +87,52 @@ Hard constraints: y"
 reject_brief "missing goal" "Hard constraints: y
 Current design: z"
 [[ ! -s $T/calls ]] || fail "non-brief task still called herdr: $(cat "$T/calls")"
+
+# ── D4: --check-brief validates + prints the resolved budget, no herdr ──────
+check_brief() {  # check_brief <task> [VAR=val...]; sets rc, $T/out, $T/err
+  local task=$1; shift
+  : > "$T/calls"
+  rc=0
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+    env "$@" bash "$here/prompt-worker.sh" --check-brief "$task" >"$T/out" 2>"$T/err" || rc=$?
+}
+check_brief "$brief"
+[[ $rc -eq 0 ]] || fail "check-brief valid: exit $rc, want 0: $(cat "$T/err")"
+[[ "$(cat "$T/out")" == 'budget=2700s source=default' ]] \
+  || fail "check-brief valid: wrong budget line: $(cat "$T/out")"
+check_brief "$brief
+Time budget: 25 min"
+[[ $rc -eq 0 ]] || fail "check-brief brief-budget: exit $rc, want 0: $(cat "$T/err")"
+[[ "$(cat "$T/out")" == 'budget=1500s source=brief' ]] \
+  || fail "check-brief brief-budget: 25 min not parsed: $(cat "$T/out")"
+check_brief "$brief
+Time budget: 25 min" PROMPT_WORKER_BUDGET_SEC=60
+[[ "$(cat "$T/out")" == 'budget=60s source=env' ]] \
+  || fail "check-brief env override: $(cat "$T/out")"
+check_brief "fix the flaky test"
+[[ $rc -eq 1 ]] || fail "check-brief invalid: exit $rc, want 1"
+grep -q 'Goal.*Hard constraints.*Current design' "$T/err" \
+  || fail "check-brief invalid: no brief error: $(cat "$T/err")"
+rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+  bash "$here/prompt-worker.sh" --check-brief >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 1 ]] || fail "check-brief no arg: exit $rc, want 1"
+[[ ! -s $T/calls ]] || fail "--check-brief called herdr: $(cat "$T/calls")"
+echo "ok: --check-brief -> validates headers, resolves budget (brief/env/default), no herdr"
+
+# ── D3: the brief's Time budget: sets the watch budget, env overrides it ────
+prompt sude-bbrief "$brief
+Time budget: 25 min" PROMPT_WORKER_MAX_SEC=2 PROMPT_WORKER_POLL_SEC=1
+[[ $rc -eq 2 ]] || fail "sude-bbrief: exit $rc, want 2 (cap): $(cat "$T/err")"
+grep -q 'budget 1500s' "$T/err" \
+  || fail "sude-bbrief: brief budget not used: $(cat "$T/err")"
+[[ "$(cat "$T/home/quaqua/runs/.sude-bbrief.budget")" == 1500 ]] \
+  || fail "sude-bbrief: budget sidecar not persisted"
+prompt sude-bover "$brief
+Time budget: 25 min" PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-bover: exit $rc, want 4 (env budget 3s): $(cat "$T/err")"
+grep -q 'budget 3s' "$T/err" || fail "sude-bover: env did not override brief: $(cat "$T/err")"
+echo "ok: brief Time budget -> watch budget; PROMPT_WORKER_BUDGET_SEC overrides"
 
 
 # ── happy path: file written during the prompt, fresh report returned ──────
