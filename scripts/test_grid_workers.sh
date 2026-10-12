@@ -798,9 +798,10 @@ place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 tieude-alpha
 rename w1:p6 detu-beta' "$actual"
 
-# ── 37. --only: unlisted workers in the anchor tab are never touched ────────
-# a CoS worker (sude-cos1) sitting next to the Lead's builder stays put; only
-# the listed worker is arranged (n=1 -> split beside the anchor)
+# ── 37. --only: unlisted workers still count toward the owner's population ──
+# sude-cos1 is never moved or renamed, but its existence keeps sude-isl out
+# of the anchor tab: population is owner-wide, so a lone listed worker of two
+# goes to the project tab (a filtered run must not fake the 1-worker layout)
 actual=$(plan coucou-workers sude-isl <<'EOF'
 anchor w1:p1
 worker sude-isl omp w1:p5 w1:t1 idle
@@ -809,9 +810,8 @@ tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,80,50 w1:p5=80,0,60,50 w1:p7=140,0,60,50
 EOF
 )
-expect "--only: unlisted worker in the anchor tab is untouched" \
-'evict w1:p5
-place w1:p5 split tab=@anchor dir=right anchor=w1:p1 ratio=0.4
+expect "--only: unlisted worker untouched, listed worker -> project tab" \
+'place w1:p5 new-tab label=coucou-workers
 rename w1:p5 sude-isl' "$actual"
 
 # ── 38. --only: two listed workers -> the project tab, the third stays ───────
@@ -842,9 +842,10 @@ HERDR_STUB_STATE="$T/state.json" HERDR_PANE_ID=w1:p1 PATH="$T/bin:$PATH" \
   || fail "--only ghost: expected exit 0"
 echo "ok: --only matching no agents -> no-op"
 
-# ── 40. --only: a group-labelled tab holding an unlisted agent is not reused ─
-# sude-cos1 sits in a coucou-workers tab but is not in --only: the tab is not
-# adopted as the workers tab and sude-cos1 is never swept into the group
+# ── 40. --only: a group tab holding an unlisted group member is reused ──────
+# sude-cos1 belongs to the same coucou-workers group but is not in --only:
+# it is a legitimate occupant — a second pipeline must not force a duplicate
+# project tab — and it is never moved or renamed itself
 actual=$(plan coucou-workers sude-isl,quansu-islr1 <<'EOF'
 anchor w1:p1
 worker sude-isl omp w1:p5 w1:t1 idle
@@ -856,8 +857,8 @@ layout w1:t1 200x50 w1:p1=0,0,50,50 w1:p5=50,0,50,50 w1:p6=100,0,50,50
 layout w1:t4 200x50 w1:p7=0,0,200,50
 EOF
 )
-expect "--only: label tab with a foreign occupant is not reused" \
-'place w1:p5 new-tab label=coucou-workers
+expect "--only: same-group unlisted occupant keeps the tab reusable" \
+'place w1:p5 split tab=@workers dir=right anchor=w1:p7 ratio=0.5
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 sude-isl
 rename w1:p6 quansu-islr1' "$actual"
@@ -927,5 +928,42 @@ EOF
 expect "groups: a lone stranded worker returns beside the anchor" \
 'place w1:p5 split tab=@anchor dir=right anchor=w1:p1 ratio=0.4
 rename w1:p5 suhuynh-x' "$actual"
+
+# ── 45. --only: a worker in another project group keeps the listed worker ────
+# out of the anchor tab — the pipeline scenario: the owner runs a second
+# project's worker beside this one; population and groups are owner-wide
+runs_case 45
+echo mono-workers > "$QUAQUA_RUNS_DIR/sude-alpha.grid"
+echo other-workers > "$QUAQUA_RUNS_DIR/sude-beta.grid"
+actual=$(plan mono-workers sude-alpha <<'EOF'
+anchor w1:p1
+worker sude-alpha pi w1:p5 w1:t1 idle
+worker sude-beta pi w1:p6 w1:t1 idle
+tab w1:t1 1
+layout w1:t1 200x50 w1:p1=0,0,80,50 w1:p5=80,0,60,50 w1:p6=140,0,60,50
+EOF
+)
+expect "--only: other-group co-owner -> project tab, other group untouched" \
+'place w1:p5 new-tab label=mono-workers
+rename w1:p5 sude-alpha' "$actual"
+
+# ── 46. --only: a tab holding a different group's worker is not reused ───────
+# sude-beta sits in the mono-workers tab but its .grid says other-workers —
+# foreign to this group, so the tab must not be adopted and it is untouched
+runs_case 46
+echo other-workers > "$QUAQUA_RUNS_DIR/sude-beta.grid"
+actual=$(plan mono-workers sude-alpha <<'EOF'
+anchor w1:p1
+worker sude-alpha pi w1:p5 w1:t1 idle
+worker sude-beta pi w1:p6 w1:t4 idle
+tab w1:t1 1
+tab w1:t4 mono-workers
+layout w1:t1 200x50 w1:p1=0,0,80,50 w1:p5=80,0,120,50
+layout w1:t4 200x50 w1:p6=0,0,200,50
+EOF
+)
+expect "--only: tab with a foreign-group occupant is not reused" \
+'place w1:p5 new-tab label=mono-workers
+rename w1:p5 sude-alpha' "$actual"
 
 echo "PASS"
