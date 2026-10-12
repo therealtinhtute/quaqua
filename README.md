@@ -96,7 +96,7 @@ network, real agents, or service activation is needed:
 for test in scripts/test_*.sh; do bash "$test" || exit; done
 ```
 
-CI runs the same suite on `ubuntu-latest` and `macos-latest`; macOS uses a Homebrew Bash.
+Tests run locally only (no CI): `for t in scripts/test_*.sh; do bash $t; done`.
 
 Run CoS (Quả Quả) from `~/quaqua` inside Herdr (`HERDR_ENV=1`); it spawns project Leads with
 `scripts/spawn-lead.sh <slug>`.
