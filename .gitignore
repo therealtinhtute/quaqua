@@ -8,3 +8,8 @@ raw/
 runs/
 reports/
 auditor/logs/
+
+# machine-local, generated per machine
+__pycache__/
+.claude/agents/tldraw-offline.md
+.claude/skills/tldraw-offline/
