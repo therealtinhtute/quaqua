@@ -6,10 +6,11 @@
 # stubbed on PATH (they log calls; herdr fabricates runs files from FAKE_*
 # vars keyed on the 'Pipeline phase: X' marker in the prompt). HOME is a temp
 # dir. No real herdr, agent, repo, or home touched.
-# Usage: scripts/test_pipeline.sh   (exit 0 = pass)
+# Usage: tests/test_pipeline.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-pipeline.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -97,7 +98,7 @@ run_pipe() {
   CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
-    env "${vars[@]}" bash "$here/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" bash "$src/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── arg validation: refused before any spawn/prompt ─────────────────────────
@@ -254,8 +255,8 @@ echo "ok: --base -> builder worktree starts at quaqua/integ"
 # Every grid call must carry --only — a call without it is an inner
 # spawn/cleanup hook leaking (it would sweep foreign workers in the CoS tab).
 mkdir -p "$T/p2/scripts"
-cp "$here/pipeline.sh" "$here/prompt-worker.sh" "$here/spawn-worker.sh" \
-   "$here/cleanup-worker.sh" "$T/p2/scripts/"
+cp "$src/pipeline.sh" "$src/prompt-worker.sh" "$src/spawn-worker.sh" \
+   "$src/cleanup-worker.sh" "$T/p2/scripts/"
 cat > "$T/p2/scripts/grid-workers.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'grid %s\n' "$*" >> "$CALLS"
@@ -564,7 +565,7 @@ run_rg() {  # real-git run (only herdr stubbed); sets rc, $T/out, $T/err, $T/cal
   CALLS="$T/calls" HOME="$T/home" PATH="$T/rgbin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 T="$T" \
-    env "${vars[@]}" bash "$here/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" bash "$src/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # F2: the reviewer worktree is created at exactly the committed tip the gate saw

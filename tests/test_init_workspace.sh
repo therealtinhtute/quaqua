@@ -7,10 +7,11 @@
 # USER.example.md, .gitignore, scripts/init-workspace.sh) in a temp dir — the
 # real workspace is never touched, so running this test on a populated
 # ~/quaqua is safe.
-# Usage: scripts/test_init_workspace.sh   (exit 0 = pass)
+# Usage: tests/test_init_workspace.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 root=$(cd "$here/.." && pwd -P)
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-init-workspace.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
@@ -30,7 +31,7 @@ git -C "$root" ls-files -z | while IFS= read -r -d '' f; do
   cp "$root/$f" "$R/$f"
 done
 mkdir -p "$R/scripts"
-cp "$here/init-workspace.sh" "$R/scripts/init-workspace.sh"
+cp "$src/init-workspace.sh" "$R/scripts/init-workspace.sh"
 cp "$root/USER.example.md" "$R/USER.example.md"
 cp -R "$root/templates" "$R/templates"
 git -C "$R" init -q  # step 0's check-ignore guard needs a repo to consult

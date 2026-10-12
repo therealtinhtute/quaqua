@@ -4,7 +4,7 @@
 # references exist, no stale role names/scheduling instructions survive, and the
 # advertised report/skill contracts match what the scripts implement.
 # Runs against the real repo root — no sandbox needed, nothing is written.
-# Usage: scripts/test_docs.sh   (exit 0 = pass)
+# Usage: tests/test_docs.sh   (exit 0 = pass)
 # Local deviations from upstream: README.md is GitHub-side only (untracked
 # here) and memory/ is tracked here, so the README assertions and the memory/
 # exclusion are dropped/kept accordingly.
@@ -38,7 +38,7 @@ done
   || fail "stale 'quaqua-<slug>-orchestrator' role name survives"
 # rename leaves no dangling refs in tracked docs, scripts, systemd, or launchd
 # (memory/ is tracked here but is dated history — excluded, as in test_worker_cap.sh)
-! grep -rn 'super''visor' "$root/scripts" "$root/systemd" "$root/launchd" \
+! grep -rn 'super''visor' "$root/scripts" "$root/tests" "$root/systemd" "$root/launchd" \
     --exclude="test_docs.sh" --exclude="test_worker_cap.sh" \
   || fail "dangling legacy references survive in docs/scripts"
 # acceptance authority: Lead merges into the integration branch, anh iu owns push

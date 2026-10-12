@@ -8,10 +8,11 @@
 # herdr, agent, or home touched.
 # Budgets in these tests are seconds (PROMPT_WORKER_BUDGET_SEC), so a grace of
 # 25% of a 4s allowance is 1s — the code paths are the real ones, no clock stub.
-# Usage: scripts/test_prompt_worker_watchdog.sh   (exit 0 = pass)
+# Usage: tests/test_prompt_worker_watchdog.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-prompt-watchdog.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -75,7 +76,7 @@ run() {
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "$@" bash "$here/prompt-worker.sh" "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" bash "$src/prompt-worker.sh" "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
 }
 # resume <name> [--extend <sec>] [VAR=val...] — resume wait; same capture
 resume() {
@@ -88,22 +89,22 @@ resume() {
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "${vars[@]}" bash "$here/prompt-worker.sh" --resume "$name" "${wargs[@]}" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" bash "$src/prompt-worker.sh" --resume "$name" "${wargs[@]}" >"$T/out" 2>"$T/err" || rc=$?
 }
 sentinel() { [[ -f $T/home/quaqua/runs/.$1.nudged ]]; }
 nudges()   { grep -c 'agent prompt.*Time check' "$T/calls" || true; }
 
 # ── --resume arg validation ─────────────────────────────────────────────────
 rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-  bash "$here/prompt-worker.sh" --resume >"$T/out" 2>"$T/err" || rc=$?
+  bash "$src/prompt-worker.sh" --resume >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "--resume no name: exit $rc, want 1"
 grep -q '^# Usage:' "$T/err" || fail "--resume no name: no usage on stderr"
 rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-  bash "$here/prompt-worker.sh" --resume 'bad_name' >"$T/out" 2>"$T/err" || rc=$?
+  bash "$src/prompt-worker.sh" --resume 'bad_name' >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "--resume bad name: exit $rc, want 1"
 for bad in '--extend 0' '--extend abc' '--extend'; do
   rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-    bash "$here/prompt-worker.sh" --resume sude-ext $bad >"$T/out" 2>"$T/err" || rc=$?
+    bash "$src/prompt-worker.sh" --resume sude-ext $bad >"$T/out" 2>"$T/err" || rc=$?
   [[ $rc -eq 1 ]] || fail "--resume $bad: exit $rc, want 1"
 done
 echo "ok: --resume arg validation -> exit 1, usage on stderr"

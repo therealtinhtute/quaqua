@@ -2,10 +2,11 @@
 # Sandbox test for cleanup-worker.sh's worktree removal and grid hook. No real
 # herdr/runs touched: temp git repo, fake herdr, and a stub grid-workers.sh
 # next to a copy of the script.
-# Usage: scripts/test_cleanup_worker.sh   (exit 0 = pass)
+# Usage: tests/test_cleanup_worker.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-cleanup-worker.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -14,7 +15,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ── sandbox: temp worker repo + fake herdr + stub grid ──────────────────────
 mkdir -p "$T/quaqua" "$T/bin" "$T/scripts"
-cp "$here/cleanup-worker.sh" "$T/scripts/cleanup-worker.sh"
+cp "$src/cleanup-worker.sh" "$T/scripts/cleanup-worker.sh"
 cat > "$T/scripts/grid-workers.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'grid%s\n' "${*:+ $*}" >> "$EVENTS"
