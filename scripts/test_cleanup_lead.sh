@@ -28,6 +28,15 @@ cat > "$T/bin/herdr" <<'STUB'
 echo "herdr $*" >> "$CALLS"
 case "${1:-} ${2:-}" in
   "agent get")
+    # $HERDR_ERR names fail with a transport error (stderr, rc 42);
+    # $HERDR_ERRJSON names fail with a non-not_found JSON error on stderr;
+    # $HERDR_GARBLE names 'succeed' with a non-JSON body (rc 0).
+    case " ${HERDR_ERR:-} " in *" ${3:-} "*)
+      echo 'temporary transport error' >&2; exit "${HERDR_ERR_RC:-42}" ;; esac
+    case " ${HERDR_ERRJSON:-} " in *" ${3:-} "*)
+      printf '{"error":{"code":"unavailable","message":"backend down"}}\n' >&2; exit 1 ;; esac
+    case " ${HERDR_GARBLE:-} " in *" ${3:-} "*)
+      echo '<html>502 Bad Gateway</html>'; exit 0 ;; esac
     if [[ " ${HERDR_LIVE:-} " == *" ${3:-} "* ]]; then
       printf '{"result":{"agent":{"name":"%s","pane_id":"%s","workspace_id":"%s"}}}\n' \
         "$3" "${LEAD_PANE:-w7:p1}" "${LEAD_PANE%%:*}"
@@ -94,5 +103,81 @@ run Bad_slug
 [[ $rc -eq 1 ]] && grep -q '^# Usage:' "$T/err" || fail "bad slug: $(cat "$T/err")"
 [[ ! -s $T/calls ]] || fail "bad slug: herdr called"
 echo "ok: missing Lead and bad slug -> refused"
+
+# ── Lead lookup failure is not "no Lead": abort, never a blind cleanup ──────
+run baro HERDR_ERR=baro-lead
+[[ $rc -eq 1 ]] || fail "lead err: exit $rc, want 1"
+grep -q "cannot determine the state of Lead 'baro-lead'" "$T/err" \
+  || fail "lead err: unclear abort: $(cat "$T/err")"
+! grep -q 'close' "$T/calls" || fail "lead err: closed something: $(cat "$T/calls")"
+cmp -s "$T/projects/INDEX.md" "$T/INDEX.orig" || fail "lead err: INDEX touched"
+echo "ok: Lead lookup transport error -> abort (not 'no live Lead'), nothing touched"
+
+# ── Peer liveness unknown -> abort: never close a workspace or rewrite INDEX ─
+# A dead Peer is only a positively identified agent_not_found (covered above);
+# every other `herdr agent get` failure leaves liveness unknown (F1).
+printf 'baro-lead' > "$T/runs/sude-live.owner"
+run baro HERDR_LIVE=baro-lead HERDR_ERR=sude-live
+[[ $rc -eq 1 ]] || fail "peer err: exit $rc, want 1"
+grep -q "cannot determine whether Peer 'sude-live' is still live" "$T/err" \
+  || fail "peer err: unclear abort: $(cat "$T/err")"
+! grep -q 'close' "$T/calls" || fail "peer err: closed something: $(cat "$T/calls")"
+cmp -s "$T/projects/INDEX.md" "$T/INDEX.orig" || fail "peer err: INDEX touched"
+echo "ok: Peer transport error -> abort, nothing closed, INDEX untouched"
+
+run baro HERDR_LIVE=baro-lead HERDR_ERRJSON=sude-live
+[[ $rc -eq 1 ]] || fail "peer errjson: exit $rc, want 1"
+! grep -q 'close' "$T/calls" || fail "peer errjson: closed something: $(cat "$T/calls")"
+cmp -s "$T/projects/INDEX.md" "$T/INDEX.orig" || fail "peer errjson: INDEX touched"
+echo "ok: Peer non-not_found JSON error -> abort"
+
+run baro HERDR_LIVE=baro-lead HERDR_GARBLE=sude-live
+[[ $rc -eq 1 ]] || fail "peer garble: exit $rc, want 1"
+! grep -q 'close' "$T/calls" || fail "peer garble: closed something: $(cat "$T/calls")"
+cmp -s "$T/projects/INDEX.md" "$T/INDEX.orig" || fail "peer garble: INDEX touched"
+echo "ok: Peer get rc 0 with a non-JSON body -> abort"
+rm -f "$T/runs/sude-live.owner"
+
+# ── concurrent cleanups on different INDEX rows must not lose updates ────────
+# The stub awk parks inside the INDEX read-modify-write (identified by the
+# OFS= program marker) until the test releases it, widening the race window
+# deterministically. With a shared lock the second writer serializes behind
+# the first; without it both snapshot the same INDEX and one row's update is
+# lost (F4). run() cannot be used: it resets INDEX/calls per call.
+cat > "$T/bin/awk" <<'STUB'
+#!/usr/bin/env bash
+idx=0 s=unknown
+for a in "$@"; do
+  [[ $a == *OFS=* ]] && idx=1
+  [[ $a == slug=* ]] && s=${a#slug=}
+done
+if (( ! idx )); then exec "$REAL_AWK" "$@"; fi
+out=$("$REAL_AWK" "$@"); r=$?
+: >> "$BARRIER_DIR/ready.$s"
+for _ in $(seq 1 800); do [[ -e $BARRIER_DIR/go ]] && break; sleep 0.01; done
+printf '%s\n' "$out"
+exit "$r"
+STUB
+chmod +x "$T/bin/awk"
+
+mkdir -p "$T/barrier"; : > "$T/calls"
+cp "$T/INDEX.orig" "$T/projects/INDEX.md"
+ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1
+    HERDR_LIVE="baro-lead baro-web-lead" REAL_AWK="$(command -v awk)" BARRIER_DIR="$T/barrier")
+env "${ce[@]}" bash "$T/scripts/cleanup-lead.sh" baro >"$T/out1" 2>"$T/err1" & p1=$!
+for _ in $(seq 1 500); do [[ -e $T/barrier/ready.baro ]] && break; sleep 0.01; done
+[[ -e $T/barrier/ready.baro ]] || fail "concurrent: first cleanup never reached the INDEX update"
+env "${ce[@]}" bash "$T/scripts/cleanup-lead.sh" baro-web >"$T/out2" 2>"$T/err2" & p2=$!
+for _ in $(seq 1 400); do [[ -e $T/barrier/ready.baro-web ]] && break; sleep 0.01; done
+touch "$T/barrier/go"
+rc1=0 rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?
+[[ $rc1 -eq 0 && $rc2 -eq 0 ]] || fail "concurrent: exits $rc1/$rc2: $(cat "$T/err1" "$T/err2")"
+grep -qE '^\| baro \| ~/Lab/baro \| cos \|' "$T/projects/INDEX.md" \
+  || fail "concurrent: baro update lost: $(cat "$T/projects/INDEX.md")"
+grep -qE '^\| baro-web \| ~/Lab/baro-web \| cos \|' "$T/projects/INDEX.md" \
+  || fail "concurrent: baro-web update lost: $(cat "$T/projects/INDEX.md")"
+find "$T/projects" -name 'INDEX.md.*' | grep -q . \
+  && fail "concurrent: leftover tmp/lock files: $(find "$T/projects" -name 'INDEX.md.*')"
+echo "ok: concurrent cleanups on different rows -> both updates kept, no torn file"
 
 echo "PASS"

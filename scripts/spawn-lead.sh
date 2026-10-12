@@ -17,11 +17,12 @@
 #   <slug> is unknown (no row in projects/INDEX.md or no projects/<slug>.md
 #   card), when its Lead is already registered with herdr, or when
 #   <slug>-lead would exceed herdr's 32-char agent-name limit; on success
-#   the row's owner column becomes the Lead name.
+#   the row's owner column becomes the Lead name (serialized with
+#   cleanup-lead.sh via projects/INDEX.md.lock.d, published by atomic rename).
 #   Env: LEAD_MODEL (default claude-opus-5-5) · LEAD_EFFORT (default high).
 set -euo pipefail
 
-usage() { sed -n '2,17p' "$0" >&2; exit 1; }
+usage() { sed -n '2,19p' "$0" >&2; exit 1; }
 die()   { echo "error: $*" >&2; exit 1; }
 
 (( $# == 1 )) || usage
@@ -103,16 +104,28 @@ herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- \
   --model "${LEAD_MODEL:-claude-opus-5-5}" --effort "${LEAD_EFFORT:-high}" \
   --append-system-prompt-file "$rf" >/dev/null
 
-# projects/INDEX.md: the <slug> row's owner cell (3rd column) -> the Lead name
-tmp=$(mktemp)
+# projects/INDEX.md: the <slug> row's owner cell (3rd column) -> the Lead
+# name. Serialized with cleanup-lead.sh through a mkdir lock (portable —
+# flock is absent on macOS); the new INDEX is built beside it and published
+# by atomic rename, so no reader sees a torn file and concurrent writers
+# cannot lose each other's update (F4).
+lock="$index.lock.d" i=0 tmp=
+until mkdir "$lock" 2>/dev/null; do
+  (( ++i <= 200 )) || die "$index is locked (stale $lock? remove it manually)"
+  sleep 0.05
+done
+trap '[[ -z $tmp ]] || rm -f "$tmp"; rmdir "$lock"' EXIT
+tmp=$(mktemp "$index.XXXXXX")
+chmod "$(stat -c %a "$index" 2>/dev/null || stat -f %Lp "$index" 2>/dev/null || echo 644)" "$tmp" 2>/dev/null || true
 awk -F'|' -v slug="$slug" -v owner="$name" 'BEGIN { OFS="|" }
   /^[[:space:]]*\|/ {
     s=$2; r=$3
     gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); gsub(/^[[:space:]]+|[[:space:]]+$/, "", r)
     if (s == slug && r != "repo") $4 = " " owner " "
   }
-  { print }' "$index" > "$tmp" && cat "$tmp" > "$index"
-rm -f "$tmp"
+  { print }' "$index" > "$tmp" && mv -f "$tmp" "$index"
+rmdir "$lock"
+trap - EXIT
 
 herdr agent prompt "$name" "You are the Lead for project '$slug' (QUAQUA_OWNER=$name) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).
 - Own the project card projects/$slug.md: read it now, then keep its '## Now' at the current truth after every outcome.
