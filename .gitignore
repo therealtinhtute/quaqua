@@ -17,5 +17,6 @@ __pycache__/
 # per-workspace project content — never ships in the boilerplate
 rules/*/
 !rules/_all/
-docs/plans/
 spec-raw/
+# zharness v0.15 managed set
+/.zharness/
