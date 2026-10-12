@@ -7,7 +7,9 @@
 # answers agent get/read/prompt from FAKE_* vars. HOME is a temp dir. No real
 # herdr, agent, or home touched.
 # Budgets in these tests are seconds (PROMPT_WORKER_BUDGET_SEC), so a grace of
-# 25% of a 4s allowance is 1s — the code paths are the real ones, no clock stub.
+# 25% of a 4s allowance is 1s — the code paths are the real ones. Time-sensitive
+# cases run on the virtual clock (see CLK below) so the thresholds under test are
+# exact instead of a race with wall-clock drift under load.
 # Usage: tests/test_prompt_worker_watchdog.sh   (exit 0 = pass)
 set -euo pipefail
 
@@ -50,9 +52,18 @@ case "${1:-} ${2:-}" in
       printf '{"error":{"code":"agent_not_idle"}}\n'; exit 1
     fi
     if [ "${FAKE_ROTATE:-0}" = 1 ]; then
-      # Each read runs in a new process. Hash its PID so digit normalization
-      # cannot erase the changing text; no GNU date %N/md5sum dependency.
-      printf 'tool line %s\n' "$(perl -MDigest::MD5=md5_hex -e 'print md5_hex($ARGV[0])' "$$")"
+      # Each read runs in a new process: advance a counter file and render it as
+      # letters. Digits would be erased by the watcher's fingerprint
+      # normalization (sed 's/[0-9][0-9]*/N/g'), so a numeric counter alone can
+      # look static; letters survive. No perl/PID dependency.
+      n=$(cat "$HOME/.rotate" 2>/dev/null || echo 0); n=$(( n + 1 ))
+      printf '%s\n' "$n" > "$HOME/.rotate"
+      s=''; m=$n
+      while [ "$m" -gt 0 ]; do
+        printf -v ch "\\$(printf '%03o' $(( 97 + m % 26 )))"
+        s="$s$ch"; m=$(( m / 26 ))
+      done
+      printf 'tool line %s\n' "$s"
     else
       printf '%s\n' "${FAKE_PANE:-some pane text}"
     fi ;;
@@ -66,22 +77,45 @@ exit 0
 STUB
 chmod +x "$T/bin/herdr"
 
+# ── virtual clock (test-only hooks, inert in production) ────────────────────
+# prompt-worker.sh reads epoch seconds from PROMPT_WORKER_CLOCK_FILE instead of
+# `date +%s`, and calls PROMPT_WORKER_SLEEP_CMD instead of `sleep` for its poll.
+# Both unset -> real date/sleep. Time-sensitive cases pass "${CLK[@]}" so time
+# advances only when the watcher naps: the thresholds under test are exact, not
+# a race with wall-clock drift under load. Cases needing the stub's real
+# FAKE_DELAY (report appearing mid-wait) pass REAL_CLOCK=1 instead.
+CLK=(PROMPT_WORKER_CLOCK_FILE="$T/clock" PROMPT_WORKER_SLEEP_CMD="$T/bin/advance-clock")
+printf '%s\n' 1700000000 > "$T/clock"
+cat > "$T/bin/advance-clock" <<'ADV'
+#!/usr/bin/env bash
+# virtual sleep: advance the clock by the requested seconds, never wall-clock
+n=$(cat "$PROMPT_WORKER_CLOCK_FILE")
+printf '%s\n' "$(( n + ${1:-1} ))" > "$PROMPT_WORKER_CLOCK_FILE"
+ADV
+chmod +x "$T/bin/advance-clock"
+
 brief='Goal: do the thing
 Hard constraints: keep tests passing
 Current design (open to challenge): via the existing helper'
 
-# run <name> [VAR=val...] — full submit+watch; sets rc, $T/out, $T/err, $T/calls
+# run <name> [VAR=val...] — full submit+watch; sets rc, $T/out, $T/err, $T/calls.
+# Virtual clock by default (exact timeouts, no wall-clock race); REAL_CLOCK=1
+# opts a case back onto the real clock when the stub's FAKE_DELAY must run.
 run() {
   local name=$1; shift
+  local clock=("${CLK[@]}") a
+  for a in "$@"; do [[ $a == REAL_CLOCK=1 ]] && clock=(); done
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "$@" bash "$src/worker/prompt-worker.sh" "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
+    env "${clock[@]}" "$@" bash "$src/worker/prompt-worker.sh" "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
 }
 # resume <name> [--extend <sec>] [VAR=val...] — resume wait; same capture
+# (virtual clock by default, REAL_CLOCK=1 to opt out — see run)
 resume() {
   local name=$1; shift
-  local vars=() wargs=()
+  local vars=() wargs=() a clock=("${CLK[@]}")
+  for a in "$@"; do [[ $a == REAL_CLOCK=1 ]] && clock=(); done
   while (( $# )); do
     if [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then vars+=("$1"); else wargs+=("$1"); fi
     shift
@@ -89,7 +123,7 @@ resume() {
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "${vars[@]}" bash "$src/worker/prompt-worker.sh" --resume "$name" "${wargs[@]}" >"$T/out" 2>"$T/err" || rc=$?
+    env "${clock[@]}" "${vars[@]}" bash "$src/worker/prompt-worker.sh" --resume "$name" "${wargs[@]}" >"$T/out" 2>"$T/err" || rc=$?
 }
 sentinel() { [[ -f $T/home/quaqua/runs/.$1.nudged ]]; }
 nudges()   { grep -c 'agent prompt.*Time check' "$T/calls" || true; }
@@ -273,7 +307,7 @@ grep -qE 'elapsed=[0-9]s ' "$T/err" \
 echo "ok: agent vanishes mid-wait -> exit 3 within AGENT_GONE_SEC"
 
 # ── transient agent_not_found once, then recovers -> no exit 3 ──────────────
-run sude-blink FAKE_DELAY=5 FAKE_GONE_AT=2 PROMPT_WORKER_POLL_SEC=1 \
+run sude-blink FAKE_DELAY=5 FAKE_GONE_AT=2 REAL_CLOCK=1 PROMPT_WORKER_POLL_SEC=1 \
   PROMPT_WORKER_AGENT_GONE_SEC=3 PROMPT_WORKER_STALL_SEC=9999 \
   PROMPT_WORKER_BUDGET_SEC=30 PROMPT_WORKER_MAX_SEC=60
 [[ $rc -eq 0 ]] || fail "sude-blink: exit $rc, want 0 (transient blip must not trip agent-gone): $(cat "$T/err")"
@@ -281,7 +315,7 @@ run sude-blink FAKE_DELAY=5 FAKE_GONE_AT=2 PROMPT_WORKER_POLL_SEC=1 \
 echo "ok: single agent_not_found then recovery -> no exit 3"
 
 # ── transient silent get failure once (status=unknown) then recovers -> ok ──
-run sude-unk FAKE_DELAY=5 FAKE_BLANK_AT=2 PROMPT_WORKER_POLL_SEC=1 \
+run sude-unk FAKE_DELAY=5 FAKE_BLANK_AT=2 REAL_CLOCK=1 PROMPT_WORKER_POLL_SEC=1 \
   PROMPT_WORKER_AGENT_GONE_SEC=3 PROMPT_WORKER_STALL_SEC=9999 \
   PROMPT_WORKER_BUDGET_SEC=30 PROMPT_WORKER_MAX_SEC=60
 [[ $rc -eq 0 ]] || fail "sude-unk: exit $rc, want 0 (one unknown poll must not trip agent-gone): $(cat "$T/err")"
