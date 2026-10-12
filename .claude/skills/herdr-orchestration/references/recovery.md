@@ -10,7 +10,7 @@ Always look first: `herdr agent get <name>` then `herdr agent read <name> --sour
 | `agent_not_ready` at start | startup dialog (e.g. codex "Trust this folder") | `herdr pane read <pane> --source visible`, answer, then `herdr agent wait <name> --until idle`. |
 | `runs/<name>.md` missing but agent idle | worker skipped the handoff | Prompt once: "Write the summary file now; reply only the path." |
 
-Watchdog exits 2–5: read the pane, act only within the brief's authority, then `scripts/prompt-worker.sh --resume <name>` keeps waiting without a fresh task prompt or clock. Text still sitting unsubmitted → `herdr agent send-keys <name> enter`, then resume. A still-working worker needs another wait, not another task.
+Watchdog exits 2–5: read the pane, act only within the brief's authority, then `scripts/worker/prompt-worker.sh --resume <name>` keeps waiting without a fresh task prompt or clock. Text still sitting unsubmitted → `herdr agent send-keys <name> enter`, then resume. A still-working worker needs another wait, not another task.
 
 For a provider/stream error (`agent_blocked`), inspect the UI first. If the one safe recovery input cannot use `agent prompt`, use `herdr pane send-text <pane_id> "<message>"` followed by `herdr pane send-keys <pane_id> Enter`, then wait. Still stuck → escalate, never loop retries.
 

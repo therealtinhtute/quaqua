@@ -98,7 +98,7 @@ run_pipe() {
   CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
-    env "${vars[@]}" bash "$src/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" bash "$src/lead/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── arg validation: refused before any spawn/prompt ─────────────────────────
@@ -254,16 +254,17 @@ echo "ok: --base -> builder worktree starts at quaqua/integ"
 # run_pipe2 does NOT set GRID_SKIP so the pipeline's own hook is observable.
 # Every grid call must carry --only — a call without it is an inner
 # spawn/cleanup hook leaking (it would sweep foreign workers in the CoS tab).
-mkdir -p "$T/p2/scripts"
-cp "$src/pipeline.sh" "$src/prompt-worker.sh" "$src/spawn-worker.sh" \
-   "$src/cleanup-worker.sh" "$T/p2/scripts/"
-cat > "$T/p2/scripts/grid-workers.sh" <<'EOF'
+mkdir -p "$T/p2/scripts/lead" "$T/p2/scripts/worker"
+cp "$src/lead/pipeline.sh" "$T/p2/scripts/lead/"
+cp "$src/worker/prompt-worker.sh" "$src/worker/spawn-worker.sh" \
+   "$src/worker/cleanup-worker.sh" "$T/p2/scripts/worker/"
+cat > "$T/p2/scripts/worker/grid-workers.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'grid %s\n' "$*" >> "$CALLS"
 if [ -n "${GRID_FAIL_ON:-}" ] && [[ $* == *"$GRID_FAIL_ON"* ]]; then exit 1; fi
 exit "${GRID_FAKE_RC:-0}"
 EOF
-chmod +x "$T/p2/scripts/grid-workers.sh"
+chmod +x "$T/p2/scripts/worker/grid-workers.sh"
 
 run_pipe2() {  # like run_pipe, but against $T/p2/scripts and without GRID_SKIP
   local vars=()
@@ -274,7 +275,7 @@ run_pipe2() {  # like run_pipe, but against $T/p2/scripts and without GRID_SKIP
   CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
-    env "${vars[@]}" bash "$T/p2/scripts/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" bash "$T/p2/scripts/lead/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 glines() { grep '^grid ' "$T/calls" || true; }
 
@@ -565,7 +566,7 @@ run_rg() {  # real-git run (only herdr stubbed); sets rc, $T/out, $T/err, $T/cal
   CALLS="$T/calls" HOME="$T/home" PATH="$T/rgbin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 T="$T" \
-    env "${vars[@]}" bash "$src/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" bash "$src/lead/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # F2: the reviewer worktree is created at exactly the committed tip the gate saw

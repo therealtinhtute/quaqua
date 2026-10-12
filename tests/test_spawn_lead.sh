@@ -18,8 +18,8 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ── sandbox: temp quaqua root (script copy under scripts/) + stub herdr/git ─
-mkdir -p "$T/bin" "$T/scripts" "$T/projects" "$T/rules/_all"
-cp "$src/spawn-lead.sh" "$T/scripts/spawn-lead.sh"
+mkdir -p "$T/bin" "$T/scripts/lead" "$T/projects" "$T/rules/_all"
+cp "$src/lead/spawn-lead.sh" "$T/scripts/lead/spawn-lead.sh"
 
 cat > "$T/projects/INDEX.md" <<'EOF'
 # Projects
@@ -77,7 +77,7 @@ spawn() {  # spawn <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" PATH="$T/bin:$PATH" env "$@" \
-    bash "$T/scripts/spawn-lead.sh" "$slug" >"$T/out" 2>"$T/err" || rc=$?
+    bash "$T/scripts/lead/spawn-lead.sh" "$slug" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 ln() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }  # first matching call line
@@ -247,7 +247,7 @@ echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corrup
 # OFS and pass straight through) until the test releases it. With the shared
 # mkdir lock the cleanup serializes behind the spawn; without it both snapshot
 # the same INDEX and one row's update is lost (F4).
-cp "$src/cleanup-lead.sh" "$T/scripts/cleanup-lead.sh"
+cp "$src/lead/cleanup-lead.sh" "$T/scripts/lead/cleanup-lead.sh"
 cat > "$T/bin/awk" <<'STUB'
 #!/usr/bin/env bash
 idx=0 s=unknown
@@ -267,12 +267,12 @@ chmod +x "$T/bin/awk"
 mkdir -p "$T/barrier" "$T/runs"; : > "$T/calls"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
 ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" REAL_AWK="$(command -v awk)" BARRIER_DIR="$T/barrier")
-env "${ce[@]}" bash "$T/scripts/spawn-lead.sh" coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
+env "${ce[@]}" bash "$T/scripts/lead/spawn-lead.sh" coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
 for _ in $(seq 1 500); do [[ -e $T/barrier/ready.coucou-island ]] && break; sleep 0.01; done
 [[ -e $T/barrier/ready.coucou-island ]] \
   || fail "concurrent: spawn never reached the INDEX update: $(cat "$T/err.s")"
 env "${ce[@]}" HERDR_LIVE=mono-desk-lead HERDR_PANE_ID=w9:p13 \
-  bash "$T/scripts/cleanup-lead.sh" mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
+  bash "$T/scripts/lead/cleanup-lead.sh" mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
 for _ in $(seq 1 400); do [[ -e $T/barrier/ready.mono-desk ]] && break; sleep 0.01; done
 touch "$T/barrier/go"
 rc1=0 rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?

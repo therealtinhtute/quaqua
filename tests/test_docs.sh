@@ -45,24 +45,41 @@ done
 grep -q 'quaqua/<slug>-integ' "$root/AGENTS.md" || fail "integration-branch acceptance missing from AGENTS.md"
 echo "ok: consolidated orchestration references; one role naming; acceptance authority consistent"
 
+# ── entrypoints live in role dirs; every scripts/*.sh reference resolves ──────
+# Phase 2 moved the entrypoints to scripts/{worker,lead,auditor,workspace}/ (hooks/
+# unchanged). A flat file left behind, or any tracked reference to a path that
+# does not exist (a stale flat entrypoint path, a typo), fails here. This very
+# comment is scanned too: never spell a dead path out in this file.
+flat=$(find "$root/scripts" -maxdepth 1 -name '*.sh' -print)
+[[ -z $flat ]] || fail "entrypoint left flat in scripts/ (role dir required): $flat"
+missing=()
+while IFS= read -r f; do
+  while IFS= read -r ref; do
+    ref="scripts/${ref#*scripts/}"
+    [[ -e $root/$ref ]] || missing+=("$f: $ref")
+  done < <(grep -aoE '(^|[^A-Za-z0-9_./-])scripts/[A-Za-z0-9_./-]+\.sh' "$root/$f" 2>/dev/null | sort -u)
+done < <(git -C "$root" ls-files)
+(( ${#missing[@]} == 0 )) || fail "dangling scripts/*.sh reference(s): ${missing[*]}"
+echo "ok: entrypoints in role dirs; every scripts/*.sh reference resolves"
+
 # ── report contract: worker -> '## Lessons', pipeline reviewer -> 'Verdict:' ──
 grep -q '## Lessons' "$root/rules/_all/brief.md" || fail "brief.md drops the Lessons tail"
 grep -q 'Verdict:' "$root/rules/_all/brief.md" || fail "brief.md ignores the reviewer Verdict tail"
-grep -q 'Verdict: clean' "$root/scripts/pipeline.sh" || fail "pipeline.sh lost the Verdict contract"
+grep -q 'Verdict: clean' "$root/scripts/lead/pipeline.sh" || fail "pipeline.sh lost the Verdict contract"
 echo "ok: report-tail contract documented for workers and pipeline reviewers"
 
 # ── scheduling assets: exactly one Auditor entrypoint (F8/F10) ───────────────
 [[ -f $root/systemd/quaqua-auditor.service && -f $root/systemd/quaqua-auditor.timer \
    && -f $root/launchd/com.quaqua.auditor.plist.in ]] \
   || fail "systemd or launchd auditor scheduling assets missing"
-grep -q 'scripts/auditor.sh' "$root/systemd/quaqua-auditor.service" \
-  || fail "auditor service does not exec scripts/auditor.sh"
-grep -q 'scripts/auditor.sh' "$root/launchd/com.quaqua.auditor.plist.in" \
+grep -q 'scripts/auditor/auditor.sh' "$root/systemd/quaqua-auditor.service" \
+  || fail "auditor service does not exec scripts/auditor/auditor.sh"
+grep -q 'scripts/auditor/auditor.sh' "$root/launchd/com.quaqua.auditor.plist.in" \
   || fail "launchd template does not exec the same auditor entrypoint"
 # README.md is GitHub-side only (not tracked here) — install coverage is
 # asserted via the shipped template + installer instead (test_install_auditor.sh).
 grep -q 'reports/audit-\*\.md\|reports/audit-' "$root/AGENTS.md" \
-  || fail "AGENTS session-start glob != scripts/auditor.sh output"
+  || fail "AGENTS session-start glob != scripts/auditor/auditor.sh output"
 echo "ok: auditor entrypoint + scheduling assets agree"
 
 # ── routing consistency: quansu findings flow through the pipeline ────────────

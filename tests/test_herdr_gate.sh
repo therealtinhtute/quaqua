@@ -53,13 +53,13 @@ for c in '"herdr" pane split --current' \
 done
 echo "ok: quoted/pathed/-c/eval/wrapper/substitution spellings -> blocked"
 
-for c in 'scripts/spawn-worker.sh sude-x sude ~/repo' \
-         'scripts/grid-workers.sh --tab x-workers --dry-run' \
+for c in 'scripts/worker/spawn-worker.sh sude-x sude ~/repo' \
+         'scripts/worker/grid-workers.sh --tab x-workers --dry-run' \
          'herdr agent list' 'herdr agent read sude-x --lines 80' \
          'herdr pane send-keys w1:p5 enter' 'herdr tab list' \
-         'herdr workspace list' 'herdr workspace get w7' 'scripts/cleanup-lead.sh baro' \
-         'grep -n "herdr pane split" scripts/spawn-worker.sh' \
-         'bash scripts/spawn-worker.sh sude-x sude ~/repo' \
+         'herdr workspace list' 'herdr workspace get w7' 'scripts/lead/cleanup-lead.sh baro' \
+         'grep -n "herdr pane split" scripts/worker/spawn-worker.sh' \
+         'bash scripts/worker/spawn-worker.sh sude-x sude ~/repo' \
          'bash -c '\''echo no herdr here'\''' \
          'echo $(herdr agent list)'; do
   [[ $(gate "$c") == 0 ]] || fail "wrongly blocked: $c"

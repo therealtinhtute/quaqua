@@ -14,9 +14,9 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ── sandbox: temp worker repo + fake herdr + stub grid ──────────────────────
-mkdir -p "$T/quaqua" "$T/bin" "$T/scripts"
-cp "$src/cleanup-worker.sh" "$T/scripts/cleanup-worker.sh"
-cat > "$T/scripts/grid-workers.sh" <<'EOF'
+mkdir -p "$T/quaqua" "$T/bin" "$T/scripts/worker"
+cp "$src/worker/cleanup-worker.sh" "$T/scripts/worker/cleanup-worker.sh"
+cat > "$T/scripts/worker/grid-workers.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'grid%s\n' "${*:+ $*}" >> "$EVENTS"
 exit "${GRID_FAKE_RC:-0}"
@@ -45,7 +45,7 @@ run_cleanup() {  # run_cleanup <name> [VAR=val...]
   local name=$1; shift
   : > "$T/events"
   env PATH="$T/bin:$PATH" EVENTS="$T/events" "$@" \
-    bash "$T/scripts/cleanup-worker.sh" "$name" "$T/quaqua"
+    bash "$T/scripts/worker/cleanup-worker.sh" "$name" "$T/quaqua"
 }
 
 # ── 1. cleanup removes the worktree; grid hook runs after the pane close ────

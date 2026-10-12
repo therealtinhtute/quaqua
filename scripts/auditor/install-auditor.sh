@@ -5,7 +5,7 @@
 #   Prints the platform's activation command for the user to run manually.
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/.." && pwd -P)"
+root="$(cd "$(dirname "$0")/../.." && pwd -P)"
 case $(uname -s) in
   Darwin)
     bash_bin=$(command -v bash) \

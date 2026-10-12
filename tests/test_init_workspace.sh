@@ -4,7 +4,7 @@
 # re-running must never clobber local content.
 #
 # The sandbox is a COPY of this checkout's skeleton (templates/,
-# USER.example.md, .gitignore, scripts/init-workspace.sh) in a temp dir — the
+# USER.example.md, .gitignore, scripts/workspace/init-workspace.sh) in a temp dir — the
 # real workspace is never touched, so running this test on a populated
 # ~/quaqua is safe.
 # Usage: tests/test_init_workspace.sh   (exit 0 = pass)
@@ -30,12 +30,12 @@ git -C "$root" ls-files -z | while IFS= read -r -d '' f; do
   mkdir -p "$R/$(dirname "$f")"
   cp "$root/$f" "$R/$f"
 done
-mkdir -p "$R/scripts"
-cp "$src/init-workspace.sh" "$R/scripts/init-workspace.sh"
+mkdir -p "$R/scripts/workspace"
+cp "$src/workspace/init-workspace.sh" "$R/scripts/workspace/init-workspace.sh"
 cp "$root/USER.example.md" "$R/USER.example.md"
 cp -R "$root/templates" "$R/templates"
 git -C "$R" init -q  # step 0's check-ignore guard needs a repo to consult
-run() { (cd / && bash "$R/scripts/init-workspace.sh"); }  # foreign cwd
+run() { (cd / && bash "$R/scripts/workspace/init-workspace.sh"); }  # foreign cwd
 
 # the sandbox must really model a fresh clone: personal state absent up front
 for f in memory projects raw runs reports USER.md; do

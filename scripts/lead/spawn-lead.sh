@@ -6,11 +6,11 @@
 #   no slot in the 4-worker cap, no grid hook: each SLP team gets its own
 #   herdr workspace labelled <slug> (the Lead in its first tab, its Peers grid
 #   beside it or in <repo>-workers there); the CoS stays the one Supervisor in
-#   its own workspace and reaches the Lead by agent name. scripts/cleanup-lead.sh
+#   its own workspace and reaches the Lead by agent name. scripts/lead/cleanup-lead.sh
 #   closes the workspace when the project is done. rules/_all/*.md are the
 #   appended system prompt (the spawn-worker convention); the first prompt
 #   is a short lead brief pointing at AGENTS.md, projects/<slug>.md and
-#   scripts/pipeline.sh. The project integration branch quaqua/<slug>-integ
+#   scripts/lead/pipeline.sh. The project integration branch quaqua/<slug>-integ
 #   is created from the project repo's default branch when missing —
 #   origin/HEAD if set, else main, else master (Peers branch from it --base
 #   and are merged back into it at acceptance). Refuses when
@@ -30,7 +30,7 @@ slug=$1
 case $slug in -*) usage ;; esac
 [[ $slug =~ ^[a-z0-9-]+$ ]] || usage
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/../.." && pwd)
 index="$root/projects/INDEX.md" card="$root/projects/$slug.md"
 name="$slug-lead"
 
@@ -129,7 +129,7 @@ trap - EXIT
 
 herdr agent prompt "$name" "You are the Lead for project '$slug' (QUAQUA_OWNER=$name) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).
 - Own the project card projects/$slug.md: read it now, then keep its '## Now' at the current truth after every outcome.
-- Pipeline-size work runs through scripts/pipeline.sh (usage in its header). Peers: scripts/spawn-worker.sh + scripts/grid-workers.sh with GRID_TAB=$slug-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.
+- Pipeline-size work runs through scripts/lead/pipeline.sh (usage in its header). Peers: scripts/worker/spawn-worker.sh + scripts/worker/grid-workers.sh with GRID_TAB=$slug-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.
 - You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch $integ (created from the repo's default branch if it was missing — spawn Peers --base $integ so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.
 - Resolve any '## Challenge' in runs/<worker>.md before acceptance; every redirect (from anh iu, the Auditor, or any report) reaches you through the CoS — record CoS steering in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.
 Reply 'ready' once the card is read." >/dev/null

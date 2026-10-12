@@ -19,9 +19,9 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ── sandbox: stub git/herdr that log every call, temp HOME, dummy repo ───────
-mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/scripts"
-cp "$src/spawn-worker.sh" "$T/scripts/spawn-worker.sh"
-cat > "$T/scripts/grid-workers.sh" <<'STUB'
+mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/scripts/worker"
+cp "$src/worker/spawn-worker.sh" "$T/scripts/worker/spawn-worker.sh"
+cat > "$T/scripts/worker/grid-workers.sh" <<'STUB'
 #!/usr/bin/env bash
 printf 'grid%s\n' "${*:+ $*}" >> "$GRID_CALLS"
 exit "${GRID_FAKE_RC:-0}"
@@ -56,7 +56,7 @@ spawn() {  # spawn <name> <kind> [VAR=val...]; script opts via array $spawn_args
   : > "$T/calls"; : > "$T/gridcalls"
   rc=0
   CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" LC_ALL="${SPAWN_LC_ALL:-C}" \
-    env "$@" bash "$T/scripts/spawn-worker.sh" ${spawn_args+"${spawn_args[@]}"} "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" bash "$T/scripts/worker/spawn-worker.sh" ${spawn_args+"${spawn_args[@]}"} "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 expect_reject() {  # expect_reject <name> <kind> <label> [locale]
@@ -256,7 +256,7 @@ echo "ok: --base= empty -> exit 1, no git/herdr"
 : > "$T/calls"; : > "$T/gridcalls"
 rc=0
 CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" LC_ALL=C \
-  bash "$T/scripts/spawn-worker.sh" tieude-noval tieude "$T/repo" --base >"$T/out" 2>"$T/err" || rc=$?
+  bash "$T/scripts/worker/spawn-worker.sh" tieude-noval tieude "$T/repo" --base >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "trailing --base: exit $rc, want 1"
 grep -q '^# Usage:' "$T/err" || fail "trailing --base: no usage on stderr"
 [[ ! -s "$T/calls" ]] || fail "trailing --base: git/herdr called: $(cat "$T/calls")"
@@ -286,7 +286,7 @@ chmod +x "$T/bin2/herdr"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  bash "$T/scripts/worker/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 spawn: exit $rc: $(cat "$T/err")"
 [[ -d $T/.wt/sude-rw1 ]] || fail "rw1: no worktree created"
 
@@ -295,7 +295,7 @@ rm -f "$T/failed-sude-rw1"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  bash "$T/scripts/worker/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 respawn: exit $rc, want 0: $(cat "$T/err")"
 grep -q 'reusing it' "$T/err" || fail "rw1 respawn: no reuse note: $(cat "$T/err")"
 grep -q 'agent start sude-rw1' "$T/calls" || fail "rw1 respawn: agent start not retried"
@@ -306,7 +306,7 @@ mkdir -p "$T/.wt/sude-rw2"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/spawn-worker.sh" sude-rw2 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  bash "$T/scripts/worker/spawn-worker.sh" sude-rw2 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "rw2 foreign dir: exit $rc, want 1"
 grep -q 'not a git worktree' "$T/err" || fail "rw2: no refusal message: $(cat "$T/err")"
 ! grep -q 'agent start' "$T/calls" || fail "rw2: agent started over a foreign dir"

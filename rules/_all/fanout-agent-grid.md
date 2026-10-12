@@ -1,7 +1,7 @@
 # Fanout agent grid — MANDATORY
 
 Every spawn/fanout of task workers MUST end with the workers arranged in the agent grid before any `herdr agent prompt`:
-- `scripts/spawn-worker.sh` / `scripts/cleanup-worker.sh` run the grid themselves; run `scripts/grid-workers.sh --tab <repo>-workers` by hand only to repair a layout.
+- `scripts/worker/spawn-worker.sh` / `scripts/worker/cleanup-worker.sh` run the grid themselves; run `scripts/worker/grid-workers.sh --tab <repo>-workers` by hand only to repair a layout.
 - The harness decides placement, not the agent: `spawn-worker.sh` records `runs/<name>.owner` (`QUAQUA_OWNER`) and `runs/<name>.grid` (`GRID_TAB`, default `<repo>-workers`); the grid only moves the caller's own workers, grouped by project.
 - An orchestrator with exactly 1 worker in total → split beside it. Otherwise each project gets its own `<repo>-workers` tab (e.g. `monotinhtute-workers`) in a grid (1 = full, 2 = left|right, 3 = A|B + C below, 4 = 2x2); the orchestrator tab keeps only the orchestrator.
 - Each SLP team gets its own herdr workspace `<slug>` (`spawn-lead.sh`): the Lead and its Peers' tabs live there; the CoS (the one Supervisor) stays in its own workspace and reaches Leads by agent name. `cleanup-lead.sh <slug>` closes it when the project is done.
