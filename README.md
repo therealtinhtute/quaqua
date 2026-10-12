@@ -55,18 +55,36 @@ Decision lock: `spec-raw/quaqua-slp-slim-lock.md`.
 | `scripts/auditor.sh` | Auditor: read-only drift + pipeline-run audit → `reports/audit-*.md` |
 | `scripts/install-auditor.sh`, `systemd/`, `launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
 | `scripts/commit-memory.sh` | CoS notes commit on the current branch: stages only `memory/ projects/ raw/`, refuses foreign staged paths, never pushes or amends |
+| `scripts/init-workspace.sh`, `templates/` | Bootstraps a fresh clone's gitignored personal state (dirs + `memory/rules.md`, `projects/INDEX.md`, `_template.md`, `USER.md`); idempotent, never overwrites |
 | `codex-config.toml` | Codex config used by codex workers |
 | `USER.example.md` | Template for the per-workspace `USER.md` |
 | `SETUP-PROMPT.md` | Original prompt used to bootstrap this setup |
 | `docs/slp.png` | Diagram: Principal → CoS → Lead → Peers |
 
+## New machine
+
+A fresh clone has no personal state: `memory/`, `projects/`, `raw/`, `runs/`,
+`reports/` and `USER.md` are gitignored and stay on the machine that created
+them. Bootstrap the skeleton — the dirs plus `memory/rules.md`,
+`projects/INDEX.md`, `projects/_template.md` and `USER.md` — with:
+
+```bash
+git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
+bash scripts/init-workspace.sh
+```
+
+`init-workspace.sh` is idempotent and never overwrites an existing file, so it
+is safe to re-run after a pull. Then edit `USER.md` for the workspace, add one
+row per project to `projects/INDEX.md` (copy `projects/_template.md` for the
+card), and continue with the auditor install below. Templates live in
+`templates/` under depth-safe names because `.gitignore`'s `memory/` and
+`projects/` patterns match at any depth.
+
 ## Install
 
 ```bash
 git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
-cp USER.example.md USER.md           # customize per workspace
-mkdir -p memory projects runs reports   # gitignored personal state AGENTS.md expects
-printf '| slug | repo | owner |\n|---|---|---|\n' > projects/INDEX.md   # one row per project
+bash scripts/init-workspace.sh     # dirs + rules.md, INDEX.md, _template.md, USER.md
 bash scripts/install-auditor.sh  # installs scheduling files; prints manual activation command
 ```
 
