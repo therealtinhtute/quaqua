@@ -6,7 +6,7 @@ Source: https://vhlam.com/article/agent-orchestration-multi-agent-slp — roles 
 
 ### 1. `scripts/pipeline.sh` — build → review → fix
 - `pipeline.sh <task> <repo> --brief <file> [--builder sude] [--reviewer quansu] [--review auto|always|skip] [--rounds 2]`
-- Callers: project Leads (`<slug>-lead`), own project only — CoS never leads pipeline-size work (no self-review, see §5). Counts as 2 workers toward the cap of 4.
+- Callers: CoS + project orchestrators, own project only. Counts as 2 workers toward the cap of 4.
 - Roles selectable, default sude/quansu; same harness for builder and reviewer → script refuses.
 - Reviewer: codex `--sandbox read-only` (new review mode in `spawn-worker.sh`); a fresh reviewer each round; `runs/<reviewer>.md` ends with `Verdict: clean | N findings`.
 - `--review auto` (default): review only when the diff crosses a size threshold or touches >1 module; else skip.
@@ -31,23 +31,16 @@ Source: https://vhlam.com/article/agent-orchestration-multi-agent-slp — roles 
 ### 5. SLP roles (added 2026-10-08, sources: vhlam, Addy Osmani Code Agent Orchestra, Anthropic/Cognition)
 | Role | Who | Owns | Authority |
 |---|---|---|---|
-| Principal | anh iu | goal, priorities, trade-offs | talks only to the CoS; approve push / merge main |
+| Principal | anh iu | goal, priorities, trade-offs | approve push / merge main; may steer any agent, steering recorded in Lead state |
 | Supervisor | CoS Quả Quả | intake, sizing, brief, cross-project view (cap, CPU/benchmark contention), digest | spawn Lead; verify Lead result (re-run test); escalate goal/cost changes to anh iu |
-| Lead | `<slug>-lead` (spawned by CoS via `scripts/spawn-lead.sh <slug>`) | project state, ownership, dependencies, evidence review | run `pipeline.sh`, spawn ≤4 Peers, approve Peer plans, **merge into project integration branch** (acceptance) |
+| Lead | `<slug>-lead` (CoS-spawned; herdr caps agent names at 32 chars → slug ≤27) | project state, ownership, dependencies, evidence review | run `pipeline.sh`, spawn ≤4 Peers, approve Peer plans, **merge into project integration branch** (acceptance) |
 | Peer | task workers (sude build, quansu review, …) | one task in own worktree | commit on own branch; may challenge premises with evidence |
 
 - CoS never acts as Lead on pipeline-size work (no self-review).
 - Challenge channel: Peer writes `## Challenge` (premise + evidence) in `runs/<name>.md`; Lead must resolve it before acceptance. Right to challenge, not duty.
 - Plan approval: pipeline-size tasks → builder writes a short plan first; Lead approves before code.
 - Kill criteria: same error ≥3 iterations → kill, spawn a fresh worker (alongside the watchdog).
-- Superseded by AGENTS.md: every redirect flows through the CoS; anh iu never steers a Peer directly.
-
-## Amendments (2026-10-08, post-review)
-- Callers corrected to project Leads only (was "CoS + project orchestrators") — AGENTS.md forbids CoS leading pipeline-size work.
-- Lead agent name is `<slug>-lead` (spawn-lead.sh; herdr caps names at 32 chars), not the earlier `quaqua-<slug>-orchestrator` label; repo base is `main`, not `master`.
-- Report tails: a task worker's runs file ends `## Lessons` (rules/_all/brief.md); a pipeline reviewer's runs file ends `Verdict:` — two different contracts, both intentional.
-- `plan_changed` telemetry field is dropped — telemetry carries only the §2 fields.
-- `--rounds` is configurable; "2" everywhere else means the default.
+- Steering from anh iu or CoS directly to a Peer must be recorded in Lead state (`runs/pipeline-<task>.md`).
 
 ## Out of scope
 Ownership lock registry (worktree/branch = owner); peer-to-peer messaging; new roles.

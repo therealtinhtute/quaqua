@@ -183,9 +183,11 @@ grep -q 'worker cap exceeded' "$T/err" || fail "pipeline cap refusal: missing er
 echo "ok: pipeline counts as 2 -> owner with 3 workers cannot start pipeline (needs 2, cap is 4)"
 
 # ── 6. Dangling legacy references check ──────────────────────────────────────
-# No file in the repo (except AGENTS.md which CoS owns and git history) should mention the old name
+# No file in the repo (except AGENTS.md which CoS owns and git history) should mention the old name.
+# memory/ is tracked in this repo (upstream gitignores it): dated logs record the
+# old name as history — excluding them is intentional, not a gap in the check.
 legacy_pat="super""visor"
-dangling=$(rg "$legacy_pat" "$root" --glob '!AGENTS.md' --glob '!scripts/test_*.sh' || true)
+dangling=$(rg "$legacy_pat" "$root" --glob '!AGENTS.md' --glob '!scripts/test_*.sh' --glob '!memory/' || true)
 [[ -z "$dangling" ]] || fail "dangling legacy references found:\n$dangling"
 echo "ok: rename leaves no dangling refs ($legacy_pat)"
 

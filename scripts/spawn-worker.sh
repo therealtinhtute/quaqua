@@ -189,17 +189,25 @@ case $kind in
     case $kind in ni) effort=low ;; suhuynh) effort=medium ;; truonglao) effort=high ;; esac
     herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" --append-system-prompt-file "$rf" >/dev/null || spawn_fail ;;
   bacdau)
-    herdr agent start "$name" --kind codex --pane "$pane" --timeout 60000 -- "${access[@]}" -m astra -c model_reasoning_effort=medium -c "$codex_rules" >/dev/null || true ;;
+    herdr agent start "$name" --kind codex --pane "$pane" --timeout 300000 -- "${access[@]}" -m gpt-6-astra -c model_reasoning_effort=medium -c "$codex_rules" >/dev/null || codex_start_rc=$? ;;
   quansu)
-    herdr agent start "$name" --kind codex --pane "$pane" --timeout 60000 -- "${access[@]}" -m gpt-6.1-sol -c model_reasoning_effort=high -c "$codex_rules" >/dev/null || true ;;
+    herdr agent start "$name" --kind codex --pane "$pane" --timeout 300000 -- "${access[@]}" -m gpt-6.1-sol -c model_reasoning_effort=high -c "$codex_rules" >/dev/null || codex_start_rc=$? ;;
 esac
 case $kind in bacdau|quansu)
+  # herdr's start timeout is not proof of failure for codex: the TUI can sit
+  # on "Trust this folder?" (new worktree, untrusted dir) or spend minutes on
+  # app-server-daemon init before the SessionStart hook reports the agent —
+  # herdr only sees 'timed out waiting for agent startup'. Fail loudly, then
+  # keep going: accept the trust dialog if present and wait for idle.
+  if [[ ${codex_start_rc:-0} -ne 0 ]]; then
+    echo "warning: herdr agent start $name failed (rc=$codex_start_rc); continuing to trust/idle wait" >&2
+  fi
   # new worktree -> codex asks "Trust this folder?"; accept default "Trust and continue".
   # start may already have failed with agent_not_ready while the dialog blocked readiness, so confirm idle here
-  if herdr pane wait-output "$pane" --match "Trust this folder" --timeout 10000 >/dev/null 2>&1; then
+  if herdr pane wait-output "$pane" --match "Trust this folder" --timeout 30000 >/dev/null 2>&1; then
     herdr pane send-keys "$pane" enter >/dev/null
   fi
-  herdr agent wait "$name" --until idle --timeout 60000 >/dev/null || spawn_fail
+  herdr agent wait "$name" --until idle --timeout 300000 >/dev/null || spawn_fail
 esac
 case $kind in tieude|sude|detu)
   # project MCP config -> pi asks "Allow project MCP server <name>?" once per
