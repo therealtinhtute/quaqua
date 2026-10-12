@@ -240,4 +240,48 @@ grep -qF "git -C $amp/Lab/coucou-island rev-parse" "$T/calls" \
   || fail "tilde: a '~' survived expansion in a git path: $(grep 'git -C' "$T/calls")"
 echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corruption)"
 
+# ── concurrent spawn vs cleanup on different INDEX rows must not lose updates ─
+# The stub awk parks inside each script's INDEX read-modify-write (identified
+# by the OFS= program marker — spawn's slug-check/repo-extract awks don't set
+# OFS and pass straight through) until the test releases it. With the shared
+# mkdir lock the cleanup serializes behind the spawn; without it both snapshot
+# the same INDEX and one row's update is lost (F4).
+cp "$here/cleanup-lead.sh" "$T/scripts/cleanup-lead.sh"
+cat > "$T/bin/awk" <<'STUB'
+#!/usr/bin/env bash
+idx=0 s=unknown
+for a in "$@"; do
+  [[ $a == *OFS=* ]] && idx=1
+  [[ $a == slug=* ]] && s=${a#slug=}
+done
+if (( ! idx )); then exec "$REAL_AWK" "$@"; fi
+out=$("$REAL_AWK" "$@"); r=$?
+: >> "$BARRIER_DIR/ready.$s"
+for _ in $(seq 1 800); do [[ -e $BARRIER_DIR/go ]] && break; sleep 0.01; done
+printf '%s\n' "$out"
+exit "$r"
+STUB
+chmod +x "$T/bin/awk"
+
+mkdir -p "$T/barrier" "$T/runs"; : > "$T/calls"
+cp "$T/INDEX.orig" "$T/projects/INDEX.md"
+ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" REAL_AWK="$(command -v awk)" BARRIER_DIR="$T/barrier")
+env "${ce[@]}" bash "$T/scripts/spawn-lead.sh" coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
+for _ in $(seq 1 500); do [[ -e $T/barrier/ready.coucou-island ]] && break; sleep 0.01; done
+[[ -e $T/barrier/ready.coucou-island ]] \
+  || fail "concurrent: spawn never reached the INDEX update: $(cat "$T/err.s")"
+env "${ce[@]}" HERDR_LIVE=mono-desk-lead HERDR_PANE_ID=w9:p13 \
+  bash "$T/scripts/cleanup-lead.sh" mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
+for _ in $(seq 1 400); do [[ -e $T/barrier/ready.mono-desk ]] && break; sleep 0.01; done
+touch "$T/barrier/go"
+rc1=0 rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?
+[[ $rc1 -eq 0 && $rc2 -eq 0 ]] || fail "concurrent: exits $rc1/$rc2: $(cat "$T/err.s" "$T/err.c")"
+grep -qE '^\| coucou-island \| ~/Lab/coucou-island \| coucou-island-lead \|' "$T/projects/INDEX.md" \
+  || fail "concurrent: spawn update lost: $(cat "$T/projects/INDEX.md")"
+grep -qE '^\| mono-desk \| ~/Lab/mono-desk \| cos \|' "$T/projects/INDEX.md" \
+  || fail "concurrent: cleanup update lost: $(cat "$T/projects/INDEX.md")"
+find "$T/projects" -name 'INDEX.md.*' | grep -q . \
+  && fail "concurrent: leftover tmp/lock files: $(find "$T/projects" -name 'INDEX.md.*')"
+echo "ok: concurrent spawn vs cleanup on different rows -> both updates kept"
+
 echo "PASS"
