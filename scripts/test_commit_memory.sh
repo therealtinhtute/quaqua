@@ -22,12 +22,16 @@ cp "$here/../.gitignore" "$R/.gitignore"  # same ignores as this repo (memory/ p
 echo m > "$R/memory/m.md"; echo p > "$R/projects/p.md"
 echo s > "$R/scripts/s.sh"; echo d > "$R/docs/d.md"
 git -C "$R" init -q
+# local identity: CI runners have no global user.name/user.email, and the
+# script under test commits without -c flags — the repo must carry its own.
+git -C "$R" config user.name "Test"
+git -C "$R" config user.email "test@example.com"
 git -C "$R" add -A
 # note dirs are gitignored here; force-add the seed notes so they are tracked —
 # the only way a note under memory/ projects/ raw/ can ever be committed in
 # this checkout (untracked ignored notes are deliberately never staged).
 git -C "$R" add -f memory/m.md projects/p.md
-git -C "$R" -c user.email=t@t -c user.name=t commit -qm seed
+git -C "$R" commit -qm seed
 
 reset() { git -C "$R" reset --hard -q HEAD && git -C "$R" clean -fdxq; }
 run() { (cd / && bash "$R/scripts/commit-memory.sh" "$1"); }  # foreign cwd
