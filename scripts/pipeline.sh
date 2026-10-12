@@ -357,10 +357,13 @@ brief_text=$(cat "$brief" 2>/dev/null) || die "brief file unreadable: $brief"
 # Fanout grid (rules/_all/fanout-agent-grid.md): after every spawn/cleanup the
 # pipeline's own workers go to the project workers tab — default
 # <repo-basename>-workers (e.g. coucou-island-workers), GRID_TAB overrides.
-# --only scopes the grid's sweep to this pipeline's workers, so workers of
-# another orchestrator sitting in the same (CoS) tab are never touched. Child
-# spawn/cleanup scripts get GRID_SKIP=1: their unfiltered hook would sweep the
-# anchor tab. GRID_SKIP=1 + QUAQUA_TEST=1 disables the pipeline's own hook (tests only).
+# --only scopes which panes this call may move to this pipeline's workers, so
+# workers of another orchestrator or a sibling project sitting in the same
+# (CoS) tab are never touched — while the owner's whole worker population
+# still decides the layout, keeping a lone pipeline worker in the project tab.
+# Child spawn/cleanup scripts get GRID_SKIP=1: their unfiltered hook would
+# sweep the anchor tab. GRID_SKIP=1 + QUAQUA_TEST=1 disables the pipeline's own
+# hook (tests only).
 grid_tab=${GRID_TAB:-"$(basename "$repo")-workers"}
 grid_hook() {  # grid_hook <name>[,<name>...] — returns the grid's rc; the
   # caller decides: pre-prompt failure = pause (MANDATORY rule), post-cleanup
