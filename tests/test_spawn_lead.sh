@@ -6,10 +6,11 @@
 # INDEX.md owner-column update, and the LEAD_MODEL/LEAD_EFFORT overrides.
 # herdr and git are stubbed on PATH and log every call; the script runs
 # against a temp repo root. No real herdr, INDEX.md, or pane touched.
-# Usage: scripts/test_spawn_lead.sh   (exit 0 = pass)
+# Usage: tests/test_spawn_lead.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-spawn-lead.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -18,7 +19,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ── sandbox: temp quaqua root (script copy under scripts/) + stub herdr/git ─
 mkdir -p "$T/bin" "$T/scripts" "$T/projects" "$T/rules/_all"
-cp "$here/spawn-lead.sh" "$T/scripts/spawn-lead.sh"
+cp "$src/spawn-lead.sh" "$T/scripts/spawn-lead.sh"
 
 cat > "$T/projects/INDEX.md" <<'EOF'
 # Projects
@@ -246,7 +247,7 @@ echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corrup
 # OFS and pass straight through) until the test releases it. With the shared
 # mkdir lock the cleanup serializes behind the spawn; without it both snapshot
 # the same INDEX and one row's update is lost (F4).
-cp "$here/cleanup-lead.sh" "$T/scripts/cleanup-lead.sh"
+cp "$src/cleanup-lead.sh" "$T/scripts/cleanup-lead.sh"
 cat > "$T/bin/awk" <<'STUB'
 #!/usr/bin/env bash
 idx=0 s=unknown

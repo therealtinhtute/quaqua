@@ -7,10 +7,11 @@
 #    - an owner with 3 standalone workers cannot start a pipeline (exceeds cap of 4).
 # 4. Project Leads (<slug>-lead) do not count toward the worker cap.
 # 5. Rename leaves no dangling refs (legacy role).
-# Usage: scripts/test_worker_cap.sh   (exit 0 = pass)
+# Usage: tests/test_worker_cap.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 root="$(cd "$here/.." && pwd)"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-worker-cap.XXXXXX")
 T=$(cd "$T" && pwd -P)
@@ -68,7 +69,7 @@ spawn() {
   local name=$1 kind=$2; shift 2
   rc=0
   HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-    env "$@" bash "$here/spawn-worker.sh" "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" bash "$src/spawn-worker.sh" "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── 1. Cap refusal: 4 live workers for cos -> 5th refused ───────────────────
@@ -177,7 +178,7 @@ Current design: test
 EOF
 prc=0
 HOME="$T/home" PATH="$T/bin:$PATH" GRID_SKIP=1 QUAQUA_OWNER=cos \
-  bash "$here/pipeline.sh" pipetest "$T/repo" --brief "$brief" >"$T/out" 2>"$T/err" || prc=$?
+  bash "$src/pipeline.sh" pipetest "$T/repo" --brief "$brief" >"$T/out" 2>"$T/err" || prc=$?
 [[ $prc -eq 2 ]] || fail "pipeline cap refusal: exit $prc, want 2: $(cat "$T/err")"
 grep -q 'worker cap exceeded' "$T/err" || fail "pipeline cap refusal: missing error message: $(cat "$T/err")"
 echo "ok: pipeline counts as 2 -> owner with 3 workers cannot start pipeline (needs 2, cap is 4)"
@@ -187,7 +188,7 @@ echo "ok: pipeline counts as 2 -> owner with 3 workers cannot start pipeline (ne
 # memory/ is tracked in this repo (upstream gitignores it): dated logs record the
 # old name as history — excluding them is intentional, not a gap in the check.
 legacy_pat="super""visor"
-dangling=$(rg "$legacy_pat" "$root" --glob '!AGENTS.md' --glob '!scripts/test_*.sh' --glob '!memory/' || true)
+dangling=$(rg "$legacy_pat" "$root" --glob '!AGENTS.md' --glob '!tests/test_*.sh' --glob '!memory/' || true)
 [[ -z "$dangling" ]] || fail "dangling legacy references found:\n$dangling"
 echo "ok: rename leaves no dangling refs ($legacy_pat)"
 

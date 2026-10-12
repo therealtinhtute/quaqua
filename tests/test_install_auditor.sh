@@ -3,6 +3,7 @@
 # Requires python3 to parse the generated plist independently of the renderer.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+src="$(cd "$here/.." && pwd)/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-install-auditor.XXXXXX")
 T=$(cd "$T" && pwd -P)
 trap 'rm -rf "$T"' EXIT
@@ -10,7 +11,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 root="$T/repo & <mac> \"quoted\" | back\\slash"
 mkdir -p "$root/scripts" "$T/bin" "$T/codex & tools" "$T/home"
-cp "$here/install-auditor.sh" "$root/scripts/"
+cp "$src/install-auditor.sh" "$root/scripts/"
 cp -R "$here/../systemd" "$root/"
 if [[ -d $here/../launchd ]]; then cp -R "$here/../launchd" "$root/"; fi
 ln -s "$BASH" "$T/bin/bash"  # proves the installer discovers, rather than hardcodes, Bash
