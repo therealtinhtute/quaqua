@@ -13,3 +13,9 @@ auditor/logs/
 __pycache__/
 .claude/agents/tldraw-offline.md
 .claude/skills/tldraw-offline/
+
+# per-workspace project content — never ships in the boilerplate
+rules/*/
+!rules/_all/
+docs/plans/
+spec-raw/
