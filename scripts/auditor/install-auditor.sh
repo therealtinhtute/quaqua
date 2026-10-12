@@ -38,7 +38,7 @@ case $(uname -s) in
         -e "s|@HOME@|$(xml_replacement "$HOME")|g" \
         -e "s|@BASH@|$(xml_replacement "$bash_bin")|g" \
         -e "s|@PATH@|$(xml_replacement "$job_path")|g" \
-      "$root/launchd/com.quaqua.auditor.plist.in" > "$tmp"
+      "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" > "$tmp"
     chmod 644 "$tmp"
     mv -f "$tmp" "$plist"
     # %q also keeps the printed command safe for paths containing spaces.
@@ -46,7 +46,7 @@ case $(uname -s) in
     printf 'launchctl bootstrap gui/%s %q\n' "$(id -u)" "$plist"
     ;;
   Linux)
-    src="$root/systemd"
+    src="$root/scripts/auditor/systemd"
     dst="$HOME/.config/systemd/user"
     mkdir -p "$dst"
     for unit in quaqua-auditor.service quaqua-auditor.timer; do

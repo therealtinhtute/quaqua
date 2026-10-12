@@ -98,15 +98,15 @@ echo "ok: failure -> exit propagates, stub report notes the failure"
 
 # ── F8 packaging: exactly one Auditor entrypoint with all scheduling assets ──
 root=$(cd "$here/.." && pwd)
-[[ -f $root/systemd/quaqua-auditor.service ]] || fail "pkg: no systemd service shipped"
-[[ -f $root/systemd/quaqua-auditor.timer ]] || fail "pkg: no systemd timer shipped"
-grep -q 'scripts/auditor/auditor.sh' "$root/systemd/quaqua-auditor.service" \
+[[ -f $root/scripts/auditor/systemd/quaqua-auditor.service ]] || fail "pkg: no systemd service shipped"
+[[ -f $root/scripts/auditor/systemd/quaqua-auditor.timer ]] || fail "pkg: no systemd timer shipped"
+grep -q 'scripts/auditor/auditor.sh' "$root/scripts/auditor/systemd/quaqua-auditor.service" \
   || fail "pkg: service does not exec scripts/auditor/auditor.sh"
-grep -q 'OnCalendar' "$root/systemd/quaqua-auditor.timer" || fail "pkg: timer has no schedule"
+grep -q 'OnCalendar' "$root/scripts/auditor/systemd/quaqua-auditor.timer" || fail "pkg: timer has no schedule"
 grep -q 'systemd' "$src/auditor/install-auditor.sh" || fail "pkg: installer does not use systemd/"
 [[ ! -d "$root/super""visor" ]] || fail "pkg: legacy runner still installed"
-[[ -f $root/launchd/com.quaqua.auditor.plist.in ]] || fail "pkg: no launchd template shipped"
-grep -q 'scripts/auditor/auditor.sh' "$root/launchd/com.quaqua.auditor.plist.in" \
+[[ -f $root/scripts/auditor/launchd/com.quaqua.auditor.plist.in ]] || fail "pkg: no launchd template shipped"
+grep -q 'scripts/auditor/auditor.sh' "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" \
   || fail "pkg: launchd template does not use the same auditor entrypoint"
 # README.md is GitHub-side only (not tracked in this repo) — launchd install
 # coverage is asserted via the template + installer instead.

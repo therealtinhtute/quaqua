@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Usage: auditor.sh
 #   Read-only drift audit of this repo, run by systemd (Linux) or launchd
-#   (macOS), 2x/day. See systemd/ and launchd/. Builds the prompt,
+#   (macOS), 2x/day. See scripts/auditor/systemd/ and scripts/auditor/launchd/.
+#   Builds the prompt,
 #   runs `codex exec` in a read-only sandbox, and writes the agent's final
 #   message to reports/audit-YYYY-MM-DD-HH.md via --output-last-message.
 #   The agent cannot edit anything; this script is the only writer.

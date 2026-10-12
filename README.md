@@ -20,7 +20,7 @@ This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal 
         │ goal                ▲ digest
         ▼                     │
  CoS (Quả Quả) — full SDLC: intake, sizing, brief, verify, release  ◄── report ── Auditor
-        │ small task (<15 min, 1 file, or needs live feedback) ──► one worker, no SLP   (systemd/launchd
+        │ small task (<15 min, 1 file, or needs live feedback) ──► one worker, no SLP   (scripts/auditor/systemd/launchd
         │ spawn Lead + brief                                                           2×/day)
         ▼
  Lead (<slug>-lead) — project state, plan approval, acceptance,
@@ -53,7 +53,7 @@ Decision lock: `spec-raw/quaqua-slp-slim-lock.md`.
 | `.claude/settings.json` | Denies the built-in `Agent` tool so all workers go through Herdr |
 | `.claude/skills/herdr-orchestration/` | Worker flow + consolidated command, recovery, and assignment/acceptance references |
 | `scripts/auditor/auditor.sh` | Auditor: read-only drift + pipeline-run audit → `reports/audit-*.md` |
-| `scripts/auditor/install-auditor.sh`, `systemd/`, `launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
+| `scripts/auditor/install-auditor.sh`, `scripts/auditor/systemd/`, `scripts/auditor/launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
 | `scripts/workspace/init-workspace.sh`, `templates/` | Bootstraps a fresh clone's gitignored personal state (dirs + `memory/rules.md`, `projects/INDEX.md`, `_template.md`, `USER.md`); idempotent, never overwrites |
 | `tests/` | Sandboxed test suite: `tests/run.sh` runs every `tests/test_*.sh` and exits non-zero on any failure |
 | `codex-config.toml` | Codex config used by codex workers |
@@ -96,7 +96,7 @@ macOS: install a current Bash (e.g. `brew install bash`), then put its `bin` dir
 first on PATH (`export PATH="$(brew --prefix bash)/bin:$PATH"` for Homebrew).
 Run `bash scripts/auditor/install-auditor.sh` with `codex` on PATH. The installer requires
 Bash >= 4.4 from `command -v bash` and refuses the macOS system Bash 3.2.
-It renders `launchd/com.quaqua.auditor.plist.in` into
+It renders `scripts/auditor/launchd/com.quaqua.auditor.plist.in` into
 `~/Library/LaunchAgents/com.quaqua.auditor.plist`, pinning the discovered Bash,
 this checkout's absolute `scripts/auditor/auditor.sh` path, and the install-time PATH (including
 codex's directory). Logs go to `~/Library/Logs/quaqua-auditor.log`; reports still go
