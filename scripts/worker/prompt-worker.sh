@@ -119,6 +119,24 @@ stall=${PROMPT_WORKER_STALL_SEC:-600}  idle_sec=${PROMPT_WORKER_IDLE_SEC:-120}
 gone_sec=${PROMPT_WORKER_AGENT_GONE_SEC:-60}
 nudge_pct=${PROMPT_WORKER_NUDGE_PCT:-80}
 heartbeat=${PROMPT_WORKER_HEARTBEAT_SEC:-300}
+# Test-only virtual clock: PROMPT_WORKER_CLOCK_FILE (epoch seconds in a file)
+# replaces `date +%s` and PROMPT_WORKER_SLEEP_CMD (an executable, called with
+# the requested seconds) replaces the poll sleep, so a test can advance time
+# deterministically instead of racing wall-clock thresholds under load. Both
+# unset in production -> real date/sleep, unchanged behaviour.
+now_sec() {
+  local v=''
+  [[ -n ${PROMPT_WORKER_CLOCK_FILE:-} ]] \
+    && v=$(cat "$PROMPT_WORKER_CLOCK_FILE" 2>/dev/null || true)
+  if [[ $v =~ ^[0-9]+$ ]]; then printf '%s\n' "$v"; else date +%s; fi
+}
+nap() {  # the poll sleep; overridable so tests advance the clock instead
+  if [[ -n ${PROMPT_WORKER_SLEEP_CMD:-} ]]; then
+    "$PROMPT_WORKER_SLEEP_CMD" "$@" || true
+  else
+    sleep "$@"
+  fi
+}
 (( poll < 1 )) && poll=1
 mkdir -p "$(dirname "$out")"
 
@@ -148,13 +166,13 @@ else
 fi
 [[ $budget =~ ^[0-9]+$ ]] || { echo "error: budget must be whole seconds (got '$budget')" >&2; exit 1; }
 
-start=$(date +%s)
+start=$(now_sec)
 rem_max=$(( max - prev_elapsed ));       (( rem_max < 1 )) && rem_max=1
 rem_budget=$(( budget - prev_elapsed )); (( rem_budget < 1 )) && rem_budget=1
 deadline=$(( start + rem_max )) budget_deadline=$(( start + rem_budget ))
 nudge_at=$(( start + budget * nudge_pct / 100 - prev_elapsed ))
 
-save_elapsed() { printf '%s\n' $(( prev_elapsed + $(date +%s) - start )) > "$elapsed_file"; }
+save_elapsed() { printf '%s\n' $(( prev_elapsed + $(now_sec) - start )) > "$elapsed_file"; }
 
 prompt_pid=''
 if (( ! resume )); then
@@ -252,7 +270,7 @@ lead_waiting() {  # a <slug>-lead idle while ITS live pipeline runs is waiting
 
 watchdog_exit() {  # <code> <reason> — status line on stderr, stdout stays clean
   local code=$1 reason=$2 now
-  now=$(date +%s)
+  now=$(now_sec)
   save_elapsed   # consumed budget/cap carries over to --resume (F5)
   printf 'WATCHDOG exit=%d %s | name=%s elapsed=%ds status=%s ctx=%s quiet=%ds last=%s | diff=%s\n' \
     "$code" "$reason" "$name" "$(( now - start ))" "$status" "$ctx" \
@@ -284,7 +302,7 @@ grace_used=0 last_progress=0
 [[ $last_progress =~ ^[0-9]+$ ]] || last_progress=0
 echo "waiting for $out (poll ${poll}s, stall ${stall}s, idle ${idle_sec}s, budget ${budget}s, cap ${max}s)" >&2
 while ! report_ready; do
-  now=$(date +%s)
+  now=$(now_sec)
   (( now >= deadline )) && watchdog_exit 2 "error: no $out after ${max}s"
   if observe; then
     # gone clock: not_found, or status unknown with nothing on the pane —
@@ -359,7 +377,7 @@ while ! report_ready; do
     last_hb=$now
   fi
   left=$(( deadline - now )); (( left < 1 )) && left=1
-  sleep "$(( left < poll ? left : poll ))"
+  nap "$(( left < poll ? left : poll ))"
 done
 # Bounded grace so a prompt that is still submitting finishes before we report
 # success (a slow herdr --wait is left behind, harmless).
