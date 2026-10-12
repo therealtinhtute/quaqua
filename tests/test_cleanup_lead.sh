@@ -17,6 +17,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 mkdir -p "$T/bin" "$T/scripts/lead" "$T/projects" "$T/runs"
 cp "$src/lead/cleanup-lead.sh" "$T/scripts/lead/cleanup-lead.sh"
+cp -R "$src/lib" "$T/scripts/"
 cat > "$T/INDEX.orig" <<'EOF'
 | slug | repo | owner | status | one-line goal |
 |------|------|-------|--------|---------------|

@@ -256,6 +256,7 @@ echo "ok: --base -> builder worktree starts at quaqua/integ"
 # spawn/cleanup hook leaking (it would sweep foreign workers in the CoS tab).
 mkdir -p "$T/p2/scripts/lead" "$T/p2/scripts/worker"
 cp "$src/lead/pipeline.sh" "$T/p2/scripts/lead/"
+cp -R "$src/lib" "$T/p2/scripts/"
 cp "$src/worker/prompt-worker.sh" "$src/worker/spawn-worker.sh" \
    "$src/worker/cleanup-worker.sh" "$T/p2/scripts/worker/"
 cat > "$T/p2/scripts/worker/grid-workers.sh" <<'EOF'

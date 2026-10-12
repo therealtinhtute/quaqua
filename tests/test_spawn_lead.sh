@@ -20,6 +20,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # ── sandbox: temp quaqua root (script copy under scripts/) + stub herdr/git ─
 mkdir -p "$T/bin" "$T/scripts/lead" "$T/projects" "$T/rules/_all"
 cp "$src/lead/spawn-lead.sh" "$T/scripts/lead/spawn-lead.sh"
+cp -R "$src/lib" "$T/scripts/"
 
 cat > "$T/projects/INDEX.md" <<'EOF'
 # Projects
