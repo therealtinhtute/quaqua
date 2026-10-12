@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Test for hooks/herdr-gate.sh: direct herdr spawn/move calls are blocked,
 # scripts/ and read-only herdr calls pass.
-# Usage: scripts/test_herdr_gate.sh   (exit 0 = pass)
+# Usage: tests/test_herdr_gate.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 gate() {  # gate <command>; prints the hook's exit code
   local rc=0
   jq -nc --arg c "$1" '{tool_name:"Bash",tool_input:{command:$c}}' \
-    | bash "$here/hooks/herdr-gate.sh" 2>/dev/null || rc=$?
+    | bash "$src/hooks/herdr-gate.sh" 2>/dev/null || rc=$?
   echo "$rc"
 }
 

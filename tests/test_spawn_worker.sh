@@ -7,10 +7,11 @@
 # script. Bad names must exit 1 before either is called; good names proceed.
 # The accented case runs under C and, when installed, a collating UTF-8 locale.
 # No real worktree, home, or herdr touched.
-# Usage: scripts/test_spawn_worker.sh   (exit 0 = pass)
+# Usage: tests/test_spawn_worker.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-spawn-worker.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -19,7 +20,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ── sandbox: stub git/herdr that log every call, temp HOME, dummy repo ───────
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/scripts"
-cp "$here/spawn-worker.sh" "$T/scripts/spawn-worker.sh"
+cp "$src/spawn-worker.sh" "$T/scripts/spawn-worker.sh"
 cat > "$T/scripts/grid-workers.sh" <<'STUB'
 #!/usr/bin/env bash
 printf 'grid%s\n' "${*:+ $*}" >> "$GRID_CALLS"

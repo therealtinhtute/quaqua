@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# Sandbox test for prompt-worker.sh watchdog: --resume mode, stall detection
+# Sandbox test for prompt-worker.sh watchdog: --resume mode, --extend (D1),
+# progress grace (D2), stall detection
 # (exit 3), idle-without-runfile (exit 3), agent gone/unknown for
 # AGENT_GONE_SEC (exit 3), time budget + one-shot nudge
 # (exit 4), blocked/question (exit 5). herdr is stubbed on PATH: it logs calls,
 # answers agent get/read/prompt from FAKE_* vars. HOME is a temp dir. No real
 # herdr, agent, or home touched.
-# Usage: scripts/test_prompt_worker_watchdog.sh   (exit 0 = pass)
+# Budgets in these tests are seconds (PROMPT_WORKER_BUDGET_SEC), so a grace of
+# 25% of a 4s allowance is 1s — the code paths are the real ones, no clock stub.
+# Usage: tests/test_prompt_worker_watchdog.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-prompt-watchdog.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -72,27 +76,37 @@ run() {
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "$@" bash "$here/prompt-worker.sh" "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" bash "$src/prompt-worker.sh" "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
 }
-# resume <name> [VAR=val...] — resume wait; same capture
+# resume <name> [--extend <sec>] [VAR=val...] — resume wait; same capture
 resume() {
   local name=$1; shift
+  local vars=() wargs=()
+  while (( $# )); do
+    if [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then vars+=("$1"); else wargs+=("$1"); fi
+    shift
+  done
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "$@" bash "$here/prompt-worker.sh" --resume "$name" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" bash "$src/prompt-worker.sh" --resume "$name" "${wargs[@]}" >"$T/out" 2>"$T/err" || rc=$?
 }
 sentinel() { [[ -f $T/home/quaqua/runs/.$1.nudged ]]; }
 nudges()   { grep -c 'agent prompt.*Time check' "$T/calls" || true; }
 
 # ── --resume arg validation ─────────────────────────────────────────────────
 rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-  bash "$here/prompt-worker.sh" --resume >"$T/out" 2>"$T/err" || rc=$?
+  bash "$src/prompt-worker.sh" --resume >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "--resume no name: exit $rc, want 1"
 grep -q '^# Usage:' "$T/err" || fail "--resume no name: no usage on stderr"
 rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-  bash "$here/prompt-worker.sh" --resume 'bad_name' >"$T/out" 2>"$T/err" || rc=$?
+  bash "$src/prompt-worker.sh" --resume 'bad_name' >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "--resume bad name: exit $rc, want 1"
+for bad in '--extend 0' '--extend abc' '--extend'; do
+  rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+    bash "$src/prompt-worker.sh" --resume sude-ext $bad >"$T/out" 2>"$T/err" || rc=$?
+  [[ $rc -eq 1 ]] || fail "--resume $bad: exit $rc, want 1"
+done
 echo "ok: --resume arg validation -> exit 1, usage on stderr"
 
 # ── resume happy path: file already there, no prompt ever sent ──────────────
@@ -142,6 +156,72 @@ resume sude-budget PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
 [[ $rc -eq 4 ]] || fail "sude-budget resume: exit $rc, want 4: $(cat "$T/err")"
 [[ $(nudges) -eq 0 ]] || fail "sude-budget resume: re-nudged: $(cat "$T/calls")"
 echo "ok: --resume -> no second nudge (sentinel persists)"
+
+# ── D2: pane progressing at the deadline -> one grace, then exit 4 ─────────
+run sude-grace FAKE_DELAY=0 FAKE_ROTATE=1 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=1 PROMPT_WORKER_BUDGET_SEC=4 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-grace: exit $rc, want 4: $(cat "$T/err")"
+grep -q 'WATCHDOG grace +1s (progressing)' "$T/err" \
+  || fail "sude-grace: no grace line: $(cat "$T/err")"
+grep -qE 'elapsed=[5-9]s ' "$T/err" \
+  || fail "sude-grace: exited before the grace ran: $(cat "$T/err")"
+echo "ok: progressing at the deadline -> grace +1s (25% of 4s), exit 4 after it"
+
+# ── D2: no progress at the deadline -> exit 4 immediately, no grace ────────
+run sude-quiet FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-quiet: exit $rc, want 4: $(cat "$T/err")"
+! grep -q 'WATCHDOG grace' "$T/err" \
+  || fail "sude-quiet: grace granted on a static pane: $(cat "$T/err")"
+grep -qE 'elapsed=[0-3]s ' "$T/err" \
+  || fail "sude-quiet: did not exit at the deadline: $(cat "$T/err")"
+echo "ok: static pane at the deadline -> exit 4 at once, no grace"
+
+# ── D2: grace is once per task: the resume does not grant a second one ─────
+resume sude-grace PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-grace resume: exit $rc, want 4: $(cat "$T/err")"
+! grep -q 'WATCHDOG grace' "$T/err" \
+  || fail "sude-grace resume: grace granted twice: $(cat "$T/err")"
+echo "ok: grace granted once per task (resume does not re-grant)"
+
+# ── D2: grace never pushes past the cap -> exit 2 ──────────────────────────
+run sude-gracecap FAKE_DELAY=0 FAKE_ROTATE=1 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=1 PROMPT_WORKER_BUDGET_SEC=4 PROMPT_WORKER_MAX_SEC=5
+[[ $rc -eq 2 ]] || fail "sude-gracecap: exit $rc, want 2 (cap): $(cat "$T/err")"
+grep -q 'WATCHDOG grace' "$T/err" \
+  || fail "sude-gracecap: grace never granted before the cap: $(cat "$T/err")"
+echo "ok: grace clamped by the cap -> exit 2 at the cap"
+
+# ── D1: --resume without --extend keeps the old fast exit 4 ────────────────
+run sude-noext FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=2 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-noext run1: exit $rc, want 4: $(cat "$T/err")"
+resume sude-noext PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-noext resume: exit $rc, want 4: $(cat "$T/err")"
+grep -qE 'elapsed=[0-2]s ' "$T/err" \
+  || fail "sude-noext resume: took too long — budget restocked without --extend: $(cat "$T/err")"
+echo "ok: --resume without --extend -> exit 4 fast (allowance unchanged)"
+
+# ── D1: --extend adds to the persisted allowance and keeps waiting ─────────
+resume sude-noext --extend 4 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-noext extend: exit $rc, want 4: $(cat "$T/err")"
+grep -q 'WATCHDOG extend +4s' "$T/err" || fail "sude-noext extend: no extend line"
+grep -qE 'elapsed=[3-9]s ' "$T/err" \
+  || fail "sude-noext extend: did not wait out the extension: $(cat "$T/err")"
+[[ "$(cat "$T/home/quaqua/runs/.sude-noext.budget")" == 6 ]] \
+  || fail "sude-noext extend: budget sidecar not updated: $(cat "$T/home/quaqua/runs/.sude-noext.budget")"
+echo "ok: --extend 4 -> waits 4s more, then exit 4 (allowance persisted in .budget)"
+
+# ── D1: --extend cannot beat the hard cap -> exit 2 ────────────────────────
+run sude-extcap FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_BUDGET_SEC=2 PROMPT_WORKER_MAX_SEC=4
+[[ $rc -eq 4 ]] || fail "sude-extcap run1: exit $rc, want 4: $(cat "$T/err")"
+resume sude-extcap --extend 300 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
+  PROMPT_WORKER_MAX_SEC=4
+[[ $rc -eq 2 ]] || fail "sude-extcap: exit $rc, want 2 (cap is absolute): $(cat "$T/err")"
+grep -q 'WATCHDOG extend +300s' "$T/err" || fail "sude-extcap: no extend line"
+echo "ok: --extend past the cap -> still exit 2 at PROMPT_WORKER_MAX_SEC"
 
 # ── QUESTION: agent_status=blocked -> exit 5 ────────────────────────────────
 run sude-blocked FAKE_DELAY=0 FAKE_STATUS=blocked PROMPT_WORKER_POLL_SEC=1 \

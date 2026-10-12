@@ -5,10 +5,11 @@
 # handling, and that nothing but the report lands in the repo tree. codex is
 # stubbed on PATH (it logs argv and writes a fake final message to the -o
 # file); the repo is a temp dir. No real codex, repo, or reports touched.
-# Usage: scripts/test_auditor.sh   (exit 0 = pass)
+# Usage: tests/test_auditor.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-auditor.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -17,7 +18,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ── sandbox: stub codex + fake repo with scripts/auditor.sh ──────────────────
 mkdir -p "$T/bin" "$T/repo/scripts" "$T/repo/memory" "$T/repo/projects"
-cp "$here/auditor.sh" "$T/repo/scripts/auditor.sh"
+cp "$src/auditor.sh" "$T/repo/scripts/auditor.sh"
 cat > "$T/bin/codex" <<'STUB'
 #!/usr/bin/env bash
 echo "codex $*" >> "$CALLS"
@@ -102,7 +103,7 @@ root=$(cd "$here/.." && pwd)
 grep -q 'scripts/auditor.sh' "$root/systemd/quaqua-auditor.service" \
   || fail "pkg: service does not exec scripts/auditor.sh"
 grep -q 'OnCalendar' "$root/systemd/quaqua-auditor.timer" || fail "pkg: timer has no schedule"
-grep -q 'systemd' "$here/install-auditor.sh" || fail "pkg: installer does not use systemd/"
+grep -q 'systemd' "$src/install-auditor.sh" || fail "pkg: installer does not use systemd/"
 [[ ! -d "$root/super""visor" ]] || fail "pkg: legacy runner still installed"
 [[ -f $root/launchd/com.quaqua.auditor.plist.in ]] || fail "pkg: no launchd template shipped"
 grep -q 'scripts/auditor.sh' "$root/launchd/com.quaqua.auditor.plist.in" \

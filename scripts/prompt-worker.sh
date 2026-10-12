@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Usage: prompt-worker.sh <name> <task>        submit task brief, wait for runs file
-#        prompt-worker.sh --resume <name>      keep waiting without re-prompting
+#        prompt-worker.sh --resume <name> [--extend <sec>]
+#                                             keep waiting; --extend adds <sec> to
+#                                             this name's allowance (persisted in
+#                                             runs/.<name>.budget; the cap still wins)
+#        prompt-worker.sh --check-brief "<task>"   validate a brief + print its budget
 #   Runs `herdr agent prompt <name> --wait --timeout 1800000` with the standard
 #   "write summary to ~/quaqua/runs/<name>.md" instruction, then watches the
 #   worker until that file exists (poll PROMPT_WORKER_POLL_SEC, default 30).
@@ -8,9 +12,14 @@
 #   (7200) · 3 stall (no pane/worktree change for PROMPT_WORKER_STALL_SEC, 600;
 #   or agent idle/done for PROMPT_WORKER_IDLE_SEC, 120; or agent not found /
 #   status unknown / unobservable for PROMPT_WORKER_AGENT_GONE_SEC, 60) ·
-#   4 time budget
-#   PROMPT_WORKER_BUDGET_SEC (2700; one soft nudge at PROMPT_WORKER_NUDGE_PCT,
-#   80%) · 5 agent blocked on a question/permission.
+#   4 time budget · 5 agent blocked on a question/permission.
+#   Budget (D3): the brief's `Time budget: <N> min` line sets it,
+#   PROMPT_WORKER_BUDGET_SEC overrides when set, neither -> 2700. One soft nudge
+#   at PROMPT_WORKER_NUDGE_PCT (80%). A resumed wait continues the allowance
+#   persisted in runs/.<name>.budget; --extend <sec> adds to it — never a fresh
+#   clock. At the deadline one grace of 25% of the budget (never past the cap)
+#   is granted when the last observed pane/worktree change is within 2 polls,
+#   then exit 4; granted once per task (runs/.<name>.grace).
 #   Lead exemption: a <slug>-lead waits on a backgrounded pipeline.sh whose
 #   pane/cwd stay static for a whole build phase, so while an unfinished
 #   pipeline state (runs/pipeline-*.state, finished=0) names a live
@@ -28,33 +37,86 @@
 #   `--resume` keeps waiting. The script never kills or re-prompts the worker.
 set -euo pipefail
 
-usage() { sed -n '2,13p' "$0" >&2; exit 1; }
+# usage prints the leading comment block (lines 2+) — no line numbers to drift
+usage() { awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "$0" >&2; exit 1; }
 
-resume=0
+# Worker briefs must carry the 3 headers from rules/_all/brief.md.
+brief_headers_ok() {
+  printf '%s\n' "$1" | grep -qF 'Goal:' \
+    && printf '%s\n' "$1" | grep -qF 'Hard constraints:' \
+    && printf '%s\n' "$1" | grep -qE 'Current design(\s*\(open to challenge\))?:'
+}
+brief_error() {
+  echo "error: task must be a brief with 'Goal:', 'Hard constraints:', 'Current design (open to challenge):' (rules/_all/brief.md)" >&2
+  exit 1
+}
+
+# D3: seconds from a `Time budget: <N> min` line (empty when absent)
+brief_budget_sec() {
+  local n
+  n=$(printf '%s\n' "$1" \
+    | grep -oiE 'time budget:[^0-9]{0,8}[0-9]+[[:space:]]*(min|mins|minutes|m)([^[:alnum:]]|$)' \
+    | head -1 | grep -oE '[0-9]+' | head -1) || true
+  [[ -n $n ]] && printf '%s\n' $(( n * 60 ))
+}
+
+# D3: env PROMPT_WORKER_BUDGET_SEC > the brief's Time budget: > 2700
+budget_sec() {
+  if [[ -n ${PROMPT_WORKER_BUDGET_SEC:-} ]]; then
+    printf '%s\n' "$PROMPT_WORKER_BUDGET_SEC"; return 0
+  fi
+  local b
+  b=$(brief_budget_sec "${1:-}" || true)
+  printf '%s\n' "${b:-2700}"
+}
+
+if [[ -n ${PROMPT_WORKER_BUDGET_SEC:-} && ! ${PROMPT_WORKER_BUDGET_SEC} =~ ^[0-9]+$ ]]; then
+  echo "error: PROMPT_WORKER_BUDGET_SEC must be whole seconds (got '$PROMPT_WORKER_BUDGET_SEC')" >&2
+  exit 1
+fi
+
+resume=0 extend=''
+# D4: validate a brief and report the budget it resolves to — no herdr call
+if [[ ${1:-} == --check-brief ]]; then
+  (( $# == 2 )) && [[ -n $2 ]] || usage
+  brief_headers_ok "$2" || brief_error
+  if [[ -n ${PROMPT_WORKER_BUDGET_SEC:-} ]]; then src=env
+  elif [[ -n $(brief_budget_sec "$2" || true) ]]; then src=brief
+  else src=default; fi
+  printf 'budget=%ss source=%s\n' "$(budget_sec "$2")" "$src"
+  exit 0
+fi
 if [[ ${1:-} == --resume ]]; then resume=1; shift; fi
 if (( resume )); then
-  (( $# == 1 )) && [[ $1 =~ ^[a-z0-9-]+$ ]] || usage
-  name=$1
+  name=''
+  while (( $# )); do
+    case $1 in
+      --extend)
+        [[ ${2:-} =~ ^[1-9][0-9]*$ ]] || usage
+        extend=$2; shift 2 ;;
+      -*) usage ;;
+      *)
+        [[ -z $name ]] || usage
+        name=$1; shift ;;
+    esac
+  done
+  [[ $name =~ ^[a-z0-9-]+$ ]] || usage
 else
   (( $# == 2 )) && [[ $1 =~ ^[a-z0-9-]+$ ]] && [[ -n $2 ]] || usage
   name=$1 task=$2
-  # Worker briefs must carry the 3 headers from rules/_all/brief.md.
-  if ! printf '%s\n' "$task" | grep -qF 'Goal:' \
-    || ! printf '%s\n' "$task" | grep -qF 'Hard constraints:' \
-    || ! printf '%s\n' "$task" | grep -qE 'Current design(\s*\(open to challenge\))?:'; then
-    echo "error: task must be a brief with 'Goal:', 'Hard constraints:', 'Current design (open to challenge):' (rules/_all/brief.md)" >&2
-    exit 1
-  fi
+  brief_headers_ok "$task" || brief_error
 fi
 
 out="$HOME/quaqua/runs/$name.md"
 submit_log="$HOME/quaqua/runs/.$name.submit.log"
 elapsed_file="$HOME/quaqua/runs/.$name.elapsed"
 sentinel="$HOME/quaqua/runs/.$name.nudged"
+budget_file="$HOME/quaqua/runs/.$name.budget"
+grace_file="$HOME/quaqua/runs/.$name.grace"
+progress_file="$HOME/quaqua/runs/.$name.progress"
 max=${PROMPT_WORKER_MAX_SEC:-7200}     poll=${PROMPT_WORKER_POLL_SEC:-30}
 stall=${PROMPT_WORKER_STALL_SEC:-600}  idle_sec=${PROMPT_WORKER_IDLE_SEC:-120}
 gone_sec=${PROMPT_WORKER_AGENT_GONE_SEC:-60}
-budget=${PROMPT_WORKER_BUDGET_SEC:-2700}
 nudge_pct=${PROMPT_WORKER_NUDGE_PCT:-80}
 heartbeat=${PROMPT_WORKER_HEARTBEAT_SEC:-300}
 (( poll < 1 )) && poll=1
@@ -63,16 +125,28 @@ mkdir -p "$(dirname "$out")"
 if (( resume )); then
   prev_elapsed=$(cat "$elapsed_file" 2>/dev/null || echo 0)
   [[ $prev_elapsed =~ ^[0-9]+$ ]] || prev_elapsed=0
+  # D1/D3: a resumed wait continues the persisted allowance (not a fresh env
+  # value); --extend <sec> adds to it for this name
+  budget=$(cat "$budget_file" 2>/dev/null || true)
+  [[ $budget =~ ^[0-9]+$ ]] || budget=$(budget_sec '')
+  if [[ -n $extend ]]; then
+    budget=$(( budget + extend ))
+    printf '%s\n' "$budget" > "$budget_file"
+    printf 'WATCHDOG extend +%ss (allowance %ss, cap %ss)\n' "$extend" "$budget" "$max" >&2
+  fi
 else
-  # a new task gets a fresh report and a fresh clock: anything already at
-  # $out predates this invocation (previous task, crashed run) — archive it
+  # a new task gets a fresh report, a fresh clock and a fresh budget: anything
+  # already at $out predates this invocation (previous task, crashed run)
   prev_elapsed=0
-  rm -f "$elapsed_file" "$sentinel"
+  budget=$(budget_sec "$task")
+  printf '%s\n' "$budget" > "$budget_file"
+  rm -f "$elapsed_file" "$sentinel" "$grace_file" "$progress_file"
   if [[ -e $out ]]; then
     mv "$out" "$out.stale.$(date +%s)"
     echo "archived pre-existing $out — a new task needs a fresh report" >&2
   fi
 fi
+[[ $budget =~ ^[0-9]+$ ]] || { echo "error: budget must be whole seconds (got '$budget')" >&2; exit 1; }
 
 start=$(date +%s)
 rem_max=$(( max - prev_elapsed ));       (( rem_max < 1 )) && rem_max=1
@@ -200,8 +274,14 @@ report_ready() {  # -s AND byte-stable across a short window — a partial
   [[ $a == "$b" ]]
 }
 
-prev_fp='' change_ts=$start idle_since=0 last_hb=$start nudged=0 blind_warned=0 gone_since=0
+prev_fp='' fp_seen=0 change_ts=$start idle_since=0 last_hb=$start nudged=0 blind_warned=0 gone_since=0
+grace_used=0 last_progress=0
 [[ -f $sentinel ]] && nudged=1
+[[ -f $grace_file ]] && grace_used=1
+# D2: a change observed just before the previous invocation gave up still
+# counts as progressing when the CoS resumes promptly
+[[ -f $progress_file ]] && last_progress=$(cat "$progress_file" 2>/dev/null || echo 0)
+[[ $last_progress =~ ^[0-9]+$ ]] || last_progress=0
 echo "waiting for $out (poll ${poll}s, stall ${stall}s, idle ${idle_sec}s, budget ${budget}s, cap ${max}s)" >&2
 while ! report_ready; do
   now=$(date +%s)
@@ -218,8 +298,31 @@ while ! report_ready; do
     fi
     [[ $status == blocked ]] && watchdog_exit 5 "agent blocked (question/permission pending)"
     question_seen && watchdog_exit 5 "pane shows a pending question/permission prompt"
-    (( now >= budget_deadline )) && watchdog_exit 4 "time budget ${budget}s exceeded"
-    [[ $fp != "$prev_fp" ]] && { prev_fp=$fp; change_ts=$now; }
+    # progress is read before the deadline check so a change in this very
+    # observation counts; the first snapshot only sets the baseline
+    if [[ $fp != "$prev_fp" ]]; then
+      prev_fp=$fp
+      if (( fp_seen )); then
+        change_ts=$now last_progress=$now
+        printf '%s\n' "$now" > "$progress_file"
+      fi
+      fp_seen=1
+    fi
+    if (( now >= budget_deadline )); then
+      # D2: one grace (25% of the allowance, never past the cap) when the last
+      # observed change is within 2 polls — a worker mid-step is not a lost
+      # cause; granted once per task, nudge is never re-sent
+      if (( ! grace_used && last_progress > 0 && now - last_progress <= poll * 2 )); then
+        grace=$(( budget / 4 )); (( grace < 1 )) && grace=1
+        (( budget_deadline + grace > deadline )) && grace=$(( deadline - budget_deadline ))
+        if (( grace > 0 )); then
+          budget_deadline=$(( budget_deadline + grace ))
+          grace_used=1; : > "$grace_file"
+          printf 'WATCHDOG grace +%ss (progressing)\n' "$grace" >&2
+        fi
+      fi
+      (( now >= budget_deadline )) && watchdog_exit 4 "time budget ${budget}s exceeded"
+    fi
     if lead_waiting; then
       # a Lead watching a live pipeline: a static pane/cwd is expected for a
       # whole pipeline phase — neither idle nor stall means dead here

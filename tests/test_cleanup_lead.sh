@@ -4,10 +4,11 @@
 # one gets only its pane closed; live Peers block the cleanup; dead Peer owner
 # files do not; the INDEX.md owner cell returns to cos. herdr is stubbed on
 # PATH and logs every call; the script runs against a temp repo root.
-# Usage: scripts/test_cleanup_lead.sh   (exit 0 = pass)
+# Usage: tests/test_cleanup_lead.sh   (exit 0 = pass)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+src="$(cd "$here/.." && pwd)/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-cleanup-lead.XXXXXX")
 T=$(cd "$T" && pwd -P)
 trap 'rm -rf "$T"' EXIT
@@ -15,7 +16,7 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 mkdir -p "$T/bin" "$T/scripts" "$T/projects" "$T/runs"
-cp "$here/cleanup-lead.sh" "$T/scripts/cleanup-lead.sh"
+cp "$src/cleanup-lead.sh" "$T/scripts/cleanup-lead.sh"
 cat > "$T/INDEX.orig" <<'EOF'
 | slug | repo | owner | status | one-line goal |
 |------|------|-------|--------|---------------|
