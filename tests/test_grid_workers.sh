@@ -183,7 +183,7 @@ plan() {  # plan [label] [only-csv]; stdin: spec -> dry-run plan lines
   [ -n "$label" ] && args+=(--tab "$label")
   [ -n "$only" ] && args+=(--only "$only")
   HERDR_STUB_STATE="$T/state.json" HERDR_PANE_ID="$anchor" PATH="$T/bin:$PATH" \
-    "$src/grid-workers.sh" "${args[@]}" --dry-run
+    "$src/worker/grid-workers.sh" "${args[@]}" --dry-run
 }
 
 run() {  # run [label] [only-csv]; stdin: spec -> mutation log (script executed against the stub)
@@ -195,7 +195,7 @@ run() {  # run [label] [only-csv]; stdin: spec -> mutation log (script executed 
   [ -n "$label" ] && args+=(--tab "$label")
   [ -n "$only" ] && args+=(--only "$only")
   HERDR_STUB_STATE="$T/state.json" HERDR_STUB_LOG="$T/log" HERDR_PANE_ID="$anchor" PATH="$T/bin:$PATH" \
-    "$src/grid-workers.sh" "${args[@]}"
+    "$src/worker/grid-workers.sh" "${args[@]}"
   cat "$T/log"
 }
 
@@ -208,7 +208,7 @@ run_fail() {  # run_fail [label]; stdin: spec -> mutation log; asserts the scrip
   [ -n "$label" ] && args=(--tab "$label")
   rc=0
   HERDR_STUB_STATE="$T/state.json" HERDR_STUB_LOG="$T/log" HERDR_PANE_ID="$anchor" PATH="$T/bin:$PATH" \
-    "$src/grid-workers.sh" "${args[@]}" >"$T/out" 2>"$T/err" || rc=$?
+    "$src/worker/grid-workers.sh" "${args[@]}" >"$T/out" 2>"$T/err" || rc=$?
   [ "$rc" -ne 0 ] || fail "expected a non-zero exit"
   cat "$T/log"
 }
@@ -443,7 +443,7 @@ EOF
 )
 mkstate <<<"$spec" > "$T/state.json"
 if err=$(HERDR_STUB_STATE="$T/state.json" HERDR_PANE_ID=w1:p1 PATH="$T/bin:$PATH" \
-         "$src/grid-workers.sh" --dry-run 2>&1 >/dev/null); then
+         "$src/worker/grid-workers.sh" --dry-run 2>&1 >/dev/null); then
   fail "5 workers: expected non-zero exit"
 fi
 [[ "$err" == *"too many workers (5)"* ]] || fail "5 workers: missing error message (got: $err)"
@@ -458,7 +458,7 @@ EOF
 )
 mkstate <<<"$spec" > "$T/state.json"
 HERDR_STUB_STATE="$T/state.json" HERDR_PANE_ID=w1:p1 PATH="$T/bin:$PATH" \
-  "$src/grid-workers.sh" >/dev/null 2>&1 || fail "no workers: expected exit 0"
+  "$src/worker/grid-workers.sh" >/dev/null 2>&1 || fail "no workers: expected exit 0"
 echo "ok: no workers -> no-op"
 
 # ── 16. execution: two workers -> exact herdr commands ───────────────────────
@@ -769,12 +769,12 @@ tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,200,50
 EOF
 if err=$(HERDR_STUB_STATE="$T/state.json" HERDR_PANE_ID=w1:p1 PATH="$T/bin:$PATH" \
-         "$src/grid-workers.sh" --tab 2>&1 >/dev/null); then
+         "$src/worker/grid-workers.sh" --tab 2>&1 >/dev/null); then
   fail "--tab without a value: expected non-zero exit"
 fi
 [[ "$err" == *"Usage:"* ]] || fail "--tab without a value: no usage on stderr (got: $err)"
 if err=$(HERDR_STUB_STATE="$T/state.json" HERDR_PANE_ID=w1:p1 PATH="$T/bin:$PATH" \
-         "$src/grid-workers.sh" --tab "" 2>&1 >/dev/null); then
+         "$src/worker/grid-workers.sh" --tab "" 2>&1 >/dev/null); then
   fail "--tab '': expected non-zero exit"
 fi
 [[ "$err" == *"Usage:"* ]] || fail "--tab '': no usage on stderr (got: $err)"
@@ -839,7 +839,7 @@ tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,100,50
 EOF
 HERDR_STUB_STATE="$T/state.json" HERDR_PANE_ID=w1:p1 PATH="$T/bin:$PATH" \
-  "$src/grid-workers.sh" --only sude-ghost >/dev/null 2>&1 \
+  "$src/worker/grid-workers.sh" --only sude-ghost >/dev/null 2>&1 \
   || fail "--only ghost: expected exit 0"
 echo "ok: --only matching no agents -> no-op"
 
@@ -871,7 +871,7 @@ tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,200,50
 EOF
 if err=$(HERDR_STUB_STATE="$T/state.json" HERDR_PANE_ID=w1:p1 PATH="$T/bin:$PATH" \
-         "$src/grid-workers.sh" --only 2>&1 >/dev/null); then
+         "$src/worker/grid-workers.sh" --only 2>&1 >/dev/null); then
   fail "--only without a value: expected non-zero exit"
 fi
 [[ "$err" == *"Usage:"* ]] || fail "--only without a value: no usage on stderr (got: $err)"

@@ -43,6 +43,10 @@ usage() { sed -n '2,29p' "$0" >&2; exit 1; }
 die()   { echo "error: $*" >&2; exit 1; }
 
 here="$(cd "$(dirname "$0")" && pwd)"
+# sibling entrypoints: pipeline.sh lives in scripts/lead/, the worker scripts it
+# drives (spawn/prompt/cleanup/grid) in scripts/worker/ — resolve both from $0.
+worker_dir="$(cd "$here/../worker" && pwd)"
+w() { printf '%s/%s' "$worker_dir" "$1"; }
 runs="$HOME/quaqua/runs"
 mkdir -p "$runs"
 inv_start=$(date +%s)
@@ -250,13 +254,13 @@ wait_file() {  # <worker> <prompt> <budget-sec> — prompt once, else resume the
   if (( ! prompted )); then
     [[ -e $f ]] && archive_stale "$f"
     prompted=1 prompt_ts=$(date +%s); save_state   # the prompt is sent below
-    PROMPT_WORKER_BUDGET_SEC=$budget bash "$here/prompt-worker.sh" "$w" "$prompt" >/dev/null || rc=$?
+    PROMPT_WORKER_BUDGET_SEC=$budget bash "$(w prompt-worker.sh)" "$w" "$prompt" >/dev/null || rc=$?
   else
     # resume: consume the report only when it postdates the recorded prompt
     if [[ -s $f && $(file_mtime "$f" || echo 0) -lt ${prompt_ts:-0} ]]; then
       archive_stale "$f"
     fi
-    PROMPT_WORKER_BUDGET_SEC=$budget bash "$here/prompt-worker.sh" --resume "$w" >/dev/null || rc=$?
+    PROMPT_WORKER_BUDGET_SEC=$budget bash "$(w prompt-worker.sh)" --resume "$w" >/dev/null || rc=$?
   fi
   if (( rc )); then
     blocker="$phase wait for $w: watchdog exit $rc — fix the cause ('prompt-worker.sh --resume $w' keeps a live wait going), then '$0 --resume $task $repo'"
@@ -369,7 +373,7 @@ grid_hook() {  # grid_hook <name>[,<name>...] — returns the grid's rc; the
   # caller decides: pre-prompt failure = pause (MANDATORY rule), post-cleanup
   # failure = warning only
   [[ ${GRID_SKIP:-} == 1 && ${QUAQUA_TEST:-} == 1 ]] && return 0
-  local grid="$here/grid-workers.sh" rc=0
+  local grid; grid="$(w grid-workers.sh)"; local rc=0
   [[ -f $grid ]] || return 0
   bash "$grid" --tab "$grid_tab" --only "$1" >&2 || rc=$?
   if (( rc )); then
@@ -388,7 +392,7 @@ while :; do
       # proof the agent started (spawn-worker.sh reuses a leftover worktree)
       if (( ! builder_spawned )); then
         sargs=(); [[ -n $base ]] && sargs+=(--base "$base")
-        if ! PIPELINE_TASK="$task" QUAQUA_OWNER="${lead:-cos}" GRID_SKIP=1 bash "$here/spawn-worker.sh" "${sargs[@]}" "$builder-$task" "$builder" "$repo" >&2; then
+        if ! PIPELINE_TASK="$task" QUAQUA_OWNER="${lead:-cos}" GRID_SKIP=1 bash "$(w spawn-worker.sh)" "${sargs[@]}" "$builder-$task" "$builder" "$repo" >&2; then
           blocker="spawn-worker.sh failed for builder $builder-$task — fix the cause, then '$0 --resume $task $repo'"
           plog "$blocker"; finish blocked 3
         fi
@@ -463,7 +467,7 @@ Pipeline phase: BUILD — your plan is approved ($planfile). Implement it in you
       if (( ! reviewer_spawned )); then
         # a report that predates this round's reviewer spawn is stale
         [[ -s $runs/$revname.md ]] && archive_stale "$runs/$revname.md"
-        if ! PIPELINE_TASK="$task" QUAQUA_OWNER="${lead:-cos}" GRID_SKIP=1 bash "$here/spawn-worker.sh" --review --base "$head_sha" \
+        if ! PIPELINE_TASK="$task" QUAQUA_OWNER="${lead:-cos}" GRID_SKIP=1 bash "$(w spawn-worker.sh)" --review --base "$head_sha" \
              "$revname" "$reviewer" "$repo" >&2; then
           blocker="spawn-worker.sh failed for reviewer $revname — fix the cause, then '$0 --resume $task $repo'"
           plog "$blocker"; finish blocked 3
@@ -487,7 +491,7 @@ Pipeline phase: REVIEW (round $round of $rounds)" "$REVIEW_BUDGET"
       if grep -q '^## Challenge' "$runs/$revname.md"; then
         log_challenge "$runs/$revname.md"
         plog "review round $round: $revname challenged the premise"
-        PIPELINE_TASK="$task" GRID_SKIP=1 bash "$here/cleanup-worker.sh" "$revname" "$repo" >&2 \
+        PIPELINE_TASK="$task" GRID_SKIP=1 bash "$(w cleanup-worker.sh)" "$revname" "$repo" >&2 \
           || echo "warning: cleanup $revname failed; clean it manually" >&2
         grid_hook "$builder-$task" || true
         blocker="reviewer $revname challenged the premise — Lead resolves the Challenge above"
@@ -495,7 +499,7 @@ Pipeline phase: REVIEW (round $round of $rounds)" "$REVIEW_BUDGET"
       fi
       verdict=$(grep -E '^[[:space:]]*Verdict:' "$runs/$revname.md" | tail -1 || true)
       plog "review round $round: ${verdict:-NO VERDICT LINE} ($revname.md)"
-      PIPELINE_TASK="$task" GRID_SKIP=1 bash "$here/cleanup-worker.sh" "$revname" "$repo" >&2 \
+      PIPELINE_TASK="$task" GRID_SKIP=1 bash "$(w cleanup-worker.sh)" "$revname" "$repo" >&2 \
         || echo "warning: cleanup $revname failed; clean it manually" >&2
       grid_hook "$builder-$task" || true
       if [[ $verdict =~ [Vv]erdict:[[:space:]]*([0-9]+)[[:space:]]*[Ff]indings? ]]; then
