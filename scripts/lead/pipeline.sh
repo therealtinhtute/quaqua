@@ -39,8 +39,7 @@
 #   GRID_TAB (default <repo-basename>-workers); GRID_SKIP=1 with QUAQUA_TEST=1 disables (tests).
 set -euo pipefail
 
-usage() { sed -n '2,29p' "$0" >&2; exit 1; }
-die()   { echo "error: $*" >&2; exit 1; }
+USAGE_LAST=29
 
 here="$(cd "$(dirname "$0")" && pwd)"
 # sibling entrypoints: pipeline.sh lives in scripts/lead/, the worker scripts it
@@ -49,6 +48,7 @@ worker_dir="$(cd "$here/../worker" && pwd)"
 w() { printf '%s/%s' "$worker_dir" "$1"; }
 runs="$HOME/quaqua/runs"
 mkdir -p "$runs"
+. "$here/../lib/common.sh"
 inv_start=$(date +%s)
 
 PLAN_BUDGET=${PIPELINE_PLAN_BUDGET_SEC:-900}
@@ -73,75 +73,6 @@ harness_of() {  # worker kind -> harness family (models.md)
     bacdau|quansu)        echo codex ;;
     *) return 1 ;;
   esac
-}
-
-count_owner_slots() {
-  local o=${1:-cos} exclude=${2:-}
-  local agents live_workers=() o_live=0 res_slots=0
-
-  agents=$(herdr agent list 2>/dev/null || true)
-  if jq -e . >/dev/null 2>&1 <<<"$agents"; then
-    while IFS= read -r a_name; do
-      [[ -n $a_name ]] || continue
-      [[ $a_name == "$exclude" ]] && continue
-      live_workers+=("$a_name")
-    done < <(jq -r '.result.agents[]?
-      | select((.agent_status // "") != "dead")
-      | select((.name // "") | test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not))
-      | .name' <<<"$agents" 2>/dev/null || true)
-  fi
-
-  local o_workers=()
-  for w in ${live_workers[@]+"${live_workers[@]}"}; do
-    local w_owner
-    w_owner=$(cat "$runs/$w.owner" 2>/dev/null || true)
-    w_owner=${w_owner:-cos}
-    if [[ "$w_owner" == "$o" ]]; then
-      (( o_live++ )) || true
-      o_workers+=("$w")
-    fi
-  done
-
-  for s in "$runs"/pipeline-*.state; do
-    [[ -f $s ]] || continue
-    grep -q '^finished=0$' "$s" || continue
-    local p_lead p_o p_pid p_b p_t p_bname p_alive=0
-    p_lead=$(sed -n 's/^lead=\(.*\)/\1/p' "$s" | head -1)
-    p_o=${p_lead:-cos}
-    [[ "$p_o" == "$o" ]] || continue
-
-    p_pid=$(sed -n 's/^pipeline_pid=\([0-9][0-9]*\).*/\1/p' "$s" | head -1)
-    p_b=$(sed -n 's/^builder=\(.*\)/\1/p' "$s" | head -1)
-    p_t=$(sed -n 's/^task=\(.*\)/\1/p' "$s" | head -1)
-    p_bname="$p_b-$p_t"
-
-    if [[ -n $p_pid ]] && kill -0 "$p_pid" 2>/dev/null; then
-      p_alive=1
-    else
-      for a in ${live_workers[@]+"${live_workers[@]}"}; do
-        if [[ "$a" == "$p_bname" ]]; then
-          p_alive=1
-          break
-        fi
-      done
-    fi
-
-    if (( p_alive )); then
-      local p_cur_live=0
-      for w in ${o_workers[@]+"${o_workers[@]}"}; do
-        local w_pipe
-        w_pipe=$(cat "$runs/$w.pipeline" 2>/dev/null || true)
-        if [[ "$w_pipe" == "$p_t" || "$w" == "$p_bname" || "$w" == *-pr[0-9]* || "$w" == *-${p_t}r[0-9]* ]]; then
-          (( p_cur_live++ )) || true
-        fi
-      done
-      if (( p_cur_live < 2 )); then
-        (( res_slots += (2 - p_cur_live) )) || true
-      fi
-    fi
-  done
-
-  echo $(( o_live + res_slots ))
 }
 
 plog() { printf -- '- %s\n' "$*" >> "$pfile"; }
@@ -331,7 +262,7 @@ else
     || die "reviewer name $reviewer-${task}r$rounds exceeds 20 chars"
 
   owner=${QUAQUA_OWNER:-${PIPELINE_LEAD:-cos}}
-  slots_used=$(count_owner_slots "$owner")
+  slots_used=$(count_owner_slots "$runs" "$owner")
   if (( slots_used + 2 > 4 )); then
     echo "error: worker cap exceeded (owner '$owner' has $slots_used slots in use; pipeline reserves 2, cap is 4)" >&2
     exit 2

@@ -48,6 +48,7 @@
 set -euo pipefail
 
 PROG=${0##*/}
+. "$(dirname "$0")/../lib/common.sh"
 
 usage() {
   cat <<'EOF'
@@ -74,8 +75,6 @@ for a replan.
   --dry-run      print the planned actions and exit without touching any pane.
 EOF
 }
-
-die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # gather_state — read live herdr state, print one JSON state object.
