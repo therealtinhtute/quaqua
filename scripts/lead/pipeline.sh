@@ -51,7 +51,13 @@ w() { printf '%s/%s' "$worker_dir" "$1"; }
 runs="$HOME/quaqua/runs"
 mkdir -p "$runs"
 . "$here/../lib/common.sh"
-inv_start=$(date +%s)
+now_sec() {
+  local v=''
+  [[ -n ${PROMPT_WORKER_CLOCK_FILE:-} ]] \
+    && v=$(cat "$PROMPT_WORKER_CLOCK_FILE" 2>/dev/null || true)
+  if [[ $v =~ ^[0-9]+$ ]]; then printf '%s\n' "$v"; else date +%s; fi
+}
+inv_start=$(now_sec)
 
 PLAN_BUDGET=${PIPELINE_PLAN_BUDGET_SEC:-900}
 BUILD_BUDGET=${PIPELINE_BUILD_BUDGET_SEC:-2700}
@@ -79,7 +85,7 @@ harness_of() {  # worker kind -> harness family (models.md)
 
 plog() { printf -- '- %s\n' "$*" >> "$pfile"; }
 
-elapsed() { echo $(( start_elapsed + $(date +%s) - inv_start )); }
+elapsed() { echo $(( start_elapsed + $(now_sec) - inv_start )); }
 
 save_state() {
   local v
@@ -130,7 +136,7 @@ check_clock() {  # whole-pipeline budget, evaluated at phase boundaries
 
 archive_stale() {  # <file> — a report that predates this phase's prompt is stale
   local f=$1
-  mv "$f" "$f.stale.$(date +%s)" \
+  mv "$f" "$f.stale.$(now_sec)" \
     && plog "archived stale report $(basename "$f") (predates this phase's prompt)"
 }
 
@@ -186,7 +192,7 @@ wait_file() {  # <worker> <prompt> <budget-sec> — prompt once, else resume the
   (( budget < 1 )) && budget=1
   if (( ! prompted )); then
     [[ -e $f ]] && archive_stale "$f"
-    prompted=1 prompt_ts=$(date +%s); save_state   # the prompt is sent below
+    prompted=1 prompt_ts=$(now_sec); save_state   # the prompt is sent below
     PROMPT_WORKER_BUDGET_SEC=$budget bash "$(w prompt-worker.sh)" "$w" "$prompt" >/dev/null || rc=$?
   else
     # resume: consume the report only when it postdates the recorded prompt
