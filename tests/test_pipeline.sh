@@ -66,7 +66,14 @@ case "${1:-} ${2:-}" in
     esac
     if [ -n "$content" ] && [ "${FAKE_SILENT:-0}" != 1 ]; then
       if [ "${FAKE_DELAY:-0}" != 0 ]; then
-        ( sleep "$FAKE_DELAY"; printf '%s\n' "$content" > "$HOME/quaqua/runs/$w.md" ) &
+        if [ -n "${PROMPT_WORKER_CLOCK_FILE:-}" ]; then
+          Tdir="$(cd "$(dirname "$0")/.." && pwd)"
+          now_clk=$(cat "$PROMPT_WORKER_CLOCK_FILE" 2>/dev/null || echo 0)
+          printf '%s %s\n' "$(( now_clk + FAKE_DELAY ))" "$HOME/quaqua/runs/$w.md" > "$Tdir/delayed_file"
+          printf '%s\n' "$content" > "$Tdir/delayed_content"
+        else
+          ( sleep "$FAKE_DELAY"; printf '%s\n' "$content" > "$HOME/quaqua/runs/$w.md" ) &
+        fi
       else
         printf '%s\n' "$content" > "$HOME/quaqua/runs/$w.md"
       fi
@@ -78,6 +85,23 @@ esac
 exit 0
 STUB
 chmod +x "$T/bin/git" "$T/bin/herdr"
+
+cat > "$T/bin/advance-clock" <<'ADV'
+#!/usr/bin/env bash
+n=$(cat "$PROMPT_WORKER_CLOCK_FILE")
+n=$(( n + ${1:-1} ))
+printf '%s\n' "$n" > "$PROMPT_WORKER_CLOCK_FILE"
+Tdir="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -f "$Tdir/delayed_file" ]]; then
+  read -r target_clk target_file < "$Tdir/delayed_file"
+  if (( n >= target_clk )); then
+    cat "$Tdir/delayed_content" > "$target_file"
+    rm -f "$Tdir/delayed_file" "$Tdir/delayed_content"
+  fi
+fi
+ADV
+chmod +x "$T/bin/advance-clock"
+CLK=(PROMPT_WORKER_CLOCK_FILE="$T/clock" PROMPT_WORKER_SLEEP_CMD="$T/bin/advance-clock")
 
 cat > "$T/brief.md" <<'EOF'
 Goal: implement the widget
@@ -473,10 +497,12 @@ echo "ok: phase budget clamped to pipeline remainder (20s of 2700s)"
 run_pipe -- clk2 "$T/repo" --brief "$T/brief.md" --review skip
 [[ $rc -eq 5 ]] || fail "clk2 run1: exit $rc, want 5"
 perl -pi -e 's/^start_elapsed=.*/start_elapsed=7190/' "$runsdir/pipeline-clk2.state"
-run_pipe PIPELINE_MAX_SEC=7195 FAKE_DELAY=7 -- --resume clk2 "$T/repo"
+printf '%s\n' 1700000000 > "$T/clock"
+run_pipe "${CLK[@]}" PIPELINE_MAX_SEC=7195 FAKE_DELAY=7 -- --resume clk2 "$T/repo"
 [[ $rc -eq 4 ]] || fail "clk2: exit $rc, want 4 (wait over remainder): $(cat "$T/out")"
 grep -q 'status=blocked' "$T/out" || fail "clk2: not blocked"
 grep -q 'budget 5s' "$T/err" || fail "clk2: remainder budget not applied"
+rm -f "$T/delayed_file" "$T/delayed_content"
 echo "ok: file landing past the total budget -> watchdog 4 + blocked, never clean"
 
 # ── F7: a report predating the prompt is archived, never consumed ────────────
