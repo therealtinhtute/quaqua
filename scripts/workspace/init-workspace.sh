@@ -71,4 +71,15 @@ if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
   fi
 fi
 
+# herdr-grid: tag the CoS orchestrator pane if running inside herdr (R5)
+cos_pane=${HERDR_PANE_ID:-}
+if [[ -z $cos_pane ]] && command -v herdr >/dev/null 2>&1; then
+  cos_pane=$(herdr pane current 2>/dev/null | jq -r '.result.pane.pane_id // empty' 2>/dev/null || true)
+fi
+if [[ -n $cos_pane ]] && command -v herdr >/dev/null 2>&1; then
+  herdr pane report-metadata "$cos_pane" --source herdr-grid \
+    --token grid_role=orchestrator \
+    --token grid_owner=cos >/dev/null 2>&1 || true
+fi
+
 echo "workspace ready in $root"

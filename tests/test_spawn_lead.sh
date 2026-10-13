@@ -16,6 +16,7 @@ T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+unset HERDR_PANE_ID
 
 # ── sandbox: temp quaqua root (script copy under scripts/) + stub herdr/git ─
 mkdir -p "$T/bin" "$T/scripts/lead" "$T/projects" "$T/rules/_all"
@@ -89,9 +90,14 @@ spawn coucou-island
 grep -qx 'lead=coucou-island-lead slug=coucou-island workspace=w7 pane=%7' "$T/out" \
   || fail "happy: no success line: $(cat "$T/out")"
 [[ $(ln 'agent get') -lt $(ln 'workspace create') ]] \
-  && [[ $(ln 'workspace create') -lt $(ln 'agent start') ]] \
+  && [[ $(ln 'workspace create') -lt $(ln 'pane report-metadata') ]] \
+  && [[ $(ln 'pane report-metadata') -lt $(ln 'agent start') ]] \
   && [[ $(ln 'agent start') -lt $(ln 'agent prompt') ]] \
   || fail "happy: bad call order: $(cat "$T/calls")"
+grep -qF 'herdr pane report-metadata %7 --source herdr-grid --token grid_role=orchestrator --token grid_owner=coucou-island-lead' "$T/calls" \
+  || fail "happy: Lead pane not tagged as orchestrator with owner: $(cat "$T/calls")"
+! grep -q 'grid_ready' "$T/calls" || fail "happy: Lead pane should not have grid_ready token"
+echo "ok: herdr-grid -> Lead pane tagged as orchestrator (role=orchestrator, owner=coucou-island-lead), no grid_ready"
 grep -q 'agent get coucou-island-lead' "$T/calls" \
   || fail "happy: no duplicate check: $(cat "$T/calls")"
 grep -qF "workspace create --label coucou-island --no-focus --cwd $T --env QUAQUA_OWNER=coucou-island-lead" "$T/calls" \
