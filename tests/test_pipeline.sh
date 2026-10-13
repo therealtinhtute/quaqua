@@ -56,10 +56,12 @@ case "${1:-} ${2:-}" in
   "agent read") printf '%s\n' "${FAKE_PANE:-working}" ;;
   "agent prompt")
     w=$3; content=''
+    # builder reports carry the '## Lessons' tail (prompt-worker.sh exit 6
+    # without it, rules/_all/brief.md); reviewer reports carry 'Verdict:'.
     case "$4" in
-      *"phase: PLAN"*)   content=${FAKE_PLAN_MD:-fake plan: step 1} ;;
-      *"phase: BUILD"*)  content=${FAKE_BUILD_MD:-fake build report: committed + tests pass} ;;
-      *"phase: FIX"*)    content=${FAKE_FIX_MD:-fake fix report: findings addressed} ;;
+      *"phase: PLAN"*)   content=${FAKE_PLAN_MD:-$'fake plan: step 1\n\n## Lessons\n- none'} ;;
+      *"phase: BUILD"*)  content=${FAKE_BUILD_MD:-$'fake build report: committed + tests pass\n\n## Lessons\n- none'} ;;
+      *"phase: FIX"*)    content=${FAKE_FIX_MD:-$'fake fix report: findings addressed\n\n## Lessons\n- none'} ;;
       *"phase: REVIEW"*) content=${FAKE_REVIEW_MD:-'Verdict: clean'} ;;
     esac
     if [ -n "$content" ] && [ "${FAKE_SILENT:-0}" != 1 ]; then
@@ -208,7 +210,7 @@ run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
 [[ $rc -eq 5 ]] || fail "dsp run1: exit $rc, want 5"
 run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
          FAKE_REVIEW_MD=$'src/a.c:10 wrong\nVerdict: 1 findings' \
-         FAKE_FIX_MD=$'looked into it\n\n## Challenge\nfinding 1 is wrong: the spec says X (evidence)\n' \
+         FAKE_FIX_MD=$'looked into it\n\n## Challenge\nfinding 1 is wrong: the spec says X (evidence)\n\n## Lessons\n- none\n' \
          -- --resume dsp "$T/repo"
 [[ $rc -eq 0 ]] || fail "dsp resume: exit $rc"
 grep -q 'status=disputed' "$T/out" || fail "dsp: stdout not disputed: $(cat "$T/out")"
@@ -227,18 +229,25 @@ grep -q 'status: blocked' "$runsdir/pipeline-wdg.md" || fail "wdg: not logged bl
 tail -1 "$tele" | grep -q '"status":"blocked"' || fail "wdg: telemetry not blocked"
 echo "ok: watchdog exit 2 -> propagated, pipeline blocked, telemetry written"
 
-# ── missing Verdict line -> blocked (reviewer broke the contract) ────────────
+# ── R3: missing Verdict line -> exit 6 at the wait, pipeline blocked ─────────
+# prompt-worker.sh rejects the reviewer report before the pipeline can read it
+# (R3), so the phase wait fails with watchdog exit 6 and pipeline.sh reports
+# blocked like every other watchdog exit. The pipeline's own missing-Verdict
+# check stays as a backstop for reports that arrive out of band.
 run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
          -- mvd "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "mvd run1: exit $rc, want 5"
 run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
          FAKE_REVIEW_MD='a report with no verdict at all' \
          -- --resume mvd "$T/repo"
-[[ $rc -eq 0 ]] || fail "mvd resume: exit $rc"
-grep -q 'status=blocked' "$T/out" || fail "mvd: stdout not blocked"
-grep -q 'Verdict' "$runsdir/pipeline-mvd.md" || fail "mvd: no verdict complaint logged"
-grep -q 'pane close' "$T/calls" || fail "mvd: reviewer not cleaned after bad verdict"
-echo "ok: missing Verdict -> blocked, reviewer still cleaned up"
+[[ $rc -eq 6 ]] || fail "mvd resume: exit $rc, want 6 (malformed report): $(cat "$T/err")"
+grep -q 'status=blocked' "$T/out" || fail "mvd: stdout not blocked: $(cat "$T/out")"
+grep -q 'watchdog exit 6' "$runsdir/pipeline-mvd.md" \
+  || fail "mvd: exit 6 not recorded in the pipeline file"
+grep -q 'WATCHDOG malformed-report' "$T/err" || fail "mvd: no malformed-report line"
+# the wait never returned a path, so the reviewer was never cleaned up
+! grep -q 'pane close' "$T/calls" || fail "mvd: reviewer cleaned up despite the failed wait"
+echo "ok: missing Verdict -> watchdog exit 6, pipeline blocked, no cleanup"
 
 # ── --base passthrough: builder worktree starts at the given ref ─────────────
 run_pipe -- bas "$T/repo" --brief "$T/brief.md" --base quaqua/integ
@@ -358,7 +367,7 @@ pid2=$(sed -n 's/^pipeline_pid=//p' "$runsdir/pipeline-st6.state")
 echo "ok: state carries lead/lead_pane; --resume refreshes pipeline_pid"
 
 # ── F1: an unfinished phase report never advances (Outcome/## Blockers) ─────
-run_pipe FAKE_PLAN_MD=$'plan v1\n\n## Blockers\n- cannot plan without the spec\n' \
+run_pipe FAKE_PLAN_MD=$'plan v1\n\n## Blockers\n- cannot plan without the spec\n\n## Lessons\n- none\n' \
          -- pb1 "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 0 ]] || fail "pb1: exit $rc, want 0"
 grep -q 'status=blocked' "$T/out" || fail "pb1: stdout not blocked: $(cat "$T/out")"
@@ -369,7 +378,7 @@ echo "ok: blocked plan report -> blocked, evidence copied, no build prompt"
 
 run_pipe -- pb2 "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "pb2 run1: exit $rc, want 5"
-run_pipe FAKE_BUILD_MD=$'Outcome: BLOCKED\n\n## Blockers\n- implementation incomplete\n' \
+run_pipe FAKE_BUILD_MD=$'Outcome: BLOCKED\n\n## Blockers\n- implementation incomplete\n\n## Lessons\n- none\n' \
          -- --resume pb2 "$T/repo"
 [[ $rc -eq 0 ]] || fail "pb2 resume: exit $rc"
 grep -q 'status=blocked' "$T/out" || fail "pb2: stdout not blocked: $(cat "$T/out")"
@@ -382,7 +391,7 @@ run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' -- pb3 "$T/repo" -
 [[ $rc -eq 5 ]] || fail "pb3 run1: exit $rc, want 5"
 run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
          FAKE_REVIEW_MD=$'src/a.c:1 wrong\nVerdict: 1 findings' \
-         FAKE_FIX_MD=$'tried\n\n## Blockers\n- fix needs schema access\n' \
+         FAKE_FIX_MD=$'tried\n\n## Blockers\n- fix needs schema access\n\n## Lessons\n- none\n' \
          -- --resume pb3 "$T/repo"
 [[ $rc -eq 0 ]] || fail "pb3 resume: exit $rc"
 grep -q 'status=blocked' "$T/out" || fail "pb3: stdout not blocked: $(cat "$T/out")"
@@ -402,7 +411,7 @@ echo "ok: zero commits after build -> resumable blocked, no reviewer"
 
 run_pipe -- nop "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "nop run1: exit $rc, want 5"
-run_pipe FAKE_HEAD_SHA=ba5eba5 FAKE_BUILD_MD=$'looked carefully\nOutcome: no changes\n' \
+run_pipe FAKE_HEAD_SHA=ba5eba5 FAKE_BUILD_MD=$'looked carefully\nOutcome: no changes\n\n## Lessons\n- none\n' \
          -- --resume nop "$T/repo"
 [[ $rc -eq 0 ]] || fail "nop: exit $rc"
 grep -q 'status=clean' "$T/out" || fail "nop: declared no-op did not finish clean: $(cat "$T/out")"
@@ -492,7 +501,7 @@ echo "ok: resume archives a report older than the recorded prompt time"
 # a report arriving after a paused wait must be consumed, not always archived.
 run_pipe FAKE_SILENT=1 PROMPT_WORKER_MAX_SEC=2 -- cur "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 2 ]] || fail "cur run1: exit $rc, want 2"
-printf 'fresh plan arriving after the prompt\n' > "$runsdir/sude-cur.md"
+printf 'fresh plan arriving after the prompt\n\n## Lessons\n- none\n' > "$runsdir/sude-cur.md"
 run_pipe FAKE_SILENT=1 PROMPT_WORKER_MAX_SEC=2 -- --resume cur "$T/repo"
 [[ $rc -eq 5 ]] || fail "cur resume: exit $rc, want 5 plan-ready: $(cat "$T/err")"
 grep -q 'fresh plan' "$runsdir/sude-cur.plan.md" || fail "cur: fresh report not consumed"
@@ -525,10 +534,11 @@ case "${1:-} ${2:-}" in
   "agent read") printf 'working\n' ;;
   "agent prompt")
     w=$3; content=''
+    # same report tails as the stub above ('## Lessons' for builders)
     case "$4" in
-      *"phase: PLAN"*)   content=${FAKE_PLAN_MD:-fake plan} ;;
-      *"phase: BUILD"*)  content=${FAKE_BUILD_MD:-fake build} ;;
-      *"phase: FIX"*)    content=${FAKE_FIX_MD:-fake fix} ;;
+      *"phase: PLAN"*)   content=${FAKE_PLAN_MD:-$'fake plan\n\n## Lessons\n- none'} ;;
+      *"phase: BUILD"*)  content=${FAKE_BUILD_MD:-$'fake build\n\n## Lessons\n- none'} ;;
+      *"phase: FIX"*)    content=${FAKE_FIX_MD:-$'fake fix\n\n## Lessons\n- none'} ;;
       *"phase: REVIEW"*) content=${FAKE_REVIEW_MD:-'Verdict: clean'} ;;
     esac
     case "$4" in
@@ -605,7 +615,7 @@ echo "ok: real git — zero commits after build is blocked"
 
 run_rg -- rgp "$T/rg/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "rgp run1: exit $rc, want 5"
-run_rg FAKE_BUILD_MD=$'checked\nOutcome: no changes\n' -- --resume rgp "$T/rg/repo"
+run_rg FAKE_BUILD_MD=$'checked\nOutcome: no changes\n\n## Lessons\n- none\n' -- --resume rgp "$T/rg/repo"
 [[ $rc -eq 0 ]] || fail "rgp: exit $rc"
 grep -q 'status=clean' "$T/out" || fail "rgp: declared no-op not clean: $(cat "$T/out")"
 echo "ok: real git — declared no-op finishes clean, no reviewer spawned"
