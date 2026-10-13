@@ -80,10 +80,32 @@ fi
 # main checkout's push target stays untouched. Runs on add AND on reuse so a
 # pre-existing worktree gets retrofitted. A guardrail, not a boundary: a
 # worker could still push a brand-new remote or an explicit URL, or unset it.
+#
+# Fail closed on a repo whose common config carries core.bare=true or
+# core.worktree: enabling extensions.worktreeConfig there drops the
+# exception that keeps those keys applying to the main worktree only
+# (git-worktree(1), CONFIGURATION FILE), so every worktree — including the
+# CoS checkout — would break. Refuse rather than spawn a half-broken worker.
+if [[ $(git -C "$repo" config --local --bool --get core.bare 2>/dev/null) == true ]] \
+    || git -C "$repo" config --local --list 2>/dev/null | grep -q '^core\.worktree='; then
+  echo "error: $repo has core.bare=true or core.worktree in its common config;" \
+       "enabling extensions.worktreeConfig for the push block would break every" \
+       "worktree of it. Move those keys to the main worktree's config.worktree" \
+       "(see git-worktree(1), CONFIGURATION FILE) or spawn from another clone." >&2
+  exit 1
+fi
+# --replace-all '' then --add, not a plain set: pushurl is a LIST and a push
+# goes to every entry, so a pushurl already in the shared config would
+# otherwise still receive the push (verified). The leading empty entry clears
+# that inherited list ("" clears the list of urls); the blocked value is then
+# ADDED so it survives re-running this on a reused worktree.
 git -C "$repo" config extensions.worktreeConfig true
 while IFS= read -r _remote; do
-  [[ -n $_remote ]] && git -C "$wt" config --worktree "remote.$_remote.pushurl" \
-    'PUSH DISABLED - task workers never push (AGENTS.md handoff rule)'
+  if [[ -n $_remote ]]; then
+    git -C "$wt" config --worktree --replace-all "remote.$_remote.pushurl" ''
+    git -C "$wt" config --worktree --add "remote.$_remote.pushurl" \
+      'PUSH DISABLED - task workers never push (AGENTS.md handoff rule)'
+  fi
 done < <(git -C "$repo" remote)
 
 # worker rules: rules/_all/*.md + rules/<repo-basename>/*.md -> one file, injected as system prompt
