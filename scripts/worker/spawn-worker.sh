@@ -73,6 +73,19 @@ else
   git -C "$repo" worktree add -b "quaqua/$name" "$wt" ${base:+"$base"} >&2
 fi
 
+# Push block (AGENTS.md handoff rule): task workers never push — branches are
+# merged by the Lead/CoS. Each remote's pushurl is pointed at an unresolvable
+# value in the worktree's own config (extensions.worktreeConfig keeps it out
+# of the shared config), so `git push` fails before any network while the
+# main checkout's push target stays untouched. Runs on add AND on reuse so a
+# pre-existing worktree gets retrofitted. A guardrail, not a boundary: a
+# worker could still push a brand-new remote or an explicit URL, or unset it.
+git -C "$repo" config extensions.worktreeConfig true
+while IFS= read -r _remote; do
+  [[ -n $_remote ]] && git -C "$wt" config --worktree "remote.$_remote.pushurl" \
+    'PUSH DISABLED - task workers never push (AGENTS.md handoff rule)'
+done < <(git -C "$repo" remote)
+
 # worker rules: rules/_all/*.md + rules/<repo-basename>/*.md -> one file, injected as system prompt
 rules_dir="$HOME/quaqua/rules" rf="$HOME/quaqua/runs/$name.rules.md"
 mkdir -p "$(dirname "$rf")"   # fresh clones have no runs/ yet — create it before writing

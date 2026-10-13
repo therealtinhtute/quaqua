@@ -33,6 +33,8 @@ echo "git $*" >> "$CALLS"
 # a ref containing "badref" does not exist: rev-parse --verify fails, and a
 # worktree-add start point with it would too
 case " $* " in *badref*) exit 1 ;; esac
+# a bare `git [-C <r>] remote` lists the fake remotes (FAKE_REMOTES, space-sep)
+if [ "${@: -1}" = remote ]; then printf '%s\n' ${FAKE_REMOTES:-}; fi
 # MKMCP=1: the new worktree ships a project .mcp.json
 if [ -n "${MKMCP:-}" ] && [ "${3:-} ${4:-}" = "worktree add" ]; then
   for a in "$@"; do case $a in */.wt/*) mkdir -p "$a" && echo '{}' > "$a/.mcp.json" ;; esac; done
@@ -271,10 +273,20 @@ spawn tieude-fresh tieude
   || fail "fresh clone: rules dump not written under a brand-new runs/"
 echo "ok: fresh clone -> runs/ created before the rules dump, spawn succeeds"
 
+# ── push block: spawn rewires each remote's pushurl in the worktree only ────
+spawn tieude-pblock tieude FAKE_REMOTES='origin upstream'
+[[ $rc -eq 0 ]] || fail "pblock spawn: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'config extensions.worktreeConfig true' "$T/calls" \
+  || fail "pblock: extensions.worktreeConfig not enabled: $(cat "$T/calls")"
+[[ $(grep -c 'config --worktree remote\.\(origin\|upstream\)\.pushurl PUSH DISABLED' "$T/calls") -eq 2 ]] \
+  || fail "pblock: pushurl not set per remote: $(cat "$T/calls")"
+echo "ok: push block -> worktreeConfig + per-remote --worktree pushurl on spawn"
+
 # ── real git: a surviving worktree is reused, a foreign dir is refused ────────
 mkdir -p "$T/bin2" "$T/rgrepo"
 git -C "$T/rgrepo" init -q
 git -C "$T/rgrepo" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
+git -C "$T/rgrepo" remote add origin git@example.com:o/r.git
 cat > "$T/bin2/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
@@ -312,5 +324,30 @@ CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
 grep -q 'not a git worktree' "$T/err" || fail "rw2: no refusal message: $(cat "$T/err")"
 ! grep -q 'agent start' "$T/calls" || fail "rw2: agent started over a foreign dir"
 echo "ok: foreign dir at worktree path -> refused before any agent start"
+
+# ── real git push block: worker worktree cannot push, main checkout can ──────
+# sude-rw1 went through the reuse-respawn path above — proof the push block
+# also applies on a resumed spawn, not only on a fresh worktree add
+[[ $(git -C "$T/.wt/sude-rw1" remote get-url --push origin) == PUSH\ DISABLED* ]] \
+  || fail "rw1: pushurl not blocked on a reused worktree: $(git -C "$T/.wt/sude-rw1" remote get-url --push origin)"
+rc=0
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
+  bash "$T/scripts/worker/spawn-worker.sh" sude-nopush sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 0 ]] || fail "nopush spawn: exit $rc: $(cat "$T/err")"
+wt_np="$T/.wt/sude-nopush"
+[[ $(git -C "$wt_np" remote get-url --push origin) == 'PUSH DISABLED - task workers never push (AGENTS.md handoff rule)' ]] \
+  || fail "nopush: worktree pushurl not blocked: $(git -C "$wt_np" remote get-url --push origin)"
+[[ $(git -C "$T/rgrepo" remote get-url --push origin) == 'git@example.com:o/r.git' ]] \
+  || fail "nopush: main checkout pushurl changed: $(git -C "$T/rgrepo" remote get-url --push origin)"
+rc=0
+git -C "$wt_np" push origin HEAD >"$T/push.out" 2>&1 || rc=$?
+[[ $rc -ne 0 ]] || fail "nopush: git push from a worker worktree succeeded"
+grep -q 'PUSH DISABLED' "$T/push.out" \
+  || fail "nopush: push error is not a clear refusal: $(cat "$T/push.out")"
+# fetch-side config is untouched, and enabling worktreeConfig left the shared
+# config's push target alone
+[[ $(git -C "$wt_np" remote get-url origin) == 'git@example.com:o/r.git' ]] \
+  || fail "nopush: fetch url changed: $(git -C "$wt_np" remote get-url origin)"
+echo "ok: real git -> worktree push fails with a clear error, main pushurl unchanged"
 
 echo "PASS"
