@@ -89,4 +89,50 @@ body
 EOF') == 2 ]] || fail "not blocked: real command beside a heredoc"
 echo "ok: argument strings, assignments, heredocs, redirect targets -> allowed"
 
+# herdr honors --help/-h only as the first word after `herdr` (top-level
+# help) or as the first word after the guarded verb pair (that verb's help);
+# it prints usage and exits without running the verb. Verified against
+# herdr 0.9.3: `herdr <verb> --help` and `herdr <verb> -h` are byte-identical
+# rc=0 usage text on all six guarded verbs, and none of those help texts
+# documents -h as anything but help.
+for c in 'herdr pane split --help' 'herdr pane split -h' \
+         'herdr pane move --help' 'herdr pane move -h' \
+         'herdr tab create --help' 'herdr tab create -h' \
+         'herdr workspace create --help' 'herdr workspace create -h' \
+         'herdr workspace close --help' 'herdr workspace close -h' \
+         'herdr agent start --help' 'herdr agent start -h' \
+         'herdr --help' 'herdr -h' \
+         'herdr --help pane split' 'herdr -h tab create' \
+         'herdr --session quaqua pane split --help' \
+         'herdr --session quaqua workspace close -h' \
+         'herdr pane split --help --current' \
+         'bash -c '\''herdr agent start --help'\''' \
+         'sudo herdr tab create -h' \
+         'X=$(herdr pane move -h)'; do
+  [[ $(gate "$c") == 0 ]] || fail "wrongly blocked: $c"
+done
+echo "ok: --help/-h at a help position -> allowed"
+
+# a help-shaped word anywhere else is not help: herdr reads it as an option
+# value (`herdr tab list --workspace --help` looks up a workspace literally
+# named "--help") or rejects it as an unknown option while the real command
+# still runs — so the gate must keep blocking, and near-miss words stay 2.
+for c in 'herdr pane split --pane --help' \
+         'herdr pane split --current --help' \
+         'herdr pane split nosuchpane -h' \
+         'herdr tab create --label --help' \
+         'herdr tab create --workspace x -h' \
+         'herdr workspace close --group --help' \
+         'herdr agent start --kind --help --pane x' \
+         'herdr agent start sude-x --kind pi --pane w1:p5 --help' \
+         'herdr pane split --hel' \
+         'herdr pane split --helpful' \
+         'herdr pane split -H' \
+         'herdr pane split -help' \
+         'herdr pane split -hx' \
+         'herdr pane split x -h'; do
+  [[ $(gate "$c") == 2 ]] || fail "not blocked: $c"
+done
+echo "ok: help-shaped words outside a help position -> blocked"
+
 echo "PASS"
