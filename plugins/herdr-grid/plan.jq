@@ -18,20 +18,15 @@
 #   {
 #     "op": "move",
 #     "pane": "<pane_id>",
+#     "deferred": <boolean>,
 #     "target": {
-#       "type": "new_tab" | "split",
-#       "mode": "new_tab" | "split",
-#       "label": "<tab_label>" | null,
-#       "tab_id": "<tab_id>" | null,
-#       "tab": "<tab_id>" | null,
-#       "split": "right" | "down" | null,
-#       "direction": "right" | "down" | null,
-#       "target_pane_id": "<pane_id>" | null,
-#       "target_pane": "<pane_id>" | null,
-#       "anchor": "<pane_id>" | null,
-#       "ratio": <float> | null
-#     },
-#     "deferred": <boolean>
+#       "kind": "new_tab" | "split",
+#       "label": "<tab_label>" (when kind == "new_tab"),
+#       "tab": "<tab_id>" | "@workers" (when kind == "split"),
+#       "anchor": "<pane_id>" (when kind == "split"),
+#       "direction": "right" | "down" (when kind == "split"),
+#       "ratio": <float> (when kind == "split")
+#     }
 #   }
 
 def tol: 2;
@@ -100,83 +95,53 @@ def build_order($n):
 def split_target($n; $i; $gws; $tab_ref):
   if $n == 2 then
     {
-      type: "split",
-      mode: "split",
-      tab_id: $tab_ref,
+      kind: "split",
       tab: $tab_ref,
-      split: "right",
-      direction: "right",
-      target_pane_id: $gws[0].pane_id,
-      target_pane: $gws[0].pane_id,
       anchor: $gws[0].pane_id,
+      direction: "right",
       ratio: 0.5
     }
   elif $n == 3 then
     if $i == 2 then
       {
-        type: "split",
-        mode: "split",
-        tab_id: $tab_ref,
+        kind: "split",
         tab: $tab_ref,
-        split: "down",
-        direction: "down",
-        target_pane_id: $gws[0].pane_id,
-        target_pane: $gws[0].pane_id,
         anchor: $gws[0].pane_id,
+        direction: "down",
         ratio: 0.5
       }
     else # $i == 1
       {
-        type: "split",
-        mode: "split",
-        tab_id: $tab_ref,
+        kind: "split",
         tab: $tab_ref,
-        split: "right",
-        direction: "right",
-        target_pane_id: $gws[0].pane_id,
-        target_pane: $gws[0].pane_id,
         anchor: $gws[0].pane_id,
+        direction: "right",
         ratio: 0.5
       }
     end
   elif $n == 4 then
     if $i == 2 then
       {
-        type: "split",
-        mode: "split",
-        tab_id: $tab_ref,
+        kind: "split",
         tab: $tab_ref,
-        split: "down",
-        direction: "down",
-        target_pane_id: $gws[0].pane_id,
-        target_pane: $gws[0].pane_id,
         anchor: $gws[0].pane_id,
+        direction: "down",
         ratio: 0.5
       }
     elif $i == 1 then
       {
-        type: "split",
-        mode: "split",
-        tab_id: $tab_ref,
+        kind: "split",
         tab: $tab_ref,
-        split: "right",
-        direction: "right",
-        target_pane_id: $gws[0].pane_id,
-        target_pane: $gws[0].pane_id,
         anchor: $gws[0].pane_id,
+        direction: "right",
         ratio: 0.5
       }
     else # $i == 3
       {
-        type: "split",
-        mode: "split",
-        tab_id: $tab_ref,
+        kind: "split",
         tab: $tab_ref,
-        split: "right",
-        direction: "right",
-        target_pane_id: $gws[2].pane_id,
-        target_pane: $gws[2].pane_id,
         anchor: $gws[2].pane_id,
+        direction: "right",
         ratio: 0.5
       }
     end
@@ -265,19 +230,14 @@ def find_owner_pane($owner; $panes; $agents; $ws):
                         {
                           op: "move",
                           pane: $w.pane_id,
+                          deferred: ($w.agent_status | is_working),
                           target: {
-                            type: "split",
-                            mode: "split",
-                            tab_id: $anchor_tab,
+                            kind: "split",
                             tab: $anchor_tab,
-                            split: "right",
-                            direction: "right",
-                            target_pane_id: $anchor_pane.pane_id,
-                            target_pane: $anchor_pane.pane_id,
                             anchor: $anchor_pane.pane_id,
+                            direction: "right",
                             ratio: 0.4
-                          },
-                          deferred: ($w.agent_status | is_working)
+                          }
                         }
                       ]
                     end
@@ -340,8 +300,8 @@ def find_owner_pane($owner; $panes; $agents; $ws):
                                           | {
                                               op: "move",
                                               pane: $gws[$i].pane_id,
-                                              target: split_target($n; $i; $gws; $wt_id),
-                                              deferred: ($gws[$i].agent_status | is_working)
+                                              deferred: ($gws[$i].agent_status | is_working),
+                                              target: split_target($n; $i; $gws; $wt_id)
                                             }
                                         ]
                                       else
@@ -352,19 +312,18 @@ def find_owner_pane($owner; $panes; $agents; $ws):
                                               {
                                                 op: "move",
                                                 pane: $gws[0].pane_id,
+                                                deferred: ($gws[0].agent_status | is_working),
                                                 target: {
-                                                  type: "new_tab",
-                                                  mode: "new_tab",
+                                                  kind: "new_tab",
                                                   label: $group
-                                                },
-                                                deferred: ($gws[0].agent_status | is_working)
+                                                }
                                               }
                                             else
                                               {
                                                 op: "move",
                                                 pane: $gws[$i].pane_id,
-                                                target: split_target($n; $i; $gws; "@workers"),
-                                                deferred: ($gws[$i].agent_status | is_working)
+                                                deferred: ($gws[$i].agent_status | is_working),
+                                                target: split_target($n; $i; $gws; "@workers")
                                               }
                                             end
                                         ]
@@ -378,19 +337,18 @@ def find_owner_pane($owner; $panes; $agents; $ws):
                                       {
                                         op: "move",
                                         pane: $gws[0].pane_id,
+                                        deferred: ($gws[0].agent_status | is_working),
                                         target: {
-                                          type: "new_tab",
-                                          mode: "new_tab",
+                                          kind: "new_tab",
                                           label: $group
-                                        },
-                                        deferred: ($gws[0].agent_status | is_working)
+                                        }
                                       }
                                     else
                                       {
                                         op: "move",
                                         pane: $gws[$i].pane_id,
-                                        target: split_target($n; $i; $gws; "@workers"),
-                                        deferred: ($gws[$i].agent_status | is_working)
+                                        deferred: ($gws[$i].agent_status | is_working),
+                                        target: split_target($n; $i; $gws; "@workers")
                                       }
                                     end
                                 ]

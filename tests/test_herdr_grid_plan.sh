@@ -16,6 +16,21 @@
 #       Second run on an applied layout produces zero ops (idempotence).
 #   R7: Moves of working panes have deferred: true (idle/done/unknown = not working).
 #
+# Schema contract:
+#   {
+#     op: "move",
+#     pane: "<pane_id>",
+#     deferred: <boolean>,
+#     target: {
+#       kind: "new_tab" | "split",
+#       label: "<label>" (new_tab),
+#       tab: "<tab_id>" | "@workers" (split),
+#       anchor: "<pane_id>" (split),
+#       direction: "right" | "down" (split),
+#       ratio: <float> (split)
+#     }
+#   }
+#
 # Usage: tests/test_herdr_grid_plan.sh   (exit 0 = pass)
 set -euo pipefail
 
@@ -32,6 +47,15 @@ run_plan() {
   /usr/bin/jq -c -f "$plan_jq" "$1"
 }
 
+assert_no_legacy_fields() {
+  local json=$1
+  local bad
+  bad=$(jq -r '[.[].target | keys[] | select(. == "type" or . == "mode" or . == "tab_id" or . == "split" or . == "target_pane" or . == "target_pane_id")] | unique | join(",")' <<<"$json")
+  if [[ -n "$bad" ]]; then
+    fail "forbidden legacy/redundant fields in target: $bad (in $json)"
+  fi
+}
+
 # -----------------------------------------------------------------------------
 # 1. 0 workers -> 0 ops
 # -----------------------------------------------------------------------------
@@ -45,25 +69,26 @@ echo "ok: 0 workers -> []"
 # -----------------------------------------------------------------------------
 echo "test 2: 1 worker"
 out=$(run_plan "$fixdir/1-worker.json")
+assert_no_legacy_fields "$out"
 len=$(jq 'length' <<<"$out")
 [[ "$len" -eq 1 ]] || fail "1 worker expected 1 op, got length $len: $out"
 op=$(jq -r '.[0].op' <<<"$out")
 pane=$(jq -r '.[0].pane' <<<"$out")
-mode=$(jq -r '.[0].target.mode' <<<"$out")
-tab_id=$(jq -r '.[0].target.tab_id' <<<"$out")
-split=$(jq -r '.[0].target.split' <<<"$out")
-target_pane=$(jq -r '.[0].target.target_pane_id' <<<"$out")
-ratio=$(jq -r '.[0].target.ratio' <<<"$out")
 deferred=$(jq -r '.[0].deferred' <<<"$out")
+kind=$(jq -r '.[0].target.kind' <<<"$out")
+tab=$(jq -r '.[0].target.tab' <<<"$out")
+direction=$(jq -r '.[0].target.direction' <<<"$out")
+anchor=$(jq -r '.[0].target.anchor' <<<"$out")
+ratio=$(jq -r '.[0].target.ratio' <<<"$out")
 
 [[ "$op" == "move" ]] || fail "expected op=move, got: $op"
 [[ "$pane" == "w1:p5" ]] || fail "expected pane=w1:p5, got: $pane"
-[[ "$mode" == "split" ]] || fail "expected mode=split, got: $mode"
-[[ "$tab_id" == "w1:t1" ]] || fail "expected tab_id=w1:t1, got: $tab_id"
-[[ "$split" == "right" ]] || fail "expected split=right, got: $split"
-[[ "$target_pane" == "w1:p1" ]] || fail "expected target_pane=w1:p1, got: $target_pane"
-[[ "$ratio" == "0.4" ]] || fail "expected ratio=0.4 (2/5|3/5 split), got: $ratio"
 [[ "$deferred" == "false" ]] || fail "expected deferred=false, got: $deferred"
+[[ "$kind" == "split" ]] || fail "expected kind=split, got: $kind"
+[[ "$tab" == "w1:t1" ]] || fail "expected tab=w1:t1, got: $tab"
+[[ "$direction" == "right" ]] || fail "expected direction=right, got: $direction"
+[[ "$anchor" == "w1:p1" ]] || fail "expected anchor=w1:p1, got: $anchor"
+[[ "$ratio" == "0.4" ]] || fail "expected ratio=0.4 (2/5|3/5 split), got: $ratio"
 echo "ok: 1 worker -> split right beside owner 2/5|3/5"
 
 # -----------------------------------------------------------------------------
@@ -71,20 +96,22 @@ echo "ok: 1 worker -> split right beside owner 2/5|3/5"
 # -----------------------------------------------------------------------------
 echo "test 3: 2 workers"
 out=$(run_plan "$fixdir/2-workers.json")
+assert_no_legacy_fields "$out"
 len=$(jq 'length' <<<"$out")
 [[ "$len" -eq 2 ]] || fail "2 workers expected 2 ops, got length $len: $out"
-op0_mode=$(jq -r '.[0].target.mode' <<<"$out")
-op0_label=$(jq -r '.[0].target.label' <<<"$out")
 op0_pane=$(jq -r '.[0].pane' <<<"$out")
-op1_mode=$(jq -r '.[1].target.mode' <<<"$out")
+op0_kind=$(jq -r '.[0].target.kind' <<<"$out")
+op0_label=$(jq -r '.[0].target.label' <<<"$out")
 op1_pane=$(jq -r '.[1].pane' <<<"$out")
-op1_anchor=$(jq -r '.[1].target.target_pane_id' <<<"$out")
-op1_dir=$(jq -r '.[1].target.split' <<<"$out")
+op1_kind=$(jq -r '.[1].target.kind' <<<"$out")
+op1_tab=$(jq -r '.[1].target.tab' <<<"$out")
+op1_anchor=$(jq -r '.[1].target.anchor' <<<"$out")
+op1_dir=$(jq -r '.[1].target.direction' <<<"$out")
 op1_ratio=$(jq -r '.[1].target.ratio' <<<"$out")
 
-[[ "$op0_pane" == "w1:p5" && "$op0_mode" == "new_tab" && "$op0_label" == "quaqua-workers" ]] \
+[[ "$op0_pane" == "w1:p5" && "$op0_kind" == "new_tab" && "$op0_label" == "quaqua-workers" ]] \
   || fail "op 0 mismatch: $out"
-[[ "$op1_pane" == "w1:p6" && "$op1_mode" == "split" && "$op1_anchor" == "w1:p5" && "$op1_dir" == "right" && "$op1_ratio" == "0.5" ]] \
+[[ "$op1_pane" == "w1:p6" && "$op1_kind" == "split" && "$op1_tab" == "@workers" && "$op1_anchor" == "w1:p5" && "$op1_dir" == "right" && "$op1_ratio" == "0.5" ]] \
   || fail "op 1 mismatch: $out"
 echo "ok: 2 workers -> new_tab + split right 0.5"
 
@@ -93,23 +120,24 @@ echo "ok: 2 workers -> new_tab + split right 0.5"
 # -----------------------------------------------------------------------------
 echo "test 4: 3 workers"
 out=$(run_plan "$fixdir/3-workers.json")
+assert_no_legacy_fields "$out"
 len=$(jq 'length' <<<"$out")
 [[ "$len" -eq 3 ]] || fail "3 workers expected 3 ops, got length $len: $out"
 p0=$(jq -r '.[0].pane' <<<"$out")
-m0=$(jq -r '.[0].target.mode' <<<"$out")
+k0=$(jq -r '.[0].target.kind' <<<"$out")
 p1=$(jq -r '.[1].pane' <<<"$out")
-m1=$(jq -r '.[1].target.mode' <<<"$out")
-d1=$(jq -r '.[1].target.split' <<<"$out")
-a1=$(jq -r '.[1].target.target_pane_id' <<<"$out")
+k1=$(jq -r '.[1].target.kind' <<<"$out")
+d1=$(jq -r '.[1].target.direction' <<<"$out")
+a1=$(jq -r '.[1].target.anchor' <<<"$out")
 p2=$(jq -r '.[2].pane' <<<"$out")
-m2=$(jq -r '.[2].target.mode' <<<"$out")
-d2=$(jq -r '.[2].target.split' <<<"$out")
-a2=$(jq -r '.[2].target.target_pane_id' <<<"$out")
+k2=$(jq -r '.[2].target.kind' <<<"$out")
+d2=$(jq -r '.[2].target.direction' <<<"$out")
+a2=$(jq -r '.[2].target.anchor' <<<"$out")
 
 # p5 is new_tab; p7 is split down on p5; p6 is split right on p5
-[[ "$p0" == "w1:p5" && "$m0" == "new_tab" ]] || fail "op 0 not p5 new_tab: $out"
-[[ "$p1" == "w1:p7" && "$m1" == "split" && "$d1" == "down" && "$a1" == "w1:p5" ]] || fail "op 1 not p7 split down on p5: $out"
-[[ "$p2" == "w1:p6" && "$m2" == "split" && "$d2" == "right" && "$a2" == "w1:p5" ]] || fail "op 2 not p6 split right on p5: $out"
+[[ "$p0" == "w1:p5" && "$k0" == "new_tab" ]] || fail "op 0 not p5 new_tab: $out"
+[[ "$p1" == "w1:p7" && "$k1" == "split" && "$d1" == "down" && "$a1" == "w1:p5" ]] || fail "op 1 not p7 split down on p5: $out"
+[[ "$p2" == "w1:p6" && "$k2" == "split" && "$d2" == "right" && "$a2" == "w1:p5" ]] || fail "op 2 not p6 split right on p5: $out"
 echo "ok: 3 workers -> build order [0, 2, 1] (A|B top + C below)"
 
 # -----------------------------------------------------------------------------
@@ -117,6 +145,7 @@ echo "ok: 3 workers -> build order [0, 2, 1] (A|B top + C below)"
 # -----------------------------------------------------------------------------
 echo "test 5: 4 workers"
 out=$(run_plan "$fixdir/4-workers.json")
+assert_no_legacy_fields "$out"
 len=$(jq 'length' <<<"$out")
 [[ "$len" -eq 4 ]] || fail "4 workers expected 4 ops, got length $len: $out"
 p0=$(jq -r '.[0].pane' <<<"$out")
@@ -124,10 +153,10 @@ p1=$(jq -r '.[1].pane' <<<"$out")
 p2=$(jq -r '.[2].pane' <<<"$out")
 p3=$(jq -r '.[3].pane' <<<"$out")
 
-[[ "$p0" == "w1:p5" ]] || fail "op 0 not p5: $out"
-[[ "$p1" == "w1:p7" && $(jq -r '.[1].target.split' <<<"$out") == "down" && $(jq -r '.[1].target.target_pane_id' <<<"$out") == "w1:p5" ]] || fail "op 1 not p7 down p5: $out"
-[[ "$p2" == "w1:p6" && $(jq -r '.[2].target.split' <<<"$out") == "right" && $(jq -r '.[2].target.target_pane_id' <<<"$out") == "w1:p5" ]] || fail "op 2 not p6 right p5: $out"
-[[ "$p3" == "w1:p8" && $(jq -r '.[3].target.split' <<<"$out") == "right" && $(jq -r '.[3].target.target_pane_id' <<<"$out") == "w1:p7" ]] || fail "op 3 not p8 right p7: $out"
+[[ "$p0" == "w1:p5" && $(jq -r '.[0].target.kind' <<<"$out") == "new_tab" ]] || fail "op 0 not p5: $out"
+[[ "$p1" == "w1:p7" && $(jq -r '.[1].target.kind' <<<"$out") == "split" && $(jq -r '.[1].target.direction' <<<"$out") == "down" && $(jq -r '.[1].target.anchor' <<<"$out") == "w1:p5" ]] || fail "op 1 not p7 down p5: $out"
+[[ "$p2" == "w1:p6" && $(jq -r '.[2].target.kind' <<<"$out") == "split" && $(jq -r '.[2].target.direction' <<<"$out") == "right" && $(jq -r '.[2].target.anchor' <<<"$out") == "w1:p5" ]] || fail "op 2 not p6 right p5: $out"
+[[ "$p3" == "w1:p8" && $(jq -r '.[3].target.kind' <<<"$out") == "split" && $(jq -r '.[3].target.direction' <<<"$out") == "right" && $(jq -r '.[3].target.anchor' <<<"$out") == "w1:p7" ]] || fail "op 3 not p8 right p7: $out"
 echo "ok: 4 workers -> build order [0, 2, 1, 3] (2x2 grid)"
 
 # -----------------------------------------------------------------------------
@@ -148,20 +177,22 @@ echo "ok: 5 workers -> rejected with error"
 # -----------------------------------------------------------------------------
 echo "test 7: two owners in the same group"
 out=$(run_plan "$fixdir/two-owners-same-group.json")
+assert_no_legacy_fields "$out"
 len=$(jq 'length' <<<"$out")
 [[ "$len" -eq 3 ]] || fail "expected 3 ops total (1 for cos + 2 for lead), got: $out"
 # cos worker w1:p5 -> split beside w1:p1
 cos_op=$(jq -c '.[] | select(.pane == "w1:p5")' <<<"$out")
-[[ $(jq -r '.target.mode' <<<"$cos_op") == "split" ]] || fail "cos worker not split: $cos_op"
-[[ $(jq -r '.target.target_pane_id' <<<"$cos_op") == "w1:p1" ]] || fail "cos worker not beside w1:p1: $cos_op"
+[[ $(jq -r '.target.kind' <<<"$cos_op") == "split" ]] || fail "cos worker not split: $cos_op"
+[[ $(jq -r '.target.anchor' <<<"$cos_op") == "w1:p1" ]] || fail "cos worker not beside w1:p1: $cos_op"
+[[ $(jq -r '.target.direction' <<<"$cos_op") == "right" ]] || fail "cos worker direction not right: $cos_op"
 [[ $(jq -r '.target.ratio' <<<"$cos_op") == "0.4" ]] || fail "cos worker ratio not 0.4: $cos_op"
 
 # lead workers w2:p6, w2:p7 -> in group tab
 lead_p6=$(jq -c '.[] | select(.pane == "w2:p6")' <<<"$out")
 lead_p7=$(jq -c '.[] | select(.pane == "w2:p7")' <<<"$out")
-[[ $(jq -r '.target.mode' <<<"$lead_p6") == "new_tab" ]] || fail "lead worker 1 not new_tab: $lead_p6"
-[[ $(jq -r '.target.mode' <<<"$lead_p7") == "split" ]] || fail "lead worker 2 not split: $lead_p7"
-[[ $(jq -r '.target.target_pane_id' <<<"$lead_p7") == "w2:p6" ]] || fail "lead worker 2 not beside w2:p6: $lead_p7"
+[[ $(jq -r '.target.kind' <<<"$lead_p6") == "new_tab" ]] || fail "lead worker 1 not new_tab: $lead_p6"
+[[ $(jq -r '.target.kind' <<<"$lead_p7") == "split" ]] || fail "lead worker 2 not split: $lead_p7"
+[[ $(jq -r '.target.anchor' <<<"$lead_p7") == "w2:p6" ]] || fail "lead worker 2 not beside w2:p6: $lead_p7"
 echo "ok: two owners in the same group planned independently per owner"
 
 # -----------------------------------------------------------------------------
@@ -169,12 +200,13 @@ echo "ok: two owners in the same group planned independently per owner"
 # -----------------------------------------------------------------------------
 echo "test 8: two sessions / workspaces"
 out=$(run_plan "$fixdir/two-sessions.json")
+assert_no_legacy_fields "$out"
 len=$(jq 'length' <<<"$out")
 [[ "$len" -eq 2 ]] || fail "expected 2 ops across sessions, got: $out"
 p1=$(jq -c '.[] | select(.pane == "w1:p5")' <<<"$out")
 p2=$(jq -c '.[] | select(.pane == "w2:p6")' <<<"$out")
-[[ $(jq -r '.target.target_pane_id' <<<"$p1") == "w1:p1" ]] || fail "session 1 worker target mismatch: $p1"
-[[ $(jq -r '.target.target_pane_id' <<<"$p2") == "w2:p1" ]] || fail "session 2 worker target mismatch: $p2"
+[[ $(jq -r '.target.anchor' <<<"$p1") == "w1:p1" ]] || fail "session 1 worker anchor mismatch: $p1"
+[[ $(jq -r '.target.anchor' <<<"$p2") == "w2:p1" ]] || fail "session 2 worker anchor mismatch: $p2"
 echo "ok: two sessions / workspaces handled cleanly"
 
 # -----------------------------------------------------------------------------
@@ -182,11 +214,11 @@ echo "ok: two sessions / workspaces handled cleanly"
 # -----------------------------------------------------------------------------
 echo "test 9: untagged pane"
 out=$(run_plan "$fixdir/untagged-pane.json")
+assert_no_legacy_fields "$out"
 len=$(jq 'length' <<<"$out")
 [[ "$len" -eq 1 ]] || fail "expected exactly 1 op (for w1:p5), got $len: $out"
 target_pane=$(jq -r '.[0].pane' <<<"$out")
 [[ "$target_pane" == "w1:p5" ]] || fail "expected only w1:p5 moved, got: $target_pane"
-# Verify w1:p2 (untagged shell), w1:p3 (grid_ready=0), w1:p4 (shell in workers tab) are never in ops
 has_p2=$(jq '[.[] | select(.pane == "w1:p2")] | length' <<<"$out")
 has_p3=$(jq '[.[] | select(.pane == "w1:p3")] | length' <<<"$out")
 has_p4=$(jq '[.[] | select(.pane == "w1:p4")] | length' <<<"$out")
@@ -198,6 +230,7 @@ echo "ok: untagged and non-ready panes untouched"
 # -----------------------------------------------------------------------------
 echo "test 10: working-pane deferral"
 out=$(run_plan "$fixdir/working-deferred.json")
+assert_no_legacy_fields "$out"
 d_p5=$(jq -r '.[] | select(.pane == "w1:p5") | .deferred' <<<"$out")
 d_p6=$(jq -r '.[] | select(.pane == "w1:p6") | .deferred' <<<"$out")
 d_p7=$(jq -r '.[] | select(.pane == "w1:p7") | .deferred' <<<"$out")
