@@ -32,6 +32,10 @@ git -C "$root" ls-files -z | while IFS= read -r -d '' f; do
 done
 mkdir -p "$R/scripts/workspace"
 cp "$src/workspace/init-workspace.sh" "$R/scripts/workspace/init-workspace.sh"
+# copied explicitly too: this test runs before they are committed
+mkdir -p "$R/scripts/hooks"
+cp "$src/hooks/pre-commit" "$R/scripts/hooks/pre-commit"
+chmod +x "$R/scripts/hooks/pre-commit"
 cp "$root/USER.example.md" "$R/USER.example.md"
 cp -R "$root/templates" "$R/templates"
 git -C "$R" init -q  # step 0's check-ignore guard needs a repo to consult
@@ -129,9 +133,11 @@ grep -q '^# my custom rule$' "$R/memory/rules.md" || fail "partial re-run clobbe
 echo "ok: partial workspace -> only missing pieces are recreated"
 
 # ── 6. a missing template fails loudly instead of seeding nothing ──────────
+cp "$R/templates/memory-rules.md" "$T/memory-rules.bak"   # restored below
 rm -f "$R/templates/memory-rules.md"
 if out=$(run 2>&1); then fail "missing template: expected failure"; fi
 [[ "$out" == *"missing template"* ]] || fail "unclear failure: $out"
+cp "$T/memory-rules.bak" "$R/templates/memory-rules.md"
 echo "ok: missing template -> loud failure naming the template"
 
 # ── 7. coverage: every file AGENTS.md says to always read is seeded ────────
@@ -152,5 +158,55 @@ for f in $always; do
 done
 # shellcheck disable=SC2086  # $includes/$always are newline-separated lists, split on purpose
 echo "ok: AGENTS.md always-reads seeded ($(printf '%s\n' $includes $always | sort -u | tr '\n' ' '))"
+
+# ── 8. git hooks wired: core.hooksPath -> scripts/hooks, never overwritten ──
+# The pre-commit portable-paths gate only runs if init-workspace.sh points git
+# at scripts/hooks/. Three states must hold: fresh repo -> wired; already ours
+# -> silent no-op; a different value (local or global) -> warned and left.
+exp="$R/scripts/hooks"
+[[ -d $exp ]] || fail "sandbox has no scripts/hooks dir to wire"
+[[ "$(git -C "$R" config --get core.hooksPath)" == "$exp" ]] \
+  || fail "init-workspace.sh did not set core.hooksPath (want $exp)"
+[[ -x $exp/pre-commit ]] || fail "scripts/hooks/pre-commit is not executable"
+echo "ok: fresh clone -> core.hooksPath wired to scripts/hooks"
+
+# idempotent when it is already ours (and quiet about it)
+out=$(run 2>&1)
+[[ "$(git -C "$R" config --get core.hooksPath)" == "$exp" ]] || fail "re-run changed core.hooksPath"
+[[ $out != *hooksPath* ]] || fail "re-run should stay quiet about a value it already owns: $out"
+echo "ok: re-run leaves an already-correct core.hooksPath untouched and silent"
+
+# a DIFFERENT local value is policy init-workspace.sh does not own: warn + leave
+git -C "$R" config core.hooksPath /somewhere/else
+out=$(run 2>&1)
+[[ "$(git -C "$R" config --get core.hooksPath)" == "/somewhere/else" ]] \
+  || fail "init-workspace.sh overwrote an existing core.hooksPath"
+[[ $out == *"already set"* ]] || fail "no warning about the foreign core.hooksPath: $out"
+[[ $out == *"/somewhere/else"* ]] || fail "warning does not name the existing value: $out"
+echo "ok: foreign local core.hooksPath -> warned, not overwritten"
+git -C "$R" config --unset core.hooksPath
+
+# a different GLOBAL value is left alone too (local scope must stay unset)
+G="$T/global.gitconfig"
+printf '[core]\n\thooksPath = /global/hooks\n' > "$G"
+out=$(GIT_CONFIG_GLOBAL="$G" run 2>&1) || fail "run failed with a global core.hooksPath set"
+[[ -z "$(GIT_CONFIG_GLOBAL="$G" git -C "$R" config --local --get core.hooksPath 2>/dev/null || true)" ]] \
+  || fail "init-workspace.sh set a local core.hooksPath over a global one"
+[[ $out == *"already set"* ]] || fail "no warning about the foreign global core.hooksPath: $out"
+[[ $(GIT_CONFIG_GLOBAL="$G" git -C "$R" config --get core.hooksPath) == "/global/hooks" ]] \
+  || fail "the global core.hooksPath value was modified"
+echo "ok: foreign global core.hooksPath -> warned, not overwritten"
+
+# not a git repo -> the wiring block is skipped, everything else still boots
+N="$T/notarepo"
+mkdir -p "$N"
+cp -R "$R/templates" "$R/USER.example.md" "$N/"
+mkdir -p "$N/scripts/workspace" "$N/scripts/hooks"
+cp "$src/workspace/init-workspace.sh" "$N/scripts/workspace/init-workspace.sh"
+cp "$src/hooks/pre-commit" "$N/scripts/hooks/pre-commit"
+( cd / && bash "$N/scripts/workspace/init-workspace.sh" ) >/dev/null \
+  || fail "init-workspace.sh failed outside a git repo"
+[[ -f $N/memory/rules.md ]] || fail "non-repo workspace was not booted"
+echo "ok: outside a git repo -> hook wiring skipped, workspace still booted"
 
 echo "PASS"

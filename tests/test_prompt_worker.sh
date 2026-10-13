@@ -23,15 +23,19 @@ mkdir -p "$T/bin" "$T/home/quaqua/runs"
 cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
+# A well-formed builder report: rules/_all/brief.md requires the '## Lessons'
+# tail (prompt-worker.sh exits 6 without it). FAKE_CONTENT overrides it for
+# the malformed/reviewer cases.
+content=${FAKE_CONTENT:-$'fake summary\n\n## Lessons\n- none'}
 if [ "${1:-} ${2:-}" = "agent prompt" ]; then
   [ -n "${FAKE_STDOUT:-}" ] && printf '%s\n' "$FAKE_STDOUT"
-  [ "${FAKE_WRITE:-0}" = 1 ] && echo "fake summary" > "$HOME/quaqua/runs/$FAKE_NAME.md"
+  [ "${FAKE_WRITE:-0}" = 1 ] && printf '%s\n' "$content" > "$HOME/quaqua/runs/$FAKE_NAME.md"
   if [ "${FAKE_PARTS:-0}" = 1 ]; then
-    ( echo part1 > "$HOME/quaqua/runs/$FAKE_NAME.md"; sleep 0.2
+    ( printf 'part1\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md"; sleep 0.2
       echo part2 >> "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
   fi
   if [ "${FAKE_DELAY:-0}" != 0 ]; then
-    ( sleep "$FAKE_DELAY"; echo "fake summary" > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
+    ( sleep "$FAKE_DELAY"; printf '%s\n' "$content" > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
   fi
 fi
 exit "${FAKE_RC:-0}"
@@ -54,6 +58,26 @@ reject() {  # reject <label> [args...]
   [[ $rc -eq 1 ]] || fail "$label: exit $rc, want 1"
   grep -q '^# Usage:' "$T/err" || fail "$label: no usage on stderr"
   echo "ok: $label -> exit 1, usage on stderr"
+}
+
+# resume <name> [VAR=val...] — --resume the wait (same capture as prompt)
+resume() {
+  local name=$1; shift
+  : > "$T/calls"
+  rc=0
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+    env "$@" bash "$src/worker/prompt-worker.sh" --resume "$name" >"$T/out" 2>"$T/err" || rc=$?
+}
+
+# malformed <label> <name> <missing> — exit 6 + the WATCHDOG line, no path
+malformed() {
+  local label=$1 name=$2 missing=$3
+  [[ $rc -eq 6 ]] || fail "$label: exit $rc, want 6: $(cat "$T/err")"
+  grep -q 'WATCHDOG malformed-report' "$T/err" \
+    || fail "$label: no 'WATCHDOG malformed-report' on stderr: $(cat "$T/err")"
+  grep -qF "missing=$missing" "$T/err" || fail "$label: wrong missing= field: $(cat "$T/err")"
+  [[ ! -s $T/out ]] || fail "$label: printed a path for a malformed report: $(cat "$T/out")"
+  echo "ok: $label -> exit 6, WATCHDOG malformed-report, no path on stdout"
 }
 
 brief='Goal: do the thing
@@ -144,7 +168,7 @@ prompt sude-quick "$brief" FAKE_WRITE=1
 grep -qF "herdr agent prompt sude-quick $brief. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/sude-quick.md (publish it atomically, never a partial file); reply only the path. --wait --timeout 1800000" "$T/calls" \
   || fail "sude-quick: wrong herdr call: $(cat "$T/calls")"
 grep -qF -- '--wait --timeout 1800000' "$T/calls" || fail "sude-quick: no --wait/--timeout"
-[[ "$(cat "$T/home/quaqua/runs/sude-quick.md")" == "fake summary" ]] \
+[[ "$(cat "$T/home/quaqua/runs/sude-quick.md")" == *"fake summary"* ]] \
   || fail "sude-quick: returned file is not the fresh report"
 echo "ok: sude-quick -> prompt sent verbatim, runs path printed"
 
@@ -152,7 +176,7 @@ echo "ok: sude-quick -> prompt sent verbatim, runs path printed"
 echo "OLD leftover report" > "$T/home/quaqua/runs/sude-stale.md"
 prompt sude-stale "$brief" FAKE_WRITE=1
 [[ $rc -eq 0 ]] || fail "sude-stale: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/home/quaqua/runs/sude-stale.md")" == "fake summary" ]] \
+[[ "$(cat "$T/home/quaqua/runs/sude-stale.md")" == *"fake summary"* ]] \
   || fail "sude-stale: stale file consumed instead of the fresh report"
 ls "$T"/home/quaqua/runs/sude-stale.md.stale.* >/dev/null 2>&1 \
   || fail "sude-stale: old report not archived"
@@ -206,5 +230,72 @@ Current design: cap" PROMPT_WORKER_MAX_SEC=2 PROMPT_WORKER_POLL_SEC=1
 grep -q "error: no $T/home/quaqua/runs/sude-never.md" "$T/err" \
   || fail "sude-never: no timeout error on stderr"
 echo "ok: sude-never -> exit 2 after cap, no path printed"
+
+# ── R3: report-shape gate (rules/_all/brief.md) ─────────────────────────────
+# The class comes from the spawn metadata runs/<name>.srt.json, never from the
+# brief text: this very suite's brief is a builder brief and would still say
+# nothing about which tail is required.
+
+# builder (no metadata at all) without '## Lessons' -> exit 6
+prompt sude-noles "Goal: build it
+Hard constraints: none
+Current design: x" FAKE_WRITE=1 \
+  FAKE_CONTENT=$'work done\n\nVerdict: clean'   # a Verdict tail is NOT a builder tail
+malformed "builder missing Lessons" sude-noles "'## Lessons' section"
+
+# builder with the section -> exit 0
+prompt sude-less "Goal: build it
+Hard constraints: none
+Current design: x" FAKE_WRITE=1 \
+  FAKE_CONTENT=$'work done\n\n## Lessons\n- none'
+[[ $rc -eq 0 ]] || fail "builder with Lessons: exit $rc, want 0: $(cat "$T/err")"
+[[ "$(cat "$T/out")" == "$T/home/quaqua/runs/sude-less.md" ]] \
+  || fail "builder with Lessons: stdout not the runs path"
+echo "ok: builder report with '## Lessons' -> exit 0"
+
+# reviewer (srt.json review:true) without 'Verdict:' -> exit 6
+printf '{"name":"quansu-rv1","kind":"quansu","review":true}\n' \
+  > "$T/home/quaqua/runs/quansu-rv1.srt.json"
+prompt quansu-rv1 "Goal: review it
+Hard constraints: read-only
+Current design: diff" FAKE_WRITE=1 \
+  FAKE_CONTENT=$'findings here\n\n## Lessons\n- none'   # a Lessons tail is NOT a reviewer tail
+malformed "reviewer missing Verdict" quansu-rv1 "'Verdict:' line"
+
+# reviewer with 'Verdict:' -> exit 0 (indented and trailing-space forms count)
+printf '{"name":"quansu-rv2","kind":"quansu","review":true}\n' \
+  > "$T/home/quaqua/runs/quansu-rv2.srt.json"
+prompt quansu-rv2 "Goal: review it
+Hard constraints: read-only
+Current design: diff" FAKE_WRITE=1 \
+  FAKE_CONTENT=$'findings here\n  Verdict: 2 findings'
+[[ $rc -eq 0 ]] || fail "reviewer with Verdict: exit $rc, want 0: $(cat "$T/err")"
+[[ "$(cat "$T/out")" == "$T/home/quaqua/runs/quansu-rv2.md" ]] \
+  || fail "reviewer with Verdict: stdout not the runs path"
+echo "ok: reviewer report with 'Verdict:' -> exit 0"
+
+# metadata that says review:false is a builder report
+printf '{"name":"sude-nof","kind":"sude","review":false}\n' \
+  > "$T/home/quaqua/runs/sude-nof.srt.json"
+prompt sude-nof "Goal: build it
+Hard constraints: none
+Current design: x" FAKE_WRITE=1 \
+  FAKE_CONTENT=$'work done\nVerdict: clean'
+malformed "review:false is a builder" sude-nof "'## Lessons' section"
+
+# --resume re-validates: the malformed file still fails, then a rewritten
+# report (temp+rename) is accepted without a fresh prompt
+resume sude-noles
+malformed "--resume on a still-malformed report" sude-noles "'## Lessons' section"
+! grep -q 'agent prompt' "$T/calls" || fail "--resume re-prompted: $(cat "$T/calls")"
+printf '%s\n' 'rewritten' '' '## Lessons' '- none' \
+  > "$T/home/quaqua/runs/.sude-noles.tmp" \
+  && mv "$T/home/quaqua/runs/.sude-noles.tmp" "$T/home/quaqua/runs/sude-noles.md"
+resume sude-noles
+[[ $rc -eq 0 ]] || fail "--resume after the rewrite: exit $rc, want 0: $(cat "$T/err")"
+[[ "$(cat "$T/out")" == "$T/home/quaqua/runs/sude-noles.md" ]] \
+  || fail "--resume after the rewrite: stdout not the runs path"
+! grep -q 'agent prompt' "$T/calls" || fail "--resume after the rewrite re-prompted"
+echo "ok: --resume re-validates the report (still 6, then accepted after the rewrite)"
 
 echo "PASS"
