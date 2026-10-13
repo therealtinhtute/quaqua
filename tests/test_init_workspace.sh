@@ -209,4 +209,30 @@ cp "$src/hooks/pre-commit" "$N/scripts/hooks/pre-commit"
 [[ -f $N/memory/rules.md ]] || fail "non-repo workspace was not booted"
 echo "ok: outside a git repo -> hook wiring skipped, workspace still booted"
 
+# ── 9. herdr-grid: CoS pane tagged as orchestrator when herdr is available ──
+mkdir -p "$T/bin_herdr"
+cat > "$T/bin_herdr/herdr" <<'STUB'
+#!/usr/bin/env bash
+echo "herdr $*" >> "$CALLS"
+[ "${1:-} ${2:-}" = "pane current" ] && echo '{"result":{"pane":{"pane_id":"w1:p1"}}}'
+exit 0
+STUB
+chmod +x "$T/bin_herdr/herdr"
+
+# with HERDR_PANE_ID set
+: > "$T/calls"
+( export CALLS="$T/calls" PATH="$T/bin_herdr:$PATH" HERDR_PANE_ID="w1:p1"; cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
+  || fail "init-workspace.sh failed with HERDR_PANE_ID set"
+grep -qF 'herdr pane report-metadata w1:p1 --source herdr-grid --token grid_role=orchestrator --token grid_owner=cos' "$T/calls" \
+  || fail "init-workspace.sh did not tag CoS pane with HERDR_PANE_ID: $(cat "$T/calls")"
+! grep -q 'grid_ready' "$T/calls" || fail "CoS pane should not have grid_ready token"
+
+# with HERDR_PANE_ID unset, falling back to herdr pane current
+: > "$T/calls"
+( export CALLS="$T/calls" PATH="$T/bin_herdr:$PATH"; unset HERDR_PANE_ID; cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
+  || fail "init-workspace.sh failed with herdr pane current"
+grep -qF 'herdr pane report-metadata w1:p1 --source herdr-grid --token grid_role=orchestrator --token grid_owner=cos' "$T/calls" \
+  || fail "init-workspace.sh did not tag CoS pane via herdr pane current: $(cat "$T/calls")"
+echo "ok: herdr-grid -> CoS pane tagged as orchestrator (role=orchestrator, owner=cos), no grid_ready"
+
 echo "PASS"
