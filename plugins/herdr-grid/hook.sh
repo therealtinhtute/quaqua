@@ -43,9 +43,9 @@ if [ "$EVENT_NAME" = "pane.agent_status_changed" ] && [ -n "$EVENT_JSON" ] && [ 
   new_status=$(echo "$EVENT_JSON" | "$JQ" -r '.agent_status // empty' 2>/dev/null || true)
 
   if [ -n "$event_pane_id" ] && [ -n "$new_status" ]; then
-    pane_summary=$(echo "$event_pane_id" | "$JQ" -r --slurpfile snap "$LAST_SNAPSHOT" '
-      . as $pid |
-      ($snap[0] | [.. | objects | select(.pane_id? == $pid)] | first) as $p |
+    pane_summary=$("$JQ" -n -r --arg pid "$event_pane_id" --slurpfile snap "$LAST_SNAPSHOT" '
+      ($snap[0].result.snapshot // $snap[0].snapshot // $snap[0]) as $root |
+      ($root.panes // [] | [ .[] | select(.pane_id? == $pid) ] | first) as $p |
       if $p == null then "missing"
       else
         "\($p.tokens?.grid_role // ""):\($p.tokens?.grid_ready // ""):\($p.agent_status // "unknown")"
@@ -139,8 +139,8 @@ reconcile() {
   if [ -f "$LAST_SNAPSHOT" ]; then
     local closed_panes
     closed_panes=$(echo "$snapshot" | "$JQ" -r --slurpfile last "$LAST_SNAPSHOT" '
-      [ $last[0] | .. | objects | select((.tokens?.grid_role // "") == "worker" and (.tokens?.grid_ready // "") == "1") | .pane_id ] as $old |
-      [ . | .. | objects | select((.tokens?.grid_role // "") == "worker" and (.tokens?.grid_ready // "") == "1") | .pane_id ] as $cur |
+      [ ($last[0].result.snapshot // $last[0].snapshot // $last[0]).panes[]? | select((.tokens?.grid_role // "") == "worker" and (.tokens?.grid_ready // "") == "1") | .pane_id ] as $old |
+      [ (.result.snapshot // .snapshot // .).panes[]? | select((.tokens?.grid_role // "") == "worker" and (.tokens?.grid_ready // "") == "1") | .pane_id ] as $cur |
       ($old - $cur)[]
     ' 2>/dev/null || true)
 
