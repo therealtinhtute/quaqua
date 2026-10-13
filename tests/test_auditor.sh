@@ -201,7 +201,7 @@ for want in \
   'pipeline-copied.md: status disputed' \
   "pipeline-copied.md: '## Challenge' unresolved" \
   "worker-chal.md: '## Challenge' unresolved" \
-  "pipeline-cfail.md: status clean but its '## Acceptance' records a failed scope/acceptance check" \
+  "pipeline-cfail.md: status clean but its '## Acceptance' records a failed scope/handback/acceptance check" \
   "pipeline-cnoacc.md: status clean but '## Acceptance' has no 'accepted by contract gate: yes' line" \
   'pipeline-cblock.md: status clean but reviewer file quansu-cblockr1.md lists a [blocking] finding' \
   'pipeline-ctele.md: status clean but the last runs/telemetry.jsonl line for ctele says blocked' \

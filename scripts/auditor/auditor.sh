@@ -84,8 +84,8 @@ for f in "$root"/runs/pipeline-*.md; do
       # must hold no FAIL line and end accepted; runs that predate the
       # contract have no '## Acceptance' and are skipped
       if grep -q '^## Acceptance' "$f"; then
-        if grep -qE '^- (scope: FAIL|A[0-9]+: .* — fail$)' "$f"; then
-          flag "runs/$base.md: status clean but its '## Acceptance' records a failed scope/acceptance check"
+        if grep -qE '^- (scope: FAIL|handback A[0-9]+: FAIL|A[0-9]+: .* — fail$)' "$f"; then
+          flag "runs/$base.md: status clean but its '## Acceptance' records a failed scope/handback/acceptance check"
         elif ! grep -q '^- accepted by contract gate: yes' "$f"; then
           flag "runs/$base.md: status clean but '## Acceptance' has no 'accepted by contract gate: yes' line"
         fi

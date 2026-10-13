@@ -24,7 +24,7 @@ Time budget: <N> min
 
 The worker's `runs/<name>.md` is the PEER.md handback: Outcome, Snapshot, Scope, Acceptance (each A-id verbatim, real output, pass|fail), Verification, Unknown / risk, Ownership. Pipeline reviewers write `## Spec` and `## Standards` findings as `- [blocking|nit] <path:line> — <claim> — <evidence>` and end with `Verdict: clean` (zero blocking) or `Verdict: <N> findings (<B> blocking)`; only blocking findings start a fix round.
 
-Before any `clean`, the pipeline re-runs every A-id on the frozen tip and checks Owned scope, writing `## Acceptance` into `runs/pipeline-<task>.md`. The Lead still re-checks before merging; the Auditor grades that section.
+Before any `clean`, the pipeline checks that the builder's report restates every A-id verbatim as pass, re-runs every A-id on the frozen tip, and checks Owned scope, writing `## Acceptance` into `runs/pipeline-<task>.md`. The Lead still re-checks before merging; the Auditor grades that section.
 
 ## Challenge
 `## Challenge` (premise + evidence) in `runs/<name>.md` — the Lead (CoS on no-SLP work) resolves it before acceptance. A right, not a duty.

@@ -61,8 +61,8 @@ case "${1:-} ${2:-}" in
     w=$3; content=''
     case "$4" in
       *"phase: PLAN"*)   content=${FAKE_PLAN_MD:-fake plan: step 1} ;;
-      *"phase: BUILD"*)  content=${FAKE_BUILD_MD:-fake build report: committed + tests pass} ;;
-      *"phase: FIX"*)    content=${FAKE_FIX_MD:-fake fix report: findings addressed} ;;
+      *"phase: BUILD"*)  content=${FAKE_BUILD_MD:-$'fake build report: committed + tests pass\n- A1: `true` → exit 0 — pass'} ;;
+      *"phase: FIX"*)    content=${FAKE_FIX_MD:-$'fake fix report: findings addressed\n- A1: `true` → exit 0 — pass'} ;;
       *"phase: REVIEW"*) content=${FAKE_REVIEW_MD:-'Verdict: clean'} ;;
     esac
     if [ -n "$content" ] && [ "${FAKE_SILENT:-0}" != 1 ]; then
@@ -408,7 +408,7 @@ echo "ok: zero commits after build -> resumable blocked, no reviewer"
 
 run_pipe -- nop "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "nop run1: exit $rc, want 5"
-run_pipe FAKE_HEAD_SHA=ba5eba5 FAKE_BUILD_MD=$'looked carefully\nOutcome: no changes\n' \
+run_pipe FAKE_HEAD_SHA=ba5eba5 FAKE_BUILD_MD=$'looked carefully\nOutcome: no changes\n- A1: `true` → exit 0 — pass\n' \
          -- --resume nop "$T/repo"
 [[ $rc -eq 0 ]] || fail "nop: exit $rc"
 grep -q 'status=clean' "$T/out" || fail "nop: declared no-op did not finish clean: $(cat "$T/out")"
@@ -533,8 +533,8 @@ case "${1:-} ${2:-}" in
     w=$3; content=''
     case "$4" in
       *"phase: PLAN"*)   content=${FAKE_PLAN_MD:-fake plan} ;;
-      *"phase: BUILD"*)  content=${FAKE_BUILD_MD:-fake build} ;;
-      *"phase: FIX"*)    content=${FAKE_FIX_MD:-fake fix} ;;
+      *"phase: BUILD"*)  content=${FAKE_BUILD_MD:-$'fake build\n- A1: `true` → exit 0 — pass'} ;;
+      *"phase: FIX"*)    content=${FAKE_FIX_MD:-$'fake fix\n- A1: `true` → exit 0 — pass'} ;;
       *"phase: REVIEW"*) content=${FAKE_REVIEW_MD:-'Verdict: clean'} ;;
     esac
     case "$4" in
@@ -611,7 +611,7 @@ echo "ok: real git — zero commits after build is blocked"
 
 run_rg -- rgp "$T/rg/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "rgp run1: exit $rc, want 5"
-run_rg FAKE_BUILD_MD=$'checked\nOutcome: no changes\n' -- --resume rgp "$T/rg/repo"
+run_rg FAKE_BUILD_MD=$'checked\nOutcome: no changes\n- A1: `true` → exit 0 — pass\n' -- --resume rgp "$T/rg/repo"
 [[ $rc -eq 0 ]] || fail "rgp: exit $rc"
 grep -q 'status=clean' "$T/out" || fail "rgp: declared no-op not clean: $(cat "$T/out")"
 echo "ok: real git — declared no-op finishes clean, no reviewer spawned"
@@ -672,5 +672,12 @@ run_pipe FAKE_NUMSTAT=$'5\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
          -- --resume cgb "$T/repo"
 grep -q 'status=blocked' "$T/out" || fail "cgb: clean beside [blocking] not blocked: $(cat "$T/out")"
 echo "ok: 'Verdict: clean' beside a [blocking] finding -> blocked"
+
+run_pipe -- cgh "$T/repo" --brief "$T/brief.md"
+run_pipe FAKE_NUMSTAT=$'5\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
+         FAKE_BUILD_MD=$'built it, tests green' -- --resume cgh "$T/repo"
+grep -q 'status=blocked' "$T/out" || fail "cgh: handback without A-ids not blocked: $(cat "$T/out")"
+grep -q 'handback A1: FAIL' "$runsdir/pipeline-cgh.md" || fail "cgh: handback mismatch not recorded"
+echo "ok: handback that does not restate the brief's A-ids as pass -> blocked (C2)"
 
 echo "PASS"

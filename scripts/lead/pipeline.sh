@@ -17,7 +17,8 @@
 #   start a fix round; 'clean' beside a '[blocking]' line is blocked). The brief
 #   must be a contract (rules/_all/brief.md): before any 'clean' the contract
 #   gate checks changed files against 'Owned scope:' and re-runs every
-#   acceptance command on the tip, writing '## Acceptance' (fail -> blocked). A phase report that declares itself
+#   acceptance command on the tip, writing '## Acceptance' (fail -> blocked);
+#   the latest builder report must restate every A-id verbatim as pass (C2). A phase report that declares itself
 #   unfinished ('Outcome: BLOCKED|PARTIAL|INCOMPLETE|FAILED' or a non-empty
 #   '## Blockers' section — e.g. written after the watchdog nudge) never
 #   advances: the pipeline stops blocked with the evidence copied in. After
@@ -136,8 +137,17 @@ contract_gate() {  # scope + acceptance re-run on the frozen tip; appends
     path_in_scope "$f" "${scope[@]}" || { plog "scope: FAIL $f is outside Owned scope"; bad=1; }
   done < <(git -C "$wt" diff --name-only "$base_sha" "$sha" 2>/dev/null)
   (( bad )) || plog "scope: pass (changed files within Owned scope: ${scope[*]})"
+  # C2: the builder's latest report restates every A-id verbatim as passing
+  local rep rline
+  rep=$(ls -t "$runs/$builder-$task".build.md "$runs/$builder-$task".fix*.md 2>/dev/null | head -1 || true)
   while IFS=$'\t' read -r id cmd; do
     [[ -n $id ]] || continue
+    rline=$(grep -E "^[[:space:]]*-?[[:space:]]*$id:" "${rep:-/dev/null}" 2>/dev/null | head -1 || true)
+    if [[ $rline == *"\`$cmd\`"* && $rline =~ [Pp][Aa][Ss][Ss] ]]; then
+      plog "handback $id: matches the brief and reports pass ($(basename "${rep:-none}"))"
+    else
+      plog "handback $id: FAIL — $(basename "${rep:-no report}") does not restate \`$cmd\` as pass"; bad=1
+    fi
     rc=0; out=$(cd "$wt" && timeout "${PIPELINE_ACCEPT_SEC:-300}" bash -c "$cmd" 2>&1) || rc=$?
     if (( rc == 0 )); then plog "$id: \`$cmd\` → exit 0 — pass"
     else plog "$id: \`$cmd\` → exit $rc — fail"; bad=1; fi
