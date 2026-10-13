@@ -69,7 +69,7 @@ spawn() {
   local name=$1 kind=$2; shift 2
   rc=0
   HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-    env "$@" bash "$src/worker/spawn-worker.sh" "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
+    env -u QUAQUA_OWNER "$@" bash "$src/worker/spawn-worker.sh" "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── 1. Cap refusal: 4 live workers for cos -> 5th refused ───────────────────
