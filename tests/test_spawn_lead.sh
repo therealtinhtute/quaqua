@@ -16,6 +16,7 @@ T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+unset HERDR_PANE_ID
 
 # ── sandbox: temp quaqua root (script copy under scripts/) + stub herdr/git ─
 mkdir -p "$T/bin" "$T/scripts/lead" "$T/projects" "$T/rules/_all"

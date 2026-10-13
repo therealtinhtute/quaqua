@@ -17,6 +17,7 @@ T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+unset HERDR_PANE_ID
 
 # ── sandbox: stub git/herdr that log every call, temp HOME, dummy repo ───────
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/scripts/worker"
