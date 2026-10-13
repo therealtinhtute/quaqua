@@ -8,6 +8,15 @@
 # Blocked (exit 2; stderr goes back to the agent): a simple command whose
 # executable resolves to herdr and whose arguments hold a guarded word pair —
 # `pane split|move`, `tab create`, `workspace create|close`, `agent start`.
+#
+# `--help`/`-h` passes only where herdr itself honors it and exits before the
+# verb runs (checked against herdr 0.9.3): as the first word after `herdr`
+# (top-level help) or as the first word after the guarded verb pair (that
+# verb's help). Anywhere else herdr reads the word as an option value —
+# `herdr tab list --workspace --help` looks up a workspace literally named
+# "--help" — or rejects it as an unknown option while the real command can
+# still run, so the gate keeps blocking those.
+#
 # The scanner below tokenizes the command first: it resolves quotes and
 # escapes into words ("herdr", h\e\rdr), strips path prefixes
 # (/usr/local/bin/herdr, ./herdr), skips VAR= prefixes and shell keywords,
@@ -256,11 +265,38 @@ check_words() {  # check_words <word>...
   if (( i + 1 < ${#w[@]} )); then a=("${w[@]:i+1}"); fi
   case $base in
     herdr)
+      # herdr honors --help/-h only as the first word after `herdr` (top-level
+      # help) or as the first word after the verb pair (that verb's help);
+      # it prints usage and exits without running the verb. Everywhere else the
+      # word is an option value or an unknown option — `herdr tab list
+      # --workspace --help` looks up a workspace literally named "--help" — so
+      # those invocations stay blocked.
+      if (( ${#a[@]} )) && { [[ ${a[0]} == '--help' ]] || [[ ${a[0]} == '-h' ]]; }; then
+        return 0
+      fi
+      local first=-1 kk
       for (( k = 0; k + 1 < ${#a[@]}; k++ )); do
         case "${a[k]} ${a[k+1]}" in
-          'pane split'|'pane move'|'tab create'|'workspace create'|'workspace close'|'agent start') block ;;
+          'pane split'|'pane move'|'tab create'|'workspace create'|'workspace close'|'agent start')
+            first=$k; break ;;
         esac
-      done ;;
+      done
+      if (( first < 0 )); then return 0; fi
+      # the pair is the command's verb only when every word before it is a
+      # global option or that option's value: `herdr --session x pane split
+      # --help` is that verb's help, while in `herdr pane send-keys x pane
+      # split --help` the pair is argument text of another verb.
+      local verb=1
+      for (( kk = 0; kk < first; kk++ )); do
+        if [[ ${a[kk]} != -* ]] && { (( kk == 0 )) || [[ ${a[kk-1]} != -* ]]; }; then
+          verb=0; break
+        fi
+      done
+      if (( verb )) && (( first + 2 < ${#a[@]} )) && \
+         { [[ ${a[first+2]} == '--help' ]] || [[ ${a[first+2]} == '-h' ]]; }; then
+        return 0
+      fi
+      block ;;
     bash|sh|dash|zsh)
       for (( k = 0; k < ${#a[@]}; k++ )); do
         if [[ ${a[k]} =~ ^-[a-z]*c$ ]] && (( k + 1 < ${#a[@]} )); then
