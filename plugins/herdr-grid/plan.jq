@@ -59,6 +59,16 @@ def is_candidate_worker:
 def is_working:
   . == "working";
 
+# Check if a tab label matches a group (exact, with/without -workers suffix, or default "workers")
+def is_group_tab($group; $label):
+  if ($label == null or $label == "") then false
+  else
+    ($label == $group)
+    or ($label == "\($group)-workers")
+    or ($label == ($group | rtrimstr("-workers")))
+    or ($label == "workers")
+  end;
+
 # Desired cells for n workers in area $a (index 0 = first spawned)
 def cells($n; $a):
   ($a.x // 0) as $x | ($a.y // 0) as $y | ($a.width // 200) as $w | ($a.height // 50) as $h
@@ -259,12 +269,14 @@ def find_owner_pane($owner; $panes; $agents; $ws):
                             ( [ $tabs[]
                                 | select((.workspace_id == $owner_ws or $owner_ws == "")
                                          and .tab_id != $anchor_tab
-                                         and .label == $group)
+                                         and is_group_tab($group; .label))
                                 | .tab_id as $tid
                                 | [ $panes[] | select(.tab_id == $tid) ] as $occ
                                 | select(($occ | length > 0)
                                          and ($occ | all(. as $p | any($gws[]; .pane_id == $p.pane_id))))
-                              ] | first // null ) as $valid_tab
+                              ]
+                              | sort_by(if (.label == $group or .label == "\($group)-workers" or .label == ($group | rtrimstr("-workers"))) then 0 else 1 end)
+                              | first // null ) as $valid_tab
 
                             | if $valid_tab != null then
                                 $valid_tab.tab_id as $wt_id
