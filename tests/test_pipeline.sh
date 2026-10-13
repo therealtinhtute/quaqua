@@ -465,8 +465,9 @@ run_pipe -- clk "$T/repo" --brief "$T/brief.md" --review skip
 [[ $rc -eq 5 ]] || fail "clk run1: exit $rc, want 5"
 perl -pi -e 's/^start_elapsed=.*/start_elapsed=7180/' "$runsdir/pipeline-clk.state"
 run_pipe PIPELINE_MAX_SEC=7200 -- --resume clk "$T/repo"
-grep -q 'budget 20s' "$T/err" \
-  || fail "clk: phase budget not clamped to remainder (want 20s): $(cat "$T/err")"
+# whole seconds: a second boundary crossed before the wait legitimately leaves 19s
+grep -qE 'budget (19|20)s' "$T/err" \
+  || fail "clk: phase budget not clamped to remainder (want 20s, or 19s across a second boundary): $(cat "$T/err")"
 [[ $rc -eq 0 ]] || fail "clk: exit $rc inside the allowance"
 echo "ok: phase budget clamped to pipeline remainder (20s of 2700s)"
 
@@ -476,7 +477,7 @@ perl -pi -e 's/^start_elapsed=.*/start_elapsed=7190/' "$runsdir/pipeline-clk2.st
 run_pipe PIPELINE_MAX_SEC=7195 FAKE_DELAY=7 -- --resume clk2 "$T/repo"
 [[ $rc -eq 4 ]] || fail "clk2: exit $rc, want 4 (wait over remainder): $(cat "$T/out")"
 grep -q 'status=blocked' "$T/out" || fail "clk2: not blocked"
-grep -q 'budget 5s' "$T/err" || fail "clk2: remainder budget not applied"
+grep -qE 'budget [45]s' "$T/err" || fail "clk2: remainder budget not applied (want 5s, or 4s across a second boundary)"
 echo "ok: file landing past the total budget -> watchdog 4 + blocked, never clean"
 
 # ── F7: a report predating the prompt is archived, never consumed ────────────
