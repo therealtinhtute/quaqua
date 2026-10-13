@@ -39,7 +39,22 @@ chmod +x "$R/scripts/hooks/pre-commit"
 cp "$root/USER.example.md" "$R/USER.example.md"
 cp -R "$root/templates" "$R/templates"
 git -C "$R" init -q  # step 0's check-ignore guard needs a repo to consult
-run() { (cd / && bash "$R/scripts/workspace/init-workspace.sh"); }  # foreign cwd
+
+# herdr stub on PATH so init-workspace.sh never touches real herdr even if run in a live pane
+mkdir -p "$T/bin"
+cat > "$T/bin/herdr" <<'STUB'
+#!/usr/bin/env bash
+echo "herdr $*" >> "${CALLS:-/dev/null}"
+if [ "${1:-} ${2:-}" = "pane current" ]; then
+  [ -n "${PANE_CURRENT_ID:-}" ] && echo "{\"result\":{\"pane\":{\"pane_id\":\"$PANE_CURRENT_ID\"}}}"
+fi
+exit 0
+STUB
+chmod +x "$T/bin/herdr"
+export PATH="$T/bin:$PATH"
+unset HERDR_PANE_ID
+
+run() { ( unset HERDR_PANE_ID; cd / && bash "$R/scripts/workspace/init-workspace.sh"); }  # foreign cwd
 
 # the sandbox must really model a fresh clone: personal state absent up front
 for f in memory projects raw runs reports USER.md; do
@@ -204,9 +219,26 @@ cp -R "$R/templates" "$R/USER.example.md" "$N/"
 mkdir -p "$N/scripts/workspace" "$N/scripts/hooks"
 cp "$src/workspace/init-workspace.sh" "$N/scripts/workspace/init-workspace.sh"
 cp "$src/hooks/pre-commit" "$N/scripts/hooks/pre-commit"
-( cd / && bash "$N/scripts/workspace/init-workspace.sh" ) >/dev/null \
+( unset HERDR_PANE_ID; cd / && bash "$N/scripts/workspace/init-workspace.sh" ) >/dev/null \
   || fail "init-workspace.sh failed outside a git repo"
 [[ -f $N/memory/rules.md ]] || fail "non-repo workspace was not booted"
 echo "ok: outside a git repo -> hook wiring skipped, workspace still booted"
+
+# ── 9. herdr-grid: CoS pane tagged as orchestrator when herdr is available ──
+# with HERDR_PANE_ID set
+: > "$T/calls"
+( export CALLS="$T/calls" HERDR_PANE_ID="w1:p1"; cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
+  || fail "init-workspace.sh failed with HERDR_PANE_ID set"
+grep -qF 'herdr pane report-metadata w1:p1 --source herdr-grid --token grid_role=orchestrator --token grid_owner=cos' "$T/calls" \
+  || fail "init-workspace.sh did not tag CoS pane with HERDR_PANE_ID: $(cat "$T/calls")"
+! grep -q 'grid_ready' "$T/calls" || fail "CoS pane should not have grid_ready token"
+
+# with HERDR_PANE_ID unset, falling back to herdr pane current
+: > "$T/calls"
+( export CALLS="$T/calls" PANE_CURRENT_ID="w1:p1"; unset HERDR_PANE_ID; cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
+  || fail "init-workspace.sh failed with herdr pane current"
+grep -qF 'herdr pane report-metadata w1:p1 --source herdr-grid --token grid_role=orchestrator --token grid_owner=cos' "$T/calls" \
+  || fail "init-workspace.sh did not tag CoS pane via herdr pane current: $(cat "$T/calls")"
+echo "ok: herdr-grid -> CoS pane tagged as orchestrator (role=orchestrator, owner=cos), no grid_ready"
 
 echo "PASS"

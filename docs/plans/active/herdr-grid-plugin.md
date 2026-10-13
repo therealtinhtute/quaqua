@@ -42,7 +42,7 @@ lane: high-risk
 - phase_slug: `enforce`
   status: done
   - goal: R1, R2, R3, R4 | depends_on: none
-  - surfaces: `scripts/worker/spawn-worker.sh`, `scripts/hooks/pre-commit` (new), `scripts/init-workspace.sh`, `scripts/worker/prompt-worker.sh`, `scripts/hooks/herdr-gate.sh`, `AGENTS.md:52`, `rules/_all/brief.md`, tests | avoided: grid scripts, plugin
+  - surfaces: `scripts/worker/spawn-worker.sh`, `scripts/hooks/pre-commit` (new), `scripts/workspace/init-workspace.sh`, `scripts/worker/prompt-worker.sh`, `scripts/hooks/herdr-gate.sh`, `AGENTS.md:52`, `rules/_all/brief.md`, tests | avoided: grid scripts, plugin
   - escalate_when: push block also breaks the CoS checkout, or report check rejects an existing pipeline reviewer format
   - wave 1:
     - T1 worktree push block: `extensions.worktreeConfig` + `--worktree remote.<r>.pushurl no-push://blocked` per remote after worktree add — output: worker push fails with clear error — check: `bash tests/test_spawn_worker.sh` — stop_if: main checkout `git remote get-url --push origin` changes

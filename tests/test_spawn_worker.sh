@@ -17,6 +17,7 @@ T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+unset HERDR_PANE_ID
 
 # ── sandbox: stub git/herdr that log every call, temp HOME, dummy repo ───────
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/scripts/worker"
@@ -64,9 +65,12 @@ spawn() {  # spawn <name> <kind> [VAR=val...]; script opts via array $spawn_args
   local name=$1 kind=$2; shift 2
   : > "$T/calls"; : > "$T/gridcalls"
   rc=0
-  CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" LC_ALL="${SPAWN_LC_ALL:-C}" \
+  CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" LC_ALL="${SPAWN_LC_ALL:-C}" QUAQUA_OWNER=cos \
     env "$@" bash "$T/scripts/worker/spawn-worker.sh" ${spawn_args+"${spawn_args[@]}"} "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
+
+ln_call() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }
+ln_last() { grep -n "$1" "$T/calls" | tail -1 | cut -d: -f1; }
 
 expect_reject() {  # expect_reject <name> <kind> <label> [locale]
   SPAWN_LC_ALL="${4:-C}" spawn "$1" "$2"
@@ -163,6 +167,34 @@ grep -q "warning: grid-workers.sh failed" "$T/err" || fail "grid failure: no war
 grep -q "worker=tieude-gridfail" "$T/out" || fail "grid failure: no success line"
 echo "ok: grid failure -> warning only, spawn succeeds"
 
+# ── herdr-grid pane tokens (R5): role/group/owner on split, grid_ready=1 last ─
+spawn tieude-tokens tieude
+[[ $rc -eq 0 ]] || fail "tokens: exit $rc, want 0: $(cat "$T/err")"
+grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=cos' "$T/calls" \
+  || fail "tokens: initial tokens missing: $(cat "$T/calls")"
+grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_ready=1' "$T/calls" \
+  || fail "tokens: grid_ready=1 missing: $(cat "$T/calls")"
+[[ $(ln_call 'pane split') -lt $(ln_call 'grid_role=worker') ]] \
+  && [[ $(ln_call 'grid_role=worker') -lt $(ln_call 'agent start') ]] \
+  && [[ $(ln_call 'agent start') -lt $(ln_call 'grid_ready=1') ]] \
+  || fail "tokens: bad call order: $(cat "$T/calls")"
+echo "ok: pane tokens -> grid_role=worker/grid_group/grid_owner on split, grid_ready=1 after agent start"
+
+# custom owner via QUAQUA_OWNER
+spawn tieude-customowner tieude QUAQUA_OWNER=custom-lead
+[[ $rc -eq 0 ]] || fail "custom owner: exit $rc, want 0: $(cat "$T/err")"
+grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=custom-lead' "$T/calls" \
+  || fail "custom owner: grid_owner not set to custom-lead: $(cat "$T/calls")"
+echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER"
+
+# dialog handling: grid_ready=1 set AFTER send-keys for pi MCP dialog
+echo 2 > "$T/dialogs"
+spawn tieude-mcporder tieude DIALOGS="$T/dialogs" MKMCP=1
+[[ $rc -eq 0 ]] || fail "mcp order: exit $rc, want 0: $(cat "$T/err")"
+[[ $(ln_last 'send-keys') -lt $(ln_call 'grid_ready=1') ]] \
+  || fail "mcp order: grid_ready=1 called before dialog send-keys: $(cat "$T/calls")"
+echo "ok: pane tokens -> grid_ready=1 set after MCP dialog handling"
+
 # ── --review: codex kinds only, repo read-only, $HOME/quaqua/runs writable ───
 # The repo must stay read-only while runs stays writable; codex only honours
 # --add-dir under workspace-write, so the guard uses a permission profile
@@ -186,7 +218,9 @@ grep -qF -- "permissions.quaqua-review.filesystem={\"$T/home/quaqua/runs\"=\"wri
 ! grep -q -- ' -s read-only' "$T/calls" \
   || fail "--review quansu: -s read-only would block runs writes: $(cat "$T/calls")"
 grep -q "worker=quansu-revread" "$T/out" || fail "--review quansu: no success line"
-echo "ok: --review quansu -> read-only profile + runs writable, no --approve-for-me/--add-dir"
+[[ $(ln_call 'agent wait') -lt $(ln_call 'grid_ready=1') ]] \
+  || fail "--review quansu: grid_ready=1 set before codex idle wait: $(cat "$T/calls")"
+echo "ok: --review quansu -> read-only profile + runs writable, no --approve-for-me/--add-dir, grid_ready=1 after idle wait"
 
 # --review is accepted for both codex kinds and leaves non-review spawns untouched
 spawn_args=(--review)
