@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# pre-commit — rules/_all/portable-paths.md: reject a commit whose ADDED lines
+# carry a machine-specific absolute path (/home/<name>/…, /Users/<name>/…).
+# The repo syncs across machines, so committed scripts, docs, settings and run
+# reports must use repo-relative paths, ~/, $HOME or $(dirname "$0").
+#
+# Scope: only lines this commit adds. Existing tracked content is never
+# re-judged — a checkout that already violates the rule still commits, which
+# keeps the hook from bricking a legacy tree. A rename-with-modification adds
+# its content, so a moved file is re-checked under its new name; a pure rename
+# adds nothing and passes. Binary diffs carry no lines and pass.
+#
+# Allowlist: rules/_all/portable-paths.md (it names the pattern) and tests/**
+# (fixtures must spell real machine paths). Excluded via pathspec, so the
+# allowlist is exact — "tests-helper.sh" is still checked.
+#
+# Heuristic guardrail, like scripts/hooks/herdr-gate.sh: not a security
+# boundary. Known holes — a user component outside [A-Za-z0-9._-], a path that
+# only appears through a file marked `-diff` in .gitattributes (git then calls
+# it binary), and commits made with --no-verify.
+#
+# The diff is parsed rather than diffed per file: `git diff -- <path>` re-adds
+# every line when a rename is detected, which would re-judge untouched content.
+# `--no-prefix` + `core.quotePath=false` make the "+++" line the literal path
+# (a trailing TAB is added when the name contains a space, hence the strip).
+#
+# Installed by scripts/workspace/init-workspace.sh via `core.hooksPath`.
+# Exit 1 with each offending file:line on stderr; 0 when clean.
+set -uo pipefail
+
+path_re='/(home|Users)/[A-Za-z0-9._-]+'
+
+diff=$(git -c core.quotePath=false diff --cached -U0 --no-prefix --no-ext-diff \
+         --no-textconv --diff-filter=ACMR -- . \
+         ':(exclude,literal)tests' \
+         ':(exclude,literal)rules/_all/portable-paths.md' || true)
+[[ -n $diff ]] || exit 0
+
+bad=0
+cur=
+while IFS= read -r line; do
+  case $line in
+    '+++ '*)
+      cur=${line#+++ }
+      cur=${cur%$'\t'}
+      cur=${cur% }
+      [[ $cur == /dev/null ]] && cur=
+      ;;
+    '+'*)
+      [[ -n $cur ]] || continue
+      if [[ $line =~ $path_re ]]; then
+        printf '%s: %s\n' "$cur" "${line#+}" >&2
+        bad=1
+      fi
+      ;;
+  esac
+done <<<"$diff"
+
+(( bad )) || exit 0
+{
+  echo "pre-commit: machine-specific absolute path in the added lines above."
+  echo "Use a repo-relative path, ~/, \$HOME or \$(dirname \"\$0\") instead"
+  echo "— rules/_all/portable-paths.md"
+} >&2
+exit 1
