@@ -149,6 +149,14 @@ pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
 # (the pane); the worktree+branch stay so a --resume can reuse them (F4)
 spawn_fail() { herdr pane close "$pane" >/dev/null 2>&1 || true; exit "${1:-1}"; }
 
+# Pane tokens (herdr-grid R5): role/group/owner right after split, grid_ready=1
+# set last after trust/send-keys handling
+grid_group=$(basename "$repo")
+herdr pane report-metadata "$pane" --source herdr-grid \
+  --token grid_role=worker \
+  --token "grid_group=$grid_group" \
+  --token "grid_owner=$owner" >/dev/null || spawn_fail
+
 case $kind in
   tieude|sude|detu)
     case $kind in
@@ -195,6 +203,9 @@ case $kind in tieude|sude|detu)
     done
   fi ;;
 esac
+
+# grid_ready=1 set last, after trust/send-keys handling (R5)
+herdr pane report-metadata "$pane" --source herdr-grid --token grid_ready=1 >/dev/null || spawn_fail
 
 # Grid hook (rules/_all/fanout-agent-grid.md): arrange the new worker's pane
 # around the caller's pane. Best-effort: a grid failure warns, never fails the

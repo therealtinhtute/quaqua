@@ -100,6 +100,11 @@ ws=$(herdr workspace create --label "$slug" --no-focus --cwd "$root" --env "QUAQ
 pane=$(printf '%s\n' "$ws" | jq -r '.result.root_pane.pane_id')
 wsid=$(printf '%s\n' "$ws" | jq -r '.result.workspace.workspace_id')
 
+# Tag Lead pane as orchestrator (herdr-grid R5)
+herdr pane report-metadata "$pane" --source herdr-grid \
+  --token grid_role=orchestrator \
+  --token "grid_owner=$name" >/dev/null
+
 herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- \
   --model "${LEAD_MODEL:-claude-opus-5-5}" --effort "${LEAD_EFFORT:-low}" \
   --append-system-prompt-file "$rf" >/dev/null
