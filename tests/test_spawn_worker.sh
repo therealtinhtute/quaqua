@@ -116,9 +116,9 @@ expect_accept sude-leadname sude "leadname suffix is not -lead"
 # ── detu model must be provider-qualified (bare name -> venice, no key) ────
 spawn detu-lookup detu
 [[ $rc -eq 0 ]] || fail "detu: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- '--kind pi .*--model antigravity/gemini-3.8-flash' "$T/calls" \
-  || fail "detu: model not antigravity/gemini-3.8-flash: $(cat "$T/calls")"
-echo "ok: detu -> --model antigravity/gemini-3.8-flash"
+grep -q -- '--kind omp .*--model google-antigravity/gemini-3.8-flash' "$T/calls" \
+  || fail "detu: model not google-antigravity/gemini-3.8-flash: $(cat "$T/calls")"
+echo "ok: detu -> --model google-antigravity/gemini-3.8-flash"
 
 # ── grid hook: a successful spawn arranges the new worker's pane ─────────────
 spawn tieude-gridhook tieude
@@ -150,16 +150,14 @@ spawn tieude-gridskip tieude GRID_SKIP=1
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
 echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid called"
 
-# ── pi + project MCP config: each "Allow project MCP server" dialog -> Allow ─
-echo 2 > "$T/dialogs"
-spawn tieude-mcp tieude DIALOGS="$T/dialogs" MKMCP=1
-[[ $rc -eq 0 ]] || fail "mcp dialog: exit $rc, want 0: $(cat "$T/err")"
-[[ $(grep -c 'pane send-keys %1 down enter' "$T/calls") -eq 2 ]] \
-  || fail "mcp dialog: want 2 Allow answers: $(grep send-keys "$T/calls")"
-echo "ok: pi + .mcp.json -> each MCP approval dialog answered Allow"
+# ── omp + project MCP config: no startup dialog wait needed ─────────────────
+spawn tieude-mcp tieude MKMCP=1
+[[ $rc -eq 0 ]] || fail "mcp: exit $rc, want 0: $(cat "$T/err")"
+! grep -q 'wait-output' "$T/calls" || fail "mcp: dialog wait ran"
+echo "ok: omp with project MCP config -> no dialog wait"
 spawn tieude-nomcp tieude
 ! grep -q 'wait-output' "$T/calls" || fail "no .mcp.json: dialog wait ran"
-echo "ok: pi without project MCP config -> no dialog wait"
+echo "ok: omp without project MCP config -> no dialog wait"
 
 spawn tieude-gridfail tieude GRID_FAKE_RC=1
 [[ $rc -eq 0 ]] || fail "grid failure: exit $rc, want 0: $(cat "$T/err")"
@@ -187,13 +185,6 @@ grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=wo
   || fail "custom owner: grid_owner not set to custom-lead: $(cat "$T/calls")"
 echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER"
 
-# dialog handling: grid_ready=1 set AFTER send-keys for pi MCP dialog
-echo 2 > "$T/dialogs"
-spawn tieude-mcporder tieude DIALOGS="$T/dialogs" MKMCP=1
-[[ $rc -eq 0 ]] || fail "mcp order: exit $rc, want 0: $(cat "$T/err")"
-[[ $(ln_last 'send-keys') -lt $(ln_call 'grid_ready=1') ]] \
-  || fail "mcp order: grid_ready=1 called before dialog send-keys: $(cat "$T/calls")"
-echo "ok: pane tokens -> grid_ready=1 set after MCP dialog handling"
 
 # ── --review: codex kinds only, repo read-only, $HOME/quaqua/runs writable ───
 # The repo must stay read-only while runs stays writable; codex only honours

@@ -160,11 +160,11 @@ herdr pane report-metadata "$pane" --source herdr-grid \
 case $kind in
   tieude|sude|detu)
     case $kind in
-      tieude) args=(--model antigravity/gemini-3.8-flash --thinking high) ;;
-      sude) args=(--model antigravity/gemini-3.8-flash --thinking high) ;;
-      detu) args=(--model antigravity/gemini-3.8-flash --thinking high) ;;
+      tieude) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
+      sude) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
+      detu) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
     esac
-    herdr agent start "$name" --kind pi --pane "$pane" --timeout 60000 -- "${args[@]}" --append-system-prompt "$rf" >/dev/null || spawn_fail ;;
+    herdr agent start "$name" --kind omp --pane "$pane" --timeout 60000 -- "${args[@]}" --append-system-prompt "$rf" >/dev/null || spawn_fail ;;
   ni|suhuynh|truonglao)
     case $kind in ni) effort=low ;; suhuynh) effort=medium ;; truonglao) effort=high ;; esac
     herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" --append-system-prompt-file "$rf" >/dev/null || spawn_fail ;;
@@ -188,20 +188,6 @@ case $kind in bacdau|quansu)
     herdr pane send-keys "$pane" enter >/dev/null
   fi
   herdr agent wait "$name" --until idle --timeout 300000 >/dev/null || spawn_fail
-esac
-case $kind in tieude|sude|detu)
-  # project MCP config -> pi asks "Allow project MCP server <name>?" once per
-  # server while herdr already reports idle; a prompt sent then lands in the
-  # dialog and is lost. Answer Allow (anh iu, 2026-10-11) before any prompt.
-  if [[ -f $wt/.mcp.json || -f $wt/.pi/mcp.json || -f $wt/.vscode/mcp.json ]]; then
-    wait_ms=10000
-    for _ in 1 2 3 4 5 6 7 8; do
-      herdr pane wait-output "$pane" --source visible --match "Allow project MCP server" \
-        --timeout "$wait_ms" >/dev/null 2>&1 || break
-      herdr pane send-keys "$pane" down enter >/dev/null
-      wait_ms=3000; sleep 1
-    done
-  fi ;;
 esac
 
 # grid_ready=1 set last, after trust/send-keys handling (R5)
