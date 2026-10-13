@@ -152,8 +152,8 @@ spawn_fail() { herdr pane close "$pane" >/dev/null 2>&1 || true; exit "${1:-1}";
 case $kind in
   tieude|sude|detu)
     case $kind in
-      tieude) args=(--model devin/deepseek-v4.1-flash --thinking max) ;;
-      sude) args=(--model devin/swe-2 --thinking max) ;;
+      tieude) args=(--model antigravity/gemini-3.8-flash --thinking high) ;;
+      sude) args=(--model antigravity/gemini-3.8-flash --thinking high) ;;
       detu) args=(--model antigravity/gemini-3.8-flash --thinking high) ;;
     esac
     herdr agent start "$name" --kind pi --pane "$pane" --timeout 60000 -- "${args[@]}" --append-system-prompt "$rf" >/dev/null || spawn_fail ;;
