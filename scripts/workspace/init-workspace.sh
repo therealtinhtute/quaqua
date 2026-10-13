@@ -9,6 +9,14 @@
 #   workspace) is a no-op. Safe on a populated workspace; run it after every
 #   clone.
 #
+#   Also wires the repo's git hooks: `core.hooksPath` -> <this checkout>/scripts/hooks
+#   (the pre-commit portable-paths gate). Absolute, so the path stays valid when
+#   git runs the hook from another directory, and it lands in the shared config
+#   so every worktree of this repo is covered. A guardrail, not a boundary: a
+#   worker can still bypass it (--no-verify, its own config). Configuration this
+#   script does not own is never overwritten: an existing different value —
+#   local or global — is left in place with a warning.
+#
 #   Templates live in templates/ under names that cannot collide with the
 #   gitignored dirs: .gitignore's `memory/` and `projects/` patterns match at
 #   ANY depth, so a literal templates/memory/rules.md would be untrackable.
@@ -47,5 +55,20 @@ seed templates/memory-rules.md        memory/rules.md
 seed templates/projects-INDEX.md      projects/INDEX.md
 seed templates/projects-_template.md  projects/_template.md
 seed USER.example.md                  USER.md
+
+# hooks: only on a real git repo, and only when nothing else owns core.hooksPath
+if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+  want=$root/scripts/hooks
+  have=$(git -C "$root" config --get core.hooksPath 2>/dev/null || true)
+  if [[ $have == "$want" ]]; then
+    : # already ours — silent, like the rest of this script
+  elif [[ -n $have ]]; then
+    echo "init-workspace: core.hooksPath already set to '$have' — left unchanged" \
+         "(unset it to use $want)" >&2
+  else
+    git -C "$root" config core.hooksPath "$want"
+    echo "hooks: core.hooksPath=$want"
+  fi
+fi
 
 echo "workspace ready in $root"
