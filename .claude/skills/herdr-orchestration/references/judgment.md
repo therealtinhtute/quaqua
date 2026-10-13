@@ -8,7 +8,7 @@
 2. Query live agent names/panes via Herdr. Inspect existing uncommitted work; give writers separate worktrees rather than touching someone else's checkout.
 3. Capability is not authority. Repo restrictions beat a seat's tools/skills; a vanished tool may be `permissions.deny`, not a broken environment. Experiment rigs go in `/tmp`.
 
-For an independent bounded Peer, open with `Read ~/quaqua/PEER.md first.` and name task ID, real repo/cwd, disposition (Engineer/Architect/Reviewer/Scout), owned/excluded paths, authority (local commit, never push/deploy/external calls), verification commands/resource ownership, and report path. Use the five Goal / Hard constraints / Current design / Unknowns / Evidence sections from `rules/_all/brief.md`.
+For an independent bounded Peer, open with `Read ~/quaqua/PEER.md first.` and name task ID, real repo/cwd, disposition (Engineer/Architect/Reviewer/Scout), owned/excluded paths, authority (local commit, never push/deploy/external calls), verification commands/resource ownership, and the runs file it writes. Use the contract fields from `rules/_all/brief.md` (Goal, Acceptance, Owned scope, Hard constraints, Current design, Unknowns) and run `--check-brief` before prompting.
 
 - Do not pre-solve the cause or freeze an uncertain design. A detailed plan is provisional; the builder proposes its own short plan before a pipeline Lead approves code.
 - New-boundary tests need a settled contract from the brief/spec/code. If those conflict, the Lead rules with evidence before the Peer creates a public method or fixes semantics just to make a test compile. Don't demand compile bridges for each slice; require a buildable final commit and real verification.

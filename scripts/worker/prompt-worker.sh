@@ -4,7 +4,7 @@
 #                                             keep waiting; --extend adds <sec> to
 #                                             this name's allowance (persisted in
 #                                             runs/.<name>.budget; the cap still wins)
-#        prompt-worker.sh --check-brief "<task>"   validate a brief + print its budget
+#        prompt-worker.sh --check-brief "<task>"   validate a contract brief + print its budget
 #   Runs `herdr agent prompt <name> --wait --timeout 1800000` with the standard
 #   "write summary to ~/quaqua/runs/<name>.md" instruction, then watches the
 #   worker until that file exists (poll PROMPT_WORKER_POLL_SEC, default 30).
@@ -39,6 +39,9 @@ set -euo pipefail
 
 # usage prints the leading comment block (lines 2+) — no line numbers to drift
 usage() { awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "$0" >&2; exit 1; }
+
+# shellcheck source=../lib/brief.sh
+. "$(cd "$(dirname "$0")/../lib" && pwd)/brief.sh"
 
 # Worker briefs must carry the 3 headers from rules/_all/brief.md.
 brief_headers_ok() {
@@ -79,7 +82,11 @@ resume=0 extend=''
 # D4: validate a brief and report the budget it resolves to — no herdr call
 if [[ ${1:-} == --check-brief ]]; then
   (( $# == 2 )) && [[ -n $2 ]] || usage
-  brief_headers_ok "$2" || brief_error
+  gaps=$(brief_contract_gaps "$2")
+  if [[ -n $gaps ]]; then
+    echo "error: brief is not a contract (rules/_all/brief.md) — missing: $(paste -sd';' <<<"$gaps")" >&2
+    exit 1
+  fi
   if [[ -n ${PROMPT_WORKER_BUDGET_SEC:-} ]]; then src=env
   elif [[ -n $(brief_budget_sec "$2" || true) ]]; then src=brief
   else src=default; fi

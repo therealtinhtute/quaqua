@@ -35,6 +35,9 @@ dir='' prev=''
 for a in "$@"; do [ "$prev" = -C ] && dir=$a; prev=$a; done
 cf="$GITN-${dir##*/}"; n=$(cat "$cf" 2>/dev/null || echo 0)
 case " $* " in
+  *"worktree add -b "*)   # like real git: the worktree dir exists afterwards
+    set -- "$@"; while [ $# -gt 0 ] && [ "$1" != -b ]; do shift; done
+    [ $# -ge 3 ] && mkdir -p "$3" ;;
   *"status --porcelain"*)   printf '%s\n' "${FAKE_PORCELAIN:-}" ;;
   *"diff --numstat"*)       printf '%s\n' "${FAKE_NUMSTAT:-}" ;;
   *"diff --name-only"*)     printf '%s\n' "${FAKE_NAMES:-}" ;;
@@ -83,6 +86,9 @@ Hard constraints: keep tests passing, no new deps
 Current design (open to challenge): extend the existing renderer
 Unknowns: none
 Evidence: diff + test output
+Owned scope: src/, AGENTS.md, impl.txt
+Acceptance:
+  - A1: `true` → exit 0
 EOF
 
 tele="$T/home/quaqua/runs/telemetry.jsonl"
@@ -631,5 +637,40 @@ run_rg FAKE_REVIEW_MD=$'ok\nVerdict: clean' -- --resume rsv "$T/rg/repo"
 [[ $rc -eq 0 ]] || fail "rsv resume: exit $rc: $(cat "$T/err")"
 grep -q 'status=clean' "$T/out" || fail "rsv: not clean after reviewer retry"
 echo "ok: reviewer spawn failure -> resume reuses worktree, reviews, finishes clean"
+
+# ── contract gate (rules/_all/brief.md): scope, acceptance re-run, verdicts ──
+run_pipe -- cgs "$T/repo" --brief "$T/brief.md"
+run_pipe FAKE_NUMSTAT=$'5\t0\tdocs/x.md' FAKE_NAMES='docs/x.md' -- --resume cgs "$T/repo"
+grep -q 'status=blocked' "$T/out" || fail "cgs: write outside Owned scope not blocked: $(cat "$T/out")"
+grep -q 'scope: FAIL docs/x.md' "$runsdir/pipeline-cgs.md" || fail "cgs: scope failure not recorded"
+echo "ok: write outside Owned scope -> blocked by the contract gate"
+
+sed 's/`true` → exit 0/`false` → exit 0/' "$T/brief.md" > "$T/brief-afail.md"
+run_pipe -- cga "$T/repo" --brief "$T/brief-afail.md"
+run_pipe FAKE_NUMSTAT=$'5\t0\tsrc/a.c' FAKE_NAMES='src/a.c' -- --resume cga "$T/repo"
+grep -q 'status=blocked' "$T/out" || fail "cga: failing acceptance not blocked: $(cat "$T/out")"
+grep -q 'A1: `false` → exit 1 — fail' "$runsdir/pipeline-cga.md" || fail "cga: acceptance failure not recorded"
+echo "ok: failing acceptance command -> blocked, recorded under ## Acceptance"
+
+run_pipe -- cgk "$T/repo" --brief "$T/brief.md"
+run_pipe FAKE_NUMSTAT=$'5\t0\tsrc/a.c' FAKE_NAMES='src/a.c' -- --resume cgk "$T/repo"
+grep -q 'status=clean' "$T/out" || fail "cgk: in-scope passing contract not clean: $(cat "$T/out")"
+grep -q 'A1: `true` → exit 0 — pass' "$runsdir/pipeline-cgk.md" || fail "cgk: acceptance pass not recorded"
+grep -q 'accepted by contract gate: yes' "$runsdir/pipeline-cgk.md" || fail "cgk: no acceptance line"
+echo "ok: in-scope change with passing acceptance -> clean, ## Acceptance recorded"
+
+run_pipe -- cgn "$T/repo" --brief "$T/brief.md" --review always
+run_pipe FAKE_NUMSTAT=$'5\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
+         FAKE_REVIEW_MD=$'## Spec\n- [nit] src/a.c:1 — name — x\nVerdict: 1 findings (0 blocking)' \
+         -- --resume cgn "$T/repo"
+grep -q 'status=clean' "$T/out" || fail "cgn: nit-only review did not finish clean: $(cat "$T/out")"
+echo "ok: nit-only review (0 blocking) -> clean, no fix round"
+
+run_pipe -- cgb "$T/repo" --brief "$T/brief.md" --review always
+run_pipe FAKE_NUMSTAT=$'5\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
+         FAKE_REVIEW_MD=$'## Spec\n- [blocking] src/a.c:1 — wrong — x\nVerdict: clean' \
+         -- --resume cgb "$T/repo"
+grep -q 'status=blocked' "$T/out" || fail "cgb: clean beside [blocking] not blocked: $(cat "$T/out")"
+echo "ok: 'Verdict: clean' beside a [blocking] finding -> blocked"
 
 echo "PASS"

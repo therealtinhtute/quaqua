@@ -152,17 +152,21 @@ your paths and don't clean the tree: a dirty bare `git status` from other lanes 
 `git add -A`, `git checkout -- .`, `git reset --hard` and `git clean -fd` destroy others'
 uncommitted work.
 
-Write the handback to the brief's report path (`/tmp/<proj>-<task>.md`), with these six fields
-in this order:
+Write the handback to `~/quaqua/runs/<name>.md` (atomically, `rules/_all/brief.md`), with
+these seven fields in this order:
 
 ```
 Outcome         COMPLETE | REOPEN_REQUEST | DEPENDENCY_REQUEST | BLOCKED
 Snapshot        SHA + branch + worktree path (omit if nothing was written)
-Scope           files changed / read, concrete paths
-Verification    commands run + REAL output, and what you deliberately skipped
+Scope           files changed / read, concrete paths — changed files stay within Owned scope
+Acceptance      each A-id from the brief, command verbatim, REAL output (≤3 lines), pass | fail
+Verification    other commands run + REAL output, and what you deliberately skipped
 Unknown / risk  assumptions you rely on, decisions that need the Human
 Ownership       scope released, or still held and why
 ```
+
+`COMPLETE` requires every A-id to pass. Never edit or loosen an A-id; a wrong one is a
+`REOPEN_REQUEST` at the `verification` layer.
 
 Reply with the report path and a 5-line summary whose first line is the Outcome. Partial work
 is reported as the blocking outcome plus what's done. **Claiming done when it isn't is worse

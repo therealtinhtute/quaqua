@@ -175,6 +175,9 @@ cat > "$brief" <<'EOF'
 Goal: test pipeline cap
 Hard constraints: none
 Current design: test
+Owned scope: src/
+Acceptance:
+  - A1: `true` → exit 0
 EOF
 prc=0
 HOME="$T/home" PATH="$T/bin:$PATH" GRID_SKIP=1 QUAQUA_OWNER=cos \

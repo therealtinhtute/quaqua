@@ -13,7 +13,11 @@
 #   <rounds> review rounds. Ends clean | disputed | blocked. '## Challenge' in
 #   any worker runs file (builder or reviewer) stops the pipeline as disputed
 #   (Lead decides); a reviewer runs file without a 'Verdict: clean | <N>
-#   findings' line stops it as blocked. A phase report that declares itself
+#   findings [(<B> blocking)]' line stops it as blocked (only blocking findings
+#   start a fix round; 'clean' beside a '[blocking]' line is blocked). The brief
+#   must be a contract (rules/_all/brief.md): before any 'clean' the contract
+#   gate checks changed files against 'Owned scope:' and re-runs every
+#   acceptance command on the tip, writing '## Acceptance' (fail -> blocked). A phase report that declares itself
 #   unfinished ('Outcome: BLOCKED|PARTIAL|INCOMPLETE|FAILED' or a non-empty
 #   '## Blockers' section — e.g. written after the watchdog nudge) never
 #   advances: the pipeline stops blocked with the evidence copied in. After
@@ -49,6 +53,7 @@ w() { printf '%s/%s' "$worker_dir" "$1"; }
 runs="$HOME/quaqua/runs"
 mkdir -p "$runs"
 . "$here/../lib/common.sh"
+. "$here/../lib/brief.sh"
 inv_start=$(date +%s)
 
 PLAN_BUDGET=${PIPELINE_PLAN_BUDGET_SEC:-900}
@@ -120,6 +125,33 @@ finish() {  # <status> <exit-code> — status line, telemetry, stdout summary
   exit "$code"
 }
 
+contract_gate() {  # scope + acceptance re-run on the frozen tip; appends
+  # '## Acceptance' to the run file and stops the pipeline when either fails
+  local sha out rc id cmd f bad=0 scope=()
+  sha=${head_sha:-$base_sha}   # the tip check_impl froze (base on 'no changes')
+  mapfile -t scope < <(brief_scope "$brief_text")
+  printf '\n## Acceptance (re-run by pipeline at %s)\n' "${sha:0:7}" >> "$pfile"
+  while IFS= read -r f; do
+    [[ -n $f ]] || continue
+    path_in_scope "$f" "${scope[@]}" || { plog "scope: FAIL $f is outside Owned scope"; bad=1; }
+  done < <(git -C "$wt" diff --name-only "$base_sha" "$sha" 2>/dev/null)
+  (( bad )) || plog "scope: pass (changed files within Owned scope: ${scope[*]})"
+  while IFS=$'\t' read -r id cmd; do
+    [[ -n $id ]] || continue
+    rc=0; out=$(cd "$wt" && timeout "${PIPELINE_ACCEPT_SEC:-300}" bash -c "$cmd" 2>&1) || rc=$?
+    if (( rc == 0 )); then plog "$id: \`$cmd\` → exit 0 — pass"
+    else plog "$id: \`$cmd\` → exit $rc — fail"; bad=1; fi
+    printf '%s\n' "$out" | tail -3 | sed 's/^/    /' >> "$pfile"
+  done < <(brief_acceptance "$brief_text")
+  if (( bad )); then
+    blocker="contract gate failed at ${sha:0:7} (see '## Acceptance' above) — fix on quaqua/$builder-$task, then '$0 --resume $task $repo'"
+    finish blocked 0
+  fi
+  plog "accepted by contract gate: yes — Lead re-checks, then merges"
+}
+
+finish_clean() { contract_gate; finish clean 0; }
+
 check_clock() {  # whole-pipeline budget, evaluated at phase boundaries
   (( $(elapsed) > MAX_SEC )) || return 0
   blocker="total budget ${MAX_SEC}s of work time exceeded — remaining work is in the log above"
@@ -164,7 +196,7 @@ check_impl() {  # <report> [prev-sha] — F2 gate: the delivered implementation 
   if [[ -z $prev && $head_sha == "$base_sha" ]]; then
     if [[ -z $dirty ]] && grep -qiE '^Outcome:[[:space:]]*no[ -]?(op|changes)' "$report"; then
       plog "build: no commits — builder declared 'Outcome: no changes'; nothing to review"
-      finish clean 0
+      finish_clean
     fi
     blocker="builder produced no commits on quaqua/$builder-$task (HEAD == base ${base_sha:0:7}) and did not declare 'Outcome: no changes' — commit the work (or fix the report), then '$0 --resume $task $repo'"
     plog "$blocker"; finish blocked 3
@@ -245,9 +277,8 @@ else
   [[ $task =~ ^[a-z0-9-]+$ ]] || usage
   [[ -n $brief && -f $brief ]] || die "--brief <file> required and must exist (got: '${brief:-none}')"
   brief=$(realpath "$brief")
-  grep -qF 'Goal:' "$brief" && grep -qF 'Hard constraints:' "$brief" \
-    && grep -qE 'Current design(\s*\(open to challenge\))?:' "$brief" \
-    || die "brief must carry the Goal:/Hard constraints:/Current design headers (rules/_all/brief.md)"
+  gaps=$(brief_contract_gaps "$(cat "$brief")")
+  [[ -z $gaps ]] || die "brief is not a contract (rules/_all/brief.md) — missing: $(paste -sd';' <<<"$gaps")"
   bh=$(harness_of "$builder")  || die "unknown builder kind: $builder"
   rh=$(harness_of "$reviewer") || die "unknown reviewer kind: $reviewer"
   case $reviewer in bacdau|quansu) ;; *)
@@ -362,7 +393,7 @@ Pipeline phase: PLAN — write only the implementation plan (steps, files to tou
     build)
       wait_file "$builder-$task" "$brief_text
 
-Pipeline phase: BUILD — your plan is approved ($planfile). Implement it in your worktree, commit on quaqua/$builder-$task, run the tests. If the premise or the plan proves wrong, stop and write '## Challenge' with evidence instead of forcing it. If the work turns out to need no changes at all, say 'Outcome: no changes' in your runs file." "$BUILD_BUDGET"
+Pipeline phase: BUILD — your plan is approved ($planfile). Implement it in your worktree, commit on quaqua/$builder-$task, run the tests. If the premise or the plan proves wrong, stop and write '## Challenge' with evidence instead of forcing it. If the work turns out to need no changes at all, say 'Outcome: no changes' in your runs file. Runs file = the PEER.md handback: Outcome, Snapshot, Scope (within Owned scope), Acceptance (each A-id from the brief, verbatim, with its real output and pass|fail), Verification, Unknown / risk. The pipeline re-runs every A-id on your tip." "$BUILD_BUDGET"
       mv "$runs/$builder-$task.md" "$runs/$builder-$task.build.md"
       if grep -q '^## Challenge' "$runs/$builder-$task.build.md"; then
         log_challenge "$runs/$builder-$task.build.md"
@@ -389,7 +420,7 @@ Pipeline phase: BUILD — your plan is approved ($planfile). Implement it in you
       esac
       if [[ $review_run == skip ]]; then
         plog "review: skipped (gate: $review)"
-        finish clean 0
+        finish_clean
       fi
       phase=review round=1 prompted=0 reviewer_spawned=0; save_state ;;
 
@@ -414,7 +445,7 @@ Pipeline phase: BUILD — your plan is approved ($planfile). Implement it in you
 Hard constraints: read-only — do not edit or create files outside ~/quaqua/runs; every finding must cite file:line in the diff.
 Current design (open to challenge): builder $builder-$task implemented the task on branch quaqua/$builder-$task — your worktree is on its tip; run 'git diff $base_sha' for the full change. Original brief: $brief (readable).
 Unknowns: whether the change meets the brief — verify correctness, missing tests, and scope creep against the diff, not the report.
-Evidence: a findings list, then the runs file MUST end with exactly one line: 'Verdict: clean' or 'Verdict: <N> findings'. Write to a temp file and rename it to ~/quaqua/runs/$revname.md — publish atomically, never a partial file.
+Evidence: findings under '## Spec' (vs Goal, Acceptance, Owned scope) and '## Standards', each '- [blocking|nit] <path:line> — <claim> — <evidence>' (always blocking: a deleted/skipped/weakened test, a write outside Owned scope, an acceptance check that passes without proving the Goal); the runs file MUST end with exactly one line: 'Verdict: clean' (zero blocking) or 'Verdict: <N> findings (<B> blocking)'. Write to a temp file and rename it to ~/quaqua/runs/$revname.md — publish atomically, never a partial file.
 Pipeline phase: REVIEW (round $round of $rounds)" "$REVIEW_BUDGET"
       rounds_run=$round
       # a reviewer is a Peer: its Challenge is resolved by the Lead before the
@@ -433,15 +464,22 @@ Pipeline phase: REVIEW (round $round of $rounds)" "$REVIEW_BUDGET"
       PIPELINE_TASK="$task" GRID_SKIP=1 bash "$(w cleanup-worker.sh)" "$revname" "$repo" >&2 \
         || echo "warning: cleanup $revname failed; clean it manually" >&2
       grid_hook "$builder-$task" || true
-      if [[ $verdict =~ [Vv]erdict:[[:space:]]*([0-9]+)[[:space:]]*[Ff]indings? ]]; then
+      if [[ $verdict =~ [Vv]erdict:[[:space:]]*([0-9]+)[[:space:]]*[Ff]indings?[[:space:]]*\(([0-9]+)[[:space:]]*blocking\) ]]; then
+        last_findings=${BASH_REMATCH[2]}   # nits never start a fix round
+        (( last_findings > 0 )) || plog "review round $round: ${BASH_REMATCH[1]} nit(s), 0 blocking — clean"
+      elif [[ $verdict =~ [Vv]erdict:[[:space:]]*([0-9]+)[[:space:]]*[Ff]indings? ]]; then
         last_findings=${BASH_REMATCH[1]}
       elif [[ $verdict =~ [Vv]erdict:[[:space:]]*[Cc]lean ]]; then
+        if grep -qE '^[[:space:]]*-[[:space:]]*\[blocking\]' "$runs/$revname.md"; then
+          blocker="reviewer $revname wrote 'Verdict: clean' beside a [blocking] finding — Lead decides"
+          finish blocked 0
+        fi
         last_findings=0
       else
         blocker="reviewer $revname runs file has no 'Verdict: clean | <N> findings' line (lock §1) — Lead decides"
         finish blocked 0
       fi
-      if (( last_findings == 0 )); then finish clean 0; fi
+      if (( last_findings == 0 )); then finish_clean; fi
       review_changed=true
       if (( round >= rounds )); then
         blocker="review rounds exhausted: $last_findings findings still open after $rounds round(s) — Lead decides"

@@ -10,7 +10,10 @@
 #   (runs/pipeline-*.md, spec-raw/quaqua-slp-slim-lock.md §3): unhandled
 #   disputed|blocked, clean with an unresolvable commit or no reviewer
 #   'Verdict:' (on the last review-round line or in the reviewer runs file it
-#   names), and unresolved '## Challenge' sections. It also flags any live
+#   names), and unresolved '## Challenge' sections; task-contract checks
+#   (rules/_all/brief.md): a clean run whose '## Acceptance' records a
+#   failure or lacks the acceptance line, 'clean' beside a [blocking] reviewer
+#   finding, and a telemetry status that disagrees with the run file. It also flags any live
 #   task worker in herdr not started through the sandbox wrapper (missing
 #   runs/<name>.srt.json) — and reports a failing `herdr agent list` instead
 #   of silently finding nothing — and flags instruction docs over 100 lines
@@ -76,8 +79,33 @@ for f in "$root"/runs/pipeline-*.md; do
         fi
         [[ -n $revfile ]] && grep -qE '^[[:space:]]*Verdict:' "$root/runs/$revfile" \
           || flag "runs/$base.md: status clean, review ran, but no 'Verdict:' on the last review-round line or in the reviewer runs file it names"
+      fi
+      # task contract (rules/_all/brief.md) — C3/C4: a recorded contract gate
+      # must hold no FAIL line and end accepted; runs that predate the
+      # contract have no '## Acceptance' and are skipped
+      if grep -q '^## Acceptance' "$f"; then
+        if grep -qE '^- (scope: FAIL|A[0-9]+: .* — fail$)' "$f"; then
+          flag "runs/$base.md: status clean but its '## Acceptance' records a failed scope/acceptance check"
+        elif ! grep -q '^- accepted by contract gate: yes' "$f"; then
+          flag "runs/$base.md: status clean but '## Acceptance' has no 'accepted by contract gate: yes' line"
+        fi
+      fi
+      # C5: 'clean' must not sit beside a [blocking] finding
+      if [[ -n $last_rev ]]; then
+        revfile=$(grep -oE '\([^)]+\.md\)' <<<"$last_rev" | tail -1 | tr -d '()' || true)
+        if [[ -n $revfile && -f $root/runs/$revfile ]] \
+            && grep -qE '^[[:space:]]*-[[:space:]]*\[blocking\]' "$root/runs/$revfile"; then
+          flag "runs/$base.md: status clean but reviewer file $revfile lists a [blocking] finding"
+        fi
       fi ;;
   esac   # plan-ready pauses and unfinished runs are not outcomes — skip
+  # C6: the last telemetry line for the task must agree with the run file
+  task=${base#pipeline-}
+  if [[ -n $st && -s $root/runs/telemetry.jsonl ]] && command -v jq >/dev/null; then
+    tst=$(jq -r --arg t "$task" 'select(.task==$t) | .status' "$root/runs/telemetry.jsonl" 2>/dev/null | tail -1)
+    [[ -z $tst || $tst == "$st" ]] \
+      || flag "runs/$base.md: status $st but the last runs/telemetry.jsonl line for $task says $tst"
+  fi
 done
 for f in "$root"/runs/*.md; do
   [[ -e $f ]] || continue

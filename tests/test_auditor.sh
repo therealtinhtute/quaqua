@@ -167,6 +167,21 @@ printf -- '- status: plan-ready · commit none · elapsed 1m\n' \
 printf -- '# x\n## Challenge\n- was wrong, resolved\n' > "$T/repo/runs/worker-ok.md"
 printf -- '# x\n## Challenge\n- premise wrong, evidence\n' > "$T/repo/runs/sude-phs.plan.md"
 printf -- '## Challenge\n- rule text mentioning it — must not flag\n' > "$T/repo/runs/x.rules.md"
+# task contract (rules/_all/brief.md): failed gate, missing acceptance line,
+# clean beside [blocking], telemetry disagreeing; a passing gate stays silent
+printf -- '- review: skipped (gate: auto)\n- status: clean · commit %s · elapsed 2m\n\n## Acceptance (re-run by pipeline at x)\n- scope: pass\n- A1: `make t` → exit 2 — fail\n' "$sha" \
+  > "$T/repo/runs/pipeline-cfail.md"
+printf -- '- review: skipped (gate: auto)\n- status: clean · commit %s · elapsed 2m\n\n## Acceptance (re-run by pipeline at x)\n- A1: `true` → exit 0 — pass\n' "$sha" \
+  > "$T/repo/runs/pipeline-cnoacc.md"
+printf -- '- review round 1: Verdict: clean (quansu-cblockr1.md)\n- status: clean · commit %s · elapsed 7m\n' "$sha" \
+  > "$T/repo/runs/pipeline-cblock.md"
+printf -- '## Spec\n- [blocking] src/a.c:1 — wrong\nVerdict: clean\n' > "$T/repo/runs/quansu-cblockr1.md"
+printf -- '- review: skipped (gate: auto)\n- status: clean · commit %s · elapsed 2m\n\n## Acceptance (re-run by pipeline at x)\n- scope: pass\n- A1: `true` → exit 0 — pass\n- accepted by contract gate: yes — Lead re-checks, then merges\n' "$sha" \
+  > "$T/repo/runs/pipeline-cok.md"
+printf -- '- review: skipped (gate: auto)\n- status: clean · commit %s · elapsed 2m\n' "$sha" \
+  > "$T/repo/runs/pipeline-ctele.md"
+printf '%s\n' '{"task":"ctele","status":"blocked"}' '{"task":"cok","status":"clean"}' \
+  > "$T/repo/runs/telemetry.jsonl"
 cat > "$T/repo/memory/2026-10-08.md" <<'MEM'
 - [quaqua] pipeline-handled disputed — quansu reviewing
 - [quaqua] worker-ok done; its Challenge resolved: premise accepted
@@ -186,13 +201,17 @@ for want in \
   'pipeline-copied.md: status disputed' \
   "pipeline-copied.md: '## Challenge' unresolved" \
   "worker-chal.md: '## Challenge' unresolved" \
+  "pipeline-cfail.md: status clean but its '## Acceptance' records a failed scope/acceptance check" \
+  "pipeline-cnoacc.md: status clean but '## Acceptance' has no 'accepted by contract gate: yes' line" \
+  'pipeline-cblock.md: status clean but reviewer file quansu-cblockr1.md lists a [blocking] finding' \
+  'pipeline-ctele.md: status clean but the last runs/telemetry.jsonl line for ctele says blocked' \
   '## Pipeline' ; do
   grep -qF "$want" <<<"$calls" || fail "precheck: prompt missing '$want'"
 done
 for absent in 'pipeline-ok.md' 'pipeline-skip.md' 'pipeline-handled.md' \
     'pipeline-paused.md' 'worker-ok.md' 'sude-copied.build.md' 'sude-phs' \
     'x.rules' 'pipeline-revfile.md' 'pipeline-revspawn.md' \
-    'quansu-revfiler1' 'quansu-revspawnr1' ; do
+    'quansu-revfiler1' 'quansu-revspawnr1' 'pipeline-cok.md' ; do
   grep -qF "$absent" <<<"$calls" && fail "precheck: false flag '$absent'"
 done
 echo "ok: precheck -> each flag raised; clean/handled/copied cases silent"

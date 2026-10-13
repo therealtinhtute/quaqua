@@ -58,7 +58,10 @@ reject() {  # reject <label> [args...]
 
 brief='Goal: do the thing
 Hard constraints: keep tests passing
-Current design (open to challenge): via the existing helper'
+Current design (open to challenge): via the existing helper
+Owned scope: src/
+Acceptance:
+  - A1: `true` → exit 0'
 
 reject_brief() {  # reject_brief <label> <task>: missing headers -> exit 1
   local label=$1 task=$2
@@ -110,6 +113,20 @@ check_brief "$brief
 Time budget: 25 min" PROMPT_WORKER_BUDGET_SEC=60
 [[ "$(cat "$T/out")" == 'budget=60s source=env' ]] \
   || fail "check-brief env override: $(cat "$T/out")"
+check_brief "Goal: x
+Hard constraints: y
+Current design: z
+Acceptance:
+  - A1: `true` → 0"
+[[ $rc -eq 1 ]] || fail "check-brief no owned scope: exit $rc, want 1"
+grep -q 'Owned scope' "$T/err" || fail "check-brief no owned scope: wrong error: $(cat "$T/err")"
+check_brief "Goal: x
+Hard constraints: y
+Current design: z
+Owned scope: src/"
+[[ $rc -eq 1 ]] || fail "check-brief no acceptance: exit $rc, want 1"
+grep -q 'Acceptance' "$T/err" || fail "check-brief no acceptance: wrong error: $(cat "$T/err")"
+echo "ok: check-brief rejects a brief without Owned scope or an acceptance line"
 check_brief "fix the flaky test"
 [[ $rc -eq 1 ]] || fail "check-brief invalid: exit $rc, want 1"
 grep -q 'Goal.*Hard constraints.*Current design' "$T/err" \
