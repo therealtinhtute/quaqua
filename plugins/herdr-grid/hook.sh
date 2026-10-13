@@ -61,7 +61,7 @@ if [ "$EVENT_NAME" = "pane.agent_status_changed" ] && [ -n "$EVENT_JSON" ] && [ 
     p_ready=$(echo "$pane_summary" | cut -d: -f2)
     p_old_status=$(echo "$pane_summary" | cut -d: -f3)
 
-    if [ "$p_role" != "worker" ] || [ "$p_ready" != "1" ]; then
+    if [ "$p_role" != "worker" ]; then
       # Untagged or non-worker pane
       exit 0
     fi
@@ -101,14 +101,22 @@ acquire_lock() {
     if [ -f "$PID_FILE" ]; then
       holder_pid=$(cat "$PID_FILE" 2>/dev/null || true)
     fi
+    case "$holder_pid" in
+      ''|*[!0-9]*) holder_pid="" ;;
+    esac
 
     if [ -n "$holder_pid" ]; then
       if ! kill -0 "$holder_pid" 2>/dev/null; then
         # Dead pid detected: reclaim lock
         rm -f "$PID_FILE" 2>/dev/null || true
-        rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR" 2>/dev/null || true
+        rmdir "$LOCK_DIR" 2>/dev/null || true
         continue
       fi
+    elif [ "$attempts" -gt 5 ]; then
+      # Empty or invalid PID file holding lock dir for >250ms
+      rm -f "$PID_FILE" 2>/dev/null || true
+      rmdir "$LOCK_DIR" 2>/dev/null || true
+      continue
     fi
 
     sleep 0.05
@@ -124,7 +132,7 @@ fi
 
 cleanup_lock() {
   rm -f "$PID_FILE" 2>/dev/null || true
-  rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR" 2>/dev/null || true
+  rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 trap cleanup_lock INT TERM HUP EXIT
 
@@ -155,7 +163,7 @@ reconcile() {
 
   # Save snapshot to cache atomically
   echo "$snapshot" > "$LAST_SNAPSHOT.tmp"
-  mv "$LAST_SNAPSHOT.tmp" "$LAST_SNAPSHOT"
+  mv -f "$LAST_SNAPSHOT.tmp" "$LAST_SNAPSHOT"
 
   # Run layout plan
   local ops

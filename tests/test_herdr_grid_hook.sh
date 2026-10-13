@@ -122,6 +122,23 @@ calls=$(cat "$CALLS_FILE")
 [[ "$calls" -gt 0 ]] || fail "test 3c: expected herdr calls for idle->working transition, got 0"
 echo "ok: 3c working state flip reconciles"
 
+# 3d: Worker pane w1:p5 changes from working to idle (flip to non-working) -> reconciles!
+sed -i.bak 's/"agent_status": "idle"/"agent_status": "working"/g' "$CURRENT_SNAPSHOT"
+rm -f "$CURRENT_SNAPSHOT.bak"
+export HERDR_PLUGIN_EVENT="pane.agent_status_changed"
+export HERDR_PLUGIN_EVENT_JSON='{"pane_id":"w1:p5","agent_status":"working"}'
+bash "$T/plugin/hook.sh" >/dev/null
+
+echo 0 > "$CALLS_FILE"
+sed -i.bak 's/"agent_status": "working"/"agent_status": "idle"/g' "$CURRENT_SNAPSHOT"
+rm -f "$CURRENT_SNAPSHOT.bak"
+export HERDR_PLUGIN_EVENT="pane.agent_status_changed"
+export HERDR_PLUGIN_EVENT_JSON='{"pane_id":"w1:p5","agent_status":"idle"}'
+bash "$T/plugin/hook.sh" >/dev/null
+calls=$(cat "$CALLS_FILE")
+[[ "$calls" -gt 0 ]] || fail "test 3d: expected herdr calls for working->idle transition, got 0"
+echo "ok: 3d working->idle transition reconciles"
+
 # ── Test 4: Closed panes detected by snapshot diff ─────────────────────────────
 echo "test 4: closed panes detected by snapshot diff"
 # Step A: snapshot has 2 workers
@@ -160,9 +177,11 @@ echo "ok: killed lock holder PID $dead_pid was successfully reclaimed"
 
 # ── Test 6: An event arriving during unlock is not lost ───────────────────────
 echo "test 6: an event arriving during unlock is not lost"
+echo 0 > "$CALLS_FILE"
 # Trigger second event during unlock via HERDR_GRID_TEST_UNLOCK_HOOK
 TRIGGER_LOG="$T/event2.log"
-rm -f "$TRIGGER_LOG"
+BG_PID_FILE="$T/bg.pid"
+rm -f "$TRIGGER_LOG" "$BG_PID_FILE"
 export HERDR_GRID_TEST_UNLOCK_HOOK="
   (
     export HERDR_PLUGIN_EVENT='pane.created'
@@ -170,13 +189,23 @@ export HERDR_GRID_TEST_UNLOCK_HOOK="
     unset HERDR_GRID_TEST_UNLOCK_HOOK
     bash '$T/plugin/hook.sh' > '$TRIGGER_LOG' 2>&1
   ) &
+  echo \$! > '$BG_PID_FILE'
 "
 bash "$T/plugin/hook.sh" >/dev/null
-wait
 unset HERDR_GRID_TEST_UNLOCK_HOOK
+
+# Wait for background event to fully complete
+if [ -f "$BG_PID_FILE" ]; then
+  bg_pid=$(cat "$BG_PID_FILE")
+  while kill -0 "$bg_pid" 2>/dev/null; do
+    sleep 0.05
+  done
+fi
 
 [[ -f "$TRIGGER_LOG" ]] || fail "test 6: second event was not triggered"
 [[ ! -d "$T/state/lock" ]] || fail "test 6: lock dir left behind"
+calls=$(cat "$CALLS_FILE")
+[[ "$calls" -ge 2 ]] || fail "test 6: expected at least 2 snapshot calls, got $calls"
 echo "ok: event arriving during unlock was safely handled"
 
 # ── Test 7: Concurrent events do not lose wakeups or leave lock ───────────────
@@ -192,5 +221,32 @@ wait
 
 [[ ! -d "$T/state/lock" ]] || fail "test 7: lock dir left behind after concurrent events"
 echo "ok: concurrent events serialized without lock leaks"
+
+# ── Test 8: Plugin manifest event validation ──────────────────────────────────
+echo "test 8: plugin manifest event validation"
+grep -q '^id = "herdr-grid"' "$T/plugin/herdr-plugin.toml" || fail "test 8: missing plugin id"
+# Verify never layout.updated (causes event recursion loops)
+if grep -q 'layout.updated' "$T/plugin/herdr-plugin.toml"; then
+  fail "test 8: herdr-plugin.toml must never subscribe to layout.updated"
+fi
+# Verify all subscribed events are valid herdr plugin events
+events_found=$(grep -E '^on = ' "$T/plugin/herdr-plugin.toml" | sed 's/on = "\(.*\)"/\1/' | sort -u)
+for ev in $events_found; do
+  case "$ev" in
+    pane.created|pane.agent_detected|pane.agent_status_changed|pane.moved|tab.closed|workspace.closed) ;;
+    *) fail "test 8: unexpected event '$ev' in herdr-plugin.toml" ;;
+  esac
+done
+echo "ok: plugin manifest subscribes only to allowed events and never layout.updated"
+
+# ── Test 9: Stale lock dir with empty PID file is reclaimed ────────────────────
+echo "test 9: stale lock dir with empty PID is reclaimed"
+mkdir -p "$T/state/lock"
+: > "$T/state/lock/pid"
+export HERDR_PLUGIN_EVENT="pane.created"
+export HERDR_PLUGIN_EVENT_JSON='{"pane_id":"w1:p5"}'
+bash "$T/plugin/hook.sh" >/dev/null
+[[ ! -d "$T/state/lock" ]] || fail "test 9: lock dir still exists"
+echo "ok: stale lock dir with empty pid was successfully reclaimed"
 
 echo "PASS"
