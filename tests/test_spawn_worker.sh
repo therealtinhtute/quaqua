@@ -33,6 +33,14 @@ echo "git $*" >> "$CALLS"
 # a ref containing "badref" does not exist: rev-parse --verify fails, and a
 # worktree-add start point with it would too
 case " $* " in *badref*) exit 1 ;; esac
+# a bare `git [-C <r>] remote` lists the fake remotes (FAKE_REMOTES, space-sep)
+if [ "${@: -1}" = remote ]; then printf '%s\n' ${FAKE_REMOTES:-}; fi
+# FAKE_BARE / FAKE_WORKTREE: make the common config look like the degenerate
+# repos the push block must refuse (core.bare=true / core.worktree set)
+case " $* " in
+  *" config --local --bool --get core.bare "*) [ -n "${FAKE_BARE:-}" ] && echo true; exit 0 ;;
+  *" config --local --list "*) [ -n "${FAKE_WORKTREE:-}" ] && echo 'core.worktree=/tmp/fake'; exit 0 ;;
+esac
 # MKMCP=1: the new worktree ships a project .mcp.json
 if [ -n "${MKMCP:-}" ] && [ "${3:-} ${4:-}" = "worktree add" ]; then
   for a in "$@"; do case $a in */.wt/*) mkdir -p "$a" && echo '{}' > "$a/.mcp.json" ;; esac; done
@@ -271,10 +279,55 @@ spawn tieude-fresh tieude
   || fail "fresh clone: rules dump not written under a brand-new runs/"
 echo "ok: fresh clone -> runs/ created before the rules dump, spawn succeeds"
 
+# ── push block: spawn rewires each remote's pushurl in the worktree only ────
+# pushurl is a LIST and a push goes to every entry, so each remote gets an
+# empty entry first (clearing any inherited shared-config pushurl) and the
+# blocked value is added after it.
+spawn tieude-pblock tieude FAKE_REMOTES='origin upstream'
+[[ $rc -eq 0 ]] || fail "pblock spawn: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'config extensions.worktreeConfig true' "$T/calls" \
+  || fail "pblock: extensions.worktreeConfig not enabled: $(cat "$T/calls")"
+[[ $(grep -c 'config --worktree --replace-all remote\.\(origin\|upstream\)\.pushurl' "$T/calls") -eq 2 ]] \
+  || fail "pblock: inherited pushurl not cleared per remote: $(cat "$T/calls")"
+[[ $(grep -c 'config --worktree --add remote\.\(origin\|upstream\)\.pushurl PUSH DISABLED' "$T/calls") -eq 2 ]] \
+  || fail "pblock: pushurl not set per remote: $(cat "$T/calls")"
+echo "ok: push block -> worktreeConfig + per-remote pushurl clear+block on spawn"
+
+# ── fail closed: core.bare=true / core.worktree in the common config ────────
+# Enabling extensions.worktreeConfig there drops the exception that keeps
+# those keys applying to the main worktree only (git-worktree(1),
+# CONFIGURATION FILE), breaking every worktree of the repo — refuse instead.
+spawn tieude-bareguard tieude FAKE_BARE=1
+[[ $rc -eq 1 ]] || fail "bare guard: exit $rc, want 1: $(cat "$T/err")"
+grep -q 'core.bare=true or core.worktree' "$T/err" \
+  || fail "bare guard: no clear message: $(cat "$T/err")"
+! grep -q 'extensions.worktreeConfig true' "$T/calls" \
+  || fail "bare guard: worktreeConfig enabled anyway: $(cat "$T/calls")"
+! grep -qE 'pane split|agent start' "$T/calls" \
+  || fail "bare guard: pane/agent created anyway: $(cat "$T/calls")"
+echo "ok: core.bare=true in common config -> spawn refused before any pane"
+
+spawn tieude-wtguard tieude FAKE_WORKTREE=1
+[[ $rc -eq 1 ]] || fail "worktree guard: exit $rc, want 1: $(cat "$T/err")"
+grep -q 'core.bare=true or core.worktree' "$T/err" \
+  || fail "worktree guard: no clear message: $(cat "$T/err")"
+! grep -q 'extensions.worktreeConfig true' "$T/calls" \
+  || fail "worktree guard: worktreeConfig enabled anyway: $(cat "$T/calls")"
+! grep -qE 'pane split|agent start' "$T/calls" \
+  || fail "worktree guard: pane/agent created anyway: $(cat "$T/calls")"
+echo "ok: core.worktree in common config -> spawn refused before any pane"
+
+# zero remotes: no pushurl to set, spawn still succeeds
+spawn tieude-noremote tieude FAKE_REMOTES=''
+[[ $rc -eq 0 ]] || fail "zero remotes: exit $rc, want 0: $(cat "$T/err")"
+! grep -q 'pushurl' "$T/calls" || fail "zero remotes: pushurl written: $(cat "$T/calls")"
+echo "ok: zero remotes -> no pushurl written, spawn succeeds"
+
 # ── real git: a surviving worktree is reused, a foreign dir is refused ────────
 mkdir -p "$T/bin2" "$T/rgrepo"
 git -C "$T/rgrepo" init -q
 git -C "$T/rgrepo" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
+git -C "$T/rgrepo" remote add origin git@example.com:o/r.git
 cat > "$T/bin2/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
@@ -312,5 +365,85 @@ CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
 grep -q 'not a git worktree' "$T/err" || fail "rw2: no refusal message: $(cat "$T/err")"
 ! grep -q 'agent start' "$T/calls" || fail "rw2: agent started over a foreign dir"
 echo "ok: foreign dir at worktree path -> refused before any agent start"
+
+# ── real git push block: worker worktree cannot push, main checkout can ──────
+# sude-rw1 went through the reuse-respawn path above — proof the push block
+# also applies on a resumed spawn, not only on a fresh worktree add
+[[ $(git -C "$T/.wt/sude-rw1" remote get-url --push origin) == PUSH\ DISABLED* ]] \
+  || fail "rw1: pushurl not blocked on a reused worktree: $(git -C "$T/.wt/sude-rw1" remote get-url --push origin)"
+rc=0
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
+  bash "$T/scripts/worker/spawn-worker.sh" sude-nopush sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 0 ]] || fail "nopush spawn: exit $rc: $(cat "$T/err")"
+wt_np="$T/.wt/sude-nopush"
+[[ $(git -C "$wt_np" remote get-url --push origin) == 'PUSH DISABLED - task workers never push (AGENTS.md handoff rule)' ]] \
+  || fail "nopush: worktree pushurl not blocked: $(git -C "$wt_np" remote get-url --push origin)"
+[[ $(git -C "$T/rgrepo" remote get-url --push origin) == 'git@example.com:o/r.git' ]] \
+  || fail "nopush: main checkout pushurl changed: $(git -C "$T/rgrepo" remote get-url --push origin)"
+rc=0
+git -C "$wt_np" push origin HEAD >"$T/push.out" 2>&1 || rc=$?
+[[ $rc -ne 0 ]] || fail "nopush: git push from a worker worktree succeeded"
+grep -q 'PUSH DISABLED' "$T/push.out" \
+  || fail "nopush: push error is not a clear refusal: $(cat "$T/push.out")"
+# fetch-side config is untouched, and enabling worktreeConfig left the shared
+# config's push target alone
+[[ $(git -C "$wt_np" remote get-url origin) == 'git@example.com:o/r.git' ]] \
+  || fail "nopush: fetch url changed: $(git -C "$wt_np" remote get-url origin)"
+echo "ok: real git -> worktree push fails with a clear error, main pushurl unchanged"
+
+# ── real git: an inherited shared-config pushurl must NOT survive the block ───
+# pushurl is a list and a push goes to every entry, so a repo that already
+# sets remote.origin.pushurl (fork workflow) would otherwise still receive a
+# worker's push even though the worktree's own entry says PUSH DISABLED.
+# Use a real bare repo as the shared push target: if the block leaks, the ref
+# actually lands there.
+shared="$T/shared.git"; mkdir -p "$T/rgpushurl"
+git init -q --bare "$shared"
+git -C "$T/rgpushurl" init -q
+git -C "$T/rgpushurl" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
+git -C "$T/rgpushurl" remote add origin git@example.com:o/r.git
+git -C "$T/rgpushurl" config remote.origin.pushurl "$shared"
+: > "$T/calls"
+rc=0
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
+  bash "$T/scripts/worker/spawn-worker.sh" sude-inherit sude "$T/rgpushurl" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 0 ]] || fail "inherit spawn: exit $rc: $(cat "$T/err")"
+wt_inh="$T/.wt/sude-inherit"
+rc=0
+git -C "$wt_inh" push origin HEAD >"$T/inherit.out" 2>&1 || rc=$?
+[[ $rc -ne 0 ]] || fail "inherit: git push succeeded despite the block"
+grep -q 'PUSH DISABLED' "$T/inherit.out" \
+  || fail "inherit: push error is not a clear refusal: $(cat "$T/inherit.out")"
+[[ -z $(git -C "$shared" for-each-ref --format='%(refname)') ]] \
+  || fail "inherit: push landed in the inherited target: $(git -C "$shared" for-each-ref --format='%(refname)')"
+[[ $(git -C "$T/rgpushurl" remote get-url --push origin) == "$shared" ]] \
+  || fail "inherit: main checkout pushurl changed: $(git -C "$T/rgpushurl" remote get-url --push origin)"
+echo "ok: real git -> inherited shared pushurl cleared, push refused, target empty"
+
+# ── real git: the bare/worktree guard refuses instead of breaking the repo ───
+# Enabling extensions.worktreeConfig with core.bare=true in the common config
+# makes every worktree report "this operation must be run in a work tree".
+# The spawn must refuse and leave the config untouched (fail closed).
+for guard_case in bare worktree; do
+  gr="$T/rgguard-$guard_case"; mkdir -p "$gr"
+  git -C "$gr" init -q
+  git -C "$gr" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
+  git -C "$gr" remote add origin git@example.com:o/r.git
+  if [[ $guard_case == bare ]]; then git -C "$gr" config core.bare true
+  else git -C "$gr" config core.worktree "$gr"; fi
+  : > "$T/calls"
+  rc=0
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
+    bash "$T/scripts/worker/spawn-worker.sh" "sude-g$guard_case" sude "$gr" >"$T/out" 2>"$T/err" || rc=$?
+  [[ $rc -eq 1 ]] || fail "guard $guard_case: exit $rc, want 1: $(cat "$T/err")"
+  grep -q 'core.bare=true or core.worktree' "$T/err" \
+    || fail "guard $guard_case: no clear message: $(cat "$T/err")"
+  [[ -z $(git -C "$gr" config --get extensions.worktreeConfig) ]] \
+    || fail "guard $guard_case: extensions.worktreeConfig was enabled anyway"
+  ! grep -q 'agent start' "$T/calls" || fail "guard $guard_case: agent started"
+  # the guard leaves the repo usable: the main checkout still works
+  git -C "$gr" rev-parse --git-dir >/dev/null || fail "guard $guard_case: repo left broken"
+done
+echo "ok: real git -> core.bare/core.worktree refused, config untouched, repo usable"
 
 echo "PASS"
