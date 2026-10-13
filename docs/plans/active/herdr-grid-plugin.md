@@ -31,7 +31,7 @@ lane: high-risk
 - risks:
   - Hook race with spawn (`pane.created` before tagging; pane ids change on move) → `grid_ready=1` set last, owner by agent name; stop if probe shows tokens lost on move → re-tag on move fallback.
   - Event storms / lost wakeups → pending counter re-checked before unlock; executor tests; recovery: disable plugin (`herdr plugin disable`), `grid-workers.sh --repair`.
-  - `layout.apply` kills or remaps processes → fallback to scratch-tab moves with id remap.
+  - `layout.apply` kills processes and remaps ids (probe Q5 = no) → never use it; arrange panes with `pane.move` only, re-keying by `pane.moved.previous_pane_id`.
   - Public history leak → audit before publish; stop on any secret/private hit and ask anh iu.
 - seams:
   - existing: `tests/test_spawn_worker.sh`, `tests/test_prompt_worker.sh`, `tests/test_herdr_gate.sh`, `tests/test_grid_workers.sh`, `tests/test_pipeline.sh`, `tests/test_docs.sh` via `bash tests/run.sh`
@@ -40,7 +40,7 @@ lane: high-risk
 - recovery: every phase lands on `quaqua/herdr-grid-integ` and is revertable per merge commit; plugin can be unlinked at any time with `grid-workers.sh` still functional until phase `prose-cut`.
 
 - phase_slug: `enforce`
-  status: planned
+  status: done
   - goal: R1, R2, R3, R4 | depends_on: none
   - surfaces: `scripts/worker/spawn-worker.sh`, `scripts/hooks/pre-commit` (new), `scripts/init-workspace.sh`, `scripts/worker/prompt-worker.sh`, `scripts/hooks/herdr-gate.sh`, `AGENTS.md:52`, `rules/_all/brief.md`, tests | avoided: grid scripts, plugin
   - escalate_when: push block also breaks the CoS checkout, or report check rejects an existing pipeline reviewer format
@@ -52,7 +52,7 @@ lane: high-risk
   - phase check: `bash tests/run.sh`
 
 - phase_slug: `probe`
-  status: planned
+  status: done
   - goal: R5, R7, R8 (facts only) | depends_on: none
   - surfaces: scratch herdr workspace, `plugins/herdr-grid-probe/` (logging-only, deleted after) | avoided: live CoS/Lead panes
   - escalate_when: any probe answer is "no" (requires plan amendment before `plugin-shadow`)
@@ -71,8 +71,8 @@ lane: high-risk
     - T1 `plan.jq` snapshot→ops with fixtures (0–5 workers, two owners same group, two sessions, untagged pane, working deferral, idempotence) — output: planner — check: `bash tests/test_herdr_grid_plan.sh` — stop_if: idempotence fails
     - T2 spawn tagging (role/group/owner after split, `grid_ready=1` last) — output: tags in snapshot — check: `bash tests/test_spawn_worker.sh && bash tests/test_spawn_lead.sh` — stop_if: spawn order changes trust/send-keys behaviour
   - wave 2:
-    - T3 `hook.sh` (pending counter, mkdir lock + pid reclaim, status-changed early exit) + manifest, shadow mode logs ops only — output: plugin linked, warnings empty — check: `bash tests/test_herdr_grid_hook.sh` (event during unlock, holder killed) — stop_if: lost wakeup reproduced
-    - T4 `apply.sh` (layout.apply or move+remap per probe; verify each op; closed pane / failed nth move / zoomed tab) behind shadow flag — output: executor — check: `bash tests/test_herdr_grid_hook.sh` — stop_if: partial apply leaves foreign pane moved
+    - T3 `hook.sh` (pending counter, mkdir lock + pid reclaim, status-changed early exit; idle/done/unknown = not working; closed panes detected by snapshot diff, not `pane.closed`, which misses tab/workspace close; subscribe `pane.moved`, `tab.closed`, `workspace.closed`, never `layout.updated`) + manifest, shadow mode logs ops only — output: plugin linked, warnings empty — check: `bash tests/test_herdr_grid_hook.sh` (event during unlock, holder killed) — stop_if: lost wakeup reproduced
+    - T4 `apply.sh` (`pane.move` only, id remap from `pane.moved`; verify each op; closed pane / failed nth move / zoomed tab) behind shadow flag — output: executor — check: `bash tests/test_herdr_grid_hook.sh` — stop_if: partial apply leaves foreign pane moved
   - phase check: `bash tests/run.sh` + shadow log matches actual layout over ≥5 real spawns
 
 - phase_slug: `cutover`
@@ -105,12 +105,14 @@ lane: high-risk
   - phase check: plugin installs from marketplace path
 
 ## Log
+- 2026-10-13 enforce done: T1–T4 on `quaqua/herdr-grid-integ` (d657c6d, fd0d639), 14/14 tests pass (watchdog skipped, known flaky).
+- 2026-10-13 probe done (`runs/sude-gridprobe.md`): Q5 no → plan amended (no `layout.apply`, snapshot-diff close detection), approved by anh iu.
 
 ## Validation
 
 ## Current State and Next Action
-- active_phase: none
-- lifecycle_status: planned
-- blockers: new seams (pre-commit, plan.jq, hook.sh tests) await anh iu confirmation
-- open_items: plan not yet approved; spawn `quaqua-lead` (slug `herdr-grid`) on approval
-- exact_next_action: work full phase enforce
+- active_phase: plugin-shadow
+- lifecycle_status: in_progress
+- blockers: none
+- open_items: integ push/merge to main awaits anh iu; `test_worker_cap.sh` fails when `QUAQUA_OWNER` is exported (pre-existing)
+- exact_next_action: work phase plugin-shadow wave 1
