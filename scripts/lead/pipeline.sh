@@ -18,7 +18,8 @@
 #   must be a contract (rules/_all/brief.md): before any 'clean' the contract
 #   gate checks changed files against 'Owned scope:' and re-runs every
 #   acceptance command on the tip, writing '## Acceptance' (fail -> blocked);
-#   the latest builder report must restate every A-id verbatim as pass (C2). A phase report that declares itself
+#   the latest builder report must restate every A-id verbatim as pass (C2).
+#   A phase report that declares itself
 #   unfinished ('Outcome: BLOCKED|PARTIAL|INCOMPLETE|FAILED' or a non-empty
 #   '## Blockers' section — e.g. written after the watchdog nudge) never
 #   advances: the pipeline stops blocked with the evidence copied in. After
