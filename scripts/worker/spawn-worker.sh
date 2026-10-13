@@ -80,14 +80,19 @@ cat "$rules_dir"/_all/*.md "$rules_dir/$(basename "$repo")"/*.md 2>/dev/null > "
 codex_rules="developer_instructions=$(jq -Rs . < "$rf")"
 
 # Record owner, grid group (grid-workers.sh groups by owner + project tab),
-# pipeline association, and sandbox marker
+# pipeline association, sandbox marker, and report class. `review` is the
+# spawn metadata prompt-worker.sh classifies the runs report by: a reviewer
+# ends with a `Verdict:` line, a builder with `## Lessons` (rules/_all/
+# brief.md). Never derived from the brief text — briefs quote that contract.
 grid_tab=${GRID_TAB:-"$(basename "$repo")-workers"}
 echo "$owner" > "$runs_dir/$name.owner"
 echo "$grid_tab" > "$runs_dir/$name.grid"
 [[ -n "${PIPELINE_TASK:-}" ]] && echo "$PIPELINE_TASK" > "$runs_dir/$name.pipeline"
 iso_now=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')
-printf '{"name":"%s","kind":"%s","created":"%s","sandbox":true,"owner":"%s"}\n' \
-  "$name" "$kind" "$iso_now" "$owner" > "$runs_dir/$name.srt.json"
+review_json=false
+[[ ${review+x} ]] && review_json=true
+printf '{"name":"%s","kind":"%s","created":"%s","sandbox":true,"owner":"%s","review":%s}\n' \
+  "$name" "$kind" "$iso_now" "$owner" "$review_json" > "$runs_dir/$name.srt.json"
 
 # codex access args. --review keeps the repo read-only and $HOME/quaqua/runs writable
 # via a permission profile extending the built-in :read-only one. Plain

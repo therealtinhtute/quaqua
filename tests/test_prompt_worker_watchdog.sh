@@ -6,6 +6,8 @@
 # (exit 4), blocked/question (exit 5). herdr is stubbed on PATH: it logs calls,
 # answers agent get/read/prompt from FAKE_* vars. HOME is a temp dir. No real
 # herdr, agent, or home touched.
+# Fabricated reports carry the '## Lessons' builder tail (R3: a report without
+# it exits 6 before any watchdog path is reached).
 # Budgets in these tests are seconds (PROMPT_WORKER_BUDGET_SEC), so a grace of
 # 25% of a 4s allowance is 1s — the code paths are the real ones. Time-sensitive
 # cases run on the virtual clock (see CLK below) so the thresholds under test are
@@ -69,7 +71,7 @@ case "${1:-} ${2:-}" in
     fi ;;
   "agent prompt")
     if [ "${FAKE_DELAY:-0}" != 0 ]; then
-      ( sleep "$FAKE_DELAY"; echo "fake summary" > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
+      ( sleep "$FAKE_DELAY"; printf 'fake summary\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
     fi
     exit "${FAKE_RC:-0}" ;;
 esac
@@ -145,6 +147,7 @@ echo "ok: --resume arg validation -> exit 1, usage on stderr"
 
 # ── resume happy path: file already there, no prompt ever sent ──────────────
 echo done > "$T/home/quaqua/runs/sude-rdone.md"
+printf '%s\n' done '' '## Lessons' '- none' >> "$T/home/quaqua/runs/sude-rdone.md"
 resume sude-rdone
 [[ $rc -eq 0 ]] || fail "sude-rdone: exit $rc: $(cat "$T/err")"
 [[ "$(cat "$T/out")" == "$T/home/quaqua/runs/sude-rdone.md" ]] \

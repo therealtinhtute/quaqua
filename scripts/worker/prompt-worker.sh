@@ -12,7 +12,13 @@
 #   (7200) · 3 stall (no pane/worktree change for PROMPT_WORKER_STALL_SEC, 600;
 #   or agent idle/done for PROMPT_WORKER_IDLE_SEC, 120; or agent not found /
 #   status unknown / unobservable for PROMPT_WORKER_AGENT_GONE_SEC, 60) ·
-#   4 time budget · 5 agent blocked on a question/permission.
+#   4 time budget · 5 agent blocked on a question/permission ·
+#   6 malformed report — the file arrived but breaks the report contract in
+#   rules/_all/brief.md: a builder report needs a `## Lessons` section, a
+#   reviewer report needs a `Verdict:` line. The class comes from the spawn
+#   metadata runs/<name>.srt.json `review` flag (spawn-worker.sh --review),
+#   never from the brief text. --resume re-validates, so a rewritten report is
+#   accepted without a new prompt.
 #   Budget (D3): the brief's `Time budget: <N> min` line sets it,
 #   PROMPT_WORKER_BUDGET_SEC overrides when set, neither -> 2700. One soft nudge
 #   at PROMPT_WORKER_NUDGE_PCT (80%). A resumed wait continues the allowance
@@ -33,8 +39,9 @@
 #   new task, and the file must be byte-stable across a short window before
 #   it counts as complete. stdout carries only the final report path; the
 #   herdr submission response goes to runs/.<name>.submit.log.
-#   Exits 2-5 print a WATCHDOG status line on stderr; fix the cause, then
-#   `--resume` keeps waiting. The script never kills or re-prompts the worker.
+#   Exits 2-6 print a WATCHDOG status line on stderr; fix the cause, then
+#   `--resume` keeps waiting (6: fix the report, then resume re-validates).
+#   The script never kills or re-prompts the worker.
 set -euo pipefail
 
 # usage prints the leading comment block (lines 2+) — no line numbers to drift
@@ -114,6 +121,7 @@ sentinel="$HOME/quaqua/runs/.$name.nudged"
 budget_file="$HOME/quaqua/runs/.$name.budget"
 grace_file="$HOME/quaqua/runs/.$name.grace"
 progress_file="$HOME/quaqua/runs/.$name.progress"
+srt="$HOME/quaqua/runs/$name.srt.json"   # spawn metadata: the report class
 max=${PROMPT_WORKER_MAX_SEC:-7200}     poll=${PROMPT_WORKER_POLL_SEC:-30}
 stall=${PROMPT_WORKER_STALL_SEC:-600}  idle_sec=${PROMPT_WORKER_IDLE_SEC:-120}
 gone_sec=${PROMPT_WORKER_AGENT_GONE_SEC:-60}
@@ -278,6 +286,16 @@ watchdog_exit() {  # <code> <reason> — status line on stderr, stdout stays cle
   exit "$code"
 }
 
+malformed_report() {  # <missing> — the file arrived but breaks its contract
+  # rules/_all/brief.md: builders end with '## Lessons', pipeline reviewers
+  # with their 'Verdict:' line. Never accept a malformed report as a phase
+  # acknowledgement, and never print its path (stdout stays path-only).
+  save_elapsed
+  printf 'WATCHDOG malformed-report | name=%s missing=%s report=%s\n' \
+    "$name" "$1" "$out" >&2
+  exit 6
+}
+
 report_stat() {  # GNU first, then BSD/macOS: size + mtime
   stat -c '%s:%Y' "$1" 2>/dev/null || stat -f '%z:%m' "$1" 2>/dev/null
 }
@@ -387,5 +405,19 @@ if [[ -n $prompt_pid ]]; then
     sleep 0.1
   done
 fi
+# Report-shape gate (R3, rules/_all/brief.md): the class comes from the spawn
+# metadata written by spawn-worker.sh (--review), never from the brief text —
+# briefs legitimately quote the 'Verdict:' contract. Missing metadata or an
+# absent flag means a builder report. --resume re-runs this gate, so a
+# rewritten report is accepted without a fresh prompt.
+expect=lessons
+if [[ -f $srt ]]; then
+  rev=$(jq -r '.review // false' "$srt" 2>/dev/null || echo false)
+  if [[ $rev == true ]]; then expect=verdict; fi
+fi
+case $expect in
+  verdict) grep -qE '^[[:space:]]*Verdict:' "$out" || malformed_report "'Verdict:' line" ;;
+  *)       grep -qE '^## Lessons' "$out" || malformed_report "'## Lessons' section" ;;
+esac
 save_elapsed
 printf '%s\n' "$out"

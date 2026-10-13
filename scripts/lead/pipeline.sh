@@ -31,7 +31,9 @@
 #   <repo>' continues from runs/pipeline-<task>.state. Every stop appends one
 #   line to runs/telemetry.jsonl {ts,task,repo,builder,reviewer,
 #   review:run|skip,rounds,review_changed_outcome,status,minutes} — the last
-#   line per task is current.
+#   line per task is current. Exit 6 (malformed report: prompt-worker.sh
+#   rejects a phase report missing its '## Lessons' / 'Verdict:' tail, R3)
+#   propagates here as blocked like every other watchdog exit.
 #   Env budgets (sec): PIPELINE_PLAN_BUDGET_SEC 900 · _BUILD_ 2700 · _REVIEW_
 #   900 · _FIX_ 1200 · PIPELINE_MAX_SEC 7200 (work time; time between
 #   invocations does not count) · PIPELINE_REVIEW_LINES 150.
