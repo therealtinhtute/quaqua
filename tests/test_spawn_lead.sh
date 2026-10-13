@@ -98,7 +98,7 @@ grep -qF "workspace create --label coucou-island --no-focus --cwd $T --env QUAQU
   || fail "happy: Lead not in its own <slug> workspace at the repo root: $(cat "$T/calls")"
 grep -q 'agent start coucou-island-lead --kind claude --pane %7 --timeout 60000' "$T/calls" \
   || fail "happy: bad agent start: $(cat "$T/calls")"
-grep -q -- '--model claude-opus-5-5 --effort high' "$T/calls" \
+grep -q -- '--model claude-opus-5-5 --effort low' "$T/calls" \
   || fail "happy: default model/effort missing: $(cat "$T/calls")"
 grep -qF -- "--append-system-prompt-file $T/runs/coucou-island-lead.rules.md" "$T/calls" \
   || fail "happy: no rules file arg: $(cat "$T/calls")"
@@ -171,9 +171,9 @@ grep -qE '^\| mono-desk \| ~/Lab/mono-desk \| quaqua-monodesk-orchestrator \|' "
 echo "ok: 'mono' updates only its own row (mono-desk untouched)"
 
 # ── LEAD_MODEL / LEAD_EFFORT override the claude args ───────────────────────
-spawn coucou-island LEAD_MODEL=claude-haiku-4 LEAD_EFFORT=low
+spawn coucou-island LEAD_MODEL=claude-haiku-4 LEAD_EFFORT=high
 [[ $rc -eq 0 ]] || fail "env: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- '--model claude-haiku-4 --effort low' "$T/calls" \
+grep -q -- '--model claude-haiku-4 --effort high' "$T/calls" \
   || fail "env: overrides not passed: $(cat "$T/calls")"
 echo "ok: LEAD_MODEL/LEAD_EFFORT override the defaults"
 
