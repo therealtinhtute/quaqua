@@ -36,31 +36,31 @@ stage() { git -C "$R" add -A; }
 reset_all() { git -C "$R" reset -q --hard HEAD >/dev/null 2>&1 || true; git -C "$R" clean -qfd; }
 
 # baseline: a policy file and a tests/ fixture (the two allowlisted paths)
-mkdir -p "$R/tests" "$R/rules/_all" "$R/scripts"
+mkdir -p "$R/tests" "$R/rules/_all" "$R/src"
 printf '# portable paths\n' > "$R/rules/_all/portable-paths.md"
 printf '#!/usr/bin/env bash\necho baseline\n' > "$R/tests/fixture.sh"
-printf '#!/usr/bin/env bash\necho baseline\n' > "$R/scripts/tool.sh"
+printf '#!/usr/bin/env bash\necho baseline\n' > "$R/src/tool.sh"
 printf 'baseline\n' > "$R/README.md"
 stage; git -C "$R" commit -qm baseline
 echo "ok: sandbox repo initialized (core.hooksPath -> scripts/hooks)"
 
 # ── 1. an added machine path in a script is rejected ───────────────────────
-printf '#!/usr/bin/env bash\ncd /home/alice/project\n' > "$R/scripts/tool.sh"
+printf '#!/usr/bin/env bash\ncd /home/alice/project\n' > "$R/src/tool.sh"
 stage
 [[ $(hook_rc) == 1 ]] || fail "added /home/<user>/ path not rejected (direct run)"
-grep -q 'scripts/tool.sh' "$T/out" || fail "hook output does not name the offending file"
+grep -q 'src/tool.sh' "$T/out" || fail "hook output does not name the offending file"
 grep -q 'home/alice/project' "$T/out" || fail "hook output does not show the offending line"
 grep -q 'portable-paths' "$T/out" || fail "hook output does not point at rules/_all/portable-paths.md"
 echo "ok: added /home/<user>/ path -> rejected, file + line + policy named"
 
 # and through a real commit, so the installed hook really fires
 [[ $(commit_rc) != 0 ]] || fail "git commit succeeded despite a machine path"
-grep -q 'scripts/tool.sh' "$T/out" || fail "commit output does not name the offending file"
+grep -q 'src/tool.sh' "$T/out" || fail "commit output does not name the offending file"
 reset_all
 echo "ok: real git commit through core.hooksPath -> blocked"
 
 # ── 2. /Users/<user>/ is rejected too (macOS form) ─────────────────────────
-printf '#!/usr/bin/env bash\nopen /Users/bob/notes\n' > "$R/scripts/tool.sh"
+printf '#!/usr/bin/env bash\nopen /Users/bob/notes\n' > "$R/src/tool.sh"
 stage
 [[ $(hook_rc) == 1 ]] || fail "added /Users/<user>/ path not rejected"
 grep -q 'Users/bob/notes' "$T/out" || fail "hook output does not show the macOS path"
@@ -95,31 +95,31 @@ echo "ok: allowlist is exact (tests-helper.sh still checked)"
   printf 'e=/Users/<name>/thing\n'
   printf 'f=/etc/hosts\n'
   printf 'g=/usr/local/bin\n'
-} > "$R/scripts/tool.sh"
+} > "$R/src/tool.sh"
 stage
 [[ $(hook_rc) == 0 ]] || fail "portable spellings/placeholders rejected: $(cat "$T/out")"
 reset_all
 echo "ok: ~/, \$HOME, \$(dirname \"\$0\"), placeholders, /etc -> allowed"
 
 # ── 5. only ADDED lines are judged (existing violations do not brick) ─────
-printf '#!/usr/bin/env bash\ncd /home/legacy/project\n' > "$R/scripts/legacy.sh"
+printf '#!/usr/bin/env bash\ncd /home/legacy/project\n' > "$R/src/legacy.sh"
 stage
 git -C "$R" commit -q --no-verify -m "legacy violation"   # pre-existing state
-printf '#!/usr/bin/env bash\ncd /home/legacy/project\necho more\n' > "$R/scripts/legacy.sh"
+printf '#!/usr/bin/env bash\ncd /home/legacy/project\necho more\n' > "$R/src/legacy.sh"
 stage
 [[ $(hook_rc) == 0 ]] || fail "a clean modification of a legacy-violating file was rejected"
-grep -q 'echo more' "$R/scripts/legacy.sh" || fail "modification did not land"
+grep -q 'echo more' "$R/src/legacy.sh" || fail "modification did not land"
 reset_all
 echo "ok: existing violations are not re-judged; clean edits still commit"
 
 # ── 6. renames: content is re-checked only when the commit adds lines ─────
-git -C "$R" mv scripts/legacy.sh scripts/renamed.sh
+git -C "$R" mv src/legacy.sh src/renamed.sh
 stage
 [[ $(hook_rc) == 0 ]] || fail "a pure rename re-judged the file's existing content"
-printf '#!/usr/bin/env bash\ncd /home/legacy/project\ncd /home/carol/other\n' > "$R/scripts/renamed.sh"
+printf '#!/usr/bin/env bash\ncd /home/legacy/project\ncd /home/carol/other\n' > "$R/src/renamed.sh"
 stage
 [[ $(hook_rc) == 1 ]] || fail "rename + added machine path not rejected"
-grep -q 'scripts/renamed.sh' "$T/out" || fail "rename+modify output does not name the new path"
+grep -q 'src/renamed.sh' "$T/out" || fail "rename+modify output does not name the new path"
 reset_all
 echo "ok: pure rename allowed; rename + added machine path rejected under the new name"
 

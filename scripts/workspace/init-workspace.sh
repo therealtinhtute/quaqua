@@ -9,11 +9,13 @@
 #   workspace) is a no-op. Safe on a populated workspace; run it after every
 #   clone.
 #
-#   Also wires the repo's git hooks: `core.hooksPath` -> scripts/hooks/ (the
-#   pre-commit portable-paths gate). Absolute, so every worktree of this repo
-#   runs this copy and a worker cannot weaken policy by editing its own.
-#   Configuration it does not own is never overwritten: an existing different
-#   value — local or global — is left in place with a warning.
+#   Also wires the repo's git hooks: `core.hooksPath` -> <this checkout>/scripts/hooks
+#   (the pre-commit portable-paths gate). Absolute, so the path stays valid when
+#   git runs the hook from another directory, and it lands in the shared config
+#   so every worktree of this repo is covered. A guardrail, not a boundary: a
+#   worker can still bypass it (--no-verify, its own config). Configuration this
+#   script does not own is never overwritten: an existing different value —
+#   local or global — is left in place with a warning.
 #
 #   Templates live in templates/ under names that cannot collide with the
 #   gitignored dirs: .gitignore's `memory/` and `projects/` patterns match at
