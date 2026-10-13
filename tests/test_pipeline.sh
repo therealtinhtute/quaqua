@@ -488,7 +488,8 @@ echo "ok: reviewer Challenge + findings verdict -> still disputed"
 run_pipe -- clk "$T/repo" --brief "$T/brief.md" --review skip
 [[ $rc -eq 5 ]] || fail "clk run1: exit $rc, want 5"
 perl -pi -e 's/^start_elapsed=.*/start_elapsed=7180/' "$runsdir/pipeline-clk.state"
-run_pipe PIPELINE_MAX_SEC=7200 -- --resume clk "$T/repo"
+printf '%s\n' 1700000000 > "$T/clock"
+run_pipe "${CLK[@]}" PIPELINE_MAX_SEC=7200 -- --resume clk "$T/repo"
 grep -q 'budget 20s' "$T/err" \
   || fail "clk: phase budget not clamped to remainder (want 20s): $(cat "$T/err")"
 [[ $rc -eq 0 ]] || fail "clk: exit $rc inside the allowance"
