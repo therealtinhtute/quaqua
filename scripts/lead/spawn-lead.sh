@@ -19,7 +19,7 @@
 #   <slug>-lead would exceed herdr's 32-char agent-name limit; on success
 #   the row's owner column becomes the Lead name (serialized with
 #   cleanup-lead.sh via projects/INDEX.md.lock.d, published by atomic rename).
-#   Env: LEAD_MODEL (default claude-opus-5-5) · LEAD_EFFORT (default high).
+#   Env: LEAD_MODEL (default claude-opus-5-5) · LEAD_EFFORT (default low).
 set -euo pipefail
 
 USAGE_LAST=19
@@ -101,7 +101,7 @@ pane=$(printf '%s\n' "$ws" | jq -r '.result.root_pane.pane_id')
 wsid=$(printf '%s\n' "$ws" | jq -r '.result.workspace.workspace_id')
 
 herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- \
-  --model "${LEAD_MODEL:-claude-opus-5-5}" --effort "${LEAD_EFFORT:-high}" \
+  --model "${LEAD_MODEL:-claude-opus-5-5}" --effort "${LEAD_EFFORT:-low}" \
   --append-system-prompt-file "$rf" >/dev/null
 
 # projects/INDEX.md: the <slug> row's owner cell (3rd column) -> the Lead
