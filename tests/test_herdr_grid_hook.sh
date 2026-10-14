@@ -668,6 +668,8 @@ bash "$T/plugin/hook.sh" >/dev/null 2>&1 || fail "test 18: expected backed-off r
 
 second_applies=$(grep -c "apply ops:" "$T/state/shadow.log" || echo 0)
 [[ "$second_applies" -eq 1 ]] || fail "test 18: apply was called again despite unchanged layout ($second_applies calls)"
+grep -q "backoff: skipping previously failed ops" "$T/state/shadow.log" \
+  || fail "test 18: missing 'backoff: skipping previously failed ops' in shadow.log"
 
 # When layout changes (e.g. pane closed), backoff is cleared and apply is retried
 /usr/bin/jq '(.snapshot // .result.snapshot // .).panes |= map(select(.pane_id != "w1:p7"))' "$CURRENT_SNAPSHOT" > "$CURRENT_SNAPSHOT.tmp" && mv "$CURRENT_SNAPSHOT.tmp" "$CURRENT_SNAPSHOT"
@@ -773,5 +775,107 @@ grep -q "apply error:" "$T/state/shadow.log" 2>/dev/null && fail "test 19: unexp
 
 unset HERDR_GRID_SHADOW HERDR_STUB_TRIGGER_EVENTS
 echo "ok: 2 freshly spawned workers in same tab converge to [] under event triggers"
+
+# ── Test 20: w1 scenario — non-cos owner without orchestrator moves to group tab ──
+echo "test 20: non-cos owner without orchestrator targets group tab, leaves CoS tab untouched"
+cat > "$CURRENT_SNAPSHOT" << 'EOF'
+{
+  "snapshot": {
+    "workspaces": [
+      { "workspace_id": "w1", "label": "quaqua" }
+    ],
+    "tabs": [
+      { "tab_id": "w1:t1", "workspace_id": "w1", "label": "quaqua", "pane_count": 3 }
+    ],
+    "panes": [
+      {
+        "pane_id": "w1:p1",
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "agent": "claude",
+        "agent_status": "idle",
+        "tokens": {
+          "grid_role": "orchestrator",
+          "grid_owner": "cos",
+          "grid_ready": "1"
+        }
+      },
+      {
+        "pane_id": "w1:p2",
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "agent": "omp",
+        "agent_status": "working",
+        "tokens": {
+          "grid_role": "worker",
+          "grid_owner": "cos",
+          "grid_group": "quaqua",
+          "grid_ready": "1"
+        }
+      },
+      {
+        "pane_id": "w1:p3",
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "agent": "omp",
+        "agent_status": "idle",
+        "tokens": {
+          "grid_role": "worker",
+          "grid_owner": "b3smoke",
+          "grid_group": "quaqua",
+          "grid_ready": "1"
+        }
+      }
+    ],
+    "layouts": [
+      {
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "area": { "x": 0, "y": 0, "width": 200, "height": 50 },
+        "panes": [
+          { "pane_id": "w1:p1", "rect": { "x": 0, "y": 0, "width": 80, "height": 50 } },
+          { "pane_id": "w1:p2", "rect": { "x": 80, "y": 0, "width": 120, "height": 50 } },
+          { "pane_id": "w1:p3", "rect": { "x": 80, "y": 0, "width": 120, "height": 50 } }
+        ]
+      }
+    ],
+    "agents": [
+      { "name": "cos", "pane_id": "w1:p1", "agent_status": "idle" },
+      { "name": "tieude-applyfix3", "pane_id": "w1:p2", "agent_status": "working" },
+      { "name": "tieude-b3x1w1", "pane_id": "w1:p3", "agent_status": "idle" }
+    ]
+  }
+}
+EOF
+
+export HERDR_GRID_SHADOW="0"
+export HERDR_PLUGIN_EVENT="pane.created"
+export HERDR_PLUGIN_EVENT_JSON='{"pane_id":"w1:p3"}'
+: > "$MOVES_LOG"
+rm -f "$CURRENT_SNAPSHOT.moves" "$T/state/shadow.log"
+
+bash "$T/plugin/hook.sh" >/dev/null
+
+moves_count=$(wc -l < "$MOVES_LOG" | tr -d ' ')
+[[ "$moves_count" -eq 1 ]] || fail "test 20: expected exactly 1 move, got $moves_count"
+
+# The move must be new_tab (into quaqua), not into w1:t1
+move_line=$(cat "$MOVES_LOG")
+echo "$move_line" | grep -q "new-tab" || fail "test 20: expected new-tab move, got: $move_line"
+
+# Remaining ops must be []
+remaining_ops=$(/usr/bin/jq -c -f "$plan_src" "$CURRENT_SNAPSHOT")
+[[ "$remaining_ops" == "[]" ]] || fail "test 20: layout did not converge to []: $remaining_ops"
+
+# w1:t1 must not contain w1:p3
+t1_panes=$(/usr/bin/jq -r '(.snapshot // .result.snapshot // .).panes[] | select(.tab_id == "w1:t1") | .pane_id' "$CURRENT_SNAPSHOT")
+if echo "$t1_panes" | grep -q "w1:p3"; then
+  fail "test 20: w1:p3 was left in CoS tab w1:t1"
+fi
+
+grep -q "apply error:" "$T/state/shadow.log" 2>/dev/null && fail "test 20: unexpected apply error in shadow.log"
+
+unset HERDR_GRID_SHADOW
+echo "ok: non-cos owner without orchestrator targets group tab, leaves CoS tab untouched"
 
 echo "PASS"

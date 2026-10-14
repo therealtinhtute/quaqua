@@ -173,11 +173,13 @@ for ((i = 0; i < count; i++)); do
     anchor_tab=$(printf '%s\n' "$anchor_obj" | "$JQ" -r '.tab_id // empty')
     tab_spec=$(printf '%s\n' "$op" | "$JQ" -r '.target.tab // empty')
     if [ "$tab_spec" = "@workers" ]; then
-      target_tab=$(printf '%s\n' "$group_tabs" | "$JQ" -r --arg g "$worker_group" '.[$g] // .["@latest"] // empty')
+      target_tab="$anchor_tab"
       if [ -z "$target_tab" ]; then
-        target_tab="$anchor_tab"
+        target_tab=$(printf '%s\n' "$group_tabs" | "$JQ" -r --arg g "$worker_group" '.[$g] // .["@latest"] // empty')
       fi
-      if [ -z "$target_tab" ]; then
+      if [ -n "$target_tab" ]; then
+        group_tabs=$(printf '%s\n' "$group_tabs" | "$JQ" -c --arg g "$worker_group" --arg t "$target_tab" '.[$g] = $t | .["@latest"] = $t')
+      else
         anchor_deferred=$(printf '%s\n' "$deferred_panes" | "$JQ" -r --arg a "$orig_anchor" '.[$a] // false')
         if [ "$anchor_deferred" = "true" ] || [ "$(printf '%s\n' "$deferred_panes" | "$JQ" 'length')" -gt 0 ]; then
           deferred_panes=$(printf '%s\n' "$deferred_panes" | "$JQ" -c --arg p "$orig_pane" '.[$p] = true')

@@ -163,10 +163,40 @@ reconcile() {
     fi
   fi
 
+  # If a worker pane is present but not yet marked grid_ready=1 (in-flight spawn),
+  # poll briefly for grid_ready=1 so we don't miss the spawn layout.
+  local pending_ready
+  pending_ready=$(echo "$snapshot" | "$JQ" -r '
+    [ (.result.snapshot // .snapshot // .).panes[]?
+      | select((.tokens?.grid_role // "") == "worker" and (.tokens?.grid_ready == null or (.tokens?.grid_ready // "") == ""))
+    ] | length
+  ' 2>/dev/null || echo 0)
+
+  if [ "$pending_ready" -gt 0 ]; then
+    local poll_attempts=0
+    while [ "$poll_attempts" -lt 15 ]; do
+      sleep 0.2 2>/dev/null || sleep 1
+      poll_attempts=$((poll_attempts + 1))
+      local cur_snap
+      cur_snap=$("$HERDR_BIN" api snapshot 2>/dev/null || echo "")
+      if [ -n "$cur_snap" ] && [ "$cur_snap" != "{}" ]; then
+        local still_pending
+        still_pending=$(echo "$cur_snap" | "$JQ" -r '
+          [ (.result.snapshot // .snapshot // .).panes[]?
+            | select((.tokens?.grid_role // "") == "worker" and (.tokens?.grid_ready == null or (.tokens?.grid_ready // "") == ""))
+          ] | length
+        ' 2>/dev/null || echo 0)
+        snapshot="$cur_snap"
+        if [ "$still_pending" -eq 0 ]; then
+          break
+        fi
+      fi
+    done
+  fi
+
   # Save snapshot to cache atomically
   echo "$snapshot" > "$LAST_SNAPSHOT.tmp"
   mv -f "$LAST_SNAPSHOT.tmp" "$LAST_SNAPSHOT"
-
   # Run layout plan
   local ops
   ops=$(echo "$snapshot" | "$JQ" -c -f "$PLAN_JQ" 2>/dev/null || echo "[]")
@@ -210,7 +240,21 @@ reconcile() {
     local snap_sig
     snap_sig=$(echo "$snapshot" | "$JQ" -c '
       (.result.snapshot // .snapshot // .) as $root
-      | [ ($root.panes // [])[] | {pane_id, tab_id, status: .agent_status, tokens} ] | sort_by(.pane_id)
+      | ( [ ($root.tabs // [])[] | {key: .tab_id, value: .label} ] | from_entries ) as $tab_labels
+      | [ ($root.panes // [])[]
+          | select((.tokens?.grid_role // "") == "worker")
+          | {
+              pane_id,
+              tab: (if ($tab_labels[.tab_id] // "" | startswith("grid-scratch-")) then "@scratch" else .tab_id end),
+              status: (if .agent_status == "working" then "working" else "idle" end),
+              tokens: {
+                role: .tokens?.grid_role,
+                owner: .tokens?.grid_owner,
+                group: .tokens?.grid_group,
+                ready: .tokens?.grid_ready
+              }
+            }
+        ] | sort_by(.pane_id)
     ' 2>/dev/null || echo "")
 
     if [ -f "$FAILED_OPS_FILE" ] && [ -f "$FAILED_SNAP_FILE" ]; then
@@ -219,10 +263,19 @@ reconcile() {
       if [ -n "$snap_sig" ] && [ "$last_snap_sig" = "$snap_sig" ]; then
         # Snapshot state has not changed since last failure.
         # Filter out previously failed ops to prevent error storm / thrashing.
+        local prev_count
+        prev_count=$(echo "$non_deferred" | "$JQ" 'length' 2>/dev/null || echo 0)
         non_deferred=$(echo "$non_deferred" | "$JQ" -c --slurpfile failed "$FAILED_OPS_FILE" '
           ($failed[0] // []) as $f |
           map(select(. as $op | ($f | any(.pane == $op.pane and .target == $op.target)) | not))
         ' 2>/dev/null || echo "[]")
+        local new_count
+        new_count=$(echo "$non_deferred" | "$JQ" 'length' 2>/dev/null || echo 0)
+        if [ "$prev_count" -gt "$new_count" ]; then
+          local ts
+          ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")
+          echo "[$ts] backoff: skipping previously failed ops" >> "$SHADOW_LOG" 2>/dev/null || true
+        fi
       else
         rm -f "$FAILED_OPS_FILE" "$FAILED_SNAP_FILE" 2>/dev/null || true
       fi
@@ -243,15 +296,33 @@ reconcile() {
         # Record failed ops and snapshot state to back off until state changes
         echo "$non_deferred" > "$FAILED_OPS_FILE.tmp"
         mv -f "$FAILED_OPS_FILE.tmp" "$FAILED_OPS_FILE"
-        echo "$snap_sig" > "$FAILED_SNAP_FILE.tmp"
-        mv -f "$FAILED_SNAP_FILE.tmp" "$FAILED_SNAP_FILE"
-
+        local post_snap_sig="$snap_sig"
         local err_snapshot
         err_snapshot=$("$HERDR_BIN" api snapshot 2>/dev/null || echo "{}")
         if [ -n "$err_snapshot" ] && [ "$err_snapshot" != "{}" ]; then
           echo "$err_snapshot" > "$LAST_SNAPSHOT.tmp"
           mv -f "$LAST_SNAPSHOT.tmp" "$LAST_SNAPSHOT"
+          post_snap_sig=$(echo "$err_snapshot" | "$JQ" -c '
+            (.result.snapshot // .snapshot // .) as $root
+            | ( [ ($root.tabs // [])[] | {key: .tab_id, value: .label} ] | from_entries ) as $tab_labels
+            | [ ($root.panes // [])[]
+                | select((.tokens?.grid_role // "") == "worker")
+                | {
+                    pane_id,
+                    tab: (if ($tab_labels[.tab_id] // "" | startswith("grid-scratch-")) then "@scratch" else .tab_id end),
+                    status: (if .agent_status == "working" then "working" else "idle" end),
+                    tokens: {
+                      role: .tokens?.grid_role,
+                      owner: .tokens?.grid_owner,
+                      group: .tokens?.grid_group,
+                      ready: .tokens?.grid_ready
+                    }
+                  }
+              ] | sort_by(.pane_id)
+          ' 2>/dev/null || echo "$snap_sig")
         fi
+        echo "$post_snap_sig" > "$FAILED_SNAP_FILE.tmp"
+        mv -f "$FAILED_SNAP_FILE.tmp" "$FAILED_SNAP_FILE"
         return 1
       fi
       # Apply succeeded: clear failed ops record
