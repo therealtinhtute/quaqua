@@ -25,8 +25,18 @@ grid_hook() {
     || echo "warning: grid-workers.sh failed (exit $?); arrange panes manually" >&2
 }
 
-pane=$(herdr agent get "$name" | jq -r '.result.agent.pane_id')
-herdr pane close "$pane" >/dev/null
+agent_info=$(herdr agent get "$name" 2>&1) || true
+if pane=$(jq -r '.result.agent.pane_id // empty' 2>/dev/null <<<"$agent_info") && [[ -n "$pane" ]]; then
+  herdr pane close "$pane" >/dev/null
+elif jq -e '.result.agent' >/dev/null 2>&1 <<<"$agent_info"; then
+  : # agent present but no pane to close
+elif jq -e '.error.code == "agent_not_found"' >/dev/null 2>&1 <<<"$agent_info" \
+     || [[ "$agent_info" == *agent_not_found* ]]; then
+  : # agent already gone: no pane to close
+else
+  echo "error: failed to inspect agent $name: $agent_info" >&2
+  exit 1
+fi
 grid_hook
 git -C "$repo" worktree remove "$wt"
 runs_dir="${QUAQUA_RUNS_DIR:-$HOME/quaqua/runs}"
