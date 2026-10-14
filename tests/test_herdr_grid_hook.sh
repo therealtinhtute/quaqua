@@ -193,7 +193,7 @@ reset_stub() {
   local fixture=$1
   cp "$fixture" "$CURRENT_SNAPSHOT"
   rm -f "$CURRENT_SNAPSHOT.moves" "$CURRENT_SNAPSHOT.next"
-  rm -f "$T/state/last_snapshot.json" "$T/state/pending"
+  rm -f "$T/state/last_snapshot.json" "$T/state/pending" "$T/state/failed_ops.json" "$T/state/failed_snap.json"
   : > "$MOVES_LOG"
   echo 0 > "$CALLS_FILE"
   unset HERDR_STUB_MOVE_SUFFIX HERDR_STUB_MOVE_FAIL_AT HERDR_STUB_MOVE_REASON HERDR_STUB_TRIGGER_EVENTS || true
@@ -642,4 +642,136 @@ grep -q "stderr_shadow_test_error" "$err_out" \
 
 unset HERDR_GRID_SHADOW HERDR_STUB_MOVE_FAIL_AT HERDR_STUB_MOVE_REASON
 echo "ok: when apply.sh fails, its stderr reaches shadow.log"
+
+# ── Test 18: Failing op with event triggers backs off without error storm ──────
+echo "test 18: failing move op backs off on unchanged layout without error loop"
+reset_stub "$fixdir/3-workers.json"
+export HERDR_GRID_SHADOW="0"
+export HERDR_STUB_MOVE_FAIL_AT=1
+export HERDR_STUB_MOVE_REASON="same_tab"
+export HERDR_PLUGIN_EVENT="pane.created"
+export HERDR_PLUGIN_EVENT_JSON='{"pane_id":"w1:p7"}'
+
+rm -f "$T/state/shadow.log"
+# First invocation: apply fails on move 1
+if bash "$T/plugin/hook.sh" >/dev/null 2>&1; then
+  fail "test 18: expected hook.sh to fail on apply error"
+fi
+
+first_applies=$(grep -c "apply ops:" "$T/state/shadow.log" || echo 0)
+[[ "$first_applies" -eq 1 ]] || fail "test 18: expected exactly 1 apply before backoff, got $first_applies"
+
+# Second invocation on the same snapshot: hook backs off and does NOT call apply.sh
+export HERDR_PLUGIN_EVENT="pane.moved"
+export HERDR_PLUGIN_EVENT_JSON='{"pane_id":"w1:p7"}'
+bash "$T/plugin/hook.sh" >/dev/null 2>&1 || fail "test 18: expected backed-off reconcile to exit cleanly"
+
+second_applies=$(grep -c "apply ops:" "$T/state/shadow.log" || echo 0)
+[[ "$second_applies" -eq 1 ]] || fail "test 18: apply was called again despite unchanged layout ($second_applies calls)"
+
+# When layout changes (e.g. pane closed), backoff is cleared and apply is retried
+/usr/bin/jq '(.snapshot // .result.snapshot // .).panes |= map(select(.pane_id != "w1:p7"))' "$CURRENT_SNAPSHOT" > "$CURRENT_SNAPSHOT.tmp" && mv "$CURRENT_SNAPSHOT.tmp" "$CURRENT_SNAPSHOT"
+unset HERDR_STUB_MOVE_FAIL_AT HERDR_STUB_MOVE_REASON
+export HERDR_PLUGIN_EVENT="pane.closed"
+export HERDR_PLUGIN_EVENT_JSON='{"pane_id":"w1:p7"}'
+bash "$T/plugin/hook.sh" >/dev/null 2>&1 || fail "test 18: expected hook to succeed on new layout"
+third_applies=$(grep -c "apply ops:" "$T/state/shadow.log" || echo 0)
+[[ "$third_applies" -gt 1 ]] || fail "test 18: expected apply to run on changed layout, but was still blocked"
+
+unset HERDR_GRID_SHADOW HERDR_STUB_MOVE_FAIL_AT HERDR_STUB_MOVE_REASON
+echo "ok: failing move op backs off on unchanged layout without error loop"
+
+# ── Test 19: 2 freshly spawned workers converge under event storm ─────────────
+echo "test 19: 2 freshly spawned workers in same tab converge to [] under event triggers"
+cat > "$CURRENT_SNAPSHOT" << 'EOF'
+{
+  "snapshot": {
+    "workspaces": [
+      { "workspace_id": "w1", "label": "quaqua" }
+    ],
+    "tabs": [
+      { "tab_id": "w1:t1", "workspace_id": "w1", "label": "main", "pane_count": 3 }
+    ],
+    "panes": [
+      {
+        "pane_id": "w1:p1",
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "agent": "claude",
+        "agent_status": "idle",
+        "tokens": {
+          "grid_role": "orchestrator",
+          "grid_owner": "cos",
+          "grid_ready": "1"
+        }
+      },
+      {
+        "pane_id": "w1:p5",
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "agent": "pi",
+        "agent_status": "idle",
+        "tokens": {
+          "grid_role": "worker",
+          "grid_owner": "cos",
+          "grid_group": "quaqua-workers",
+          "grid_ready": "1"
+        }
+      },
+      {
+        "pane_id": "w1:p6",
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "agent": "pi",
+        "agent_status": "idle",
+        "tokens": {
+          "grid_role": "worker",
+          "grid_owner": "cos",
+          "grid_group": "quaqua-workers",
+          "grid_ready": "1"
+        }
+      }
+    ],
+    "layouts": [
+      {
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "area": { "x": 0, "y": 0, "width": 200, "height": 50 },
+        "panes": [
+          { "pane_id": "w1:p1", "rect": { "x": 0, "y": 0, "width": 100, "height": 50 } },
+          { "pane_id": "w1:p5", "rect": { "x": 100, "y": 0, "width": 50, "height": 50 } },
+          { "pane_id": "w1:p6", "rect": { "x": 150, "y": 0, "width": 50, "height": 50 } }
+        ]
+      }
+    ],
+    "agents": [
+      { "name": "cos", "pane_id": "w1:p1", "agent_status": "idle" },
+      { "name": "tieude-1", "pane_id": "w1:p5", "agent_status": "idle" },
+      { "name": "sude-1", "pane_id": "w1:p6", "agent_status": "idle" }
+    ]
+  }
+}
+EOF
+
+export HERDR_GRID_SHADOW="0"
+export HERDR_STUB_TRIGGER_EVENTS="1"
+export HERDR_PLUGIN_EVENT="pane.created"
+export HERDR_PLUGIN_EVENT_JSON='{"pane_id":"w1:p6"}'
+: > "$MOVES_LOG"
+rm -f "$CURRENT_SNAPSHOT.moves" "$T/state/shadow.log"
+
+bash "$T/plugin/hook.sh" >/dev/null
+wait
+
+moves_count=$(wc -l < "$MOVES_LOG" | tr -d ' ')
+[[ "$moves_count" -eq 2 ]] || fail "test 19: expected exactly 2 moves, got $moves_count"
+
+remaining_ops=$(/usr/bin/jq -c -f "$plan_src" "$CURRENT_SNAPSHOT")
+[[ "$remaining_ops" == "[]" ]] || fail "test 19: layout did not converge to []: $remaining_ops"
+
+grep -q "apply error:" "$T/state/shadow.log" 2>/dev/null && fail "test 19: unexpected apply error in shadow.log"
+
+unset HERDR_GRID_SHADOW HERDR_STUB_TRIGGER_EVENTS
+echo "ok: 2 freshly spawned workers in same tab converge to [] under event triggers"
+
 echo "PASS"

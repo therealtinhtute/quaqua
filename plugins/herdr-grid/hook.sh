@@ -30,6 +30,8 @@ PID_FILE="$LOCK_DIR/pid"
 PENDING_FILE="$STATE_DIR/pending"
 LAST_SNAPSHOT="$STATE_DIR/last_snapshot.json"
 SHADOW_LOG="$STATE_DIR/shadow.log"
+FAILED_OPS_FILE="$STATE_DIR/failed_ops.json"
+FAILED_SNAP_FILE="$STATE_DIR/failed_snap.json"
 
 EVENT_NAME="${HERDR_PLUGIN_EVENT:-}"
 EVENT_JSON="${HERDR_PLUGIN_EVENT_JSON:-}"
@@ -169,6 +171,10 @@ reconcile() {
   local ops
   ops=$(echo "$snapshot" | "$JQ" -c -f "$PLAN_JQ" 2>/dev/null || echo "[]")
 
+  if [ "$ops" = "[]" ] || [ -z "$ops" ]; then
+    rm -f "$FAILED_OPS_FILE" "$FAILED_SNAP_FILE" 2>/dev/null || true
+  fi
+
   # Determine shadow mode (default: 1)
   local shadow_mode=1
   if [ "${HERDR_GRID_SHADOW:-}" = "0" ] || [ "${HERDR_GRID_SHADOW:-}" = "false" ]; then
@@ -199,7 +205,30 @@ reconcile() {
         end
       ) | .non_deferred
     ' 2>/dev/null || echo "[]")
-    if [ -x "$PLUGIN_DIR/apply.sh" ] && [ "$non_deferred" != "[]" ]; then
+
+    # Failure backoff: avoid infinite retry loops when an op fails on an unchanged layout
+    local snap_sig
+    snap_sig=$(echo "$snapshot" | "$JQ" -c '
+      (.result.snapshot // .snapshot // .) as $root
+      | [ ($root.panes // [])[] | {pane_id, tab_id, status: .agent_status, tokens} ] | sort_by(.pane_id)
+    ' 2>/dev/null || echo "")
+
+    if [ -f "$FAILED_OPS_FILE" ] && [ -f "$FAILED_SNAP_FILE" ]; then
+      local last_snap_sig
+      last_snap_sig=$(cat "$FAILED_SNAP_FILE" 2>/dev/null || true)
+      if [ -n "$snap_sig" ] && [ "$last_snap_sig" = "$snap_sig" ]; then
+        # Snapshot state has not changed since last failure.
+        # Filter out previously failed ops to prevent error storm / thrashing.
+        non_deferred=$(echo "$non_deferred" | "$JQ" -c --slurpfile failed "$FAILED_OPS_FILE" '
+          ($failed[0] // []) as $f |
+          map(select(. as $op | ($f | any(.pane == $op.pane and .target == $op.target)) | not))
+        ' 2>/dev/null || echo "[]")
+      else
+        rm -f "$FAILED_OPS_FILE" "$FAILED_SNAP_FILE" 2>/dev/null || true
+      fi
+    fi
+
+    if [ -x "$PLUGIN_DIR/apply.sh" ] && [ "$non_deferred" != "[]" ] && [ -n "$non_deferred" ]; then
       local ts
       ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")
       echo "[$ts] apply ops: $non_deferred" >> "$SHADOW_LOG" 2>/dev/null || true
@@ -211,6 +240,12 @@ reconcile() {
           echo "$apply_err" >> "$SHADOW_LOG" 2>/dev/null || true
           echo "$apply_err" >&2
         fi
+        # Record failed ops and snapshot state to back off until state changes
+        echo "$non_deferred" > "$FAILED_OPS_FILE.tmp"
+        mv -f "$FAILED_OPS_FILE.tmp" "$FAILED_OPS_FILE"
+        echo "$snap_sig" > "$FAILED_SNAP_FILE.tmp"
+        mv -f "$FAILED_SNAP_FILE.tmp" "$FAILED_SNAP_FILE"
+
         local err_snapshot
         err_snapshot=$("$HERDR_BIN" api snapshot 2>/dev/null || echo "{}")
         if [ -n "$err_snapshot" ] && [ "$err_snapshot" != "{}" ]; then
@@ -219,6 +254,8 @@ reconcile() {
         fi
         return 1
       fi
+      # Apply succeeded: clear failed ops record
+      rm -f "$FAILED_OPS_FILE" "$FAILED_SNAP_FILE" 2>/dev/null || true
       # Refresh snapshot cache after apply so LAST_SNAPSHOT reflects applied moves
       local post_snapshot
       post_snapshot=$("$HERDR_BIN" api snapshot 2>/dev/null || echo "{}")
@@ -233,7 +270,9 @@ reconcile() {
 # Main loop handling pending counter
 while true; do
   rm -f "$PENDING_FILE" 2>/dev/null || true
-  reconcile
+  if ! reconcile; then
+    exit 1
+  fi
 
   # If more events arrived during reconcile, loop again
   if [ -f "$PENDING_FILE" ]; then
