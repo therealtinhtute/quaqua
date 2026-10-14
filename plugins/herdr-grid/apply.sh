@@ -159,14 +159,23 @@ for ((i = 0; i < count; i++)); do
   # Verification specific to split
   target_tab=""
   if [ "$kind" = "split" ]; then
+    # Verify anchor pane exists in snapshot first
+    anchor_obj=$(printf '%s\n' "$snapshot" | "$JQ" -c --arg a "$anchor" '
+      (.result.snapshot // .snapshot // .) as $root
+      | ($root.panes // []) as $panes
+      | [ $panes[] | select(.pane_id == $a) ] | first // empty
+    ')
+    if [ -z "$anchor_obj" ]; then
+      printf 'apply.sh: error: anchor pane %s closed or not found in snapshot\n' "$anchor" >&2
+      exit 1
+    fi
+
+    anchor_tab=$(printf '%s\n' "$anchor_obj" | "$JQ" -r '.tab_id // empty')
     tab_spec=$(printf '%s\n' "$op" | "$JQ" -r '.target.tab // empty')
     if [ "$tab_spec" = "@workers" ]; then
       target_tab=$(printf '%s\n' "$group_tabs" | "$JQ" -r --arg g "$worker_group" '.[$g] // .["@latest"] // empty')
       if [ -z "$target_tab" ]; then
-        target_tab=$(printf '%s\n' "$snapshot" | "$JQ" -r --arg g "$worker_group" '
-          (.result.snapshot // .snapshot // .) as $root
-          | [ ($root.tabs // [])[] | select((.label == $g) or (.label == "\($g)-workers") or (.label == "workers")) | .tab_id ] | first // empty
-        ')
+        target_tab="$anchor_tab"
       fi
       if [ -z "$target_tab" ]; then
         anchor_deferred=$(printf '%s\n' "$deferred_panes" | "$JQ" -r --arg a "$orig_anchor" '.[$a] // false')
@@ -195,19 +204,7 @@ for ((i = 0; i < count; i++)); do
       exit 1
     fi
 
-    # Verify anchor pane exists in snapshot
-    anchor_obj=$(printf '%s\n' "$snapshot" | "$JQ" -c --arg a "$anchor" '
-      (.result.snapshot // .snapshot // .) as $root
-      | ($root.panes // []) as $panes
-      | [ $panes[] | select(.pane_id == $a) ] | first // empty
-    ')
-    if [ -z "$anchor_obj" ]; then
-      printf 'apply.sh: error: anchor pane %s closed or not found in snapshot\n' "$anchor" >&2
-      exit 1
-    fi
-
     # Verify anchor is in target tab
-    anchor_tab=$(printf '%s\n' "$anchor_obj" | "$JQ" -r '.tab_id // empty')
     if [ "$anchor_tab" != "$target_tab" ]; then
       printf 'apply.sh: error: anchor %s is in tab %s, expected target tab %s\n' "$anchor" "$anchor_tab" "$target_tab" >&2
       exit 1
@@ -240,7 +237,7 @@ for ((i = 0; i < count; i++)); do
     if [ "$current_tab" = "$target_tab" ]; then
       # herdr ignores a move whose destination is the pane's current tab (reason: same_tab).
       # Park the pane in a temporary scratch tab first, then move it to the split target.
-      scratch_label="grid-scratch-$worker_group"
+      scratch_label="grid-scratch-${worker_group}-$$-$i"
       scratch_output=$("$HERDR" pane move "$pane" --new-tab --label "$scratch_label" --no-focus 2>&1) || move_rc=$?
       if [ $move_rc -ne 0 ]; then
         printf 'apply.sh: error: failed to park pane %s in scratch tab (exit %d): %s\n' "$pane" "$move_rc" "$scratch_output" >&2
