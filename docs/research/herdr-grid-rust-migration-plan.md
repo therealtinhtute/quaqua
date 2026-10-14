@@ -45,6 +45,16 @@ Move the `herdr-grid` workspace plugin from Bash/jq to a Rust CLI-driven plugin 
 - Publish clean GitHub path.
 - Ensure `--ref main` install works and native permissions stay intact.
 
+## Edge Cases To Reproduce
+- Stale worker in wrong tab.
+- Foreign pane and untagged pane.
+- Zoomed anchor or zoomed target.
+- Missing `workers` tab.
+- Stale session path after worktree rename.
+- Failed apply then unchanged snapshot.
+- Cross-owner group.
+See `docs/research/herdr-grid-rust-edgecases.md`.
+
 ## Criteria
 
 - 176 commits history stays documented.
