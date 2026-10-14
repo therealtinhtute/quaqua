@@ -35,15 +35,16 @@
 # Workers are ordered by spawn order (pane id allocation order) and their panes
 # are labelled with the worker name (the agent's registered name).
 #
-# Usage: grid-workers.sh [--tab <label>] [--only <names>] [--dry-run]
+# Usage: grid-workers.sh [--check | --repair] [--tab <label>] [--only <names>] [--dry-run]
+#   --check        block until the plugin plan has no pending moves for these workers (≤60s)
+#   --repair       imperatively arrange workers into the grid layout (default)
 #   --tab <label>  label of the 2-4 worker tab (default: workers)
 #   --only <names> comma-separated worker names: only the listed agents are
 #                  moved or renamed (e.g. a pipeline's own builder+reviewer),
 #                  but the owner's whole worker population still decides the
 #                  layout — an unlisted co-owner worker keeps the listed ones
 #                  out of the anchor tab; unlisted agents are never touched
-#   --dry-run      print the planned actions and exit without touching any pane.
-#
+#   --dry-run      print the planned actions (or pending check ops) without touching any pane.
 # Requires herdr and jq; run inside a herdr pane or set HERDR_PANE_ID.
 set -euo pipefail
 
@@ -52,7 +53,11 @@ PROG=${0##*/}
 
 usage() {
   cat <<'EOF'
-Usage: grid-workers.sh [--tab <label>] [--only <names>] [--dry-run]
+Usage: grid-workers.sh [--check | --repair] [--tab <label>] [--only <names>] [--dry-run]
+
+Modes:
+  --check        block until the plugin plan has no pending moves for these workers (≤60s)
+  --repair       imperatively arrange workers into the grid layout (default)
 
 Arrange the caller's worker panes around the anchor pane (the caller's pane):
   1 worker in total  same tab as the anchor, split right (anchor 2/5, worker 3/5)
@@ -74,6 +79,108 @@ for a replan.
                  decides the layout
   --dry-run      print the planned actions and exit without touching any pane.
 EOF
+}
+
+now_sec() {
+  local v=''
+  [[ -n ${PROMPT_WORKER_CLOCK_FILE:-} ]] \
+    && v=$(cat "$PROMPT_WORKER_CLOCK_FILE" 2>/dev/null || true)
+  if [[ $v =~ ^[0-9]+$ ]]; then printf '%s\n' "$v"; else date +%s; fi
+}
+
+nap() {
+  if [[ -n ${PROMPT_WORKER_SLEEP_CMD:-} ]]; then
+    "$PROMPT_WORKER_SLEEP_CMD" "$@" || true
+  else
+    sleep "$@"
+  fi
+}
+
+get_snapshot() {
+  if [ -n "${HERDR_STUB_SNAPSHOT:-}" ]; then
+    if [ -f "$HERDR_STUB_SNAPSHOT" ]; then
+      cat "$HERDR_STUB_SNAPSHOT"
+    else
+      printf '%s\n' "$HERDR_STUB_SNAPSHOT"
+    fi
+  elif [ -n "${HERDR_BIN_PATH:-}" ]; then
+    "$HERDR_BIN_PATH" api snapshot
+  else
+    herdr api snapshot
+  fi
+}
+
+check_grid() {
+  local label=$1 only_csv=$2 dry_run=$3
+  local owner="${QUAQUA_OWNER:-cos}"
+  local timeout=${GRID_CHECK_TIMEOUT_SEC:-60}
+  local poll=${GRID_CHECK_POLL_SEC:-0.2}
+
+  local plan_jq=${HERDR_PLUGIN_PLAN_JQ:-"$(cd "$(dirname "$0")/../.." && pwd)/plugins/herdr-grid/plan.jq"}
+  [ -f "$plan_jq" ] || die "missing plan.jq at $plan_jq"
+
+  local start_ts now_ts elapsed
+  start_ts=$(now_sec)
+
+  while :; do
+    local snap ops rem_ops
+    snap=$(get_snapshot 2>/dev/null || true)
+    if [ -n "$snap" ]; then
+      ops=$(jq -c -f "$plan_jq" <<<"$snap" 2>/dev/null || echo "[]")
+      rem_ops=$(jq -n \
+        --argjson snap "$snap" \
+        --argjson ops "$ops" \
+        --arg only_csv "$only_csv" \
+        --arg owner "$owner" \
+        --arg tab "$label" '
+        def is_group_tab($g; $l):
+          if ($l == null or $l == "" or $g == null or $g == "") then false
+          else
+            ($l == $g)
+            or ($l == "\($g)-workers")
+            or ($l == ($g | rtrimstr("-workers")))
+            or ($l == "workers")
+          end;
+        ($snap.result.snapshot // $snap.snapshot // $snap) as $root
+        | ($root.panes // []) as $panes
+        | ($root.agents // []) as $agents
+        | ($only_csv | split(",") | map(select(. != ""))) as $only
+        | [ $ops[]
+            | select(.deferred != true)
+            | . as $op
+            | ([ $panes[] | select(.pane_id == $op.pane) ] | first // null) as $p
+            | ([ $agents[] | select(.pane_id == $op.pane) ] | first // null) as $a
+            | ($a.name // $p.tokens.grid_name // $p.label // "") as $name
+            | ($p.tokens.grid_owner // "cos") as $powner
+            | ($p.tokens.grid_group // "") as $pgroup
+            | select($owner == "" or $powner == $owner)
+            | select(($only | length) == 0 or ($only | index($name) != null))
+            | select(($only | length) > 0 or $tab == "" or is_group_tab($pgroup; $tab))
+          ]' 2>/dev/null || echo "[]")
+
+      if [ "$dry_run" -eq 1 ]; then
+        if [ "$rem_ops" = "[]" ] || [ -z "$rem_ops" ]; then
+          echo "[]"
+          return 0
+        else
+          printf '%s\n' "$rem_ops"
+          return 1
+        fi
+      fi
+
+      if [ "$rem_ops" = "[]" ] || [ -z "$rem_ops" ]; then
+        return 0
+      fi
+    fi
+
+    now_ts=$(now_sec)
+    elapsed=$(( now_ts - start_ts ))
+    if [ "$elapsed" -ge "$timeout" ]; then
+      die "grid check timed out after ${timeout}s; pending ops: ${rem_ops:-unknown}"
+    fi
+
+    nap "$poll"
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -467,9 +574,15 @@ execute_plan() {
 }
 
 main() {
-  local dry_run=0 label=workers only_csv=''
+  local mode="repair" mode_set=0 dry_run=0 label=workers only_csv=''
   while [ $# -gt 0 ]; do
     case "$1" in
+      --check)
+        [ "$mode_set" -eq 0 ] || die "cannot specify both --check and --repair"
+        mode="check"; mode_set=1 ;;
+      --repair)
+        [ "$mode_set" -eq 0 ] || die "cannot specify both --check and --repair"
+        mode="repair"; mode_set=1 ;;
       --tab)
         [ $# -ge 2 ] || { usage >&2; exit 2; }
         label=$2; shift ;;
@@ -483,6 +596,11 @@ main() {
     shift
   done
   [ -n "$label" ] || { usage >&2; exit 2; }
+
+  if [ "$mode" = "check" ]; then
+    check_grid "$label" "$only_csv" "$dry_run"
+    exit 0
+  fi
 
   local state n plan g groups=()
   state=$(gather_state "$label" "$label" "$only_csv")

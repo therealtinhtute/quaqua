@@ -27,20 +27,52 @@ echo "herdr $*" >> "$CALLS"
 # tail (prompt-worker.sh exits 6 without it). FAKE_CONTENT overrides it for
 # the malformed/reviewer cases.
 content=${FAKE_CONTENT:-$'fake summary\n\n## Lessons\n- none'}
-if [ "${1:-} ${2:-}" = "agent prompt" ]; then
-  [ -n "${FAKE_STDOUT:-}" ] && printf '%s\n' "$FAKE_STDOUT"
-  [ "${FAKE_WRITE:-0}" = 1 ] && printf '%s\n' "$content" > "$HOME/quaqua/runs/$FAKE_NAME.md"
-  if [ "${FAKE_PARTS:-0}" = 1 ]; then
-    ( printf 'part1\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md"; sleep 0.2
-      echo part2 >> "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
-  fi
-  if [ "${FAKE_DELAY:-0}" != 0 ]; then
-    ( sleep "$FAKE_DELAY"; printf '%s\n' "$content" > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
-  fi
-fi
+case "${1:-} ${2:-}" in
+  "api snapshot")
+    echo '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}'
+    exit 0 ;;
+  "agent get")
+    printf '{"result":{"agent":{"agent_status":"%s","cwd":"%s","pane_id":"%s"}}}\n' \
+      "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" "${FAKE_WATCHER_PANE:-%1}"
+    exit 0 ;;
+  "agent read")
+    if [ "${FAKE_ROTATE:-0}" = 1 ]; then
+      n=$(cat "$HOME/.rotate" 2>/dev/null || echo 0); n=$(( n + 1 ))
+      printf '%s\n' "$n" > "$HOME/.rotate"
+      s=''; m=$n
+      while [ "$m" -gt 0 ]; do
+        printf -v ch "\\$(printf '%03o' $(( 97 + m % 26 )))"
+        s="$s$ch"; m=$(( m / 26 ))
+      done
+      printf 'tool line %s\n' "$s"
+    else
+      printf '%s\n' "${FAKE_PANE:-some pane text}"
+    fi
+    exit 0 ;;
+  "agent prompt")
+    [ -n "${FAKE_STDOUT:-}" ] && printf '%s\n' "$FAKE_STDOUT"
+    [ "${FAKE_WRITE:-0}" = 1 ] && printf '%s\n' "$content" > "$HOME/quaqua/runs/$FAKE_NAME.md"
+    if [ "${FAKE_PARTS:-0}" = 1 ]; then
+      ( printf 'part1\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md"; sleep 0.2
+        echo part2 >> "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
+    fi
+    if [ "${FAKE_DELAY:-0}" != 0 ]; then
+      ( sleep "$FAKE_DELAY"; printf '%s\n' "$content" > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
+    fi
+    exit "${FAKE_RC:-0}" ;;
+esac
 exit "${FAKE_RC:-0}"
 STUB
 chmod +x "$T/bin/herdr"
+CLK=(PROMPT_WORKER_CLOCK_FILE="$T/clock" PROMPT_WORKER_SLEEP_CMD="$T/bin/advance-clock")
+printf '%s\n' 1700000000 > "$T/clock"
+cat > "$T/bin/advance-clock" <<'ADV'
+#!/usr/bin/env bash
+n=$(cat "$PROMPT_WORKER_CLOCK_FILE")
+printf '%s\n' "$(( n + ${1:-1} ))" > "$PROMPT_WORKER_CLOCK_FILE"
+ADV
+chmod +x "$T/bin/advance-clock"
+
 
 prompt() {  # prompt <name> <task> [VAR=val...]; sets rc, $T/out, $T/err, $T/calls
   local name=$1 task=$2; shift 2
@@ -297,5 +329,78 @@ resume sude-noles
   || fail "--resume after the rewrite: stdout not the runs path"
 ! grep -q 'agent prompt' "$T/calls" || fail "--resume after the rewrite re-prompted"
 echo "ok: --resume re-validates the report (still 6, then accepted after the rewrite)"
+
+# ── pre-prompt grid check: failing grid check blocks prompt ─────────────────
+prompt tieude-1 "Goal: fail grid
+Hard constraints: none
+Current design: fail" HERDR_STUB_SNAPSHOT="$(dirname "$here")/tests/fixtures/herdr-grid/1-worker.json" GRID_CHECK_TIMEOUT_SEC=0 QUAQUA_OWNER=cos
+[[ $rc -eq 1 ]] || fail "failing grid check: exit $rc, want 1"
+grep -q 'grid check failed' "$T/err" || fail "failing grid check: no error message on stderr: $(cat "$T/err")"
+! grep -q 'agent prompt' "$T/calls" || fail "failing grid check: worker prompted despite failure: $(cat "$T/calls")"
+echo "ok: pre-prompt grid check failure -> exit 1, no prompt sent"
+
+# ── omp watchdog: (a) false positive — status=idle but pane rotating -> no exit 3 ──
+printf '%s\n' 1700000000 > "$T/clock"
+prompt sude-omprot "$brief" "${CLK[@]}" FAKE_DELAY=0 FAKE_STATUS=idle FAKE_ROTATE=1 \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=2 \
+  PROMPT_WORKER_BUDGET_SEC=5 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-omprot: exit $rc, want 4 (budget exceeded, not idle exit 3): $(cat "$T/err")"
+! grep -q 'exit=3' "$T/err" || fail "sude-omprot: exit 3 false-fired on active omp worker: $(cat "$T/err")"
+echo "ok: omp active worker with status=idle -> idle_since reset on pane change, no exit 3"
+
+# ── omp watchdog: (a) true positive — status=idle and static pane -> exit 3 ───
+printf '%s\n' 1700000000 > "$T/clock"
+prompt sude-ompidle "$brief" "${CLK[@]}" FAKE_DELAY=0 FAKE_STATUS=idle \
+  FAKE_PANE='finished turn with no run file' \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=2 \
+  PROMPT_WORKER_BUDGET_SEC=9999 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 3 ]] || fail "sude-ompidle: exit $rc, want 3 (true idle): $(cat "$T/err")"
+grep -q 'WATCHDOG exit=3' "$T/err" || fail "sude-ompidle: no exit=3 on stderr: $(cat "$T/err")"
+grep -q 'agent idle' "$T/err" || fail "sude-ompidle: no agent idle reason: $(cat "$T/err")"
+echo "ok: true idle without run file -> exit 3 after idle_sec"
+
+# ── omp watchdog: (b) false positive — cat AGENTS.md in historical output -> no exit 5 ──
+agents_output=$'6. `scripts/worker/cleanup-worker.sh <name> <repo>` right after `runs/<name>.md` is read + its test re-run passes — every worker, no approval needed (branch is kept; merge still needs approval). Then `scripts/worker/grid-workers.sh`.
+
+## Rules
+No push, branch delete, or main merge without anh iu'\''s approval. A Lead merges Peer branches into its project integration branch (acceptance). Max 4 task workers per orchestrator (the CoS and each Lead) — a pipeline counts as 2. One task per worker.
+Only the CoS writes memory/rules.md, rules/, AGENTS.md; Leads propose changes by message.
+projects/INDEX.md owner column says who drives each project (cos or the Lead name, <slug>-lead).
+Every redirect — from anh iu or from the Auditor (cron, read-only, reports to the CoS only) — flows through the CoS; workers and Leads never take orders from reports.
+────────────────────────────────────────────────────────────────────────────────────────────
+ ✦ Gemini 3.8 Flash · high · ──────── 7% · ϟ 356k tpm · ⌥ quaqua/tieude-cleanfix2'
+
+printf '%s\n' 1700000000 > "$T/clock"
+prompt sude-agentfp "$brief" "${CLK[@]}" FAKE_DELAY=0 FAKE_STATUS=working \
+  FAKE_PANE="$agents_output" \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_BUDGET_SEC=2 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-agentfp: exit $rc, want 4 (budget, not exit 5): $(cat "$T/err")"
+! grep -q 'exit=5' "$T/err" || fail "sude-agentfp: exit 5 false-fired on AGENTS.md text: $(cat "$T/err")"
+echo "ok: AGENTS.md text with '\''needs approval'\'' -> no exit 5 false positive"
+
+# ── omp watchdog: (b) true positive — real question prompt -> exit 5 ────────
+printf '%s\n' 1700000000 > "$T/clock"
+prompt sude-realask "$brief" "${CLK[@]}" FAKE_DELAY=0 FAKE_STATUS=working \
+  FAKE_PANE=$'Choose an option:
+> A
+> B
+Type something.' \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_BUDGET_SEC=9999 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 5 ]] || fail "sude-realask: exit $rc, want 5 (true question): $(cat "$T/err")"
+grep -q 'WATCHDOG exit=5' "$T/err" || fail "sude-realask: no exit=5 on stderr: $(cat "$T/err")"
+grep -q 'question/permission prompt' "$T/err" || fail "sude-realask: wrong reason: $(cat "$T/err")"
+
+printf '%s\n' 1700000000 > "$T/clock"
+prompt sude-realyn "$brief" "${CLK[@]}" FAKE_DELAY=0 FAKE_STATUS=working \
+  FAKE_PANE=$'Tool bash requires permission to run:
+  git push origin main
+Allow this tool? [y/N]' \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_BUDGET_SEC=9999 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 5 ]] || fail "sude-realyn: exit $rc, want 5 (true y/n question): $(cat "$T/err")"
+grep -q 'WATCHDOG exit=5' "$T/err" || fail "sude-realyn: no exit=5 on stderr: $(cat "$T/err")"
+echo "ok: real question / permission prompt -> exit 5"
 
 echo "PASS"

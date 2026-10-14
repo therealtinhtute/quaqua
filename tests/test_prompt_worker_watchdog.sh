@@ -36,6 +36,9 @@ gone_now() {  # is this agent gone this call? (FAKE_GONE always; _AFTER n> ; _AT
   return 1
 }
 case "${1:-} ${2:-}" in
+  "api snapshot")
+    echo '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}'
+    exit 0 ;;
   "agent get")
     # real herdr prints error JSON on stderr, not stdout — keep it that way so
     # the watcher's stderr capture is what is actually tested

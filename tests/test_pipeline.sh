@@ -318,21 +318,21 @@ lineno() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }
 run_pipe2 FAKE_NUMSTAT=$'200\t10\tsrc/a.c' FAKE_NAMES=$'src/a.c' \
           -- grd "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "grd run1: exit $rc, want 5: $(cat "$T/err")"
-glines | grep -qx 'grid --tab repo-workers --only sude-grd' \
+glines | grep -qx 'grid --check --tab repo-workers --only sude-grd' \
   || fail "grd run1: builder not gridded into repo-workers: $(glines)"
 [[ $(lineno 'agent start sude-grd') -lt $(lineno '^grid ') ]] \
   || fail "grd run1: grid ran before the builder spawn: $(cat "$T/calls")"
 ! glines | grep -v -- '--only' | grep -q . \
   || fail "grd run1: unfiltered grid call leaked (inner hook not skipped): $(glines)"
-echo "ok: builder spawn -> grid --tab repo-workers --only sude-grd"
+echo "ok: builder spawn -> grid --check --tab repo-workers --only sude-grd"
 
 run_pipe2 FAKE_NUMSTAT=$'200\t10\tsrc/a.c' FAKE_NAMES=$'src/a.c' \
           FAKE_REVIEW_MD=$'ok\nVerdict: clean' \
           -- --resume grd "$T/repo"
 [[ $rc -eq 0 ]] || fail "grd resume: exit $rc: $(cat "$T/err")"
-glines | grep -qx 'grid --tab repo-workers --only sude-grd,quansu-grdr1' \
+glines | grep -qx 'grid --check --tab repo-workers --only sude-grd,quansu-grdr1' \
   || fail "grd resume: reviewer spawn not gridded: $(glines)"
-[[ $(glines | grep -cx 'grid --tab repo-workers --only sude-grd') -ge 1 ]] \
+[[ $(glines | grep -cx 'grid --check --tab repo-workers --only sude-grd') -ge 1 ]] \
   || fail "grd resume: builder-only grid call after reviewer cleanup missing: $(glines)"
 ! glines | grep -v -- '--only' | grep -q . \
   || fail "grd resume: unfiltered grid call leaked: $(glines)"
@@ -341,7 +341,7 @@ echo "ok: reviewer spawn -> --only builder,reviewer; cleanup -> --only builder"
 # GRID_TAB overrides the derived <repo-basename>-workers label
 run_pipe2 GRID_TAB=my-tab -- gto "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "gto: exit $rc, want 5: $(cat "$T/err")"
-glines | grep -qx 'grid --tab my-tab --only sude-gto' \
+glines | grep -qx 'grid --check --tab my-tab --only sude-gto' \
   || fail "gto: GRID_TAB not honoured: $(glines)"
 ! glines | grep -v -- '--only' | grep -q . \
   || fail "gto: unfiltered grid call leaked: $(glines)"

@@ -30,6 +30,8 @@ PID_FILE="$LOCK_DIR/pid"
 PENDING_FILE="$STATE_DIR/pending"
 LAST_SNAPSHOT="$STATE_DIR/last_snapshot.json"
 SHADOW_LOG="$STATE_DIR/shadow.log"
+FAILED_OPS_FILE="$STATE_DIR/failed_ops.json"
+FAILED_SNAP_FILE="$STATE_DIR/failed_snap.json"
 
 EVENT_NAME="${HERDR_PLUGIN_EVENT:-}"
 EVENT_JSON="${HERDR_PLUGIN_EVENT_JSON:-}"
@@ -161,13 +163,47 @@ reconcile() {
     fi
   fi
 
+  # If a worker pane is present but not yet marked grid_ready=1 (in-flight spawn),
+  # poll briefly for grid_ready=1 so we don't miss the spawn layout.
+  local pending_ready
+  pending_ready=$(echo "$snapshot" | "$JQ" -r '
+    [ (.result.snapshot // .snapshot // .).panes[]?
+      | select((.tokens?.grid_role // "") == "worker" and (.tokens?.grid_ready == null or (.tokens?.grid_ready // "") == ""))
+    ] | length
+  ' 2>/dev/null || echo 0)
+
+  if [ "$pending_ready" -gt 0 ]; then
+    local poll_attempts=0
+    while [ "$poll_attempts" -lt 15 ]; do
+      sleep 0.2 2>/dev/null || sleep 1
+      poll_attempts=$((poll_attempts + 1))
+      local cur_snap
+      cur_snap=$("$HERDR_BIN" api snapshot 2>/dev/null || echo "")
+      if [ -n "$cur_snap" ] && [ "$cur_snap" != "{}" ]; then
+        local still_pending
+        still_pending=$(echo "$cur_snap" | "$JQ" -r '
+          [ (.result.snapshot // .snapshot // .).panes[]?
+            | select((.tokens?.grid_role // "") == "worker" and (.tokens?.grid_ready == null or (.tokens?.grid_ready // "") == ""))
+          ] | length
+        ' 2>/dev/null || echo 0)
+        snapshot="$cur_snap"
+        if [ "$still_pending" -eq 0 ]; then
+          break
+        fi
+      fi
+    done
+  fi
+
   # Save snapshot to cache atomically
   echo "$snapshot" > "$LAST_SNAPSHOT.tmp"
   mv -f "$LAST_SNAPSHOT.tmp" "$LAST_SNAPSHOT"
-
   # Run layout plan
   local ops
   ops=$(echo "$snapshot" | "$JQ" -c -f "$PLAN_JQ" 2>/dev/null || echo "[]")
+
+  if [ "$ops" = "[]" ] || [ -z "$ops" ]; then
+    rm -f "$FAILED_OPS_FILE" "$FAILED_SNAP_FILE" 2>/dev/null || true
+  fi
 
   # Determine shadow mode (default: 1)
   local shadow_mode=1
@@ -186,9 +222,118 @@ reconcile() {
   else
     # Non-shadow mode: pipe non-deferred ops to apply.sh
     local non_deferred
-    non_deferred=$(echo "$ops" | "$JQ" -c '[.[] | select(.deferred != true)]' 2>/dev/null || echo "[]")
-    if [ -x "$PLUGIN_DIR/apply.sh" ] && [ "$non_deferred" != "[]" ]; then
-      echo "$non_deferred" | "$PLUGIN_DIR/apply.sh"
+    non_deferred=$(echo "$ops" | "$JQ" -c '
+      reduce .[] as $op (
+        {deferred_panes: {}, workers_tab_deferred: false, non_deferred: []};
+        if $op.deferred == true then
+          .deferred_panes[$op.pane] = true
+          | (if $op.target.kind == "new_tab" then .workers_tab_deferred = true else . end)
+        elif (.deferred_panes[$op.target.anchor // ""] == true) or ($op.target.tab == "@workers" and .workers_tab_deferred) then
+          .deferred_panes[$op.pane] = true
+        else
+          .non_deferred += [$op]
+        end
+      ) | .non_deferred
+    ' 2>/dev/null || echo "[]")
+
+    # Failure backoff: avoid infinite retry loops when an op fails on an unchanged layout
+    local snap_sig
+    snap_sig=$(echo "$snapshot" | "$JQ" -c '
+      (.result.snapshot // .snapshot // .) as $root
+      | ( [ ($root.tabs // [])[] | {key: .tab_id, value: .label} ] | from_entries ) as $tab_labels
+      | [ ($root.panes // [])[]
+          | select((.tokens?.grid_role // "") == "worker")
+          | {
+              pane_id,
+              tab: (if ($tab_labels[.tab_id] // "" | startswith("grid-scratch-")) then "@scratch" else .tab_id end),
+              status: (if .agent_status == "working" then "working" else "idle" end),
+              tokens: {
+                role: .tokens?.grid_role,
+                owner: .tokens?.grid_owner,
+                group: .tokens?.grid_group,
+                ready: .tokens?.grid_ready
+              }
+            }
+        ] | sort_by(.pane_id)
+    ' 2>/dev/null || echo "")
+
+    if [ -f "$FAILED_OPS_FILE" ] && [ -f "$FAILED_SNAP_FILE" ]; then
+      local last_snap_sig
+      last_snap_sig=$(cat "$FAILED_SNAP_FILE" 2>/dev/null || true)
+      if [ -n "$snap_sig" ] && [ "$last_snap_sig" = "$snap_sig" ]; then
+        # Snapshot state has not changed since last failure.
+        # Filter out previously failed ops to prevent error storm / thrashing.
+        local prev_count
+        prev_count=$(echo "$non_deferred" | "$JQ" 'length' 2>/dev/null || echo 0)
+        non_deferred=$(echo "$non_deferred" | "$JQ" -c --slurpfile failed "$FAILED_OPS_FILE" '
+          ($failed[0] // []) as $f |
+          map(select(. as $op | ($f | any(.pane == $op.pane and .target == $op.target)) | not))
+        ' 2>/dev/null || echo "[]")
+        local new_count
+        new_count=$(echo "$non_deferred" | "$JQ" 'length' 2>/dev/null || echo 0)
+        if [ "$prev_count" -gt "$new_count" ]; then
+          local ts
+          ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")
+          echo "[$ts] backoff: skipping previously failed ops" >> "$SHADOW_LOG" 2>/dev/null || true
+        fi
+      else
+        rm -f "$FAILED_OPS_FILE" "$FAILED_SNAP_FILE" 2>/dev/null || true
+      fi
+    fi
+
+    if [ -x "$PLUGIN_DIR/apply.sh" ] && [ "$non_deferred" != "[]" ] && [ -n "$non_deferred" ]; then
+      local ts
+      ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")
+      echo "[$ts] apply ops: $non_deferred" >> "$SHADOW_LOG" 2>/dev/null || true
+      local apply_err="" apply_rc=0
+      apply_err=$(echo "$non_deferred" | "$PLUGIN_DIR/apply.sh" 2>&1) || apply_rc=$?
+      if [ $apply_rc -ne 0 ]; then
+        echo "[$ts] apply error: apply.sh exited with failure" >> "$SHADOW_LOG" 2>/dev/null || true
+        if [ -n "$apply_err" ]; then
+          echo "$apply_err" >> "$SHADOW_LOG" 2>/dev/null || true
+          echo "$apply_err" >&2
+        fi
+        # Record failed ops and snapshot state to back off until state changes
+        echo "$non_deferred" > "$FAILED_OPS_FILE.tmp"
+        mv -f "$FAILED_OPS_FILE.tmp" "$FAILED_OPS_FILE"
+        local post_snap_sig="$snap_sig"
+        local err_snapshot
+        err_snapshot=$("$HERDR_BIN" api snapshot 2>/dev/null || echo "{}")
+        if [ -n "$err_snapshot" ] && [ "$err_snapshot" != "{}" ]; then
+          echo "$err_snapshot" > "$LAST_SNAPSHOT.tmp"
+          mv -f "$LAST_SNAPSHOT.tmp" "$LAST_SNAPSHOT"
+          post_snap_sig=$(echo "$err_snapshot" | "$JQ" -c '
+            (.result.snapshot // .snapshot // .) as $root
+            | ( [ ($root.tabs // [])[] | {key: .tab_id, value: .label} ] | from_entries ) as $tab_labels
+            | [ ($root.panes // [])[]
+                | select((.tokens?.grid_role // "") == "worker")
+                | {
+                    pane_id,
+                    tab: (if ($tab_labels[.tab_id] // "" | startswith("grid-scratch-")) then "@scratch" else .tab_id end),
+                    status: (if .agent_status == "working" then "working" else "idle" end),
+                    tokens: {
+                      role: .tokens?.grid_role,
+                      owner: .tokens?.grid_owner,
+                      group: .tokens?.grid_group,
+                      ready: .tokens?.grid_ready
+                    }
+                  }
+              ] | sort_by(.pane_id)
+          ' 2>/dev/null || echo "$snap_sig")
+        fi
+        echo "$post_snap_sig" > "$FAILED_SNAP_FILE.tmp"
+        mv -f "$FAILED_SNAP_FILE.tmp" "$FAILED_SNAP_FILE"
+        return 1
+      fi
+      # Apply succeeded: clear failed ops record
+      rm -f "$FAILED_OPS_FILE" "$FAILED_SNAP_FILE" 2>/dev/null || true
+      # Refresh snapshot cache after apply so LAST_SNAPSHOT reflects applied moves
+      local post_snapshot
+      post_snapshot=$("$HERDR_BIN" api snapshot 2>/dev/null || echo "{}")
+      if [ -n "$post_snapshot" ] && [ "$post_snapshot" != "{}" ]; then
+        echo "$post_snapshot" > "$LAST_SNAPSHOT.tmp"
+        mv -f "$LAST_SNAPSHOT.tmp" "$LAST_SNAPSHOT"
+      fi
     fi
   fi
 }
@@ -196,7 +341,9 @@ reconcile() {
 # Main loop handling pending counter
 while true; do
   rm -f "$PENDING_FILE" 2>/dev/null || true
-  reconcile
+  if ! reconcile; then
+    exit 1
+  fi
 
   # If more events arrived during reconcile, loop again
   if [ -f "$PENDING_FILE" ]; then

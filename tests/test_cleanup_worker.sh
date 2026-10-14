@@ -25,7 +25,18 @@ EOF
 cat > "$T/bin/herdr" <<'EOF'
 #!/usr/bin/env bash
 echo "herdr $*" >> "${EVENTS:-/dev/null}"
-[[ "$1" == agent && "$2" == get ]] && echo '{"result":{"agent":{"pane_id":"pane-1"}}}'
+if [[ "$1" == agent && "$2" == get ]]; then
+  if [[ "${HERDR_GONE:-}" == 1 || " ${HERDR_GONE:-} " == *" $3 "* ]]; then
+    printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3" >&2
+    exit 1
+  fi
+  if [[ -n "${HERDR_ERR:-}" ]]; then
+    printf '{"error":{"code":"internal_error","message":"backend down"}}\n' >&2
+    exit 1
+  fi
+  echo '{"result":{"agent":{"pane_id":"pane-1"}}}'
+  exit 0
+fi
 exit 0
 EOF
 chmod +x "$T/bin/herdr"
@@ -52,15 +63,15 @@ run_cleanup() {  # run_cleanup <name> [VAR=val...]
 worktree "$T/quaqua" zz-clean
 run_cleanup zz-clean >/dev/null || fail "cleanup failed"
 [[ ! -d "$T/.wt/zz-clean" ]] || fail "worktree not removed"
-[[ "$(grep '^grid' "$T/events")" == "grid --tab quaqua-workers" ]] || fail "grid hook: not called: $(cat "$T/events")"
-[[ "$(tail -1 "$T/events")" == "grid --tab quaqua-workers" ]] || fail "grid hook: not after the pane close: $(cat "$T/events")"
-echo "ok: cleanup -> worktree removed, grid --tab <repo>-workers called after the pane is closed"
+[[ "$(grep '^grid' "$T/events")" == "grid --check --tab quaqua-workers" ]] || fail "grid hook: not called: $(cat "$T/events")"
+[[ "$(tail -1 "$T/events")" == "grid --check --tab quaqua-workers" ]] || fail "grid hook: not after the pane close: $(cat "$T/events")"
+echo "ok: cleanup -> worktree removed, grid --check --tab <repo>-workers called after the pane is closed"
 
 # ── 2. GRID_TAB selects the project's 2-4 worker tab ────────────────────────
 worktree "$T/quaqua" zz-clean
 run_cleanup zz-clean GRID_TAB=coucou-workers >/dev/null || fail "cleanup failed with GRID_TAB"
-grep -q '^grid --tab coucou-workers$' "$T/events" || fail "GRID_TAB: not passed as --tab: $(cat "$T/events")"
-echo "ok: GRID_TAB -> grid-workers.sh --tab coucou-workers"
+grep -q '^grid --check --tab coucou-workers$' "$T/events" || fail "GRID_TAB: not passed as --tab: $(cat "$T/events")"
+echo "ok: GRID_TAB -> grid-workers.sh --check --tab coucou-workers"
 
 # ── 3. GRID_SKIP=1 disables the grid hook only for pipeline.sh / tests ─────
 worktree "$T/quaqua" zz-clean
@@ -72,7 +83,7 @@ grep -q '^grid' "$T/events" && fail "pipeline GRID_SKIP=1: grid called: $(cat "$
 echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not called"
 worktree "$T/quaqua" zz-clean
 run_cleanup zz-clean GRID_SKIP=1 >/dev/null 2>"$T/err" || fail "cleanup failed with bare GRID_SKIP"
-grep -q '^grid --tab quaqua-workers$' "$T/events" || fail "bare GRID_SKIP=1: grid not called: $(cat "$T/events")"
+grep -q '^grid --check --tab quaqua-workers$' "$T/events" || fail "bare GRID_SKIP=1: grid not called: $(cat "$T/events")"
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
 echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid called"
 
@@ -90,5 +101,30 @@ echo cos > "$T/runs/zz-clean.owner"; echo quaqua-workers > "$T/runs/zz-clean.gri
 run_cleanup zz-clean QUAQUA_RUNS_DIR="$T/runs" >/dev/null || fail "cleanup failed with runs metadata"
 [[ ! -e "$T/runs/zz-clean.owner" && ! -e "$T/runs/zz-clean.grid" ]] || fail "runs metadata left: $(ls "$T/runs")"
 echo "ok: cleanup -> runs/<name>.owner and .grid removed"
+
+# ── 6. agent already gone -> worktree removed, branch kept, no pane close ───
+worktree "$T/quaqua" zz-gone
+mkdir -p "$T/runs"
+echo cos > "$T/runs/zz-gone.owner"; echo quaqua-workers > "$T/runs/zz-gone.grid"
+run_cleanup zz-gone HERDR_GONE=1 QUAQUA_RUNS_DIR="$T/runs" >/dev/null || fail "cleanup failed when agent is gone"
+[[ ! -d "$T/.wt/zz-gone" ]] || fail "gone agent: worktree not removed"
+git -C "$T/quaqua" show-ref -q "refs/heads/quaqua/zz-gone" || fail "gone agent: branch deleted"
+! grep -q 'pane close' "$T/events" || fail "gone agent: pane close called"
+[[ ! -e "$T/runs/zz-gone.owner" && ! -e "$T/runs/zz-gone.grid" ]] || fail "gone agent: runs metadata left"
+grep -q '^grid --check --tab quaqua-workers$' "$T/events" || fail "gone agent: grid hook not called"
+echo "ok: agent already gone -> worktree removed, branch kept, no pane close"
+
+# ── 7. real failure exits non-zero ──────────────────────────────────────────
+worktree "$T/quaqua" zz-dirty
+echo "dirty" > "$T/.wt/zz-dirty/dirty.txt"
+git -C "$T/.wt/zz-dirty" add dirty.txt
+run_cleanup zz-dirty >/dev/null 2>&1 && fail "expected non-zero exit on dirty worktree removal failure"
+[[ -d "$T/.wt/zz-dirty" ]] || fail "dirty worktree should not be removed"
+git -C "$T/quaqua" worktree remove -f "$T/.wt/zz-dirty" 2>/dev/null || true
+worktree "$T/quaqua" zz-herdr-err
+run_cleanup zz-herdr-err HERDR_ERR=1 >/dev/null 2>&1 && fail "expected non-zero exit on herdr backend failure"
+[[ -d "$T/.wt/zz-herdr-err" ]] || fail "worktree removed on unexpected herdr error"
+git -C "$T/quaqua" worktree remove -f "$T/.wt/zz-herdr-err" 2>/dev/null || true
+echo "ok: real failure (worktree remove or herdr error) -> non-zero exit"
 
 echo "PASS"

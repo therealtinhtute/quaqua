@@ -58,6 +58,7 @@ fi
 pane_map='{}'
 # group_tabs: { "<group_name>": "<tab_id>", "@latest": "<tab_id>" }
 group_tabs='{}'
+deferred_panes='{}'
 
 for ((i = 0; i < count; i++)); do
   op=$(printf '%s\n' "$ops" | "$JQ" -c ".[$i]")
@@ -72,6 +73,7 @@ for ((i = 0; i < count; i++)); do
   # Skip deferred ops
   deferred=$(printf '%s\n' "$op" | "$JQ" -r '.deferred // false')
   if [ "$deferred" = "true" ]; then
+    deferred_panes=$(printf '%s\n' "$deferred_panes" | "$JQ" -c --arg p "$(printf '%s\n' "$op" | "$JQ" -r '.pane // empty')" '.[$p] = true')
     continue
   fi
 
@@ -100,13 +102,17 @@ for ((i = 0; i < count; i++)); do
       exit 1
     fi
     anchor=$(printf '%s\n' "$pane_map" | "$JQ" -r --arg a "$orig_anchor" '.[$a] // $a')
+    anchor_deferred=$(printf '%s\n' "$deferred_panes" | "$JQ" -r --arg a "$orig_anchor" '.[$a] // false')
+    if [ "$anchor_deferred" = "true" ]; then
+      deferred_panes=$(printf '%s\n' "$deferred_panes" | "$JQ" -c --arg p "$orig_pane" '.[$p] = true')
+      continue
+    fi
   fi
 
   # ---------------------------------------------------------------------------
   # Verify against fresh snapshot
   # ---------------------------------------------------------------------------
-  snapshot=$("$HERDR" api snapshot)
-  if [ $? -ne 0 ] || [ -z "$snapshot" ]; then
+  if ! snapshot=$("$HERDR" api snapshot 2>&1) || [ -z "$snapshot" ]; then
     printf 'apply.sh: error: failed to fetch herdr api snapshot\n' >&2
     exit 1
   fi
@@ -153,10 +159,32 @@ for ((i = 0; i < count; i++)); do
   # Verification specific to split
   target_tab=""
   if [ "$kind" = "split" ]; then
+    # Verify anchor pane exists in snapshot first
+    anchor_obj=$(printf '%s\n' "$snapshot" | "$JQ" -c --arg a "$anchor" '
+      (.result.snapshot // .snapshot // .) as $root
+      | ($root.panes // []) as $panes
+      | [ $panes[] | select(.pane_id == $a) ] | first // empty
+    ')
+    if [ -z "$anchor_obj" ]; then
+      printf 'apply.sh: error: anchor pane %s closed or not found in snapshot\n' "$anchor" >&2
+      exit 1
+    fi
+
+    anchor_tab=$(printf '%s\n' "$anchor_obj" | "$JQ" -r '.tab_id // empty')
     tab_spec=$(printf '%s\n' "$op" | "$JQ" -r '.target.tab // empty')
     if [ "$tab_spec" = "@workers" ]; then
-      target_tab=$(printf '%s\n' "$group_tabs" | "$JQ" -r --arg g "$worker_group" '.[$g] // .["@latest"] // empty')
+      target_tab="$anchor_tab"
       if [ -z "$target_tab" ]; then
+        target_tab=$(printf '%s\n' "$group_tabs" | "$JQ" -r --arg g "$worker_group" '.[$g] // .["@latest"] // empty')
+      fi
+      if [ -n "$target_tab" ]; then
+        group_tabs=$(printf '%s\n' "$group_tabs" | "$JQ" -c --arg g "$worker_group" --arg t "$target_tab" '.[$g] = $t | .["@latest"] = $t')
+      else
+        anchor_deferred=$(printf '%s\n' "$deferred_panes" | "$JQ" -r --arg a "$orig_anchor" '.[$a] // false')
+        if [ "$anchor_deferred" = "true" ] || [ "$(printf '%s\n' "$deferred_panes" | "$JQ" 'length')" -gt 0 ]; then
+          deferred_panes=$(printf '%s\n' "$deferred_panes" | "$JQ" -c --arg p "$orig_pane" '.[$p] = true')
+          continue
+        fi
         printf 'apply.sh: error: cannot resolve @workers tab for group %s\n' "$worker_group" >&2
         exit 1
       fi
@@ -178,19 +206,7 @@ for ((i = 0; i < count; i++)); do
       exit 1
     fi
 
-    # Verify anchor pane exists in snapshot
-    anchor_obj=$(printf '%s\n' "$snapshot" | "$JQ" -c --arg a "$anchor" '
-      (.result.snapshot // .snapshot // .) as $root
-      | ($root.panes // []) as $panes
-      | [ $panes[] | select(.pane_id == $a) ] | first // empty
-    ')
-    if [ -z "$anchor_obj" ]; then
-      printf 'apply.sh: error: anchor pane %s closed or not found in snapshot\n' "$anchor" >&2
-      exit 1
-    fi
-
     # Verify anchor is in target tab
-    anchor_tab=$(printf '%s\n' "$anchor_obj" | "$JQ" -r '.tab_id // empty')
     if [ "$anchor_tab" != "$target_tab" ]; then
       printf 'apply.sh: error: anchor %s is in tab %s, expected target tab %s\n' "$anchor" "$anchor_tab" "$target_tab" >&2
       exit 1
@@ -210,6 +226,7 @@ for ((i = 0; i < count; i++)); do
   # ---------------------------------------------------------------------------
   move_output=""
   move_rc=0
+  parked_pane=""
   if [ "$kind" = "new_tab" ]; then
     label=$(printf '%s\n' "$op" | "$JQ" -r '.target.label // empty')
     if [ -z "$label" ]; then
@@ -219,7 +236,30 @@ for ((i = 0; i < count; i++)); do
   elif [ "$kind" = "split" ]; then
     direction=$(printf '%s\n' "$op" | "$JQ" -r '.target.direction // "right"')
     ratio=$(printf '%s\n' "$op" | "$JQ" -r '.target.ratio // 0.5')
-    move_output=$("$HERDR" pane move "$pane" --tab "$target_tab" --split "$direction" --target-pane "$anchor" --ratio "$ratio" --no-focus 2>&1) || move_rc=$?
+    if [ "$current_tab" = "$target_tab" ]; then
+      # herdr ignores a move whose destination is the pane's current tab (reason: same_tab).
+      # Park the pane in a temporary scratch tab first, then move it to the split target.
+      scratch_label="grid-scratch-${worker_group}-$$-$i"
+      scratch_output=$("$HERDR" pane move "$pane" --new-tab --label "$scratch_label" --no-focus 2>&1) || move_rc=$?
+      if [ $move_rc -ne 0 ]; then
+        printf 'apply.sh: error: failed to park pane %s in scratch tab (exit %d): %s\n' "$pane" "$move_rc" "$scratch_output" >&2
+        exit 1
+      fi
+      scratch_changed=$(printf '%s\n' "$scratch_output" | "$JQ" -r '(.result.move_result // .move_result // .).changed // false' 2>/dev/null || echo "false")
+      if [ "$scratch_changed" != "true" ]; then
+        scratch_reason=$(printf '%s\n' "$scratch_output" | "$JQ" -r '(.result.move_result // .move_result // .).reason // "unknown"' 2>/dev/null || echo "unknown")
+        printf 'apply.sh: error: scratch move changed nothing for %s (changed=%s, reason=%s)\n' "$pane" "$scratch_changed" "$scratch_reason" >&2
+        exit 1
+      fi
+      parked_pane=$(printf '%s\n' "$scratch_output" | "$JQ" -r '(.result.move_result // .move_result // .).pane.pane_id // empty' 2>/dev/null || true)
+      if [ -z "$parked_pane" ]; then
+        printf 'apply.sh: error: missing pane_id in scratch move result for %s\n' "$pane" >&2
+        exit 1
+      fi
+      move_output=$("$HERDR" pane move "$parked_pane" --tab "$target_tab" --split "$direction" --target-pane "$anchor" --ratio "$ratio" --no-focus 2>&1) || move_rc=$?
+    else
+      move_output=$("$HERDR" pane move "$pane" --tab "$target_tab" --split "$direction" --target-pane "$anchor" --ratio "$ratio" --no-focus 2>&1) || move_rc=$?
+    fi
   fi
 
   if [ $move_rc -ne 0 ]; then
@@ -251,11 +291,12 @@ for ((i = 0; i < count; i++)); do
   # ---------------------------------------------------------------------------
   prev_id="${prev_pane_id:-$pane}"
   pane_map=$(printf '%s\n' "$pane_map" | "$JQ" -c \
-    --arg prev "$prev_id" --arg orig "$orig_pane" --arg cur "$pane" --arg next "$new_pane_id" '
-      with_entries(if .value == $prev or .value == $orig or .value == $cur then .value = $next else . end)
+    --arg prev "$prev_id" --arg orig "$orig_pane" --arg cur "$pane" --arg next "$new_pane_id" --arg parked "${parked_pane:-}" '
+      with_entries(if .value == $prev or .value == $orig or .value == $cur or (.value != "" and .value == $parked) then .value = $next else . end)
       | .[$prev] = $next
       | .[$orig] = $next
       | .[$cur] = $next
+      | (if $parked != "" then .[$parked] = $next else . end)
   ')
 
   if [ "$kind" = "new_tab" ] && [ -n "$new_tab_id" ]; then

@@ -314,7 +314,7 @@ grid_hook() {  # grid_hook <name>[,<name>...] — returns the grid's rc; the
   [[ ${GRID_SKIP:-} == 1 && ${QUAQUA_TEST:-} == 1 ]] && return 0
   local grid; grid="$(w grid-workers.sh)"; local rc=0
   [[ -f $grid ]] || return 0
-  bash "$grid" --tab "$grid_tab" --only "$1" >&2 || rc=$?
+  bash "$grid" --check --tab "$grid_tab" --only "$1" >&2 || rc=$?
   if (( rc )); then
     echo "warning: grid-workers.sh failed (exit $rc); arrange panes manually" >&2
   fi
