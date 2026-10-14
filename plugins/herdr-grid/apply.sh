@@ -58,6 +58,7 @@ fi
 pane_map='{}'
 # group_tabs: { "<group_name>": "<tab_id>", "@latest": "<tab_id>" }
 group_tabs='{}'
+deferred_panes='{}'
 
 for ((i = 0; i < count; i++)); do
   op=$(printf '%s\n' "$ops" | "$JQ" -c ".[$i]")
@@ -72,6 +73,7 @@ for ((i = 0; i < count; i++)); do
   # Skip deferred ops
   deferred=$(printf '%s\n' "$op" | "$JQ" -r '.deferred // false')
   if [ "$deferred" = "true" ]; then
+    deferred_panes=$(printf '%s\n' "$deferred_panes" | "$JQ" -c --arg p "$(printf '%s\n' "$op" | "$JQ" -r '.pane // empty')" '.[$p] = true')
     continue
   fi
 
@@ -100,13 +102,17 @@ for ((i = 0; i < count; i++)); do
       exit 1
     fi
     anchor=$(printf '%s\n' "$pane_map" | "$JQ" -r --arg a "$orig_anchor" '.[$a] // $a')
+    anchor_deferred=$(printf '%s\n' "$deferred_panes" | "$JQ" -r --arg a "$orig_anchor" '.[$a] // false')
+    if [ "$anchor_deferred" = "true" ]; then
+      deferred_panes=$(printf '%s\n' "$deferred_panes" | "$JQ" -c --arg p "$orig_pane" '.[$p] = true')
+      continue
+    fi
   fi
 
   # ---------------------------------------------------------------------------
   # Verify against fresh snapshot
   # ---------------------------------------------------------------------------
-  snapshot=$("$HERDR" api snapshot)
-  if [ $? -ne 0 ] || [ -z "$snapshot" ]; then
+  if ! snapshot=$("$HERDR" api snapshot 2>&1) || [ -z "$snapshot" ]; then
     printf 'apply.sh: error: failed to fetch herdr api snapshot\n' >&2
     exit 1
   fi
@@ -157,6 +163,17 @@ for ((i = 0; i < count; i++)); do
     if [ "$tab_spec" = "@workers" ]; then
       target_tab=$(printf '%s\n' "$group_tabs" | "$JQ" -r --arg g "$worker_group" '.[$g] // .["@latest"] // empty')
       if [ -z "$target_tab" ]; then
+        target_tab=$(printf '%s\n' "$snapshot" | "$JQ" -r --arg g "$worker_group" '
+          (.result.snapshot // .snapshot // .) as $root
+          | [ ($root.tabs // [])[] | select((.label == $g) or (.label == "\($g)-workers") or (.label == "workers")) | .tab_id ] | first // empty
+        ')
+      fi
+      if [ -z "$target_tab" ]; then
+        anchor_deferred=$(printf '%s\n' "$deferred_panes" | "$JQ" -r --arg a "$orig_anchor" '.[$a] // false')
+        if [ "$anchor_deferred" = "true" ] || [ "$(printf '%s\n' "$deferred_panes" | "$JQ" 'length')" -gt 0 ]; then
+          deferred_panes=$(printf '%s\n' "$deferred_panes" | "$JQ" -c --arg p "$orig_pane" '.[$p] = true')
+          continue
+        fi
         printf 'apply.sh: error: cannot resolve @workers tab for group %s\n' "$worker_group" >&2
         exit 1
       fi

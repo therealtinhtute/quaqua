@@ -186,9 +186,40 @@ reconcile() {
   else
     # Non-shadow mode: pipe non-deferred ops to apply.sh
     local non_deferred
-    non_deferred=$(echo "$ops" | "$JQ" -c '[.[] | select(.deferred != true)]' 2>/dev/null || echo "[]")
+    non_deferred=$(echo "$ops" | "$JQ" -c '
+      reduce .[] as $op (
+        {deferred_panes: {}, workers_tab_deferred: false, non_deferred: []};
+        if $op.deferred == true then
+          .deferred_panes[$op.pane] = true
+          | (if $op.target.kind == "new_tab" then .workers_tab_deferred = true else . end)
+        elif (.deferred_panes[$op.target.anchor // ""] == true) or ($op.target.tab == "@workers" and .workers_tab_deferred) then
+          .deferred_panes[$op.pane] = true
+        else
+          .non_deferred += [$op]
+        end
+      ) | .non_deferred
+    ' 2>/dev/null || echo "[]")
     if [ -x "$PLUGIN_DIR/apply.sh" ] && [ "$non_deferred" != "[]" ]; then
-      echo "$non_deferred" | "$PLUGIN_DIR/apply.sh"
+      local ts
+      ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")
+      echo "[$ts] apply ops: $non_deferred" >> "$SHADOW_LOG" 2>/dev/null || true
+      if ! echo "$non_deferred" | "$PLUGIN_DIR/apply.sh"; then
+        echo "[$ts] apply error: apply.sh exited with failure" >> "$SHADOW_LOG" 2>/dev/null || true
+        local err_snapshot
+        err_snapshot=$("$HERDR_BIN" api snapshot 2>/dev/null || echo "{}")
+        if [ -n "$err_snapshot" ] && [ "$err_snapshot" != "{}" ]; then
+          echo "$err_snapshot" > "$LAST_SNAPSHOT.tmp"
+          mv -f "$LAST_SNAPSHOT.tmp" "$LAST_SNAPSHOT"
+        fi
+        return 1
+      fi
+      # Refresh snapshot cache after apply so LAST_SNAPSHOT reflects applied moves
+      local post_snapshot
+      post_snapshot=$("$HERDR_BIN" api snapshot 2>/dev/null || echo "{}")
+      if [ -n "$post_snapshot" ] && [ "$post_snapshot" != "{}" ]; then
+        echo "$post_snapshot" > "$LAST_SNAPSHOT.tmp"
+        mv -f "$LAST_SNAPSHOT.tmp" "$LAST_SNAPSHOT"
+      fi
     fi
   fi
 }
