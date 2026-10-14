@@ -246,7 +246,7 @@ observe() {
   # Fingerprint: drop status-bar rows (spinner/model/quota), collapse digits so
   # timers, % and token counters don't fake progress.
   body=$(printf '%s\n' "$pane_text" \
-    | grep -vE '^[─[:space:]│|]*$|👾|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]' \
+    | grep -vE '^[─[:space:]│|]*$|[👾✦]|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]' \
     | sed 's/[0-9][0-9]*/N/g')
   ctx=$(grep -E '^[[:space:]]*👾.*·.*[0-9]+%' <<<"$pane_text" | grep -oE '[0-9]+%' | head -1 || true)
   [[ -z $ctx ]] && ctx=$(grep -oE '[0-9]+%' <<<"$pane_text" | head -1 || true); ctx=${ctx:-'?'}
@@ -263,7 +263,11 @@ observe() {
 }
 
 question_seen() {  # fallback for agents whose question UI isn't 'blocked'
-  tail -15 <<<"$pane_text" | grep -qiE 'type something|esc to abandon|(^|[^[:alpha:]])[yYnN]/[yYnN]([^[:alpha:]]|$)|do you want to|(needs|requires?) (approval|permission)'
+  local tail_lines
+  tail_lines=$(printf '%s\n' "$pane_text" \
+    | grep -vE '^[─[:space:]│|═━┈┉┄┅┌┐└┘├┤┬┴┼╭╮╯╰]*$|[👾✦]|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]' \
+    | tail -n 3)
+  grep -qiE 'type something|esc to (abandon|cancel|undo)|(^|[^[:alpha:]])[yYnN]/[yYnN]([^[:alpha:]]|$)|do you want to|(needs|requires?) (approval|permission)' <<<"$tail_lines"
 }
 
 lead_waiting() {  # a <slug>-lead idle while ITS live pipeline runs is waiting
@@ -350,6 +354,7 @@ while ! report_ready; do
       prev_fp=$fp
       if (( fp_seen )); then
         change_ts=$now last_progress=$now
+        idle_since=0
         printf '%s\n' "$now" > "$progress_file"
       fi
       fp_seen=1
