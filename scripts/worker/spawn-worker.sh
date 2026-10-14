@@ -206,7 +206,7 @@ grid_hook() {
   local grid
   grid="$(dirname "$0")/grid-workers.sh"
   [[ -f "$grid" ]] || return 0
-  bash "$grid" --tab "$grid_tab" >&2 \
+  bash "$grid" --check --tab "$grid_tab" >&2 \
     || echo "warning: grid-workers.sh failed (exit $?); worker $name spawned, arrange panes manually" >&2
 }
 
