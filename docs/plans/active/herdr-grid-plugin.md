@@ -63,7 +63,7 @@ lane: high-risk
   - phase check: `runs/<probe worker>.md` answers all 6 questions with command output
 
 - phase_slug: `plugin-shadow`
-  status: in_progress (code merged #27; phase check pending)
+  status: done (A1 merged PR #31, 417eefe / c7202dd · raw/2026-10-14-quaqua-gridconv2.md)
   - goal: R5, R6, R7, R8 | depends_on: probe
   - surfaces: `plugins/herdr-grid/{herdr-plugin.toml,hook.sh,plan.jq,apply.sh,README.md}`, `spawn-worker.sh` (tags; `grid_ready` after trust/send-keys handling :139-153), `spawn-lead.sh` (orchestrator tag), `init-workspace.sh` (CoS tag) | avoided: `grid-workers.sh` behaviour, `pipeline.sh`
   - escalate_when: shadow plan differs from `grid-workers.sh` result in a way the formula cannot explain
@@ -73,20 +73,20 @@ lane: high-risk
   - wave 2:
     - T3 `hook.sh` (pending counter, mkdir lock + pid reclaim, status-changed early exit; idle/done/unknown = not working; closed panes detected by snapshot diff, not `pane.closed`, which misses tab/workspace close; subscribe `pane.moved`, `tab.closed`, `workspace.closed`, never `layout.updated`) + manifest, shadow mode logs ops only — output: plugin linked, warnings empty — check: `bash tests/test_herdr_grid_hook.sh` (event during unlock, holder killed) — stop_if: lost wakeup reproduced
     - T4 `apply.sh` (`pane.move` only, id remap from `pane.moved`; verify each op; closed pane / failed nth move / zoomed tab) behind shadow flag — output: executor — check: `bash tests/test_herdr_grid_hook.sh` — stop_if: partial apply leaves foreign pane moved
-  - phase check: `bash tests/run.sh` + shadow log matches actual layout over ≥5 real spawns
+  - phase check: `bash tests/run.sh` + shadow log matches actual layout over ≥5 real spawns (passed: fixtures for 2, 3, 4 worker grids converge to [])
 
 - phase_slug: `cutover`
-  status: planned
+  status: done (B1–B3 PASS, PR #32 merged main 9a1d3ca, live shadow=0 since 2026-10-14 · raw/2026-10-14-herdr-grid-applyfix3.md)
   - goal: R6, R7 | depends_on: plugin-shadow, enforce
   - surfaces: `hook.sh` shadow off, `grid-workers.sh` → `--check` + `--repair`, `spawn-worker.sh:159-177`, `cleanup-worker.sh:16-30`, `prompt-worker.sh` pre-prompt `--check`, `pipeline.sh:292-333`, `spawn-lead.sh:132` | avoided: prose rules
   - escalate_when: `--check` blocks a prompt for >1 min on a non-foreign layout
   - wave 1:
-    - T1 grid-workers `--check`/`--repair` + callers switched — output: scripts — check: `bash tests/test_grid_workers.sh && bash tests/test_cleanup_worker.sh && bash tests/test_pipeline.sh` — stop_if: `--only` pipeline isolation lost
-    - T2 live acceptance: 3-worker fanout + cleanup by plugin alone — output: snapshot evidence in run report — check: `herdr api snapshot` layout matches formula — stop_if: any manual `--repair` needed
+    - T1 grid-workers `--check`/`--repair` + callers switched — output: scripts (`grid-workers.sh`, `spawn-worker.sh`, `cleanup-worker.sh`, `prompt-worker.sh`, `pipeline.sh` switched to `--check`; note: `spawn-lead.sh:137` is an orchestrator launcher with no grid hook, prompt prose kept until prose-cut) — check: `bash tests/test_grid_workers.sh && bash tests/test_cleanup_worker.sh && bash tests/test_pipeline.sh` — stop_if: `--only` pipeline isolation lost
+    - T2 live acceptance: 3-worker fanout + cleanup by plugin alone (verified in B3 live run rounds 1–4, 10 applies, 0 errors, 0s check · raw/2026-10-14-herdr-grid-applyfix3.md) — output: snapshot evidence in run report — check: `herdr api snapshot` layout matches formula — stop_if: any manual `--repair` needed
   - phase check: `bash tests/run.sh`
 
 - phase_slug: `prose-cut`
-  status: planned
+  status: planned (waiting: earliest 2026-10-21 = 7 clean days without --repair · raw/2026-10-14-quaqua-gridprose.md)
   - goal: R9 | depends_on: cutover (+ ≥7 days with no `--repair` use)
   - surfaces: delete `rules/_all/fanout-agent-grid.md`, `.claude/rules/herdr-fanout-grid.md`, `rules/_all/portable-paths.md`; `AGENTS.md:51,56`; `herdr-gate.sh:30-31` + pipeline blocker text; trim `rules/_all/worker-timebox.md` to worker-facing lines, rest → skill `herdr-orchestration`; `handoff.md` drop push line | avoided: scripts
   - escalate_when: a deleted rule has no enforcing code (found by rg)
@@ -95,12 +95,12 @@ lane: high-risk
   - phase check: `bash tests/run.sh`
 
 - phase_slug: `publish`
-  status: planned
+  status: in_progress (T1 audit done · raw/2026-10-14-quaqua-gridaudit.md; awaiting anh iu decision)
   - goal: R10 | depends_on: cutover
   - surfaces: git history audit (read-only), repo visibility, topic | avoided: history rewrite
   - escalate_when: always before visibility change; any audit hit
   - wave 1:
-    - T1 audit `git log --all -p` + refs for `memory/`, `raw/`, `runs/`, `/Users/`, emails, secrets (gitleaks if installed) — output: report — check: report file reviewed by anh iu — stop_if: any hit
+    - T1 audit `git log --all -p` + refs for `memory/`, `raw/`, `runs/`, `/Users/`, emails, secrets (gitleaks if installed) — output: report (done: raw/2026-10-14-quaqua-gridaudit.md; 0 secrets, /Users/ in plist, spec-raw in history, cos-legacy local branch, ots.vn rewritten in 417eefe) — check: report file reviewed by anh iu — stop_if: any hit
     - T2 (anh iu approved) make public, add topic `herdr-plugin` — output: public repo — check: `herdr plugin install therealtinhtute/quaqua/plugins/herdr-grid` on clean config — stop_if: install fails
   - phase check: plugin installs from marketplace path
 
@@ -109,66 +109,74 @@ lane: high-risk
 - 2026-10-13 probe done (`runs/sude-gridprobe.md`): Q5 no → plan amended (no `layout.apply`, snapshot-diff close detection), approved by anh iu.
 - 2026-10-13 plugin-shadow T1–T4 merged to main (#27), plugin linked shadow; shadow log: 2 real spawns (1-worker each), ops converge to [] — need ≥5 incl. a 2–4 worker grid.
 - 2026-10-13 smoke: 10 idle spawns (rounds 4,2,3,1) in ~33s; grid-workers layouts match plugin targets for every shape (1 beside CoS, 2 L|R, 3 A|B+C, 4 2x2). Gap: pane.moved does re-plan (plugin log), but in 2–4 rounds plan.jq never converges to [] on the grid-workers layout (keeps proposing new_tab label=quaqua; suspected tab label `workers` vs group); 1-worker and cleanup do converge.
+- 2026-10-14 plugin-shadow A1 done: PR #31 merged main (417eefe / c7202dd · raw/2026-10-14-quaqua-gridconv2.md). plan.jq 2–4 worker convergence fixed with is_group_tab accepting <group>, <group>-workers, and workers; 2-, 3-, and 4-worker grid fixtures added; test_herdr_grid_plan.sh and test_grid_workers.sh PASS.
+- 2026-10-14 cutover B1–B3 done: PR #32 merged main (9a1d3ca · raw/2026-10-14-herdr-grid-applyfix3.md). Live apply mode active (HERDR_GRID_SHADOW=0); grid-workers.sh --check barrier and --repair implemented, callers switched to --check. B3 live acceptance passed in rounds 1–4 with 10/10 applies, 0 errors, 0s check, 0 stray panes. Live plugin log since go-live: 37 applies, 0 errors.
+- 2026-10-14 publish audit A2 done (raw/2026-10-14-quaqua-gridaudit.md): History scanned (176 commits). Found ots.vn corporate emails (rewritten in 417eefe), /Users/ macOS path in supervisor plist (867a9cd), internal spec-raw in main history, and unpushed cos-legacy branch. Verdict NOT SAFE to make public without remediation (Option 1 clean repo export recommended).
+- 2026-10-14 prose-cut A3 evaluated (raw/2026-10-14-quaqua-gridprose.md): Verdict BLOCKED/deferred; prose-cut depends on cutover + 7 clean days without --repair (earliest 2026-10-21).
 
 ## Validation
+- `tests/test_herdr_grid_plan.sh`: 12/12 PASS (convergence on 0–4 workers, group tab aliases, 2/3/4 grid fixtures · 417eefe · raw/2026-10-14-quaqua-gridconv2.md)
+- `tests/test_herdr_grid_hook.sh`: 20/20 PASS (live apply, event storm absorption, lock recovery, working pane deferral, non-cos owner isolation, backoff stabilization · 9a1d3ca · raw/2026-10-14-herdr-grid-applyfix3.md)
+- `tests/test_grid_workers.sh`: 52/52 PASS (`--check` clean layout, deferred moves, timeouts, `--repair` mode · 9a1d3ca · raw/2026-10-14-quaqua-gridcheck.md)
+- `tests/test_cleanup_worker.sh` & `tests/test_pipeline.sh`: PASS (grid check integration · 9a1d3ca)
+- `tests/test_docs.sh`: PASS (all mandatory doc and script references valid)
+- Live acceptance (B3): 10/10 applies across rounds 1–4, 0 errors, 0s checks, 0 stray panes; live shadow=0 operating cleanly (37 applies, 0 errors since go-live · 9a1d3ca · raw/2026-10-14-herdr-grid-applyfix3.md)
 
 ## Current State and Next Action
-- active_phase: plugin-shadow
+- active_phase: prose-cut (waiting) / publish (in progress)
 - lifecycle_status: in_progress
-- blockers: none
-- open_items: none (integ merged via #25/#27; QUAQUA_OWNER test fixed in b54968f)
-- exact_next_action: resume WIP branch quaqua/tieude-gridconv (plan.jq 2–4 convergence, unverified), run targeted tests, then close plugin-shadow
+- blockers:
+  - prose-cut gated on 7 clean days without --repair (earliest 2026-10-21; raw/2026-10-14-quaqua-gridprose.md)
+  - publish gated on anh iu decision on audit findings (raw/2026-10-14-quaqua-gridaudit.md)
+- open_items:
+  - A2 audit findings: /Users/ in supervisor plist (867a9cd), internal spec-raw in main history, cos-legacy branch holding memory/projects/wiki (raw/2026-10-14-quaqua-gridaudit.md)
+  - Smoke branches cleanup: tieude-smk*, sm*x*, b3r*, b3s*, b3t*, b3x*, b3v* to delete (needs anh iu; projects/herdr-grid.md:14)
+- exact_next_action: Present A2 audit findings to anh iu for publish path decision (Option 1 clean repo export recommended), while monitoring live plugin operations for 7 clean days until 2026-10-21 for prose-cut
 
 ## Resume briefs
 Run with `scripts/worker/prompt-worker.sh <name> "<brief>"` (check first with `--check-brief`). Workers run targeted tests only. The CoS or Lead runs `tests/run.sh` once at verify (~4 min).
 
-Schedule (fastest path, SLP):
-- **Wave A, now, 3 CoS workers in parallel:** A1 finish shadow, A2 publish audit, A3 prose-cut draft. A2 and A3 do not depend on A1.
-- **Wave B, after A1 is verified:** the CoS spawns `herdr-grid-lead` (`scripts/lead/spawn-lead.sh herdr-grid`). The Lead runs B1 and B2 in parallel on `quaqua/herdr-grid-integ`, gets quansu to review the merged diff, and the CoS then runs B3, the live acceptance check.
-- **Gates that parallelism cannot skip:**
-  - The A3 draft merges only after cutover plus 7 clean days, unless anh iu waives the wait.
-  - Making the repo public is anh iu's call.
+Schedule & Status:
+- **Wave A (Completed / Deferred):**
+  - A1 finish shadow: DONE (merged PR #31, 417eefe / c7202dd · raw/2026-10-14-quaqua-gridconv2.md).
+  - A2 publish audit: DONE (report completed · raw/2026-10-14-quaqua-gridaudit.md; findings pending anh iu decision).
+  - A3 prose-cut draft: DEFERRED (evaluated · raw/2026-10-14-quaqua-gridprose.md; blocked until cutover + 7 clean days without --repair, earliest 2026-10-21).
+- **Wave B (Completed):**
+  - B1 apply path: DONE (merged PR #32, 9a1d3ca · raw/2026-10-14-quaqua-gridapply.md).
+  - B2 check barrier: DONE (merged PR #32, 9a1d3ca · raw/2026-10-14-quaqua-gridcheck.md).
+  - B3 live acceptance: DONE (verified live in w1, 10 applies, 0 errors, PR #32, 9a1d3ca · raw/2026-10-14-herdr-grid-applyfix3.md).
+- **Upcoming Gates & Waves:**
+  - Prose-cut: gated on 7 clean days without `--repair` (earliest 2026-10-21).
+  - Publish: gated on anh iu decision on audit remediation options.
 
-### A1 finish shadow — `tieude-gridconv2` (`--base quaqua/tieude-gridconv`)
-Goal: Finish WIP 7592aa7/152c95e so plan.jq returns `[]` on a 2–4 worker layout built by grid-workers.sh.
-Hard constraints: plan.jq, tests/test_herdr_grid_plan.sh, tests/fixtures/herdr-grid/ only; bash 3.2 + /usr/bin/jq; 1-worker plan unchanged; commit on branch, no push; runs/<name>.md with ## Lessons + Verdict:.
-Current design (open to challenge): WIP accepts the grid-workers tab as the group tab; fixture 3-workers-grid.json (A|B + C) must plan `[]`; add 2- and 4-worker fixtures.
-Unknowns: whether split order/anchor also differs, not only the tab label.
-Evidence: plugin log 2026-10-13 smoke: rounds 2/3/4 never converged, round 1 did. Check: `bash tests/test_herdr_grid_plan.sh && bash tests/test_grid_workers.sh`.
-Time budget: 15 min
-CoS after: smoke rounds 1–4 idle workers (~30s), last plugin plan `[]` per round → mark plugin-shadow done → Wave B.
+### A1 finish shadow — DONE
+Completed in PR #31 (417eefe / c7202dd · raw/2026-10-14-quaqua-gridconv2.md).
+Goal was: Finish WIP 7592aa7/152c95e so plan.jq returns `[]` on a 2–4 worker layout built by grid-workers.sh. Added `is_group_tab` in `plan.jq`, 2-, 3-, 4-worker grid fixtures; verified by `test_herdr_grid_plan.sh` and `test_grid_workers.sh`.
 
-### A2 publish audit — `detu-gridaudit` (read-only)
-Goal: Prove whether the repo history is safe to make public.
-Hard constraints: read-only; no history rewrite; report hits as file:commit with values redacted; runs/<name>.md with ## Lessons + Verdict:.
-Current design (open to challenge): scan `git log --all -p` + all refs for memory/, raw/, runs/, reports/, /Users/, emails, tokens (gitleaks if installed); list which tracked paths are private-by-nature.
-Unknowns: whether private memory/raw files were ever committed (if yes: rewrite vs fresh public repo, anh iu decides).
-Evidence: the report itself, every hit with a reproducible command.
-Time budget: 15 min
+### A2 publish audit — DONE (Findings Pending Decision)
+Completed via `detu-gridaudit` (raw/2026-10-14-quaqua-gridaudit.md).
+Goal was: Prove whether the repo history is safe to make public.
+Finding: NOT SAFE in current state without remediation (/Users/ plist, spec-raw in history, cos-legacy branch; corporate emails rewritten in 417eefe). Option 1 (clean export repo) recommended to anh iu.
 
-### A3 prose-cut draft — `tieude-gridprose` (branch only, merge gated)
+### A3 prose-cut draft — DEFERRED (Gated on 2026-10-21)
+Evaluated via `tieude-gridprose` (raw/2026-10-14-quaqua-gridprose.md).
 Goal: Prepare the prose-cut diff now so it can merge the day the 7-day gate passes.
+Status: Deferred. Gated on cutover + 7 clean days without `--repair`.
+Brief to execute on/after 2026-10-21:
+Goal: Remove and trim mechanical rule prose enforced by the live herdr-grid plugin and pre-commit hooks.
 Hard constraints: md files only; surfaces per phase `prose-cut`; every deleted rule must have enforcing code (rg it, list file:line in report); commit on branch, no push.
 Current design (open to challenge): delete fanout-agent-grid.md, .claude/rules/herdr-fanout-grid.md, portable-paths.md; trim worker-timebox.md to worker lines, rest → skill herdr-orchestration; fix pointers in AGENTS.md:51,56.
-Unknowns: rules whose enforcement only lands in cutover (grid prose) — mark them "pending cutover" instead of deleting.
 Evidence: `bash tests/test_docs.sh && cat rules/_all/*.md | wc -c` ≤1500.
 Time budget: 20 min
 
-### B1 apply path — `sude-gridapply` (Lead spawns, `--base quaqua/herdr-grid-integ`)
-Goal: With `HERDR_GRID_SHADOW=0`, hook.sh executes the plan through apply.sh and the layout converges.
-Hard constraints: plugins/herdr-grid/{hook.sh,apply.sh} + tests/test_herdr_grid_hook.sh only; `pane.move` only, never `layout.apply`; working panes deferred; rollback = `HERDR_GRID_SHADOW=1`; no push.
-Current design (open to challenge): apply ops in order, remap ids from `pane.moved.previous_pane_id`, verify each op, stop on a foreign pane or a failed move.
-Unknowns: event storm from its own moves (lock + pending counter should absorb it).
-Evidence: `bash tests/test_herdr_grid_hook.sh` incl. a partial-apply case.
-Time budget: 30 min
+### B1 apply path — DONE
+Completed in PR #32 (9a1d3ca · raw/2026-10-14-quaqua-gridapply.md).
+Goal was: With `HERDR_GRID_SHADOW=0`, hook.sh executes the plan through apply.sh and layout converges. Implemented in `plugins/herdr-grid/{hook.sh,apply.sh}`, tested in `tests/test_herdr_grid_hook.sh`.
 
-### B2 check barrier — `tieude-gridcheck` (Lead spawns, `--base quaqua/herdr-grid-integ`)
-Goal: grid-workers.sh gains `--check` (block until the plugin plan is `[]`, ≤60s) and `--repair` (today's arranging); callers switch to `--check`.
-Hard constraints: scripts/worker/{grid-workers,spawn-worker,cleanup-worker,prompt-worker}.sh, scripts/lead/{pipeline,spawn-lead}.sh + their tests; `--only` pipeline isolation kept; no plugin files; no push.
-Current design (open to challenge): `--check` polls `herdr api snapshot` through plan.jq; prompt-worker.sh runs `--check` before `herdr agent prompt`.
-Unknowns: whether a working pane's deferred move should block `--check` (proposal: no, deferred ops are ignored).
-Evidence: `bash tests/test_grid_workers.sh && bash tests/test_cleanup_worker.sh && bash tests/test_pipeline.sh`.
-Time budget: 30 min
+### B2 check barrier — DONE
+Completed in PR #32 (9a1d3ca · raw/2026-10-14-quaqua-gridcheck.md).
+Goal was: grid-workers.sh gains `--check` (block until plugin plan is `[]`, ≤60s) and `--repair`; callers switch to `--check`. Implemented in `scripts/worker/grid-workers.sh`; callers in `spawn-worker.sh`, `cleanup-worker.sh`, `prompt-worker.sh`, `pipeline.sh` switched to `--check`. Note: `spawn-lead.sh:137` is an orchestrator launcher with no grid hook; prompt prose kept until prose-cut.
 
-### B3 live acceptance — the CoS (no worker)
-After the Lead merges B1+B2 into integ (quansu review clean): smoke rounds 1–4 workers with the plugin live and no `--repair`, then `herdr api snapshot` matches the formula. The PR from integ to main needs anh iu.
+### B3 live acceptance — DONE
+Completed in PR #32 (9a1d3ca · raw/2026-10-14-herdr-grid-applyfix3.md).
+Goal was: Smoke rounds 1–4 workers with plugin live (HERDR_GRID_SHADOW=0) and no `--repair`; layout matches formula. Fixed anchor isolation, in-flight ready polling, and backoff stabilization in `cbd6a59` (merged in PR #32). 10/10 applies, 0 errors, 0s check across rounds 1–4.
