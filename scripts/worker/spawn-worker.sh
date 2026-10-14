@@ -158,10 +158,16 @@ herdr pane report-metadata "$pane" --source herdr-grid \
   --token "grid_owner=$owner" >/dev/null || spawn_fail
 
 case $kind in
-  tieude|sude|detu)
+  sude)
+    # opencode has no append-system-prompt flag: load the rules file via the
+    # worktree's .opencode/opencode.json "instructions" (kept out of git).
+    mkdir -p "$wt/.opencode"
+    printf '{"instructions":["%s"]}\n' "$rf" > "$wt/.opencode/opencode.json"
+    echo '*' > "$wt/.opencode/.gitignore"
+    herdr agent start "$name" --kind opencode --pane "$pane" --timeout 60000 -- --model opencode-go/deepseek-v4.1-flash >/dev/null || spawn_fail ;;
+  tieude|detu)
     case $kind in
       tieude) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
-      sude) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
       detu) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
     esac
     herdr agent start "$name" --kind omp --pane "$pane" --timeout 60000 -- "${args[@]}" --append-system-prompt "$rf" >/dev/null || spawn_fail ;;
