@@ -367,4 +367,20 @@ replan_two_owners=$(echo "$applied_two_owners" | run_plan -)
 
 echo "ok: idempotence verified across all layout topologies (applying ops -> replan yields [])"
 
+# -----------------------------------------------------------------------------
+# 12. converged grid: 2, 3, and 4 tagged workers already in grid tab -> []
+# -----------------------------------------------------------------------------
+echo "test 12: 2, 3, 4 tagged workers already in grid tab -> []"
+for n in 2 3 4; do
+  fix="$fixdir/${n}-workers-grid.json"
+  out=$(run_plan "$fix")
+  [[ "$out" == "[]" ]] || fail "expected [] for ${n}-workers-grid, got: $out"
+
+  out_named=$(jq '.snapshot.tabs[1].label = "quaqua-workers"' "$fix" | run_plan -)
+  [[ "$out_named" == "[]" ]] || fail "expected [] for ${n}-workers-grid with quaqua-workers label, got: $out_named"
+
+  out_group=$(jq '.snapshot.tabs[1].label = "quaqua"' "$fix" | run_plan -)
+  [[ "$out_group" == "[]" ]] || fail "expected [] for ${n}-workers-grid with quaqua label, got: $out_group"
+done
+echo "ok: 2, 3, 4 tagged workers already in tab (workers, group-workers, group label) -> []"
 echo "ALL TESTS PASSED: test_herdr_grid_plan.sh"
