@@ -203,8 +203,14 @@ reconcile() {
       local ts
       ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")
       echo "[$ts] apply ops: $non_deferred" >> "$SHADOW_LOG" 2>/dev/null || true
-      if ! echo "$non_deferred" | "$PLUGIN_DIR/apply.sh"; then
+      local apply_err="" apply_rc=0
+      apply_err=$(echo "$non_deferred" | "$PLUGIN_DIR/apply.sh" 2>&1) || apply_rc=$?
+      if [ $apply_rc -ne 0 ]; then
         echo "[$ts] apply error: apply.sh exited with failure" >> "$SHADOW_LOG" 2>/dev/null || true
+        if [ -n "$apply_err" ]; then
+          echo "$apply_err" >> "$SHADOW_LOG" 2>/dev/null || true
+          echo "$apply_err" >&2
+        fi
         local err_snapshot
         err_snapshot=$("$HERDR_BIN" api snapshot 2>/dev/null || echo "{}")
         if [ -n "$err_snapshot" ] && [ "$err_snapshot" != "{}" ]; then
