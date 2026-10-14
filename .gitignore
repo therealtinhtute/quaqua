@@ -1,0 +1,21 @@
+.DS_Store
+# personal state — lives only in ~/quaqua
+USER.md
+MEMORY.md
+memory/
+projects/
+raw/
+runs/
+reports/
+auditor/logs/
+
+# machine-local, generated per machine
+__pycache__/
+.claude/agents/tldraw-offline.md
+.claude/skills/tldraw-offline/
+
+# per-workspace project content — never ships in the boilerplate
+rules/*/
+!rules/_all/
+docs/plans/
+spec-raw/
