@@ -123,7 +123,7 @@ echo "ok: detu -> --model google-antigravity/gemini-3.8-flash"
 # ── grid hook: a successful spawn arranges the new worker's pane ─────────────
 spawn tieude-gridhook tieude
 [[ $rc -eq 0 ]] || fail "grid hook: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/gridcalls")" == "grid --tab repo-workers" ]] || fail "grid hook: not called: $(cat "$T/gridcalls")"
+[[ "$(cat "$T/gridcalls")" == "grid --check --tab repo-workers" ]] || fail "grid hook: not called: $(cat "$T/gridcalls")"
 grep -q "worker=tieude-gridhook" "$T/out" || fail "grid hook: no success line"
 [[ "$(cat "$T/home/quaqua/runs/tieude-gridhook.grid")" == repo-workers ]] \
   || fail "grid hook: runs/<name>.grid not <repo>-workers"
@@ -131,11 +131,11 @@ echo "ok: grid hook -> called after a successful spawn, group recorded"
 
 spawn tieude-gridtab tieude GRID_TAB=coucou-workers
 [[ $rc -eq 0 ]] || fail "GRID_TAB: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/gridcalls")" == "grid --tab coucou-workers" ]] \
+[[ "$(cat "$T/gridcalls")" == "grid --check --tab coucou-workers" ]] \
   || fail "GRID_TAB: not passed as --tab: $(cat "$T/gridcalls")"
 [[ "$(cat "$T/home/quaqua/runs/tieude-gridtab.grid")" == coucou-workers ]] \
   || fail "GRID_TAB: runs/<name>.grid not coucou-workers"
-echo "ok: GRID_TAB -> grid-workers.sh --tab coucou-workers, group recorded"
+echo "ok: GRID_TAB -> grid-workers.sh --check --tab coucou-workers, group recorded"
 
 spawn tieude-gridskip tieude QUAQUA_TEST=1 GRID_SKIP=1
 [[ $rc -eq 0 ]] || fail "GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"
@@ -146,7 +146,7 @@ echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not called"
 
 spawn tieude-gridskip tieude GRID_SKIP=1
 [[ $rc -eq 0 ]] || fail "bare GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/gridcalls")" == "grid --tab repo-workers" ]] || fail "bare GRID_SKIP=1: grid not called: $(cat "$T/gridcalls")"
+[[ "$(cat "$T/gridcalls")" == "grid --check --tab repo-workers" ]] || fail "bare GRID_SKIP=1: grid not called: $(cat "$T/gridcalls")"
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
 echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid called"
 

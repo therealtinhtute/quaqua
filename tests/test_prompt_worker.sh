@@ -27,6 +27,10 @@ echo "herdr $*" >> "$CALLS"
 # tail (prompt-worker.sh exits 6 without it). FAKE_CONTENT overrides it for
 # the malformed/reviewer cases.
 content=${FAKE_CONTENT:-$'fake summary\n\n## Lessons\n- none'}
+if [ "${1:-} ${2:-}" = "api snapshot" ]; then
+  echo '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}'
+  exit 0
+fi
 if [ "${1:-} ${2:-}" = "agent prompt" ]; then
   [ -n "${FAKE_STDOUT:-}" ] && printf '%s\n' "$FAKE_STDOUT"
   [ "${FAKE_WRITE:-0}" = 1 ] && printf '%s\n' "$content" > "$HOME/quaqua/runs/$FAKE_NAME.md"
@@ -297,5 +301,14 @@ resume sude-noles
   || fail "--resume after the rewrite: stdout not the runs path"
 ! grep -q 'agent prompt' "$T/calls" || fail "--resume after the rewrite re-prompted"
 echo "ok: --resume re-validates the report (still 6, then accepted after the rewrite)"
+
+# ── pre-prompt grid check: failing grid check blocks prompt ─────────────────
+prompt tieude-1 "Goal: fail grid
+Hard constraints: none
+Current design: fail" HERDR_STUB_SNAPSHOT="$(dirname "$here")/tests/fixtures/herdr-grid/1-worker.json" GRID_CHECK_TIMEOUT_SEC=0 QUAQUA_OWNER=cos
+[[ $rc -eq 1 ]] || fail "failing grid check: exit $rc, want 1"
+grep -q 'grid check failed' "$T/err" || fail "failing grid check: no error message on stderr: $(cat "$T/err")"
+! grep -q 'agent prompt' "$T/calls" || fail "failing grid check: worker prompted despite failure: $(cat "$T/calls")"
+echo "ok: pre-prompt grid check failure -> exit 1, no prompt sent"
 
 echo "PASS"

@@ -113,6 +113,17 @@ case "$cmd" in
       list) jq -c '{result:{tabs:.tabs}}' "$state" ;;
       *) echo "stub: unhandled tab $sub" >&2; exit 2 ;;
     esac ;;
+  api)
+    sub=${1:-}; shift || true
+    case "$sub" in
+      snapshot)
+        if [ -n "${HERDR_SNAPSHOT_FILE:-}" ] && [ -f "$HERDR_SNAPSHOT_FILE" ]; then
+          cat "$HERDR_SNAPSHOT_FILE"
+        elif [ -f "$state" ]; then
+          jq -c '{snapshot: .}' "$state"
+        fi ;;
+      *) echo "stub: unhandled api $sub" >&2; exit 2 ;;
+    esac ;;
   *)
     echo "stub: unhandled command $cmd" >&2; exit 2 ;;
 esac
@@ -967,4 +978,46 @@ expect "--only: tab with a foreign-group occupant is not reused" \
 'place w1:p5 new-tab label=mono-workers
 rename w1:p5 sude-alpha' "$actual"
 
+
+# ── 47. --repair flag runs the arranger ──────────────────────────────────────
+actual=$(HERDR_STUB_STATE="$T/state.json" HERDR_PANE_ID=w1:p1 PATH="$T/bin:$PATH" \
+         "$src/worker/grid-workers.sh" --repair --tab mono-workers --only sude-alpha --dry-run)
+expect "--repair: dry-run matches normal dry-run" \
+'place w1:p5 new-tab label=mono-workers
+rename w1:p5 sude-alpha' "$actual"
+echo "ok: --repair -> runs arranger"
+
+# ── 48. --check: clean layout exits 0 immediately ────────────────────────────
+fixdir="$here/fixtures/herdr-grid"
+HERDR_STUB_SNAPSHOT="$fixdir/2-workers-grid.json" "$src/worker/grid-workers.sh" --check \
+  || fail "--check on clean layout: expected exit 0"
+echo "ok: --check on clean layout -> exit 0"
+
+# ── 49. --check: deferred moves ignored (exit 0) ─────────────────────────────
+HERDR_STUB_SNAPSHOT="$fixdir/working-deferred.json" "$src/worker/grid-workers.sh" --check --only tieude-1 \
+  || fail "--check on working deferred worker: expected exit 0"
+echo "ok: --check with only deferred moves -> exit 0"
+
+# ── 50. --check: pending ops times out (exit 1) ──────────────────────────────
+if err=$(HERDR_STUB_SNAPSHOT="$fixdir/2-workers.json" GRID_CHECK_TIMEOUT_SEC=0 \
+         "$src/worker/grid-workers.sh" --check 2>&1 >/dev/null); then
+  fail "--check on pending ops: expected timeout non-zero exit"
+fi
+[[ "$err" == *"grid check timed out"* ]] || fail "--check timeout: wrong error (got: $err)"
+echo "ok: --check on pending ops -> times out exit 1"
+
+# ── 51. --check: --only ignores ops for other workers ────────────────────────
+HERDR_STUB_SNAPSHOT="$fixdir/two-owners-same-group.json" QUAQUA_OWNER=cos \
+  "$src/worker/grid-workers.sh" --check --only non-existent \
+  || fail "--check --only non-existent: expected exit 0"
+echo "ok: --check --only ignores foreign ops -> exit 0"
+
+# ── 52. --check and --repair mutual exclusion ────────────────────────────────
+if err=$(HERDR_STUB_SNAPSHOT="$fixdir/2-workers-grid.json" \
+         "$src/worker/grid-workers.sh" --check --repair 2>&1 >/dev/null); then
+  fail "--check --repair together: expected non-zero exit"
+fi
+[[ "$err" == *"cannot specify both --check and --repair"* ]] \
+  || fail "--check --repair: wrong error (got: $err)"
+echo "ok: --check and --repair together -> error exit"
 echo "PASS"

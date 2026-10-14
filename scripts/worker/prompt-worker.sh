@@ -184,6 +184,16 @@ save_elapsed() { printf '%s\n' $(( prev_elapsed + $(now_sec) - start )) > "$elap
 
 prompt_pid=''
 if (( ! resume )); then
+  grid="$(dirname "$0")/grid-workers.sh"
+  if [[ -f "$grid" ]]; then
+    if [[ "${GRID_SKIP:-}" != 1 || ( -z "${PIPELINE_TASK:-}" && "${QUAQUA_TEST:-}" != 1 ) ]]; then
+      grid_tab=$(head -n 1 "$HOME/quaqua/runs/$name.grid" 2>/dev/null || true)
+      if ! bash "$grid" --check ${grid_tab:+--tab "$grid_tab"} --only "$name" >&2; then
+        echo "error: grid check failed for $name; arrange panes manually before prompting" >&2
+        exit 1
+      fi
+    fi
+  fi
   # Backgrounded so the watchdog below polls from second 0; the wait inside
   # herdr returning early is fine, the loop keeps waiting for the file. A
   # still-running herdr is left behind on early exits: it is a bounded local

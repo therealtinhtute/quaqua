@@ -52,15 +52,15 @@ run_cleanup() {  # run_cleanup <name> [VAR=val...]
 worktree "$T/quaqua" zz-clean
 run_cleanup zz-clean >/dev/null || fail "cleanup failed"
 [[ ! -d "$T/.wt/zz-clean" ]] || fail "worktree not removed"
-[[ "$(grep '^grid' "$T/events")" == "grid --tab quaqua-workers" ]] || fail "grid hook: not called: $(cat "$T/events")"
-[[ "$(tail -1 "$T/events")" == "grid --tab quaqua-workers" ]] || fail "grid hook: not after the pane close: $(cat "$T/events")"
-echo "ok: cleanup -> worktree removed, grid --tab <repo>-workers called after the pane is closed"
+[[ "$(grep '^grid' "$T/events")" == "grid --check --tab quaqua-workers" ]] || fail "grid hook: not called: $(cat "$T/events")"
+[[ "$(tail -1 "$T/events")" == "grid --check --tab quaqua-workers" ]] || fail "grid hook: not after the pane close: $(cat "$T/events")"
+echo "ok: cleanup -> worktree removed, grid --check --tab <repo>-workers called after the pane is closed"
 
 # ── 2. GRID_TAB selects the project's 2-4 worker tab ────────────────────────
 worktree "$T/quaqua" zz-clean
 run_cleanup zz-clean GRID_TAB=coucou-workers >/dev/null || fail "cleanup failed with GRID_TAB"
-grep -q '^grid --tab coucou-workers$' "$T/events" || fail "GRID_TAB: not passed as --tab: $(cat "$T/events")"
-echo "ok: GRID_TAB -> grid-workers.sh --tab coucou-workers"
+grep -q '^grid --check --tab coucou-workers$' "$T/events" || fail "GRID_TAB: not passed as --tab: $(cat "$T/events")"
+echo "ok: GRID_TAB -> grid-workers.sh --check --tab coucou-workers"
 
 # ── 3. GRID_SKIP=1 disables the grid hook only for pipeline.sh / tests ─────
 worktree "$T/quaqua" zz-clean
@@ -72,7 +72,7 @@ grep -q '^grid' "$T/events" && fail "pipeline GRID_SKIP=1: grid called: $(cat "$
 echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not called"
 worktree "$T/quaqua" zz-clean
 run_cleanup zz-clean GRID_SKIP=1 >/dev/null 2>"$T/err" || fail "cleanup failed with bare GRID_SKIP"
-grep -q '^grid --tab quaqua-workers$' "$T/events" || fail "bare GRID_SKIP=1: grid not called: $(cat "$T/events")"
+grep -q '^grid --check --tab quaqua-workers$' "$T/events" || fail "bare GRID_SKIP=1: grid not called: $(cat "$T/events")"
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
 echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid called"
 
