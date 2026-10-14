@@ -95,14 +95,14 @@ lane: high-risk
   - phase check: `bash tests/run.sh`
 
 - phase_slug: `publish`
-  status: in_progress (T1 audit done · raw/2026-10-14-quaqua-gridaudit.md; awaiting anh iu decision)
+  status: in_progress (T1 audit done · repo already public on GitHub; T2 topic/install via GitHub path pending)
   - goal: R10 | depends_on: cutover
   - surfaces: git history audit (read-only), repo visibility, topic | avoided: history rewrite
   - escalate_when: always before visibility change; any audit hit
   - wave 1:
     - T1 audit `git log --all -p` + refs for `memory/`, `raw/`, `runs/`, `/Users/`, emails, secrets (gitleaks if installed) — output: report (done: raw/2026-10-14-quaqua-gridaudit.md; 0 secrets, /Users/ in plist, spec-raw in history, cos-legacy local branch, ots.vn rewritten in 417eefe) — check: report file reviewed by anh iu — stop_if: any hit
-    - T2 (anh iu approved) make public, add topic `herdr-plugin` — output: public repo — check: `herdr plugin install therealtinhtute/quaqua/plugins/herdr-grid` on clean config — stop_if: install fails
-  - phase check: plugin installs from marketplace path
+    - T2 (anh iu approved) keep repo public GitHub path, add/view topic `herdr-plugin`, and verify install — output: public repo + installed plugin — check: `herdr plugin install therealtinhtute/quaqua/plugins/herdr-grid` on clean config (GitHub path, no marketplace) — stop_if: install fails
+  - phase check: plugin installs from GitHub path
 
 ## Log
 - 2026-10-13 enforce done: T1–T4 on `quaqua/herdr-grid-integ` (d657c6d, fd0d639), 14/14 tests pass (watchdog skipped, known flaky).
@@ -127,11 +127,11 @@ lane: high-risk
 - lifecycle_status: in_progress
 - blockers:
   - prose-cut gated on 7 clean days without --repair (earliest 2026-10-21; raw/2026-10-14-quaqua-gridprose.md)
-  - publish gated on anh iu decision on audit findings (raw/2026-10-14-quaqua-gridaudit.md)
+  - publish gated on T2 install/topic plus A2 remediation options (raw/2026-10-14-quaqua-gridaudit.md)
 - open_items:
   - A2 audit findings: /Users/ in supervisor plist (867a9cd), internal spec-raw in main history, cos-legacy branch holding memory/projects/wiki (raw/2026-10-14-quaqua-gridaudit.md)
   - Smoke branches cleanup: tieude-smk*, sm*x*, b3r*, b3s*, b3t*, b3x*, b3v* to delete (needs anh iu; projects/herdr-grid.md:14)
-- exact_next_action: Present A2 audit findings to anh iu for publish path decision (Option 1 clean repo export recommended), while monitoring live plugin operations for 7 clean days until 2026-10-21 for prose-cut
+- exact_next_action: Publish via GitHub-only path `therealtinhtute/quaqua/plugins/herdr-grid`, add/view topic `herdr-plugin`, and verify clean-config install; optional A2 remediation stays separate from distribution
 
 ## Resume briefs
 Run with `scripts/worker/prompt-worker.sh <name> "<brief>"` (check first with `--check-brief`). Workers run targeted tests only. The CoS or Lead runs `tests/run.sh` once at verify (~4 min).
