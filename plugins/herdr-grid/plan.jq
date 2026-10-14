@@ -173,11 +173,12 @@ def find_owner_pane($owner; $panes; $agents; $ws):
   # 4. Pane whose agent == $owner
   ([ $panes[] | select(.agent == $owner) | .pane_id ] | first)
   //
-  # 5. Pane tagged orchestrator/lead/cos in the same workspace
-  ([ $panes[] | select(.workspace_id == $ws and .tokens? and (.tokens.grid_role == "orchestrator" or .tokens.grid_role == "cos" or .tokens.grid_role == "lead")) | .pane_id ] | first)
-  //
-  # 6. Any non-candidate-worker pane in the same workspace
-  ([ $panes[] | select(.workspace_id == $ws and (is_candidate_worker | not)) | .pane_id ] | first)
+  # 5. For cos only: pane tagged orchestrator/lead/cos or first non-worker pane
+  (if $owner == "cos" then
+     ([ $panes[] | select(.workspace_id == $ws and .tokens? and (.tokens.grid_role == "orchestrator" or .tokens.grid_role == "cos" or .tokens.grid_role == "lead")) | .pane_id ] | first)
+     //
+     ([ $panes[] | select(.workspace_id == $ws and (is_candidate_worker | not)) | .pane_id ] | first)
+   else null end)
   //
   null;
 
@@ -214,7 +215,7 @@ def find_owner_pane($owner; $panes; $agents; $ws):
               | ([ $panes[] | select(.pane_id == $anchor_pane_id) ] | first // null) as $anchor_pane
               | ($anchor_pane.tab_id // null) as $anchor_tab
 
-              | if $total == 1 then
+              | if ($total == 1 and $anchor_pane != null) then
                   # ---------------------------------------------------------
                   # 1 worker total for this owner -> split beside owner
                   # ---------------------------------------------------------
@@ -268,7 +269,7 @@ def find_owner_pane($owner; $panes; $agents; $ws):
                             # Search for an existing valid workers tab for this group
                             ( [ $tabs[]
                                 | select((.workspace_id == $owner_ws or $owner_ws == "")
-                                         and .tab_id != $anchor_tab
+                                         and ($anchor_tab == null or .tab_id != $anchor_tab)
                                          and is_group_tab($group; .label))
                                 | .tab_id as $tid
                                 | [ $panes[] | select(.tab_id == $tid) ] as $occ
