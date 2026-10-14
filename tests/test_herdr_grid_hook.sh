@@ -98,8 +98,13 @@ case "${1:-}" in
         n=$(( $(cat "$moves_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$moves_file"
 
+        current_tab=$(/usr/bin/jq -r --arg p "$pane" '(.snapshot // .result.snapshot // .).panes[]? | select(.pane_id == $p) | .tab_id' "$state")
         changed=true
         reason=""
+        if [[ "$tab" != "new" && "$tab" == "$current_tab" ]]; then
+          changed=false
+          reason="same_tab"
+        fi
         if [[ -n "${HERDR_STUB_MOVE_FAIL_AT:-}" && "$n" -eq "${HERDR_STUB_MOVE_FAIL_AT}" ]]; then
           changed=false
           reason="${HERDR_STUB_MOVE_REASON:-failed}"
@@ -142,8 +147,12 @@ case "${1:-}" in
                          else . end
                        )
                      end)
+                  | ($root.panes[]? | select(.pane_id == $p) | .tab_id) as $prev_t
                   | .agents |= map(if .pane_id == $p then .pane_id = $np | .tab_id = $t else . end)
                   | .panes |= map(if .pane_id == $p then .pane_id = $np | .tab_id = $t else . end)
+                  | if ($prev_t != null and $prev_t != $t and ([.panes[] | select(.pane_id != $p and .tab_id == $prev_t)] | length == 0))
+                    then .tabs |= map(select(.tab_id != $prev_t)) | .layouts |= map(select(.tab_id != $prev_t))
+                    else . end
                 )' \
             "$state" > "$state.next" && mv "$state.next" "$state"
         fi
@@ -520,4 +529,117 @@ moves_count=$(wc -l < "$MOVES_LOG" | tr -d ' ')
 grep -q "shadow ops:" "$T/state/shadow.log" || fail "test 15: shadow.log missing 'shadow ops:'"
 unset HERDR_GRID_SHADOW
 echo "ok: HERDR_GRID_SHADOW=1 successfully rolls back to shadow mode"
+
+# ── Test 16: Freshly spawned 1-worker in same tab moves to ratio 0.4 and grid-workers.sh --check passes ──
+echo "test 16: 1-worker freshly spawned in same tab moves into place (ratio 0.4) and check passes"
+cat > "$CURRENT_SNAPSHOT" << 'EOF'
+{
+  "snapshot": {
+    "workspaces": [
+      { "workspace_id": "w1", "label": "quaqua" }
+    ],
+    "tabs": [
+      { "tab_id": "w1:t1", "workspace_id": "w1", "label": "quaqua", "pane_count": 2 }
+    ],
+    "panes": [
+      {
+        "pane_id": "w1:p1",
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "agent": "claude",
+        "agent_status": "idle",
+        "tokens": {
+          "grid_role": "orchestrator",
+          "grid_owner": "cos",
+          "grid_ready": "1"
+        }
+      },
+      {
+        "pane_id": "w1:p5",
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "agent": "pi",
+        "agent_status": "idle",
+        "tokens": {
+          "grid_role": "worker",
+          "grid_owner": "cos",
+          "grid_group": "quaqua",
+          "grid_ready": "1"
+        }
+      }
+    ],
+    "layouts": [
+      {
+        "tab_id": "w1:t1",
+        "workspace_id": "w1",
+        "area": { "x": 0, "y": 0, "width": 200, "height": 50 },
+        "panes": [
+          { "pane_id": "w1:p1", "rect": { "x": 0, "y": 0, "width": 100, "height": 50 } },
+          { "pane_id": "w1:p5", "rect": { "x": 100, "y": 0, "width": 100, "height": 50 } }
+        ]
+      }
+    ],
+    "agents": [
+      { "name": "cos", "pane_id": "w1:p1", "agent_status": "idle" },
+      { "name": "tieude-1", "pane_id": "w1:p5", "agent_status": "idle" }
+    ]
+  }
+}
+EOF
+
+export HERDR_GRID_SHADOW="0"
+export HERDR_PLUGIN_EVENT="pane.created"
+export HERDR_PLUGIN_EVENT_JSON='{"pane_id":"w1:p5"}'
+: > "$MOVES_LOG"
+rm -f "$CURRENT_SNAPSHOT.moves"
+
+bash "$T/plugin/hook.sh" >/dev/null
+
+# 2 moves: parked in scratch tab, then moved to w1:t1 beside w1:p1 ratio 0.4
+moves_count=$(wc -l < "$MOVES_LOG" | tr -d ' ')
+[[ "$moves_count" -eq 2 ]] || fail "test 16: expected 2 moves executed, got $moves_count"
+
+# Layout must have converged to []
+remaining_ops=$(/usr/bin/jq -c -f "$plan_src" "$CURRENT_SNAPSHOT")
+[[ "$remaining_ops" == "[]" ]] || fail "test 16: expected layout to converge to [], got: $remaining_ops"
+
+# Anchor rect is 80 (0.4), worker rect is 120 (0.6)
+anchor_w=$(/usr/bin/jq -r '(.snapshot // .result.snapshot // .).layouts[] | select(.tab_id == "w1:t1") | .panes[] | select(.pane_id == "w1:p1") | .rect.width' "$CURRENT_SNAPSHOT")
+worker_w=$(/usr/bin/jq -r '(.snapshot // .result.snapshot // .).layouts[] | select(.tab_id == "w1:t1") | .panes[] | select(.pane_id != "w1:p1") | .rect.width' "$CURRENT_SNAPSHOT")
+[[ "$anchor_w" -eq 80 ]] || fail "test 16: expected anchor width 80 (0.4), got $anchor_w"
+[[ "$worker_w" -eq 120 ]] || fail "test 16: expected worker width 120 (0.6), got $worker_w"
+
+# grid-workers.sh --check returns 0
+PATH="$T/bin:$PATH" HERDR_CALLS_FILE="$CALLS_FILE" HERDR_MOVES_LOG="$MOVES_LOG" HERDR_SNAPSHOT_FILE="$CURRENT_SNAPSHOT" \
+  GRID_CHECK_TIMEOUT_SEC=5 bash "$repo_root/scripts/worker/grid-workers.sh" --check --tab quaqua >/dev/null \
+  || fail "test 16: grid-workers.sh --check failed"
+
+unset HERDR_GRID_SHADOW
+echo "ok: 1-worker freshly spawned in same tab moves into place (ratio 0.4) and grid-workers.sh --check returns 0"
+
+# ── Test 17: When apply.sh fails, its stderr reaches shadow.log ───────────────
+echo "test 17: when apply.sh fails, its stderr reaches shadow.log"
+reset_stub "$fixdir/3-workers.json"
+export HERDR_GRID_SHADOW="0"
+export HERDR_STUB_MOVE_FAIL_AT=2
+export HERDR_STUB_MOVE_REASON="stderr_shadow_test_error"
+export HERDR_PLUGIN_EVENT="pane.created"
+export HERDR_PLUGIN_EVENT_JSON='{"pane_id":"w1:p7"}'
+
+rm -f "$T/state/shadow.log"
+err_out="$T/test17.err"
+if bash "$T/plugin/hook.sh" 2>"$err_out"; then
+  fail "test 17: expected hook.sh to fail on apply failure"
+fi
+
+[[ -f "$T/state/shadow.log" ]] || fail "test 17: shadow.log not created"
+grep -q "apply error: apply.sh exited with failure" "$T/state/shadow.log" \
+  || fail "test 17: shadow.log missing 'apply error: apply.sh exited with failure'"
+grep -q "stderr_shadow_test_error" "$T/state/shadow.log" \
+  || fail "test 17: shadow.log missing stderr message 'stderr_shadow_test_error'"
+grep -q "stderr_shadow_test_error" "$err_out" \
+  || fail "test 17: hook.sh stderr missing 'stderr_shadow_test_error'"
+
+unset HERDR_GRID_SHADOW HERDR_STUB_MOVE_FAIL_AT HERDR_STUB_MOVE_REASON
+echo "ok: when apply.sh fails, its stderr reaches shadow.log"
 echo "PASS"
