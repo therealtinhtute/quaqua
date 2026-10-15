@@ -71,12 +71,39 @@ if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
   fi
 fi
 
-# herdr-grid: tag the CoS orchestrator pane if running inside herdr (R5)
+# herdr-grid: tag the CoS orchestrator pane (R5) — but ONLY that pane.
+# This script is a plain bootstrap command (README 'New machine') and every
+# worker worktree of this repo ships a copy of it, so the pane that runs it is
+# NOT the CoS by default: an opencode or worker pane must never come out of
+# here carrying grid_role=orchestrator/grid_owner=cos. A wrong orchestrator
+# token is worse than a missing one — grid-workers.sh anchors the grid beside
+# the caller's pane, so the workers land beside the wrong pane and the grid
+# check times out (2026-10-14).
+#
+# So the caller's pane is checked against herdr, not assumed. The CoS is the
+# unnamed Claude Code session in this checkout (AGENTS.md '## Roles'): every
+# task worker is a registered agent named <kind>-<task> and every project Lead
+# is named <slug>-lead (spawn-worker.sh / spawn-lead.sh both tag their own new
+# pane from the id the split/create returned, they never guess), and neither
+# runs in the checkout root — a worker runs in its own worktree. Anything that
+# does not match (another harness, a named agent, another directory, a herdr
+# that cannot answer) fails closed and is left untagged.
 cos_pane=${HERDR_PANE_ID:-}
 if [[ -z $cos_pane ]] && command -v herdr >/dev/null 2>&1; then
   cos_pane=$(herdr pane current 2>/dev/null | jq -r '.result.pane.pane_id // empty' 2>/dev/null || true)
 fi
-if [[ -n $cos_pane ]] && command -v herdr >/dev/null 2>&1; then
+is_cos_pane() {  # is_cos_pane <pane>: true only for the CoS pane itself
+  local pane=$1 info agent cwd name
+  info=$(herdr pane get "$pane" 2>/dev/null) || return 1
+  agent=$(jq -r '.result.pane.agent // empty' <<<"$info" 2>/dev/null) || return 1
+  cwd=$(jq -r '.result.pane.cwd // empty' <<<"$info" 2>/dev/null) || return 1
+  [[ $agent == claude && -n $cwd ]] || return 1
+  [[ $(cd "$cwd" 2>/dev/null && pwd -P) == "$root" ]] || return 1
+  name=$(herdr agent list 2>/dev/null \
+    | jq -r --arg p "$pane" '[(.result.agents // [])[] | select(.pane_id == $p)] | first | .name // empty' 2>/dev/null) || return 1
+  [[ -z $name ]]
+}
+if [[ -n $cos_pane ]] && command -v herdr >/dev/null 2>&1 && is_cos_pane "$cos_pane"; then
   herdr pane report-metadata "$cos_pane" --source herdr-grid \
     --token grid_role=orchestrator \
     --token grid_owner=cos >/dev/null 2>&1 || true
