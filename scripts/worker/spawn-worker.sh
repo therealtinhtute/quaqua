@@ -143,7 +143,8 @@ else
 fi
 
 oc_env=()
-[[ $kind == tieude ]] && oc_env=(--env "OPENCODE_CONFIG_CONTENT={\"model\":\"opencode-go/deepseek-v4.1-flash\",\"instructions\":[\"$rf\"]}")
+[[ $kind == tieude || $kind == detu || $kind == sude ]] \
+  && oc_env=(--env "OPENCODE_CONFIG_CONTENT={\"model\":\"opencode-go/deepseek-v4.1-flash\",\"instructions\":[\"$rf\"]}")
 split=$(herdr pane split --current --direction right --no-focus --cwd "$wt" --env "QUAQUA_SANDBOX=1" --env "QUAQUA_OWNER=$owner" "${oc_env[@]}")
 pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
 
@@ -160,14 +161,8 @@ herdr pane report-metadata "$pane" --source herdr-grid \
   --token "grid_owner=$owner" >/dev/null || spawn_fail
 
 case $kind in
-  tieude)
+  tieude|detu|sude)
     herdr agent start "$name" --kind opencode --pane "$pane" --timeout 60000 -- --standalone --auto >/dev/null || spawn_fail ;;
-  sude|detu)
-    case $kind in
-      sude) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
-      detu) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
-    esac
-    herdr agent start "$name" --kind omp --pane "$pane" --timeout 60000 -- "${args[@]}" --append-system-prompt "$rf" >/dev/null || spawn_fail ;;
   ni|suhuynh|truonglao)
     case $kind in ni) effort=low ;; suhuynh) effort=medium ;; truonglao) effort=high ;; esac
     herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" --append-system-prompt-file "$rf" >/dev/null || spawn_fail ;;
