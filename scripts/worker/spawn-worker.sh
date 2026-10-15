@@ -161,7 +161,7 @@ herdr pane report-metadata "$pane" --source herdr-grid \
 
 case $kind in
   tieude)
-    herdr agent start "$name" --kind opencode --pane "$pane" --timeout 60000 -- --auto >/dev/null || spawn_fail ;;
+    herdr agent start "$name" --kind opencode --pane "$pane" --timeout 60000 -- --standalone --auto >/dev/null || spawn_fail ;;
   sude|detu)
     case $kind in
       sude) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
