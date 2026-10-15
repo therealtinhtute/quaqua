@@ -45,9 +45,31 @@ mkdir -p "$T/bin"
 cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "${CALLS:-/dev/null}"
-if [ "${1:-} ${2:-}" = "pane current" ]; then
-  [ -n "${PANE_CURRENT_ID:-}" ] && echo "{\"result\":{\"pane\":{\"pane_id\":\"$PANE_CURRENT_ID\"}}}"
-fi
+# pane metadata the caller asks for: PANE_CURRENT_ID (pane current),
+# PANE_AGENT/PANE_CWD (pane get), PA_PANE_ID/PA_AGENT/PA_AGENT_NAME (agent list;
+# no PA_AGENT_NAME = the pane holds an unregistered agent)
+case "${1:-} ${2:-}" in
+  "pane current")
+    [ -n "${PANE_CURRENT_ID:-}" ] && echo "{\"result\":{\"pane\":{\"pane_id\":\"$PANE_CURRENT_ID\"}}}"
+    ;;
+  "pane get")
+    printf '{"result":{"pane":{"pane_id":"%s","agent":"%s","cwd":"%s"}}}\n' \
+      "${3:-}" "${PANE_AGENT:-}" "${PANE_CWD:-}"
+    ;;
+  "agent list")
+    if [ -n "${PA_PANE_ID:-}" ]; then
+      if [ -n "${PA_AGENT_NAME:-}" ]; then
+        printf '{"result":{"agents":[{"pane_id":"%s","agent":"%s","name":"%s"}]}}\n' \
+          "$PA_PANE_ID" "${PA_AGENT:-claude}" "$PA_AGENT_NAME"
+      else
+        printf '{"result":{"agents":[{"pane_id":"%s","agent":"%s"}]}}\n' \
+          "$PA_PANE_ID" "${PA_AGENT:-claude}"
+      fi
+    else
+      echo '{"result":{"agents":[]}}'
+    fi
+    ;;
+esac
 exit 0
 STUB
 chmod +x "$T/bin/herdr"
@@ -224,21 +246,64 @@ cp "$src/hooks/pre-commit" "$N/scripts/hooks/pre-commit"
 [[ -f $N/memory/rules.md ]] || fail "non-repo workspace was not booted"
 echo "ok: outside a git repo -> hook wiring skipped, workspace still booted"
 
-# ── 9. herdr-grid: CoS pane tagged as orchestrator when herdr is available ──
-# with HERDR_PANE_ID set
-: > "$T/calls"
-( export CALLS="$T/calls" HERDR_PANE_ID="w1:p1"; cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
-  || fail "init-workspace.sh failed with HERDR_PANE_ID set"
-grep -qF 'herdr pane report-metadata w1:p1 --source herdr-grid --token grid_role=orchestrator --token grid_owner=cos' "$T/calls" \
-  || fail "init-workspace.sh did not tag CoS pane with HERDR_PANE_ID: $(cat "$T/calls")"
-! grep -q 'grid_ready' "$T/calls" || fail "CoS pane should not have grid_ready token"
+# ── 9. herdr-grid: ONLY the real CoS pane is tagged orchestrator (R5) ───────
+# init-workspace.sh runs from whatever pane drives the clone, and every worker
+# worktree of this repo ships a copy of it, so the caller's pane is not the CoS.
+# Regression this covers (2026-10-14): an opencode pane came out of here tagged
+# grid_role=orchestrator/grid_owner=cos while the real CoS pane had no token, so
+# grid-workers.sh anchored the grid beside the wrong pane and timed out.
+tag='herdr pane report-metadata w1:p1 --source herdr-grid --token grid_role=orchestrator --token grid_owner=cos'
+mkdir -p "$T/wt" "$T/elsewhere"   # a worker worktree and a non-checkout cwd
 
-# with HERDR_PANE_ID unset, falling back to herdr pane current
+# tag_as <pane> <agent> <cwd> <agent-name>: run init-workspace.sh as if called
+# from <pane>, which herdr reports as <agent> in <cwd>, registered as
+# <agent-name> ('' = unregistered). Prints the herdr calls the script made.
+tag_as() {
+  : > "$T/calls"
+  ( export CALLS="$T/calls" HERDR_PANE_ID="$1" PANE_CURRENT_ID="$1" \
+           PANE_AGENT="$2" PANE_CWD="$3" PA_PANE_ID="$1" PA_AGENT="$2" PA_AGENT_NAME="$4"
+    cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
+    || fail "init-workspace.sh failed for pane $1 ($2/${4:-unnamed})"
+  cat "$T/calls"
+}
+
+# the CoS itself — an unregistered Claude agent in this checkout — is tagged
+out=$(tag_as w1:p1 claude "$R" "")
+grep -qF "$tag" <<<"$out" \
+  || fail "the CoS pane (claude, unregistered, in the checkout) was not tagged: $out"
+! grep -q 'grid_ready' <<<"$out" || fail "CoS pane should not have grid_ready token"
+echo "ok: herdr-grid -> the CoS pane is tagged orchestrator/owner=cos, no grid_ready"
+
+# every other caller stays untagged: a stray orchestrator token anchors the grid
+# beside the wrong pane
+out=$(tag_as w1:p2 opencode /elsewhere sude-scan)
+! grep -q 'report-metadata' <<<"$out" || fail "opencode pane tagged as the CoS orchestrator: $out"
+out=$(tag_as w1:p3 claude "$T/wt" sude-fix)          # a claude worker in its worktree
+! grep -q 'report-metadata' <<<"$out" || fail "claude worker pane tagged as the CoS orchestrator: $out"
+out=$(tag_as w1:p4 claude "$R" acme-lead)            # a Lead: same cwd as the CoS
+! grep -q 'report-metadata' <<<"$out" || fail "Lead pane tagged as the CoS orchestrator: $out"
+out=$(tag_as w1:p5 claude "$T/elsewhere" "")         # unregistered, but not this checkout
+! grep -q 'report-metadata' <<<"$out" || fail "unregistered claude pane outside the checkout tagged as the CoS: $out"
+echo "ok: herdr-grid -> opencode / claude-worker / Lead / foreign-dir panes stay untagged"
+
+# with HERDR_PANE_ID unset the pane still comes from herdr pane current
 : > "$T/calls"
-( export CALLS="$T/calls" PANE_CURRENT_ID="w1:p1"; unset HERDR_PANE_ID; cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
+( export CALLS="$T/calls" PANE_CURRENT_ID="w1:p1" PANE_AGENT=claude PANE_CWD="$R" \
+         PA_PANE_ID="w1:p1" PA_AGENT=claude
+  unset HERDR_PANE_ID PA_AGENT_NAME
+  cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
   || fail "init-workspace.sh failed with herdr pane current"
-grep -qF 'herdr pane report-metadata w1:p1 --source herdr-grid --token grid_role=orchestrator --token grid_owner=cos' "$T/calls" \
-  || fail "init-workspace.sh did not tag CoS pane via herdr pane current: $(cat "$T/calls")"
-echo "ok: herdr-grid -> CoS pane tagged as orchestrator (role=orchestrator, owner=cos), no grid_ready"
+grep -qF "$tag" "$T/calls" \
+  || fail "the CoS pane was not tagged via herdr pane current: $(cat "$T/calls")"
+echo "ok: herdr-grid -> herdr pane current fallback still tags the CoS pane"
+
+# a herdr that cannot say who the pane is -> no tag, and no failure
+: > "$T/calls"
+( export CALLS="$T/calls" HERDR_PANE_ID="w1:p1" PANE_CURRENT_ID="w1:p1"
+  unset PANE_AGENT PANE_CWD PA_PANE_ID PA_AGENT_NAME
+  cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
+  || fail "init-workspace.sh failed when herdr reports no pane metadata"
+! grep -q 'report-metadata' "$T/calls" || fail "tagged an unidentifiable pane: $(cat "$T/calls")"
+echo "ok: herdr-grid -> an unidentifiable pane fails closed (no tag, no error)"
 
 echo "PASS"
