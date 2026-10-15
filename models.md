@@ -4,9 +4,9 @@ Pick by task shape. Name = kind passed to `spawn-worker.sh`. Update "Seen" after
 
 | name | harness · model · effort | Use for | Avoid | Seen |
 |------|--------------------------|---------|-------|------|
-| tieude | omp · google-antigravity/gemini-3.8-flash · high | **default**: every task unless anh iu names another; cheap well-specced impl, QA passes | ambiguous design | mdqa, mdchip, mdbold |
-| detu | omp · google-antigravity/gemini-3.8-flash · high | quick lookup, research, read-only scan | implementation | – |
-| sude | omp · google-antigravity/gemini-3.8-flash · high | hard multi-file impl, audits (on request) | – | mdtree, mdstatus, mdflat |
+| tieude | opencode · opencode-go/deepseek-v4.1-flash | **default**: every task unless anh iu names another; cheap well-specced impl, QA passes | ambiguous design | mdqa, mdchip, mdbold |
+| detu | opencode · opencode-go/deepseek-v4.1-flash | quick lookup, research, read-only scan | implementation | – |
+| sude | opencode · opencode-go/deepseek-v4.1-flash | hard multi-file impl, audits (on request) | – | mdtree, mdstatus, mdflat |
 | ni | claude · opus-5.5 · low | small Claude edits, quick answers | design, long work | – |
 | suhuynh | claude · opus-5.5 · medium | refactor, review of intent | long mechanical edits | mdside |
 | truonglao | claude · opus-5.5 · high | design, architecture, hard trade-offs | anything a cheaper tier can do | – |
