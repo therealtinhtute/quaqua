@@ -76,7 +76,8 @@ iso_timestamp() {  # GNU first; BSD versions without -I still emit ISO 8601
 
 harness_of() {  # worker kind -> harness family (models.md)
   case $1 in
-    tieude|detu|sude)  echo opencode ;;
+    tieude|detu)          echo opencode ;;
+    sude)                 echo omp ;;
     ni|suhuynh|truonglao) echo claude ;;
     bacdau|quansu)        echo codex ;;
     *) return 1 ;;

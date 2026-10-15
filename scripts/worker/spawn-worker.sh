@@ -142,8 +142,11 @@ else
   access=(--approve-for-me --add-dir "$HOME/quaqua/runs")
 fi
 
+# tieude/detu are opencode (models.md): the model and the worker rules file
+# ride in the pane env, since the start command carries no flags for them.
+# sude is omp and takes both as flags (see the case below) — no pane env.
 oc_env=()
-[[ $kind == tieude || $kind == detu || $kind == sude ]] \
+[[ $kind == tieude || $kind == detu ]] \
   && oc_env=(--env "OPENCODE_CONFIG_CONTENT={\"model\":\"opencode-go/deepseek-v4.1-flash\",\"instructions\":[\"$rf\"]}")
 split=$(herdr pane split --current --direction right --no-focus --cwd "$wt" --env "QUAQUA_SANDBOX=1" --env "QUAQUA_OWNER=$owner" "${oc_env[@]}")
 pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
@@ -161,8 +164,17 @@ herdr pane report-metadata "$pane" --source herdr-grid \
   --token "grid_owner=$owner" >/dev/null || spawn_fail
 
 case $kind in
-  tieude|detu|sude)
+  tieude|detu)
     herdr agent start "$name" --kind opencode --pane "$pane" --timeout 60000 -- --standalone --auto >/dev/null || spawn_fail ;;
+  sude)
+    # omp (models.md): model + thinking as flags, worker rules as an appended
+    # system prompt (--append-system-prompt takes a file path and appends its
+    # contents). --auto-approve matches the other harnesses' unattended modes
+    # (opencode --auto, claude/codex approval flags): without it a tool
+    # approval prompt would silently stall the worker.
+    herdr agent start "$name" --kind omp --pane "$pane" --timeout 60000 -- \
+      --model google-antigravity/gemini-3.8-flash --thinking high --auto-approve \
+      --append-system-prompt "$rf" >/dev/null || spawn_fail ;;
   ni|suhuynh|truonglao)
     case $kind in ni) effort=low ;; suhuynh) effort=medium ;; truonglao) effort=high ;; esac
     herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" --append-system-prompt-file "$rf" >/dev/null || spawn_fail ;;
