@@ -153,7 +153,7 @@ Kinds: builder `sude` (heavy: R2, R3, R4) or `tieude` (R0, R1, R5); reviewer `qu
 ### S1 Lead order (dependencies → parallelism; cap 4, pipeline = 2 → ≤2 pipelines at once)
 | Step | Phase | Depends on | Parallel with | Check the Lead re-runs |
 |---|---|---|---|---|
-| 1 | R0 scaffold `crates/quaqua/`, `tests/run.sh` also runs `cargo test` | S0 | – | `cargo build --release && bash tests/run.sh` |
+| 1 | R0 scaffold `crates/quaqua/`, `tests/run.sh` also runs `cargo test` | S0 | – | `cargo build --release && cargo test`; `tests/run.sh` diff adds the `cargo test` call (full suite waits for step 7) |
 | 2 | R1 `team.toml` + `config validate/get` + rule → key table (in this file) | R0 | – | `cargo test config`; every row of the table → key or "prose" |
 | 3 | R2 `grid` planner/apply/hook | R1 | R3 | differential: `quaqua grid plan` vs `plan.jq` on all 13 `tests/fixtures/herdr-grid/*.json` + 9 edge fixtures |
 | 4 | R3 `worker spawn/prompt/cleanup`, `cap` (includes the omp `sude` branch) | R1 | R2 | `test_spawn_worker`, `test_prompt_worker*`, `test_cleanup_worker`, `test_worker_cap` against shims in the Peer worktree |
