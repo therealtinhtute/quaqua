@@ -259,8 +259,8 @@ else
     || die "brief must carry the Goal:/Hard constraints:/Current design headers (rules/_all/brief.md)"
   bh=$(harness_of "$builder")  || die "unknown builder kind: $builder"
   rh=$(harness_of "$reviewer") || die "unknown reviewer kind: $reviewer"
-  case $reviewer in bacdau|quansu) ;; *)
-    die "reviewer must be a codex kind (bacdau|quansu) — spawn-worker.sh --review refuses $reviewer" ;; esac
+  case $reviewer in bacdau|quansu|ni|suhuynh|truonglao) ;; *)
+    die "reviewer must be a codex kind (bacdau|quansu) or a claude kind (ni|suhuynh|truonglao) — spawn-worker.sh --review refuses $reviewer" ;; esac
   [[ $bh != "$rh" ]] \
     || die "builder and reviewer must be different harnesses (models.md): $builder/$reviewer are both $bh"
   case $review in auto|always|skip) ;; *) die "--review must be auto|always|skip" ;; esac
