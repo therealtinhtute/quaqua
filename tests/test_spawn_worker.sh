@@ -113,12 +113,37 @@ expect_accept tieude-spawnguard tieude "17 chars"
 expect_accept tieude-abcdefghijklm tieude "20 chars (boundary)"
 expect_accept sude-leadname sude "leadname suffix is not -lead"
 
-# ── detu model must be provider-qualified (bare name -> venice, no key) ────
-spawn detu-lookup detu
-[[ $rc -eq 0 ]] || fail "detu: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- '--kind omp .*--model google-antigravity/gemini-3.8-flash' "$T/calls" \
-  || fail "detu: model not google-antigravity/gemini-3.8-flash: $(cat "$T/calls")"
-echo "ok: detu -> --model google-antigravity/gemini-3.8-flash"
+# ── tieude/detu: opencode with deepseek-v4.1-flash in the pane env ──────────
+# (models.md) — the model travels in OPENCODE_CONFIG_CONTENT; no omp/gemini
+for k in tieude detu; do
+  spawn "$k-model" "$k"
+  [[ $rc -eq 0 ]] || fail "$k: exit $rc, want 0: $(cat "$T/err")"
+  grep -qF -- '--kind opencode' "$T/calls" \
+    || fail "$k: not an opencode start: $(cat "$T/calls")"
+  grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":"opencode-go/deepseek-v4.1-flash","instructions":' "$T/calls" \
+    || fail "$k: model not in OPENCODE_CONFIG_CONTENT: $(cat "$T/calls")"
+  ! grep -q -- '--kind omp' "$T/calls" || fail "$k: still spawned as omp: $(cat "$T/calls")"
+  ! grep -q 'gemini' "$T/calls" || fail "$k: gemini flag leaked: $(cat "$T/calls")"
+  echo "ok: $k -> --kind opencode, model opencode-go/deepseek-v4.1-flash"
+done
+
+# ── sude: omp with antigravity gemini-3.8-flash high, worker rules appended ──
+# (models.md) — omp takes the model, the thinking level and the rules file on
+# the command line (--append-system-prompt reads a file path), not in pane env
+spawn sude-impl sude
+[[ $rc -eq 0 ]] || fail "sude: exit $rc, want 0: $(cat "$T/err")"
+grep -qF -- '--kind omp' "$T/calls" || fail "sude: not an omp start: $(cat "$T/calls")"
+grep -qF -- '--model google-antigravity/gemini-3.8-flash' "$T/calls" \
+  || fail "sude: model not google-antigravity/gemini-3.8-flash: $(cat "$T/calls")"
+grep -qF -- '--thinking high' "$T/calls" || fail "sude: thinking level not high: $(cat "$T/calls")"
+grep -qF -- '--auto-approve' "$T/calls" \
+  || fail "sude: no --auto-approve (unattended spawn): $(cat "$T/calls")"
+grep -qF -- "--append-system-prompt $T/home/quaqua/runs/sude-impl.rules.md" "$T/calls" \
+  || fail "sude: worker rules file not appended: $(cat "$T/calls")"
+! grep -q -- '--kind opencode' "$T/calls" || fail "sude: still an opencode start: $(cat "$T/calls")"
+! grep -q 'OPENCODE_CONFIG_CONTENT' "$T/calls" \
+  || fail "sude: opencode pane env leaked into an omp start: $(cat "$T/calls")"
+echo "ok: sude -> --kind omp, google-antigravity/gemini-3.8-flash high, rules appended"
 
 # ── grid hook: a successful spawn arranges the new worker's pane ─────────────
 spawn tieude-gridhook tieude
@@ -150,14 +175,14 @@ spawn tieude-gridskip tieude GRID_SKIP=1
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
 echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid called"
 
-# ── omp + project MCP config: no startup dialog wait needed ─────────────────
+# ── opencode + project MCP config: no startup dialog wait needed ─────────────
 spawn tieude-mcp tieude MKMCP=1
 [[ $rc -eq 0 ]] || fail "mcp: exit $rc, want 0: $(cat "$T/err")"
 ! grep -q 'wait-output' "$T/calls" || fail "mcp: dialog wait ran"
-echo "ok: omp with project MCP config -> no dialog wait"
+echo "ok: opencode with project MCP config -> no dialog wait"
 spawn tieude-nomcp tieude
 ! grep -q 'wait-output' "$T/calls" || fail "no .mcp.json: dialog wait ran"
-echo "ok: omp without project MCP config -> no dialog wait"
+echo "ok: opencode without project MCP config -> no dialog wait"
 
 spawn tieude-gridfail tieude GRID_FAKE_RC=1
 [[ $rc -eq 0 ]] || fail "grid failure: exit $rc, want 0: $(cat "$T/err")"
