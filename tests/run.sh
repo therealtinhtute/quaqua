@@ -17,8 +17,10 @@ pass=0 fail=0 failed=()
 
 # Rust crate gate: the `quaqua` binary takes over from the shell engine, so its
 # crate tests are part of this runner. Booked under cargo_test so the failure
-# tail below picks up "$T/cargo_test.log" like any other case.
-if (cd "$here/.." && cargo test) >"$T/cargo_test.log" 2>&1; then
+# tail below picks up "$T/cargo_test.log" like any other case. --locked keeps the
+# committed Cargo.lock authoritative: a manifest/lock drift fails here instead of
+# being silently repaired by cargo.
+if (cd "$here/.." && cargo test --locked) >"$T/cargo_test.log" 2>&1; then
   printf 'PASS %s\n' cargo_test
   pass=$((pass + 1))
 else
