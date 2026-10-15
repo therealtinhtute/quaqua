@@ -142,7 +142,9 @@ else
   access=(--approve-for-me --add-dir "$HOME/quaqua/runs")
 fi
 
-split=$(herdr pane split --current --direction right --no-focus --cwd "$wt" --env "QUAQUA_SANDBOX=1" --env "QUAQUA_OWNER=$owner")
+oc_env=()
+[[ $kind == tieude ]] && oc_env=(--env "OPENCODE_CONFIG_CONTENT={\"model\":\"opencode-go/deepseek-v4.1-flash\",\"instructions\":[\"$rf\"]}")
+split=$(herdr pane split --current --direction right --no-focus --cwd "$wt" --env "QUAQUA_SANDBOX=1" --env "QUAQUA_OWNER=$owner" "${oc_env[@]}")
 pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
 
 # if the agent never becomes ready, roll back only what this attempt created
@@ -158,9 +160,10 @@ herdr pane report-metadata "$pane" --source herdr-grid \
   --token "grid_owner=$owner" >/dev/null || spawn_fail
 
 case $kind in
-  tieude|sude|detu)
+  tieude)
+    herdr agent start "$name" --kind opencode --pane "$pane" --timeout 60000 -- --auto >/dev/null || spawn_fail ;;
+  sude|detu)
     case $kind in
-      tieude) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
       sude) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
       detu) args=(--model google-antigravity/gemini-3.8-flash --thinking high) ;;
     esac
