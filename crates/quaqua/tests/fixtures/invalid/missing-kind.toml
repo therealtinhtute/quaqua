@@ -4,17 +4,17 @@ schema_version = 2
 
 [strategy]
 default_kind = "tieude"
-default_reviewer = ["quansu"]
+default_reviewer = ["suhuynh"]
 
 [kinds.tieude]
 harness = "opencode"
 model = "opencode-go/deepseek-v4.1-flash"
 can_review = false
 
-[kinds.quansu]
-harness = "codex"
-model = "gpt-6.1-sol"
-effort = "high"
+[kinds.suhuynh]
+harness = "claude"
+model = "opus-5.5"
+effort = "medium"
 can_review = true
 
 [merge]

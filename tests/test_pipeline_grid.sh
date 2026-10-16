@@ -142,14 +142,14 @@ rc=0
 glines=$(grep '^grid ' "$CALLS")
 echo "$glines" | grep -q 'grid --check --tab myrepo-workers --only sude-pgrid' \
   || fail "builder grid missing: $glines"
-echo "$glines" | grep -q 'grid --check --tab myrepo-workers --only sude-pgrid,quansu-pgridr1' \
+echo "$glines" | grep -q 'grid --check --tab myrepo-workers --only sude-pgrid,suhuynh-pgridr1' \
   || fail "reviewer+builder grid missing: $glines"
 
 # ── 2. Pure grid planner verification: 2 workers placed in workers tab, not anchor tab ─
 # Snapshot representing:
 # Tab t1: Lead pane (%lead) tagged role=orchestrator, owner=mylead-lead
 # Tab t2: label="myrepo-workers" (workers tab)
-# Panes %w1 (sude-pgrid) and %w2 (quansu-pgridr1) tagged role=worker, owner=mylead-lead, group=myrepo
+# Panes %w1 (sude-pgrid) and %w2 (suhuynh-pgridr1) tagged role=worker, owner=mylead-lead, group=myrepo
 cat > "$T/snapshot.json" << 'JSON'
 {
   "tabs": [

@@ -20,8 +20,8 @@ bin="$root/target/debug/quaqua"
 echo "ok: repo team.toml validates"
 
 rev=$("$bin" config get strategy.default_reviewer --file "$root/team.toml")
-[[ "$rev" == $'quansu\nsuhuynh' ]] || fail "default_reviewer = '$rev'"
-echo "ok: config get strategy.default_reviewer = quansu,suhuynh"
+[[ "$rev" == "suhuynh" ]] || fail "default_reviewer = '$rev'"
+echo "ok: config get strategy.default_reviewer = suhuynh"
 
 cap=$("$bin" config get limits.max_workers_per_orchestrator --file "$root/team.toml")
 [[ "$cap" == "4" ]] || fail "cap = '$cap'"
@@ -29,8 +29,8 @@ zcap=$("$bin" config get limits.max_workers_per_orchestrator --file "$root/team.
 [[ "$zcap" == "3" ]] || fail "zimage cap = '$zcap'"
 echo "ok: cap 4, zimage override 3"
 
-[[ "$("$bin" config get kinds.quansu.can_review --file "$root/team.toml")" == "true" ]] \
-  || fail "quansu.can_review"
+[[ "$("$bin" config get kinds.suhuynh.can_review --file "$root/team.toml")" == "true" ]] \
+  || fail "suhuynh.can_review"
 [[ "$("$bin" config get kinds.tieude.can_review --file "$root/team.toml")" == "false" ]] \
   || fail "tieude.can_review"
 echo "ok: kinds.<k>.can_review"

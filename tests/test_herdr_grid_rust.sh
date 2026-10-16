@@ -91,7 +91,7 @@ rc=0
 out=$(HERDR_STUB_SNAPSHOT="$fixdir/only-custom-tab.json" QUAQUA_OWNER=cos "$QUAQUA_BIN" grid reconcile \
   --check \
   --tab mono-workers \
-  --only sude-isl,quansu-islr1 \
+  --only sude-isl,suhuynh-islr1 \
   --dry-run \
   --team-file "$repo_root/team.toml" 2>&1) || rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -105,7 +105,7 @@ err=""
 if err=$(HERDR_STUB_SNAPSHOT="$fixdir/only-custom-tab.json" QUAQUA_OWNER=cos "$QUAQUA_BIN" grid reconcile \
   --check \
   --tab quaqua-workers \
-  --only sude-isl,quansu-islr1 \
+  --only sude-isl,suhuynh-islr1 \
   --dry-run \
   --team-file "$repo_root/team.toml" 2>&1); then
   fail "--check --only with matching --tab quaqua-workers expected error (pending ops), got success: $err"

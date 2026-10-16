@@ -80,7 +80,7 @@ case "${1:-} ${2:-}" in
     fi
     exit "${FAKE_RC:-0}" ;;
   "pane split") printf '{"result":{"pane":{"pane_id":"%%1"}}}\n' ;;
-  "pane wait-output") exit 1 ;;   # no codex trust dialog
+  "pane wait-output") exit 1 ;;   # no first-run trust dialog
 esac
 exit 0
 STUB
@@ -143,9 +143,9 @@ reject "missing --brief"      'brief.*required' -- isl "$T/repo"
 reject "missing brief file"   'brief.*required' -- isl "$T/repo" --brief "$T/nope.md"
 printf 'just prose\n' > "$T/nobrief.md"
 reject "brief lacks headers"  'Goal.*Hard constraints.*Current design' -- isl "$T/repo" --brief "$T/nobrief.md"
-reject "same harness"         'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder bacdau --reviewer quansu
-reject "same kind"            'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder quansu --reviewer quansu
-reject "non-codex reviewer"   'codex kind' -- isl "$T/repo" --brief "$T/brief.md" --builder ni --reviewer sude
+reject "same harness"         'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder suhuynh --reviewer truonglao
+reject "same kind"            'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder suhuynh --reviewer suhuynh
+reject "non-claude reviewer"  'claude kind' -- isl "$T/repo" --brief "$T/brief.md" --builder ni --reviewer sude
 reject "bad --review"         'auto|always|skip' -- isl "$T/repo" --brief "$T/brief.md" --review maybe
 reject "--rounds 0"           'integer >= 1' -- isl "$T/repo" --brief "$T/brief.md" --rounds 0
 reject "builder name >20"     'exceeds 20 chars' -- abcdefghijklmnopq "$T/repo" --brief "$T/brief.md"
@@ -164,7 +164,7 @@ grep -q 'plan-ready' "$T/err" || fail "isl run1: no plan-ready notice"
 grep -q '"task":"isl".*"status":"plan-ready"' "$tele" \
   || fail "isl run1: no plan-ready telemetry line: $(cat "$tele")"
 grep -q 'agent start sude-isl --kind omp' "$T/calls" || fail "isl run1: builder not spawned as omp: $(cat "$T/calls")"
-! grep -q 'quaqua-review' "$T/calls" || fail "isl run1: builder spawned read-only"
+! grep -q -- '--permission-mode dontAsk' "$T/calls" || fail "isl run1: builder spawned read-only"
 echo "ok: plan-ready -> exit 5, plan parked, state + telemetry written"
 
 # refuse a second fresh start on the same slug (state exists)
@@ -180,11 +180,11 @@ run_pipe FAKE_NUMSTAT=$'200\t10\tsrc/a.c\n5\t0\tsrc/b.c' \
 [[ $rc -eq 0 ]] || fail "isl resume: exit $rc, want 0: $(cat "$T/err")"
 grep -q 'status=clean' "$T/out" || fail "isl resume: stdout not clean: $(cat "$T/out")"
 # reviewer spawned on the exact committed tip the gate measured (F2), read-only
-grep -q 'worktree add -b quaqua/quansu-islr1 .* c0ffee1deadbeef' "$T/calls" \
+grep -q 'worktree add -b quaqua/suhuynh-islr1 .* c0ffee1deadbeef' "$T/calls" \
   || fail "isl resume: reviewer not based on the gated head sha: $(cat "$T/calls")"
 grep -q 'commit c0ffee1' "$runsdir/pipeline-isl.md" \
   || fail "isl resume: committed head sha not recorded in the report"
-grep -q 'quaqua-review' "$T/calls" \
+grep -q -- '--permission-mode dontAsk' "$T/calls" \
   || fail "isl resume: reviewer spawned without read-only profile"
 ! grep -q 'agent start sude-isl' "$T/calls" || fail "isl resume: builder respawned"
 grep -q 'pane close' "$T/calls" || fail "isl resume: reviewer pane not closed"
@@ -203,7 +203,7 @@ run_pipe FAKE_NUMSTAT=$'20\t5\tAGENTS.md' FAKE_NAMES='AGENTS.md' \
          -- --resume skp "$T/repo"
 [[ $rc -eq 0 ]] || fail "skp resume: exit $rc"
 grep -q 'status=clean' "$T/out" || fail "skp: stdout not clean"
-! grep -q 'quansu' "$T/calls" || fail "skp: reviewer spawned despite skip: $(cat "$T/calls")"
+! grep -q 'suhuynh' "$T/calls" || fail "skp: reviewer spawned despite skip: $(cat "$T/calls")"
 tail -1 "$tele" | grep -q '"review":"skip"' || fail "skp: telemetry review!=skip"
 tail -1 "$tele" | grep -q '"rounds":0' || fail "skp: telemetry rounds!=0"
 echo "ok: auto gate under threshold -> review skipped, no reviewer spawned"
@@ -220,7 +220,7 @@ grep -q 'status=blocked' "$T/out" || fail "rex: stdout not blocked: $(cat "$T/ou
 grep -q 'rounds exhausted' "$runsdir/pipeline-rex.md" || fail "rex: no exhausted note"
 grep -q '## Blockers' "$runsdir/pipeline-rex.md" || fail "rex: no Blockers section"
 [[ -f $runsdir/sude-rex.fix1.md ]] || fail "rex: fix1 file not parked"
-[[ $(grep -c 'agent start quansu-rexr' "$T/calls") -eq 2 ]] \
+[[ $(grep -c 'agent start suhuynh-rexr' "$T/calls") -eq 2 ]] \
   || fail "rex: want 2 fresh reviewers: $(grep 'agent start' "$T/calls")"
 tail -1 "$tele" | grep -q '"status":"blocked"' || fail "rex: telemetry not blocked"
 tail -1 "$tele" | grep -q '"rounds":2' || fail "rex: telemetry rounds!=2"
@@ -240,7 +240,7 @@ run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
 grep -q 'status=disputed' "$T/out" || fail "dsp: stdout not disputed: $(cat "$T/out")"
 grep -q '## Challenge' "$runsdir/pipeline-dsp.md" || fail "dsp: challenge not copied"
 grep -q 'finding 1 is wrong' "$runsdir/pipeline-dsp.md" || fail "dsp: challenge text missing"
-! grep -q 'agent start quansu-dspr2' "$T/calls" || fail "dsp: round-2 reviewer spawned"
+! grep -q 'agent start suhuynh-dspr2' "$T/calls" || fail "dsp: round-2 reviewer spawned"
 tail -1 "$tele" | grep -q '"status":"disputed"' || fail "dsp: telemetry not disputed"
 echo "ok: disputed -> Challenge copied into pipeline file, stops before round 2"
 
@@ -330,7 +330,7 @@ run_pipe2 FAKE_NUMSTAT=$'200\t10\tsrc/a.c' FAKE_NAMES=$'src/a.c' \
           FAKE_REVIEW_MD=$'ok\nVerdict: clean' \
           -- --resume grd "$T/repo"
 [[ $rc -eq 0 ]] || fail "grd resume: exit $rc: $(cat "$T/err")"
-glines | grep -qx 'grid --check --tab repo-workers --only sude-grd,quansu-grdr1' \
+glines | grep -qx 'grid --check --tab repo-workers --only sude-grd,suhuynh-grdr1' \
   || fail "grd resume: reviewer spawn not gridded: $(glines)"
 [[ $(glines | grep -cx 'grid --check --tab repo-workers --only sude-grd') -ge 1 ]] \
   || fail "grd resume: builder-only grid call after reviewer cleanup missing: $(glines)"
@@ -366,11 +366,11 @@ echo "ok: grid failure pauses pre-prompt; resume after arranging continues"
 run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
           -- gfr "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "gfr run1: exit $rc, want 5"
-run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' GRID_FAIL_ON=quansu \
+run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' GRID_FAIL_ON=suhuynh \
           FAKE_REVIEW_MD=$'ok\nVerdict: clean' -- --resume gfr "$T/repo"
 [[ $rc -eq 5 ]] || fail "gfr: exit $rc, want 5 (reviewer-grid pause): $(cat "$T/err")"
 grep -q 'grid-workers.sh failed' "$T/err" || fail "gfr: no grid warning"
-! grep -q 'agent prompt quansu-gfr' "$T/calls" \
+! grep -q 'agent prompt suhuynh-gfr' "$T/calls" \
   || fail "gfr: reviewer prompted despite grid failure: $(cat "$T/calls")"
 run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
           FAKE_REVIEW_MD=$'ok\nVerdict: clean' -- --resume gfr "$T/repo"
@@ -407,7 +407,7 @@ run_pipe FAKE_BUILD_MD=$'Outcome: BLOCKED\n\n## Blockers\n- implementation incom
 [[ $rc -eq 0 ]] || fail "pb2 resume: exit $rc"
 grep -q 'status=blocked' "$T/out" || fail "pb2: stdout not blocked: $(cat "$T/out")"
 grep -q 'implementation incomplete' "$runsdir/pipeline-pb2.md" || fail "pb2: evidence not copied"
-! grep -q 'agent start quansu' "$T/calls" || fail "pb2: reviewer spawned on a blocked build"
+! grep -q 'agent start suhuynh' "$T/calls" || fail "pb2: reviewer spawned on a blocked build"
 tail -1 "$tele" | grep -q '"status":"blocked"' || fail "pb2: telemetry not blocked"
 echo "ok: Outcome: BLOCKED build (nudge-style report) -> blocked, no reviewer"
 
@@ -420,7 +420,7 @@ run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
 [[ $rc -eq 0 ]] || fail "pb3 resume: exit $rc"
 grep -q 'status=blocked' "$T/out" || fail "pb3: stdout not blocked: $(cat "$T/out")"
 grep -q 'fix needs schema access' "$runsdir/pipeline-pb3.md" || fail "pb3: evidence not copied"
-! grep -q 'agent start quansu-pb3r2' "$T/calls" || fail "pb3: round-2 reviewer spawned"
+! grep -q 'agent start suhuynh-pb3r2' "$T/calls" || fail "pb3: round-2 reviewer spawned"
 echo "ok: blocked fix report -> blocked, no next review round"
 
 # F1b (regression): a '## Blockers' section whose body only says none is
@@ -446,7 +446,7 @@ run_pipe FAKE_HEAD_SHA=ba5eba5 -- --resume ncm "$T/repo"   # tip == base: no com
 [[ $rc -eq 3 ]] || fail "ncm: exit $rc, want 3 (resumable block): $(cat "$T/out")"
 grep -q 'status=blocked' "$T/out" || fail "ncm: not blocked"
 grep -q 'produced no commits' "$runsdir/pipeline-ncm.md" || fail "ncm: no-commit reason missing"
-! grep -q 'agent start quansu' "$T/calls" || fail "ncm: reviewer spawned with no commits"
+! grep -q 'agent start suhuynh' "$T/calls" || fail "ncm: reviewer spawned with no commits"
 echo "ok: zero commits after build -> resumable blocked, no reviewer"
 
 run_pipe -- nop "$T/repo" --brief "$T/brief.md"
@@ -456,7 +456,7 @@ run_pipe FAKE_HEAD_SHA=ba5eba5 FAKE_BUILD_MD=$'looked carefully\nOutcome: no cha
 [[ $rc -eq 0 ]] || fail "nop: exit $rc"
 grep -q 'status=clean' "$T/out" || fail "nop: declared no-op did not finish clean: $(cat "$T/out")"
 grep -q 'no commits.*no changes' "$runsdir/pipeline-nop.md" || fail "nop: no-op note missing"
-! grep -q 'agent start quansu' "$T/calls" || fail "nop: reviewer spawned for a no-op"
+! grep -q 'agent start suhuynh' "$T/calls" || fail "nop: reviewer spawned for a no-op"
 echo "ok: explicit 'Outcome: no changes' -> clean, review skipped"
 
 run_pipe -- dty "$T/repo" --brief "$T/brief.md"
@@ -466,7 +466,7 @@ run_pipe FAKE_PORCELAIN=$' M src/a.c\n?? newfile.c' -- --resume dty "$T/repo"
 grep -q 'status=blocked' "$T/out" || fail "dty: not blocked"
 grep -q 'uncommitted/untracked' "$runsdir/pipeline-dty.md" || fail "dty: dirty evidence not logged"
 grep -q '?? newfile.c' "$runsdir/pipeline-dty.md" || fail "dty: untracked file not listed"
-! grep -q 'agent start quansu' "$T/calls" || fail "dty: reviewer spawned on dirty tree"
+! grep -q 'agent start suhuynh' "$T/calls" || fail "dty: reviewer spawned on dirty tree"
 echo "ok: dirty worktree (tracked + untracked) -> blocked, evidence logged"
 
 run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' -- fxc "$T/repo" --brief "$T/brief.md"
@@ -673,13 +673,15 @@ grep -q 'agent start sude-rsf' "$T/calls" || fail "rsf: agent start not retried"
 grep -q 'reusing it' "$T/err" || fail "rsf: worktree reuse note missing: $(cat "$T/err")"
 echo "ok: failed agent start -> resume reuses worktree, retries start, prompts plan"
 
-# F4 (reviewer): wait-ready failure keeps the worktree; --resume retries
+# F4 (reviewer): agent-start failure keeps the worktree; --resume retries
+# (the codex trust/idle wait is gone with the codex kinds, so the reviewer's
+# startup failure is observed at `agent start`)
 run_rg -- rsv "$T/rg/repo" --brief "$T/brief.md" --review always
 [[ $rc -eq 5 ]] || fail "rsv run1: exit $rc, want 5"
-run_rg FAKE_DO_COMMIT="$T/rg/.wt/sude-rsv" FAKE_FAIL_WAIT=quansu-rsvr1 \
+run_rg FAKE_DO_COMMIT="$T/rg/.wt/sude-rsv" FAKE_FAIL_START=suhuynh-rsvr1 \
        -- --resume rsv "$T/rg/repo"
 [[ $rc -eq 3 ]] || fail "rsv: exit $rc, want 3 (reviewer spawn failure): $(cat "$T/err")"
-[[ -d $T/rg/.wt/quansu-rsvr1 ]] || fail "rsv: reviewer worktree should survive"
+[[ -d $T/rg/.wt/suhuynh-rsvr1 ]] || fail "rsv: reviewer worktree should survive"
 run_rg FAKE_REVIEW_MD=$'ok\nVerdict: clean' -- --resume rsv "$T/rg/repo"
 [[ $rc -eq 0 ]] || fail "rsv resume: exit $rc: $(cat "$T/err")"
 grep -q 'status=clean' "$T/out" || fail "rsv: not clean after reviewer retry"

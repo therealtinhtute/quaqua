@@ -97,11 +97,11 @@ echo "ok: dual-lens with 1 live worker still accounts for 2 slots (1 live + 1 re
 cat > "$AGENT_JSON" << 'JSON'
 {"result":{"agents":[
   {"name":"truonglao-tf1dl1","agent_status":"working"},
-  {"name":"quansu-tf1dl2","agent_status":"working"}
+  {"name":"suhuynh-tf1dl2","agent_status":"working"}
 ]}}
 JSON
-echo "cos" > "$runs_dir/quansu-tf1dl2.owner"
-echo "tf1" > "$runs_dir/quansu-tf1dl2.taskforce"
+echo "cos" > "$runs_dir/suhuynh-tf1dl2.owner"
+echo "tf1" > "$runs_dir/suhuynh-tf1dl2.taskforce"
 
 cap_out=$("$bin" cap cos)
 [[ "$cap_out" -eq 2 ]] || fail "dual-lens with 2 workers: want 2 slots, got $cap_out"
@@ -111,7 +111,7 @@ echo "ok: dual-lens with 2 live workers accounts for 2 slots"
 cat > "$AGENT_JSON" << 'JSON'
 {"result":{"agents":[
   {"name":"truonglao-tf1dl1","agent_status":"working"},
-  {"name":"quansu-tf1dl2","agent_status":"working"},
+  {"name":"suhuynh-tf1dl2","agent_status":"working"},
   {"name":"sude-w1","agent_status":"working"},
   {"name":"sude-w2","agent_status":"working"}
 ]}}

@@ -276,7 +276,7 @@ actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
 worker detu-beta pi w1:p6 w1:t1 idle
-worker sude-gamma codex w1:p7 w1:t1 idle
+worker sude-gamma claude w1:p7 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,50,50 w1:p5=50,0,50,50 w1:p6=100,0,50,50 w1:p7=150,0,50,50
 EOF
@@ -294,7 +294,7 @@ actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
 worker detu-beta pi w1:p6 w1:t1 idle
-worker sude-gamma codex w1:p7 w1:t1 idle
+worker sude-gamma claude w1:p7 w1:t1 idle
 worker ni-delta pi w1:p8 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,50,50 w1:p5=50,0,50,50 w1:p6=100,0,50,50 w1:p7=150,0,50,50 w1:p8=0,0,25,25
@@ -315,7 +315,7 @@ actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
 worker detu-beta pi w1:p6 w1:t3 idle
-worker sude-gamma codex w1:p7 w1:t3 idle
+worker sude-gamma claude w1:p7 w1:t3 idle
 tab w1:t1 1
 tab w1:t3 workers
 layout w1:t1 200x50 w1:p1=0,0,200,50
@@ -332,7 +332,7 @@ actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
 worker detu-beta pi w1:p6 w1:t3 idle
-worker sude-gamma codex w1:p7 w1:t3 idle
+worker sude-gamma claude w1:p7 w1:t3 idle
 worker ni-delta pi w1:p8 w1:t1 idle
 tab w1:t1 1
 tab w1:t3 workers
@@ -351,7 +351,7 @@ rename w1:p8 ni-delta' "$actual"
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
-worker sude-gamma codex w1:p7 w1:t3 idle
+worker sude-gamma claude w1:p7 w1:t3 idle
 tab w1:t1 1
 tab w1:t3 workers
 layout w1:t1 200x50 w1:p1=0,0,200,50
@@ -371,7 +371,7 @@ actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
 worker detu-beta pi w1:p6 w1:t3 idle
-worker sude-gamma codex w1:p7 w1:t1 idle
+worker sude-gamma claude w1:p7 w1:t1 idle
 tab w1:t1 1
 tab w1:t3 workers
 layout w1:t1 200x50 w1:p1=0,0,200,50 w1:p7=0,0,200,50
@@ -433,7 +433,7 @@ rename w1:p5 tieude-alpha' "$actual"
 actual=$(plan <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
-worker truonglao-other codex w2:p9 w2:t1 idle w2
+worker truonglao-other claude w2:p9 w2:t1 idle w2
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,80,50 w1:p5=80,0,120,50
 EOF
@@ -445,7 +445,7 @@ spec=$(cat <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
 worker detu-beta pi w1:p6 w1:t1 idle
-worker sude-gamma codex w1:p7 w1:t1 idle
+worker sude-gamma claude w1:p7 w1:t1 idle
 worker ni-delta pi w1:p8 w1:t1 idle
 worker suhuynh-eps pi w1:p9 w1:t1 idle
 tab w1:t1 1
@@ -491,7 +491,7 @@ rename w1:p6 detu-beta' "$actual"
 actual=$(run <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
-worker sude-gamma codex w1:p7 w1:t3 idle
+worker sude-gamma claude w1:p7 w1:t3 idle
 tab w1:t1 1
 tab w1:t3 workers
 layout w1:t1 200x50 w1:p1=0,0,200,50
@@ -647,7 +647,7 @@ rename w1:p6 detu-beta' "$actual"
 actual=$(HERDR_STUB_MOVE_SUFFIX=X run <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
-worker sude-gamma codex w1:p7 w1:t3 idle
+worker sude-gamma claude w1:p7 w1:t3 idle
 tab w1:t1 1
 tab w1:t3 workers
 layout w1:t1 200x50 w1:p1=0,0,200,50
@@ -683,7 +683,7 @@ anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t1 idle
 worker detu-beta pi w1:p6 w1:t1 idle
 worker truonglao-other1 pi w1:p7 w1:t4 idle
-worker bacdau-other2 pi w1:p8 w1:t4 idle
+worker ni-other2 pi w1:p8 w1:t4 idle
 tab w1:t1 1
 tab w1:t4 coucou-workers
 layout w1:t1 200x50 w1:p1=0,0,100,50 w1:p5=100,0,50,50 w1:p6=150,0,50,50
@@ -741,7 +741,7 @@ rename w1:p6 detu-beta' "$actual"
 actual=$(run coucou-workers <<'EOF'
 anchor w1:p1
 worker tieude-alpha pi w1:p5 w1:t3 idle
-worker sude-gamma codex w1:p7 w1:t3 idle
+worker sude-gamma claude w1:p7 w1:t3 idle
 tab w1:t1 1
 tab w1:t3 coucou-workers
 layout w1:t1 200x50 w1:p1=0,0,200,50
@@ -827,10 +827,10 @@ expect "--only: unlisted worker untouched, listed worker -> project tab" \
 rename w1:p5 sude-isl' "$actual"
 
 # ── 38. --only: two listed workers -> the project tab, the third stays ───────
-actual=$(plan coucou-workers sude-isl,quansu-islr1 <<'EOF'
+actual=$(plan coucou-workers sude-isl,suhuynh-islr1 <<'EOF'
 anchor w1:p1
 worker sude-isl omp w1:p5 w1:t1 idle
-worker quansu-islr1 codex w1:p6 w1:t1 idle
+worker suhuynh-islr1 claude w1:p6 w1:t1 idle
 worker sude-cos1 omp w1:p7 w1:t1 idle
 tab w1:t1 1
 layout w1:t1 200x50 w1:p1=0,0,50,50 w1:p5=50,0,50,50 w1:p6=100,0,50,50 w1:p7=150,0,50,50
@@ -840,7 +840,7 @@ expect "--only: two listed workers -> project tab, third untouched" \
 'place w1:p5 new-tab label=coucou-workers
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 sude-isl
-rename w1:p6 quansu-islr1' "$actual"
+rename w1:p6 suhuynh-islr1' "$actual"
 
 # ── 39. --only names nobody -> no-op ────────────────────────────────────────
 mkstate <<'EOF' > "$T/state.json"
@@ -858,10 +858,10 @@ echo "ok: --only matching no agents -> no-op"
 # sude-cos1 belongs to the same coucou-workers group but is not in --only:
 # it is a legitimate occupant — a second pipeline must not force a duplicate
 # project tab — and it is never moved or renamed itself
-actual=$(plan coucou-workers sude-isl,quansu-islr1 <<'EOF'
+actual=$(plan coucou-workers sude-isl,suhuynh-islr1 <<'EOF'
 anchor w1:p1
 worker sude-isl omp w1:p5 w1:t1 idle
-worker quansu-islr1 codex w1:p6 w1:t1 idle
+worker suhuynh-islr1 claude w1:p6 w1:t1 idle
 worker sude-cos1 omp w1:p7 w1:t4 idle
 tab w1:t1 1
 tab w1:t4 coucou-workers
@@ -873,7 +873,7 @@ expect "--only: same-group unlisted occupant keeps the tab reusable" \
 'place w1:p5 split tab=@workers dir=right anchor=w1:p7 ratio=0.5
 place w1:p6 split tab=@workers dir=right anchor=w1:p5 ratio=0.5
 rename w1:p5 sude-isl
-rename w1:p6 quansu-islr1' "$actual"
+rename w1:p6 suhuynh-islr1' "$actual"
 
 # ── 41. --only without a value -> usage error ───────────────────────────────
 mkstate <<'EOF' > "$T/state.json"
@@ -1028,11 +1028,11 @@ echo "ok: --check and --repair together -> error exit"
 # or it waits forever (rc=1) and blocks pipeline.sh. A --tab that does match
 # the worker's group still waits for its pending ops.
 HERDR_STUB_SNAPSHOT="$fixdir/only-custom-tab.json" QUAQUA_OWNER=cos GRID_CHECK_TIMEOUT_SEC=0 \
-  "$src/worker/grid-workers.sh" --check --tab mono-workers --only sude-isl,quansu-islr1 \
+  "$src/worker/grid-workers.sh" --check --tab mono-workers --only sude-isl,suhuynh-islr1 \
   || fail "--check --only with a custom --tab: expected exit 0 (foreign-group ops ignored)"
 echo "ok: --check --only honours a custom --tab"
 if err=$(HERDR_STUB_SNAPSHOT="$fixdir/only-custom-tab.json" QUAQUA_OWNER=cos GRID_CHECK_TIMEOUT_SEC=0 \
-         "$src/worker/grid-workers.sh" --check --tab quaqua-workers --only sude-isl,quansu-islr1 2>&1 >/dev/null); then
+         "$src/worker/grid-workers.sh" --check --tab quaqua-workers --only sude-isl,suhuynh-islr1 2>&1 >/dev/null); then
   fail "--check --only with a matching --tab: expected timeout non-zero exit"
 fi
 [[ "$err" == *"grid check timed out"* ]] || fail "--check --only matching --tab: wrong error (got: $err)"

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu> <repo-path>
+# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — spawn-lead.sh <slug>-lead)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
-#   --review      bacdau|quansu|ni|suhuynh|truonglao: repo read-only, $HOME/quaqua/runs writable
+#   --review      ni|suhuynh|truonglao: repo read-only, $HOME/quaqua/runs writable
 #   Resume-safe: when $wt is already a registered worktree of <repo> (a
 #   previous attempt died after creating it) it is reused and startup
 #   continues with a fresh pane/agent. A pane this attempt created is closed
@@ -27,16 +27,16 @@ if [[ ${base+x} && ( -z $base || $base == -* ) ]]; then usage; fi
 if ((${#pos[@]} < 3)); then usage; fi
 name=${pos[0]} kind=${pos[1]} repo=$(realpath "${pos[2]}")
 case $kind in
-  tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu) ;;
+  tieude|detu|sude|ni|suhuynh|truonglao) ;;
   *) sed -n '2p' "$0" >&2; exit 1 ;;
 esac
 if [[ ! $name =~ ^$kind-[abcdefghijklmnopqrstuvwxyz0123456789-]+$ ]] || (( ${#name} > 20 )) \
     || [[ $name == *-lead ]]; then
   sed -n '2,3p' "$0" >&2; exit 1
 fi
-case $kind in bacdau|quansu|ni|suhuynh|truonglao) ;; *)
+case $kind in ni|suhuynh|truonglao) ;; *)
   if [[ ${review+x} ]]; then
-    echo "error: --review is only supported for codex kinds (bacdau, quansu) and claude kinds (ni, suhuynh, truonglao), not $kind" >&2
+    echo "error: --review is only supported for claude kinds (ni, suhuynh, truonglao), not $kind" >&2
     usage
   fi ;;
 esac
@@ -112,7 +112,6 @@ done < <(git -C "$repo" remote)
 rules_dir="$HOME/quaqua/rules" rf="$HOME/quaqua/runs/$name.rules.md"
 mkdir -p "$(dirname "$rf")"   # fresh clones have no runs/ yet — create it before writing
 cat "$rules_dir"/_all/*.md "$rules_dir/$(basename "$repo")"/*.md 2>/dev/null > "$rf" || true
-codex_rules="developer_instructions=$(jq -Rs . < "$rf")"
 
 # Record owner, grid group (grid-workers.sh groups by owner + project tab),
 # pipeline association, sandbox marker, and report class. `review` is the
@@ -129,22 +128,8 @@ review_json=false
 printf '{"name":"%s","kind":"%s","created":"%s","sandbox":true,"owner":"%s","review":%s}\n' \
   "$name" "$kind" "$iso_now" "$owner" "$review_json" > "$runs_dir/$name.srt.json"
 
-# codex access args. --review keeps the repo read-only and $HOME/quaqua/runs writable
-# via a permission profile extending the built-in :read-only one. Plain
-# `-s read-only` cannot do this: codex only honours --add-dir under
-# workspace-write (a read-only sandbox makes runs/ read-only too), and
-# --approve-for-me conflicts with an explicit -s.
-if [[ ${review+x} ]]; then
-  access=(-a never -c 'default_permissions="quaqua-review"'
-          -c 'permissions.quaqua-review.extends=":read-only"'
-          -c "permissions.quaqua-review.filesystem={\"$HOME/quaqua/runs\"=\"write\"}")
-else
-  access=(--approve-for-me --add-dir "$HOME/quaqua/runs")
-fi
-
 # claude review args (ni|suhuynh|truonglao). claude has no filesystem sandbox, so
-# the mirror of codex's quaqua-review profile is a permission mode plus path
-# rules:
+# the reviewer is held read-only by a permission mode plus path rules:
 #   --permission-mode dontAsk — "Auto-denies every call that would otherwise
 #     prompt ... tools pre-approved via /permissions or permissions.allow rules
 #     still run" (docs: permissions → Permission modes). Nothing ever prompts,
@@ -180,8 +165,8 @@ fi
 #     Everything else that would prompt (mkdir, tee, arbitrary mv/rm) is still
 #     auto-denied by dontAsk, never a stalled prompt.
 # Guardrail, not a boundary, like the push block above: a Bash rule matches the
-# command text Claude writes, and claude has no OS-level read-only sandbox
-# (codex does), so a determined reviewer could still write through a subprocess.
+# command text Claude writes, and claude has no OS-level read-only
+# sandbox: a determined reviewer could still write through a subprocess.
 claude_review=()
 if [[ ${review+x} ]] && [[ $kind == ni || $kind == suhuynh || $kind == truonglao ]]; then
   claude_review=(--permission-mode dontAsk --add-dir "$HOME/quaqua/runs"
@@ -217,7 +202,7 @@ case $kind in
     # omp (models.md): model + thinking as flags, worker rules as an appended
     # system prompt (--append-system-prompt takes a file path and appends its
     # contents). --auto-approve matches the other harnesses' unattended modes
-    # (opencode --auto, claude/codex approval flags): without it a tool
+    # (opencode --auto, claude approval flags): without it a tool
     # approval prompt would silently stall the worker.
     herdr agent start "$name" --kind omp --pane "$pane" --timeout 60000 -- \
       --model google-antigravity/gemini-3.8-flash --thinking high --auto-approve \
@@ -227,29 +212,9 @@ case $kind in
     # ${claude_review[@]} is empty for a non-review spawn: model, effort and the
     # rules file are the only flags, and the ambient permission mode applies.
     herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" "${claude_review[@]}" --append-system-prompt-file "$rf" >/dev/null || spawn_fail ;;
-  bacdau)
-    herdr agent start "$name" --kind codex --pane "$pane" --timeout 300000 -- "${access[@]}" -m gpt-6-astra -c model_reasoning_effort=medium -c "$codex_rules" >/dev/null || codex_start_rc=$? ;;
-  quansu)
-    herdr agent start "$name" --kind codex --pane "$pane" --timeout 300000 -- "${access[@]}" -m gpt-6.1-sol -c model_reasoning_effort=high -c "$codex_rules" >/dev/null || codex_start_rc=$? ;;
-esac
-case $kind in bacdau|quansu)
-  # herdr's start timeout is not proof of failure for codex: the TUI can sit
-  # on "Trust this folder?" (new worktree, untrusted dir) or spend minutes on
-  # app-server-daemon init before the SessionStart hook reports the agent —
-  # herdr only sees 'timed out waiting for agent startup'. Fail loudly, then
-  # keep going: accept the trust dialog if present and wait for idle.
-  if [[ ${codex_start_rc:-0} -ne 0 ]]; then
-    echo "warning: herdr agent start $name failed (rc=$codex_start_rc); continuing to trust/idle wait" >&2
-  fi
-  # new worktree -> codex asks "Trust this folder?"; accept default "Trust and continue".
-  # start may already have failed with agent_not_ready while the dialog blocked readiness, so confirm idle here
-  if herdr pane wait-output "$pane" --match "Trust this folder" --timeout 30000 >/dev/null 2>&1; then
-    herdr pane send-keys "$pane" enter >/dev/null
-  fi
-  herdr agent wait "$name" --until idle --timeout 300000 >/dev/null || spawn_fail
 esac
 
-# grid_ready=1 set last, after trust/send-keys handling (R5)
+# grid_ready=1 set last (R5)
 herdr pane report-metadata "$pane" --source herdr-grid --token grid_ready=1 >/dev/null || spawn_fail
 
 # Grid hook (rules/_all/fanout-agent-grid.md): arrange the new worker's pane

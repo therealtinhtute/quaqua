@@ -11,11 +11,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 pub const USAGE: &str = "\
-# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu> <repo-path>
+# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — spawn-lead.sh <slug>-lead)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
-#   --review      bacdau|quansu|ni|suhuynh|truonglao: repo read-only, $HOME/quaqua/runs writable";
+#   --review      ni|suhuynh|truonglao: repo read-only, $HOME/quaqua/runs writable";
 
 pub struct SpawnOptions {
     pub base: Option<String>,
@@ -143,14 +143,14 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
 
     if opts.review && !kind_info.can_review {
         eprintln!(
-            "error: --review is only supported for codex kinds (bacdau, quansu) and claude kinds (ni, suhuynh, truonglao), not {}",
+            "error: --review is only supported for claude kinds (ni, suhuynh, truonglao), not {}",
             opts.kind
         );
         return Err((1, format!("{}\n", USAGE)));
     }
 
     let harness = kind_info.harness.as_str();
-    if !["opencode", "omp", "claude", "codex"].contains(&harness) {
+    if !["opencode", "omp", "claude"].contains(&harness) {
         return Err((
             1,
             format!("error: unsupported harness '{harness}' for kind '{}'\n", opts.kind),
@@ -398,64 +398,13 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
             let extra_slices: Vec<&str> = extra_args.iter().map(String::as_str).collect();
             herdr.agent_start(&opts.name, "claude", &pane_id, 60000, &extra_slices)
         }
-        "codex" => {
-            let mut extra_args: Vec<String> = vec!["--".to_string()];
-            let runs_str = runs_dir.to_string_lossy().to_string();
-            if opts.review {
-                let perm_fs = format!("permissions.quaqua-review.filesystem={{\"{}\"=\"write\"}}", runs_str);
-                extra_args.push("-a".to_string());
-                extra_args.push("never".to_string());
-                extra_args.push("-c".to_string());
-                extra_args.push("default_permissions=\"quaqua-review\"".to_string());
-                extra_args.push("-c".to_string());
-                extra_args.push("permissions.quaqua-review.extends=\":read-only\"".to_string());
-                extra_args.push("-c".to_string());
-                extra_args.push(perm_fs);
-            } else {
-                extra_args.push("--approve-for-me".to_string());
-                extra_args.push("--add-dir".to_string());
-                extra_args.push(runs_str);
-            }
-            let effort_flag = format!("model_reasoning_effort={effort}");
-            let codex_rules = format!("developer_instructions={}", format_json_string(&rules_content));
-            extra_args.push("-m".to_string());
-            extra_args.push(model.to_string());
-            extra_args.push("-c".to_string());
-            extra_args.push(effort_flag);
-            extra_args.push("-c".to_string());
-            extra_args.push(codex_rules);
-
-            let extra_slices: Vec<&str> = extra_args.iter().map(String::as_str).collect();
-            let res = herdr.agent_start(&opts.name, "codex", &pane_id, 300000, &extra_slices);
-
-            let codex_start_rc = match &res {
-                Ok(out) if out.status.success() => 0,
-                Ok(out) => out.status.code().unwrap_or(1),
-                Err(_) => 1,
-            };
-
-            if codex_start_rc != 0 {
-                eprintln!("warning: herdr agent start {} failed (rc={codex_start_rc}); continuing to trust/idle wait", opts.name);
-            }
-
-            if herdr.pane_wait_output(&pane_id, "Trust this folder", 30000) {
-                let _ = herdr.pane_send_keys(&pane_id, "enter");
-            }
-            let wait_res = herdr.agent_wait_idle(&opts.name, 300000);
-            if wait_res.is_err() || !wait_res.unwrap().status.success() {
-                return Err(spawn_fail(&pane_id, 1));
-            }
-            res
-        }
         _ => {
             return Err(spawn_fail(&pane_id, 1));
         }
     };
 
-    if harness != "codex" {
-        if start_res.is_err() || !start_res.unwrap().status.success() {
-            return Err(spawn_fail(&pane_id, 1));
-        }
+    if start_res.is_err() || !start_res.unwrap().status.success() {
+        return Err(spawn_fail(&pane_id, 1));
     }
 
     let ready_res = herdr.pane_report_metadata(&pane_id, &["grid_ready=1"]);

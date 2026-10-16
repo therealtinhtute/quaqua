@@ -4,8 +4,8 @@
 # The anchor is the caller's pane: the CoS, or a project orchestrator. Workers
 # are the agents owned by the caller (runs/<name>.owner == QUAQUA_OWNER,
 # default cos; no .owner file = cos) whose registered name matches the worker
-# pattern <kind>- (tieude, detu, sude, ni, suhuynh, truonglao, bacdau,
-# quansu), excluding *-lead names (a project Lead, <slug>-lead, is never a
+# pattern <kind>- (tieude, detu, sude, ni, suhuynh, truonglao), excluding
+# *-lead names (a project Lead, <slug>-lead, is never a
 # worker), and whose pane is in the anchor's tab or in a group tab: a tab
 # labelled with a known group label (--tab, default "workers", or any
 # runs/<name>.grid) or its scratch tab. Agents in any other tab, another
@@ -244,7 +244,7 @@ gather_state() {  # gather_state <group-label> <default-label> <only-csv>
       (try (capture(":p(?<s>[0-9A-Za-z]+)$").s) catch "") as $s
       | ("123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0" | split("")) as $alpha
       | reduce ($s | split("")[]) as $c (0; . * 36 + (($alpha | index($c)) + 1));
-    def worker_name: test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not);
+    def worker_name: test("^(tieude|detu|sude|ni|suhuynh|truonglao)-") and (test("-lead$") | not);
     ([ $meta[] | .grid // empty ] + [$dlabel] | unique) as $known
     | ( [ $tabs.result.tabs[]
           | select(.workspace_id == $ws and .tab_id != $atab)

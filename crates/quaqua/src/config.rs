@@ -545,14 +545,14 @@ can_spawn = ["lead"]
 can_prompt = ["lead"]
 [strategy]
 default_kind = "tieude"
-default_reviewer = ["quansu"]
+default_reviewer = ["suhuynh"]
 builder_reviewer_differ = "harness"
 [kinds.tieude]
 harness = "opencode"
 model = "m"
 can_review = false
-[kinds.quansu]
-harness = "codex"
+[kinds.suhuynh]
+harness = "claude"
 model = "m"
 effort = "high"
 can_review = true
@@ -579,8 +579,8 @@ workers_tab = "workers"
 
     #[test]
     fn get_array_prints_lines() {
-        assert_eq!(get(&base(), "kinds.quansu.effort", None).unwrap(), "high");
-        assert!(get(&base(), "strategy.default_reviewer", None).unwrap().contains("quansu"));
+        assert_eq!(get(&base(), "kinds.suhuynh.effort", None).unwrap(), "high");
+        assert!(get(&base(), "strategy.default_reviewer", None).unwrap().contains("suhuynh"));
         assert!(get(&base(), "nope.nope", None).is_err());
     }
 }

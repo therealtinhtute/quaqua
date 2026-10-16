@@ -4,15 +4,15 @@ schema_version = 2
 
 [strategy]
 default_kind = "tieude"
-default_reviewer = ["quansu"]
+default_reviewer = ["suhuynh"]
 
 [kinds.tieude]
 harness = "opencode"
 model = "m"
 can_reveiw = true
 
-[kinds.quansu]
-harness = "codex"
+[kinds.suhuynh]
+harness = "claude"
 model = "m"
 can_review = true
 

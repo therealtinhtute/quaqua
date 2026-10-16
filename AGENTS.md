@@ -32,7 +32,7 @@ Authority, not persona; brief shape: `rules/_all/brief.md`.
 | Principal | anh iu | goal, priorities, trade-offs | talks only to the CoS; approves push / merge main / deploy |
 | CoS | Quả Quả (Claude Code in `~/quaqua`) | the full SDLC: intake/clarify → design (truonglao) → brief → pipeline (plan/build/review) → verify (re-run tests) → integrate (integ branch) → release (anh iu approves) → learn (lessons → rules) | spawn Leads and task workers; verify every result; escalate goal/cost changes and outward actions to anh iu |
 | Lead | `<slug>-lead` (spawned via `scripts/lead/spawn-lead.sh <slug>` into its own herdr workspace, torn down by `scripts/lead/cleanup-lead.sh <slug>`; herdr caps agent names at 32 chars) — internal, anh iu never addresses it | project state, ownership, dependencies, evidence review | run `pipeline.sh`, spawn ≤4 Peers (`--base quaqua/<slug>-integ`), approve Peer plans, merge Peer branches into `quaqua/<slug>-integ` (integration branch; spawn-lead.sh creates it from `main`); reports to the CoS only |
-| Peer | task workers (sude build, quansu review, …) | one task in own worktree | commit on own branch; may challenge premises with evidence |
+| Peer | task workers (sude build, suhuynh review, …) | one task in own worktree | commit on own branch; may challenge premises with evidence |
 
 - The CoS spawns a Lead for project-size work (multi-step, multi-file, review rounds) to keep its own context small. The CoS never Leads pipeline-size work itself — no self-review.
 - No SLP for: a task <15 min in one file, or work needing continuous anh iu feedback (UI/UX, game feel) — one worker, no Lead, no pipeline.
@@ -41,7 +41,7 @@ Authority, not persona; brief shape: `rules/_all/brief.md`.
 - Kill criteria: same error ≥3 iterations → kill the worker and spawn a fresh one (alongside the watchdog).
 
 ## Workers
-Roster (tieude · detu · sude · ni · suhuynh · truonglao · bacdau · quansu) + routing: `models.md`. Default `tieude`. Kind, model and effort exactly per `models.md`; never change them on your own.
+Roster (tieude · detu · sude · ni · suhuynh · truonglao) + routing: `models.md`. Default `tieude`. Kind, model and effort exactly per `models.md`; never change them on your own.
 Two classes:
 - **Task worker** `<kind>-<task>`: one task, own worktree, cleaned after the outcome. Counts toward the cap.
 - **Project orchestrator (Lead)** `<slug>-lead`: long-lived session owning one project's card and its task workers. Spawned by the CoS. Not a task worker; does not count toward the cap.

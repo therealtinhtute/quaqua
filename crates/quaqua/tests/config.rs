@@ -122,7 +122,7 @@ fn config_get_default_reviewer_is_a_list_one_per_line() {
         &repo_team(),
     ]);
     assert!(out.status.success(), "get failed: {}", stderr(&out));
-    assert_eq!(stdout(&out), "quansu\nsuhuynh\n");
+    assert_eq!(stdout(&out), "suhuynh\n");
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn config_get_cap_applies_project_override() {
 
 #[test]
 fn config_get_can_review_and_kind_fields() {
-    let can = run(&["config", "get", "kinds.quansu.can_review", "--file", &repo_team()]);
+    let can = run(&["config", "get", "kinds.suhuynh.can_review", "--file", &repo_team()]);
     assert_eq!(stdout(&can).trim(), "true");
     let cannot = run(&["config", "get", "kinds.tieude.can_review", "--file", &repo_team()]);
     assert_eq!(stdout(&cannot).trim(), "false");

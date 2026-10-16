@@ -74,20 +74,20 @@ reports_to = "owner"
 
 [strategy]
 default_kind = "tieude"           # anh iu, 2026-10-15
-default_reviewer = ["quansu", "suhuynh"]  # first available wins (anh iu, 2026-10-15)
+default_reviewer = ["suhuynh"]           # first available wins (anh iu, 2026-10-16)
 builder_reviewer_differ = "harness"
 
 [kinds.tieude]                    # harness·model·effort move here from models.md; prose stays there
 harness = "opencode"
 model = "opencode-go/deepseek-v4.1-flash"
-can_review = false                # true for bacdau, quansu (codex profile) and ni, suhuynh, truonglao (claude read-only flags)
-# … detu, sude, ni, suhuynh, truonglao, bacdau, quansu — values copied verbatim, never changed
+can_review = false                # true for ni, suhuynh, truonglao (claude read-only flags)
+# … detu, sude, ni, suhuynh, truonglao — values copied verbatim, never changed
 
 [taskforce.advisor]
-members = ["quansu"]
+members = ["suhuynh"]
 read_only = true
 [taskforce.dual-lens]
-members = ["truonglao", "quansu"]
+members = ["truonglao", "suhuynh"]
 read_only = true
 
 [merge]
@@ -154,7 +154,7 @@ not in `models.md`.
 | `models.md` | naming: spawn command shape (branch + report path) | prose |
 | `models.md` | naming: old names stay as-is | prose |
 | plan § `team.toml` | reviewer fallback list, first available wins | `strategy.default_reviewer` |
-| plan § `team.toml` | `can_review` set (bacdau, quansu, ni, suhuynh, truonglao) | `kinds.<k>.can_review` |
+| plan § `team.toml` | `can_review` set (ni, suhuynh, truonglao) | `kinds.<k>.can_review` |
 <!-- rule-key-table:end -->
 
 ## New behaviour from piggery
@@ -175,7 +175,7 @@ not in `models.md`.
 | R0 | Crate scaffold `crates/quaqua/` (clap, serde, toml), `cargo test` runs from `tests/run.sh` | `cargo build --release` on macOS + Linux |
 | R1 | `team.toml` + `config validate/get` + rule → key table | table complete; invalid fixtures rejected |
 | R2 | `grid` (pure planner + apply + hook) | existing `tests/fixtures/herdr-grid` + 9 edge fixtures pass; planner output equals `plan.jq` on every fixture (differential) |
-| R3 | `worker spawn/prompt/cleanup`, `cap` | `test_spawn_worker`, `test_prompt_worker*`, `test_cleanup_worker`, `test_worker_cap` pass against shims; `--review` works for every `can_review` kind on each harness (codex, claude) |
+| R3 | `worker spawn/prompt/cleanup`, `cap` | `test_spawn_worker`, `test_prompt_worker*`, `test_cleanup_worker`, `test_worker_cap` pass against shims; `--review` works for every `can_review` kind (claude) |
 | R4 | `lead`, `pipeline`, `merge`, `taskforce` | `test_spawn_lead`, `test_cleanup_lead`, `test_pipeline` pass; new tests: merge-queue undo on failing check, taskforce weight 2, pipeline builder + reviewer land in `GRID_TAB` (2 workers → workers tab, never the Lead tab; bash bug 2026-10-15) |
 | R5 | `gate`, `init` | `test_herdr_gate`, `test_init_workspace` pass |
 | R6 | Cutover PR: shims, plugin manifest, `.claude/settings.json` hook → `quaqua gate`, 3 policy rules, AGENTS.md/models.md/`rules/_all/*` path updates, `trash` the replaced bash bodies | gate below |
@@ -197,7 +197,7 @@ Rollback: `git revert` the cutover commit. The bash bodies come back intact.
 
 ## Execution (to-plan 2026-10-15)
 Who: R0–R5 = Lead `quaqua-rs-lead` (SLP, pipeline per phase, Peers `--base quaqua/quaqua-rs-integ`). R6 touches `scripts/`, `rules/`, AGENTS.md, which are CoS-only per `spawn-lead.sh:138`, so the CoS runs R6 itself with one worker, no Lead.
-Kinds: builder `sude` (heavy: R2, R3, R4) or `tieude` (R0, R1, R5); reviewer `suhuynh` (quansu unavailable, anh iu 2026-10-15), on a different harness (omp/opencode vs claude).
+Kinds: builder `sude` (heavy: R2, R3, R4) or `tieude` (R0, R1, R5); reviewer `suhuynh` (anh iu 2026-10-16), on a different harness (omp/opencode vs claude).
 
 ### S0 Prerequisites (CoS)
 1. Commit this plan + `models.md` on `docs/rust-herdr-plugin-brainstorm`. Verify: `git status` clean for those paths.

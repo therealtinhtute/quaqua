@@ -36,7 +36,7 @@ count_owner_slots() {
       live_workers+=("$a_name")
     done < <(jq -r '.result.agents[]?
       | select((.agent_status // "") != "dead")
-      | select((.name // "") | test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not))
+      | select((.name // "") | test("^(tieude|detu|sude|ni|suhuynh|truonglao)-") and (test("-lead$") | not))
       | .name' <<<"$agents" 2>/dev/null || true)
   fi
 
