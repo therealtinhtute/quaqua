@@ -19,6 +19,14 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# The entrypoint under test is a shim over the Rust binary after the R6
+# cutover, so the fresh-clone boot must be able to exec `quaqua` (tests/run.sh
+# exports the same PATH/QUAQUA_BIN). Build it if this is a standalone run.
+bin="$root/target/debug/quaqua"
+[[ -x $bin ]] || (cd "$root" && cargo build --locked --quiet) >/dev/null 2>&1 || true
+export PATH="$root/target/debug:$PATH"
+export QUAQUA_BIN="${QUAQUA_BIN:-$bin}"
+
 # ── sandbox: a true fresh clone — tracked files only, personal state absent ──
 # `git ls-files` is the definition of what a clone ships; anything gitignored
 # (memory/, projects/, raw/, runs/, reports/, USER.md) is deliberately absent.

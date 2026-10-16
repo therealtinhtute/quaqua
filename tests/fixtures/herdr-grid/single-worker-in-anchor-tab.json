@@ -1,0 +1,53 @@
+{
+  "snapshot": {
+    "workspaces": [
+      { "workspace_id": "w9", "label": "quaqua" }
+    ],
+    "tabs": [
+      { "tab_id": "w9:t1A", "workspace_id": "w9", "label": "quaqua", "pane_count": 2 }
+    ],
+    "panes": [
+      {
+        "pane_id": "w9:p10",
+        "tab_id": "w9:t1A",
+        "workspace_id": "w9",
+        "agent": "claude",
+        "agent_status": "done",
+        "tokens": {
+          "grid_role": "orchestrator",
+          "grid_owner": "cos"
+        }
+      },
+      {
+        "pane_id": "w9:p32",
+        "tab_id": "w9:t1A",
+        "workspace_id": "w9",
+        "agent": "opencode",
+        "agent_status": "idle",
+        "label": "tieude-1",
+        "tokens": {
+          "grid_role": "worker",
+          "grid_owner": "cos",
+          "grid_group": "quaqua",
+          "grid_ready": "1"
+        }
+      }
+    ],
+    "layouts": [
+      {
+        "tab_id": "w9:t1A",
+        "workspace_id": "w9",
+        "area": { "x": 0, "y": 0, "width": 206, "height": 78 },
+        "panes": [
+          { "pane_id": "w9:p10", "rect": { "x": 0, "y": 0, "width": 103, "height": 78 } },
+          { "pane_id": "w9:p32", "rect": { "x": 103, "y": 0, "width": 103, "height": 78 } }
+        ],
+        "zoomed": false
+      }
+    ],
+    "agents": [
+      { "name": "cos", "pane_id": "w9:p10", "agent_status": "done" },
+      { "name": "tieude-1", "pane_id": "w9:p32", "agent_status": "idle" }
+    ]
+  }
+}

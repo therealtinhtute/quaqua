@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sandbox installer test: no real user service manager, codex, or HOME touched.
+# Sandbox installer test: no real user service manager, claude, or HOME touched.
 # Requires python3 to parse the generated plist independently of the renderer.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -10,7 +10,7 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 root="$T/repo & <mac> \"quoted\" | back\\slash"
-mkdir -p "$root/scripts/auditor" "$T/bin" "$T/codex & tools" "$T/home"
+mkdir -p "$root/scripts/auditor" "$T/bin" "$T/claude & tools" "$T/home"
 cp "$src/auditor/install-auditor.sh" "$root/scripts/auditor/"
 cp -R "$here/../scripts/auditor/systemd" "$root/scripts/auditor/"
 if [[ -d $here/../scripts/auditor/launchd ]]; then cp -R "$here/../scripts/auditor/launchd" "$root/scripts/auditor/"; fi
@@ -28,17 +28,17 @@ cat > "$T/bin/launchctl" <<'EOF'
 printf 'FORBIDDEN launchctl %s\n' "$*" >> "$CALLS"
 exit 99
 EOF
-cat > "$T/codex & tools/codex" <<'EOF'
+cat > "$T/claude & tools/claude" <<'EOF'
 #!/bin/sh
-printf 'FORBIDDEN codex %s\n' "$*" >> "$CALLS"
+printf 'FORBIDDEN claude %s\n' "$*" >> "$CALLS"
 exit 99
 EOF
-chmod +x "$T/bin/uname" "$T/bin/systemctl" "$T/bin/launchctl" "$T/codex & tools/codex"
+chmod +x "$T/bin/uname" "$T/bin/systemctl" "$T/bin/launchctl" "$T/claude & tools/claude"
 run() {
   : > "$T/calls"
   rc=0
   TEST_OS=$1 CALLS="$T/calls" HOME="${TEST_HOME:-$T/home}" \
-    PATH="$T/bin:$T/codex & tools:$PATH" \
+    PATH="$T/bin:$T/claude & tools:$PATH" \
     "$BASH" "$root/scripts/auditor/install-auditor.sh" > "$T/out" 2> "$T/err" || rc=$?
 }
 
@@ -60,10 +60,10 @@ run Darwin
 plist="$T/home/Library/LaunchAgents/com.quaqua.auditor.plist"
 [[ -f $plist ]] || fail 'Darwin: no LaunchAgents plist'
 [[ -d $T/home/Library/Logs ]] || fail 'Darwin: log directory not created'
-[[ ! -s $T/calls ]] || fail "Darwin: invoked a manager or codex: $(cat "$T/calls")"
-python3 - "$plist" "$root" "$T/home" "$T/codex & tools" "$T/bin/bash" <<'PY'
+[[ ! -s $T/calls ]] || fail "Darwin: invoked a manager or claude: $(cat "$T/calls")"
+python3 - "$plist" "$root" "$T/home" "$T/claude & tools" "$T/bin/bash" <<'PY'
 import pathlib, plistlib, sys
-plist, root, home, codex_dir, bash_bin = sys.argv[1:]
+plist, root, home, claude_dir, bash_bin = sys.argv[1:]
 with open(plist, 'rb') as f:
     p = plistlib.load(f)
 assert p['Label'] == 'com.quaqua.auditor', p
@@ -71,7 +71,7 @@ assert p['ProgramArguments'] == [bash_bin, root + '/scripts/auditor/auditor.sh']
 assert all(pathlib.Path(v).is_absolute() for v in p['ProgramArguments']), p
 assert p['StartCalendarInterval'] == [{'Hour': 7, 'Minute': 0}, {'Hour': 19, 'Minute': 0}], p
 paths = p['EnvironmentVariables']['PATH'].split(':')
-assert str(pathlib.Path(bash_bin).parent) in paths and codex_dir in paths, paths
+assert str(pathlib.Path(bash_bin).parent) in paths and claude_dir in paths, paths
 assert '/usr/bin' in paths and '/bin' in paths, paths
 for k in ['StandardOutPath', 'StandardErrorPath']:
     assert p[k] == home + '/Library/Logs/quaqua-auditor.log', p
@@ -117,16 +117,16 @@ if [[ $(/bin/bash -c 'printf "%s" "$BASH_VERSION"') == 3.* ]]; then
   echo 'ok: Darwin -> real macOS system Bash 3.2 refused'
 fi
 
-# No codex on the install PATH: checked before any destination is created.
-rm "$T/bin/bash" "$T/codex & tools/codex"
+# No claude on the install PATH: checked before any destination is created.
+rm "$T/bin/bash" "$T/claude & tools/claude"
 ln -s "$BASH" "$T/bin/bash"
-# Only essential native tools are visible; no user's codex can leak in.
+# Only essential native tools are visible; no user's claude can leak in.
 rc=0
-TEST_OS=Darwin CALLS="$T/calls" HOME="$T/missing-codex-home" \
+TEST_OS=Darwin CALLS="$T/calls" HOME="$T/missing-claude-home" \
   PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   "$BASH" "$root/scripts/auditor/install-auditor.sh" > "$T/out" 2> "$T/err" || rc=$?
-[[ $rc -eq 1 ]] || fail "missing codex: exit $rc, want 1"
-grep -q 'codex must be on PATH' "$T/err" || fail 'missing codex: no diagnostic'
-[[ ! -d $T/missing-codex-home ]] || fail 'missing codex: installed anyway'
-echo 'ok: Darwin -> requires codex on install PATH before writing files'
+[[ $rc -eq 1 ]] || fail "missing claude: exit $rc, want 1"
+grep -q 'claude must be on PATH' "$T/err" || fail 'missing claude: no diagnostic'
+[[ ! -d $T/missing-claude-home ]] || fail 'missing claude: installed anyway'
+echo 'ok: Darwin -> requires claude on install PATH before writing files'
 echo PASS

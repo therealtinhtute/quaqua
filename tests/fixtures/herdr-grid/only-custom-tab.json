@@ -59,7 +59,7 @@
     "agents": [
       { "name": "cos", "pane_id": "w1:p1", "agent_status": "idle" },
       { "name": "sude-isl", "pane_id": "w1:p5", "agent_status": "idle" },
-      { "name": "quansu-islr1", "pane_id": "w1:p6", "agent_status": "idle" }
+      { "name": "suhuynh-islr1", "pane_id": "w1:p6", "agent_status": "idle" }
     ]
   }
 }

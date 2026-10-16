@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Sandbox test for spawn-worker.sh name validation (models.md Naming:
-# <kind>-<task>, ascii [a-z0-9-], <=20 chars), the optional --base <ref>
-# worktree start point, the same-name retry that reuses a branch kept by
-# cleanup, the --review read-only mode for codex and claude kinds (including
-# the narrow claude Bash allows for `cargo test` and the atomic report `mv`),
-# the claude workspace-trust dialog the spawn answers before sending a brief,
-# the codex update/trust startup dialogs, and its best-effort grid hook.
+# Sandbox test for the spawn-worker.sh shim (-> `quaqua worker spawn`) name
+# validation (models.md Naming: <kind>-<task>, ascii [a-z0-9-], <=20 chars),
+# the optional --base <ref> worktree start point, the same-name retry that
+# reuses a branch kept by cleanup, the --review read-only mode for the claude
+# kinds (including the narrow claude Bash allows for `cargo test` and the
+# atomic report `mv`), the claude workspace-trust dialog the spawn answers
+# before sending a brief, and its best-effort grid hook.
 # git+herdr are stubbed on PATH; the grid hook is stubbed next to a copy of the
 # script. Bad names must exit 1 before either is called; good names proceed.
 # The accented case runs under C and, when installed, a collating UTF-8 locale.
@@ -45,12 +45,9 @@ case " $* " in
   *" config --local --bool --get core.bare "*) [ -n "${FAKE_BARE:-}" ] && echo true; exit 0 ;;
   *" config --local --list "*) [ -n "${FAKE_WORKTREE:-}" ] && echo 'core.worktree=/tmp/fake'; exit 0 ;;
 esac
-# MKMCP=1: the new worktree ships a project .mcp.json
-if [ -n "${MKMCP:-}" ] && [ "${3:-} ${4:-}" = "worktree add" ]; then
-  for a in "$@"; do case $a in */.wt/*) mkdir -p "$a" && echo '{}' > "$a/.mcp.json" ;; esac; done
-fi
-# FAKE_BRANCH: branches that already exist (space-sep full names, e.g.
-# "quaqua/sude-x"); show-ref --verify succeeds for those and fails otherwise
+# FAKE_BRANCH: branches that already exist (space-sep short names, e.g.
+# "quaqua/sude-x"); show-ref --verify succeeds for those and fails otherwise,
+# so a same-name retry can be told from a fresh spawn
 case " $* " in
   *" show-ref "*)
     for b in ${FAKE_BRANCH:-}; do
@@ -58,6 +55,10 @@ case " $* " in
     done
     exit 1 ;;
 esac
+# MKMCP=1: the new worktree ships a project .mcp.json
+if [ -n "${MKMCP:-}" ] && [ "${3:-} ${4:-}" = "worktree add" ]; then
+  for a in "$@"; do case $a in */.wt/*) mkdir -p "$a" && echo '{}' > "$a/.mcp.json" ;; esac; done
+fi
 exit 0
 STUB
 cat > "$T/bin/herdr" <<'STUB'
@@ -66,22 +67,20 @@ echo "herdr $*" >> "$CALLS"
 [ "${1:-} ${2:-}" = "pane split" ] && echo '{"result":{"pane":{"pane_id":"%1"}}}'
 # PANE_TEXT is what `pane read` shows (the trust-dialog clear check greps it)
 [ "${1:-} ${2:-}" = "pane read" ] && { printf '%s\n' "${PANE_TEXT:-}"; exit 0; }
-# DIALOGS = codex "Trust this folder?" dialogs left to show; CLAUDE_DIALOG =
-# claude workspace-trust dialogs left to show (--match trust)
+# CLAUDE_DIALOG = claude workspace-trust dialogs left to show (--match trust)
 if [ "${1:-} ${2:-}" = "pane wait-output" ]; then
   m=""; prev=""
   for a in "$@"; do [ "$prev" = "--match" ] && m=$a; prev=$a; done
   case $m in
     trust) f=${CLAUDE_DIALOG:-/dev/null} ;;
-    Skip) f=${CODEX_UPDATE:-/dev/null} ;;
-    "Trust this folder") f=${DIALOGS:-/dev/null} ;;
     *) f=/dev/null ;;
   esac
   n=$(cat "$f" 2>/dev/null || echo 0); [ "${n:-0}" -gt 0 ] || exit 1
   echo $((n - 1)) > "$f"
 fi
-# CODEX_FAIL=1: `agent start` reports the startup-blocked error codex spawns hit
-if [ "${1:-} ${2:-}" = "agent start" ] && [ -n "${CODEX_FAIL:-}" ]; then
+# START_FAIL=1: `agent start` reports the startup-blocked error a slow (or
+# dialog-held) start hits — herdr prints it on stdout and exits non-zero
+if [ "${1:-} ${2:-}" = "agent start" ] && [ -n "${START_FAIL:-}" ]; then
   echo '{"error":{"code":"agent_not_ready","message":"agent is blocked during startup and is not ready for prompts"}}'
   exit 1
 fi
@@ -240,85 +239,6 @@ grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=wo
 echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER"
 
 
-# ── --review: codex + claude kinds, repo read-only, runs writable ────────────
-# The repo must stay read-only while runs stays writable; codex only honours
-# --add-dir under workspace-write, so the guard uses a permission profile
-# extending the built-in :read-only one.
-spawn_args=(--review)
-spawn quansu-revread quansu
-unset spawn_args
-[[ $rc -eq 0 ]] || fail "--review quansu: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- '--kind codex' "$T/calls" || fail "--review quansu: not a codex start: $(cat "$T/calls")"
-grep -q -- '-a never' "$T/calls" || fail "--review quansu: no -a never: $(cat "$T/calls")"
-grep -q -- 'default_permissions="quaqua-review"' "$T/calls" \
-  || fail "--review quansu: no read-only profile: $(cat "$T/calls")"
-grep -q -- 'permissions.quaqua-review.extends=":read-only"' "$T/calls" \
-  || fail "--review quansu: profile does not extend :read-only: $(cat "$T/calls")"
-grep -qF -- "permissions.quaqua-review.filesystem={\"$T/home/quaqua/runs\"=\"write\"}" "$T/calls" \
-  || fail "--review quansu: runs not writable: $(cat "$T/calls")"
-! grep -q -- '--approve-for-me' "$T/calls" \
-  || fail "--review quansu: --approve-for-me conflicts with read-only: $(cat "$T/calls")"
-! grep -q -- '--add-dir' "$T/calls" \
-  || fail "--review quansu: --add-dir ignored under read-only: $(cat "$T/calls")"
-! grep -q -- ' -s read-only' "$T/calls" \
-  || fail "--review quansu: -s read-only would block runs writes: $(cat "$T/calls")"
-grep -q "worker=quansu-revread" "$T/out" || fail "--review quansu: no success line"
-[[ $(ln_call 'agent wait') -lt $(ln_call 'grid_ready=1') ]] \
-  || fail "--review quansu: grid_ready=1 set before codex idle wait: $(cat "$T/calls")"
-echo "ok: --review quansu -> read-only profile + runs writable, no --approve-for-me/--add-dir, grid_ready=1 after idle wait"
-
-# ── codex startup dialogs: update notice (esc) then folder trust (enter) ─────
-# A blocked codex start in an untrusted dir needs two answers: the pending
-# update notice — whose focused item is the network "Update now", which is not
-# ours to run — skipped with esc, then the folder-trust dialog accepted with
-# enter. A clean start (rc 0) answers nothing.
-echo 1 > "$T/codex-update"; echo 1 > "$T/codex-trust"
-spawn_args=(--review)
-spawn quansu-dialogs quansu CODEX_FAIL=1 CODEX_UPDATE="$T/codex-update" DIALOGS="$T/codex-trust"
-unset spawn_args
-[[ $rc -eq 0 ]] || fail "codex dialogs: exit $rc, want 0: $(cat "$T/err")"
-grep -q 'warning: herdr agent start quansu-dialogs failed' "$T/err" \
-  || fail "codex dialogs: blocked start not reported: $(cat "$T/err")"
-grep -qF 'herdr pane wait-output %1 --match Skip --timeout 20000' "$T/calls" \
-  || fail "codex dialogs: update notice not waited for: $(cat "$T/calls")"
-grep -qF 'herdr pane send-keys %1 esc' "$T/calls" \
-  || fail "codex dialogs: update notice not skipped: $(cat "$T/calls")"
-grep -qF 'herdr pane send-keys %1 enter' "$T/calls" \
-  || fail "codex dialogs: folder trust not accepted: $(cat "$T/calls")"
-[[ $(ln_call 'send-keys %1 esc') -lt $(ln_call 'send-keys %1 enter') ]] \
-  || fail "codex dialogs: trust answered before the update notice: $(cat "$T/calls")"
-! grep -qE 'curl|install\.sh|Update now' "$T/calls" \
-  || fail "codex dialogs: tried to run the codex update: $(cat "$T/calls")"
-grep -q "worker=quansu-dialogs" "$T/out" || fail "codex dialogs: no success line"
-echo "ok: blocked codex start -> update notice skipped (esc), folder trust accepted (enter)"
-
-# a clean codex start answers no dialogs and does not pay their waits
-spawn quansu-clean quansu
-[[ $rc -eq 0 ]] || fail "codex clean: exit $rc, want 0: $(cat "$T/err")"
-! grep -qF -- '--match Skip' "$T/calls" || fail "codex clean: update wait ran: $(cat "$T/calls")"
-! grep -qF -- '--match Trust this folder' "$T/calls" || fail "codex clean: trust wait ran: $(cat "$T/calls")"
-! grep -qF 'pane send-keys' "$T/calls" || fail "codex clean: keys sent: $(cat "$T/calls")"
-grep -q 'agent wait quansu-clean' "$T/calls" || fail "codex clean: no idle wait: $(cat "$T/calls")"
-echo "ok: clean codex start -> no dialog waits, no keys, idle wait only"
-
-# --review is accepted for both codex kinds and leaves non-review spawns untouched
-
-spawn_args=(--review)
-spawn bacdau-revread bacdau
-unset spawn_args
-[[ $rc -eq 0 ]] || fail "--review bacdau: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- 'default_permissions="quaqua-review"' "$T/calls" \
-  || fail "--review bacdau: no read-only profile: $(cat "$T/calls")"
-echo "ok: --review bacdau -> read-only profile"
-
-spawn quansu-write quansu
-[[ $rc -eq 0 ]] || fail "no --review quansu: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- '--approve-for-me' "$T/calls" || fail "no --review quansu: no --approve-for-me"
-grep -q -- "--add-dir $T/home/quaqua/runs" "$T/calls" \
-  || fail "no --review quansu: no --add-dir: $(cat "$T/calls")"
-! grep -q -- 'default_permissions' "$T/calls" \
-  || fail "no --review quansu: review profile leaked: $(cat "$T/calls")"
-echo "ok: no --review -> --approve-for-me + --add-dir, unchanged"
 
 # --review on an opencode/omp kind: refused before any git/herdr call
 expect_reject_review() {  # expect_reject_review <name> <kind> <label>
@@ -327,7 +247,7 @@ expect_reject_review() {  # expect_reject_review <name> <kind> <label>
   unset spawn_args
   [[ $rc -eq 1 ]] || fail "$3: exit $rc, want 1"
   grep -q '^# Usage:' "$T/err" || fail "$3: no usage on stderr"
-  grep -qF "error: --review is only supported for codex kinds (bacdau, quansu) and claude kinds" "$T/err" \
+  grep -qF "error: --review is only supported for claude kinds (ni, suhuynh, truonglao)" "$T/err" \
     || fail "$3: no clear refusal: $(cat "$T/err")"
   [[ ! -s "$T/calls" ]] || fail "$3: git/herdr called before rejection: $(cat "$T/calls")"
   echo "ok: $3 -> exit 1, no git/herdr"
@@ -336,8 +256,8 @@ expect_reject_review tieude-revbad tieude "--review on tieude"
 expect_reject_review sude-revbad sude "--review on sude"
 
 # ── --review claude kinds: repo read-only, $HOME/quaqua/runs writable ────────
-# claude has no filesystem sandbox, so the codex quaqua-review profile is
-# mirrored by --permission-mode dontAsk ("Auto-denies every call that would
+# claude has no filesystem sandbox, so the reviewer is held read-only by
+# --permission-mode dontAsk ("Auto-denies every call that would
 # otherwise prompt ... tools pre-approved via permissions.allow rules still
 # run"), so the unattended reviewer never stalls on a permission dialog, plus
 # Edit() path rules — the only file rules the file tools consult (a Write(...)
@@ -370,8 +290,8 @@ for k in ni suhuynh truonglao; do
   ! grep -qF -- 'Bash(mv:*' "$T/calls" || fail "--review $k: unbounded mv allow leaked: $(cat "$T/calls")"
   grep -qF -- '--model claude-opus-5-5' "$T/calls" || fail "--review $k: model changed: $(cat "$T/calls")"
   grep -qF -- "--effort $eff" "$T/calls" || fail "--review $k: effort not $eff: $(cat "$T/calls")"
-  ! grep -qF -- '--approve-for-me' "$T/calls" || fail "--review $k: codex approval flag leaked: $(cat "$T/calls")"
-  ! grep -qF -- 'default_permissions' "$T/calls" || fail "--review $k: codex profile leaked: $(cat "$T/calls")"
+  ! grep -qF -- '--approve-for-me' "$T/calls" || fail "--review $k: approval flag leaked: $(cat "$T/calls")"
+  ! grep -qF -- 'default_permissions' "$T/calls" || fail "--review $k: foreign profile leaked: $(cat "$T/calls")"
   grep -qF "worker=$k-revread" "$T/out" || fail "--review $k: no success line"
   echo "ok: --review $k -> dontAsk + Edit() rules (runs writable, worktree denied) + narrow Bash allows (cargo test, atomic mv), model/effort unchanged"
 done
@@ -391,7 +311,7 @@ echo "ok: plain ni (no --review) -> ambient settings, no review mode/Bash rules"
 # focus and which would swallow the brief. herdr's own dialog rules do not
 # match that text (it can even report the agent ready with the dialog up), so
 # the spawn answers it the way a person would: Down onto "Yes, I trust this
-# folder", then Enter.
+# folder", then Enter, and only then reports grid_ready=1.
 echo 1 > "$T/claude-dialog"
 spawn_args=(--review)
 spawn suhuynh-trust suhuynh CLAUDE_DIALOG="$T/claude-dialog"
@@ -419,6 +339,18 @@ spawn suhuynh-notrust suhuynh
 [[ $rc -eq 0 ]] || fail "no trust dialog: exit $rc, want 0: $(cat "$T/err")"
 ! grep -qF 'pane send-keys' "$T/calls" || fail "no trust dialog: keys sent anyway: $(cat "$T/calls")"
 echo "ok: no trust dialog -> waited, nothing sent"
+
+# a start herdr could not confirm (blocked during startup, or a slow hook) is
+# not proof of failure: the spawn waits for idle instead of abandoning it
+spawn suhuynh-blocked suhuynh START_FAIL=1
+[[ $rc -eq 0 ]] || fail "blocked start: exit $rc, want 0: $(cat "$T/err")"
+grep -qF 'herdr agent wait suhuynh-blocked --until idle --timeout 120000' "$T/calls" \
+  || fail "blocked start: no idle wait: $(cat "$T/calls")"
+[[ $(ln_call 'agent start') -lt $(ln_call 'agent wait suhuynh-blocked') ]] \
+  && [[ $(ln_call 'agent wait suhuynh-blocked') -lt $(ln_call 'grid_ready=1') ]] \
+  || fail "blocked start: bad order: $(cat "$T/calls")"
+grep -q "worker=suhuynh-blocked" "$T/out" || fail "blocked start: no success line"
+echo "ok: blocked claude start -> trust wait, idle wait, then grid_ready=1"
 
 # a dialog that never clears is a loud failure, never a stalled worker
 echo 1 > "$T/claude-dialog"
@@ -459,6 +391,8 @@ spawn tieude-branchfix tieude FAKE_BRANCH='quaqua/tieude-branchfix'
 [[ $rc -eq 0 ]] || fail "same-name retry: exit $rc, want 0: $(cat "$T/err")"
 grep -q 'branch quaqua/tieude-branchfix already exists' "$T/err" \
   || fail "same-name retry: no reuse note: $(cat "$T/err")"
+grep -q "show-ref --verify --quiet refs/heads/quaqua/tieude-branchfix" "$T/calls" \
+  || fail "same-name retry: kept branch not looked up: $(cat "$T/calls")"
 grep -q "worktree add .*/tieude-branchfix quaqua/tieude-branchfix\$" "$T/calls" \
   || fail "same-name retry: kept branch not reused: $(cat "$T/calls")"
 ! grep -q "worktree add -b" "$T/calls" \
@@ -467,6 +401,7 @@ echo "ok: same-name retry -> kept branch reused, no -b"
 
 # an unrelated existing branch does not change a fresh spawn
 spawn tieude-branchother tieude FAKE_BRANCH='quaqua/sude-other'
+[[ $rc -eq 0 ]] || fail "unrelated branch: exit $rc, want 0: $(cat "$T/err")"
 grep -q "worktree add -b quaqua/tieude-branchother .*/tieude-branchother\$" "$T/calls" \
   || fail "same-name retry: unrelated branch hijacked the add: $(cat "$T/calls")"
 echo "ok: another branch exists -> fresh -b still used"

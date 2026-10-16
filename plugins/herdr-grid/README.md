@@ -18,14 +18,13 @@ Automatic agent grid layout reconciler for Herdr.
 - **`herdr-plugin.toml`**: Plugin manifest declaring subscriptions for lifecycle events:
   - `pane.created`, `pane.agent_detected`, `pane.agent_status_changed`, `pane.moved`, `tab.closed`, `workspace.closed`.
   - Never subscribes to `layout.updated` to avoid recursive trigger loops.
-- **`hook.sh`**: Event hook handler.
-  - Serialized via `mkdir` lock with dead-PID reclaim and a pending event counter (bash 3.2 compatible, no `flock`).
+- **`plan.jq`**: Pure jq planner transforming `herdr api snapshot` into an ordered list of `pane.move` operations. Retained as the differential oracle for the Rust planner.
+- **`quaqua grid hook`** (was `hook.sh`): event hook handler, the manifest's `command = ["quaqua", "grid", "hook"]`. Same behaviour as the retired bash body:
+  - Serialized via a lock directory with dead-PID reclaim and a pending event counter.
   - Detects closed panes via snapshot diff against the last observed snapshot (handles cascaded pane closures from tab and workspace closing where `pane.closed` is not emitted).
   - Early-exits on `pane.agent_status_changed` events when the status change does not affect layout execution (e.g. non-worker panes or transitions between non-working states `idle`, `done`, `unknown`).
-  - Runs in **shadow mode** by default: calculates layout ops using `plan.jq` and logs them without modifying panes.
-  - When shadow mode is disabled (`HERDR_GRID_SHADOW=0`), pipes non-deferred moves to `apply.sh`.
-- **`plan.jq`**: Pure jq planner transforming `herdr api snapshot` into an ordered list of `pane.move` operations.
-- **`apply.sh`**: Executor applying non-deferred move operations (executed when shadow mode is off).
+  - Runs in **shadow mode** by default: calculates layout ops using the Rust planner and logs them without modifying panes.
+  - When shadow mode is disabled (`HERDR_GRID_SHADOW=0`), applies non-deferred moves itself (was `apply.sh`).
 
 ## Configuration
 

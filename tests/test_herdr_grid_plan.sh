@@ -226,7 +226,8 @@ has_p4=$(jq '[.[] | select(.pane == "w1:p4")] | length' <<<"$out")
 echo "ok: untagged and non-ready panes untouched"
 
 # -----------------------------------------------------------------------------
-# 10. working-pane deferral -> deferred: true for working, false otherwise
+# 10. working-pane deferral -> deferred: true for working, and every dependent
+#     split inherits it (its anchor / the @workers tab is not there yet)
 # -----------------------------------------------------------------------------
 echo "test 10: working-pane deferral"
 out=$(run_plan "$fixdir/working-deferred.json")
@@ -237,10 +238,15 @@ d_p7=$(jq -r '.[] | select(.pane == "w1:p7") | .deferred' <<<"$out")
 d_p8=$(jq -r '.[] | select(.pane == "w1:p8") | .deferred' <<<"$out")
 
 [[ "$d_p5" == "true" ]] || fail "working pane w1:p5 expected deferred=true, got: $d_p5"
-[[ "$d_p6" == "false" ]] || fail "idle pane w1:p6 expected deferred=false, got: $d_p6"
-[[ "$d_p7" == "false" ]] || fail "done pane w1:p7 expected deferred=false, got: $d_p7"
-[[ "$d_p8" == "false" ]] || fail "unknown pane w1:p8 expected deferred=false, got: $d_p8"
-echo "ok: working-pane deferral flag set correctly (idle/done/unknown = not working)"
+[[ "$d_p6" == "true" ]] || fail "w1:p6 splits onto working w1:p5 -> deferred=true, got: $d_p6"
+[[ "$d_p7" == "true" ]] || fail "w1:p7 splits onto working w1:p5 -> deferred=true, got: $d_p7"
+[[ "$d_p8" == "true" ]] || fail "w1:p8 splits onto deferred w1:p7 -> deferred=true, got: $d_p8"
+
+# idle / done / unknown are not working: a lone idle worker is not deferred
+out_idle=$(run_plan "$fixdir/1-worker.json")
+[[ $(jq -r '.[0].deferred' <<<"$out_idle") == "false" ]] \
+  || fail "idle worker must not be deferred: $out_idle"
+echo "ok: working-pane deferral flag set correctly (idle = not working; dependents inherit)"
 
 # -----------------------------------------------------------------------------
 # 11. idempotence: applying ops and re-planning gives zero ops

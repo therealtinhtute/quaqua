@@ -1,0 +1,6 @@
+# Virtual workspace root: lets `cargo build --release` / `cargo test` run from the
+# repo root, and gives later phases room to add crates without restructuring.
+# No [package] here on purpose — the binary lives in crates/quaqua.
+[workspace]
+resolver = "2"
+members = ["crates/quaqua"]

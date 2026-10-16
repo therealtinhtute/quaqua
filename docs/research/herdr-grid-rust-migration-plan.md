@@ -35,7 +35,7 @@ Every old script becomes a one-line shim `exec quaqua <cmd> "$@"`. That way `tes
 | `scripts/worker/grid-workers.sh` + `plugins/herdr-grid/{hook.sh,plan.jq,apply.sh}` | `quaqua grid {reconcile,hook,plan}` | plugin manifest `command = ["quaqua","grid","hook"]`; `plan` is pure (snapshot → ops JSON) |
 | `scripts/lead/spawn-lead.sh`, `cleanup-lead.sh` | `quaqua lead {spawn,cleanup}` | still injects `rules/_all/*.md` as the system prompt |
 | `scripts/lead/pipeline.sh` | `quaqua pipeline` | |
-| `scripts/hooks/herdr-gate.sh` | `quaqua gate` | same tokenizer semantics, same `test_herdr_gate.sh` cases |
+| `scripts/hooks/herdr-gate.sh` | `quaqua gate` | same tokenizer semantics, same `test_herdr_gate.sh` cases; fails closed (exit 2) on unparseable stdin (intended difference from bash, anh iu decision 2026-10-16) |
 | `scripts/workspace/init-workspace.sh` | `quaqua init` | |
 | `scripts/lib/common.sh` | internal module | |
 | — (new) | `quaqua config {validate,get}` | bash-free config access; validation runs at every command start |
@@ -74,20 +74,20 @@ reports_to = "owner"
 
 [strategy]
 default_kind = "tieude"           # anh iu, 2026-10-15
-default_reviewer = ["quansu", "suhuynh"]  # first available wins (anh iu, 2026-10-15)
+default_reviewer = ["suhuynh"]           # first available wins (anh iu, 2026-10-16)
 builder_reviewer_differ = "harness"
 
 [kinds.tieude]                    # harness·model·effort move here from models.md; prose stays there
 harness = "opencode"
 model = "opencode-go/deepseek-v4.1-flash"
-can_review = false                # true for bacdau, quansu (codex profile) and ni, suhuynh, truonglao (claude read-only flags)
-# … detu, sude, ni, suhuynh, truonglao, bacdau, quansu — values copied verbatim, never changed
+can_review = false                # true for ni, suhuynh, truonglao (claude read-only flags)
+# … detu, sude, ni, suhuynh, truonglao — values copied verbatim, never changed
 
 [taskforce.advisor]
-members = ["quansu"]
+members = ["suhuynh"]
 read_only = true
 [taskforce.dual-lens]
-members = ["truonglao", "quansu"]
+members = ["truonglao", "suhuynh"]
 read_only = true
 
 [merge]
@@ -103,6 +103,59 @@ max_workers_per_orchestrator = 3
 Resolution: project override → defaults → reject. Validation rejects: workers over the cap, builder and reviewer on the same harness, a reviewer whose kind has `can_review = false`, unknown kind or role, a kind whose model differs from `models.md` at startup (model drift).
 
 Rule → key coverage is a gate: every rule in AGENTS.md `## Rules`/`## Protocol`, `worker-cap.sh`, `worker-timebox.md` and `models.md` must map to a key or stay prose by name. Nothing is dropped silently.
+
+### Rule → key (R1)
+
+40 rules → 40 rows. Every rule keeps a home: a `team.toml` key, or named "prose" when it is an
+authority/CLI-shape fact no config value can carry. `models.md` `## Rules`/`## Naming` prose stays
+in `models.md`; only the routing cell moves to `[kinds.*]`. Two rows cite the plan/`team.toml`
+comment (the `can_review` set and the reviewer fallback order), because those rules live there,
+not in `models.md`.
+
+<!-- rule-key-table:start -->
+| Source | Rule | team.toml key |
+|---|---|---|
+| AGENTS.md `## Rules` | push / branch delete / main merge need anh iu's approval | prose (human gate) |
+| AGENTS.md `## Rules` | a Lead merges Peer branches into its project integration branch | `merge.integ_branch` |
+| AGENTS.md `## Rules` | max 4 task workers per orchestrator; a pipeline counts 2 | `limits.max_workers_per_orchestrator`, `limits.weights.pipeline` |
+| AGENTS.md `## Rules` | one task per worker | prose |
+| AGENTS.md `## Rules` | only the CoS writes `rules/`, `AGENTS.md` | prose |
+| AGENTS.md `## Rules` | `projects/INDEX.md` owner column | prose |
+| AGENTS.md `## Rules` | every redirect flows through the CoS | prose |
+| AGENTS.md `## Protocol` | spawn then grid (mandatory) | `grid.workers_tab` |
+| AGENTS.md `## Protocol` | `--check-brief` + watchdog exit codes 0, 2–6 | `timers.budget_default`, `timers.hard_cap`, `timers.stall`, `timers.idle` |
+| AGENTS.md `## Protocol` | trust `runs/<name>.md`, re-run the test | prose |
+| AGENTS.md `## Protocol` | blocked → read the pane first | prose |
+| AGENTS.md `## Protocol` | timeout/stall → read before re-prompt | prose |
+| AGENTS.md `## Protocol` | cleanup right after the run file is read | prose |
+| `worker-cap.sh` | a live task worker counts 1 | `limits.weights.default` |
+| `worker-cap.sh` | an active pipeline reserves 2 | `limits.weights.pipeline` |
+| `worker-cap.sh` | `<slug>-lead` agents never count | prose |
+| `worker-cap.sh` | max 4 slots per owner | `limits.max_workers_per_orchestrator` |
+| `worker-timebox.md` | brief `Time budget:` wins, else 2700s | `timers.budget_default` |
+| `worker-timebox.md` | hard cap 7200s | `timers.hard_cap` |
+| `worker-timebox.md` | stall window 600s | `timers.stall` |
+| `worker-timebox.md` | idle window 120s | `timers.idle` |
+| `worker-timebox.md` | one grace of 25%, once per task | `timers.grace` |
+| `worker-timebox.md` | `--extend` is the only extension | prose (CLI flag) |
+| `worker-timebox.md` | one soft nudge at 80% | `timers.nudge_at` |
+| `worker-timebox.md` | on exit 3–5 read the pane, then `--resume`; never blind re-prompt | prose |
+| `worker-timebox.md` | long silent waits are fine; the stall clock measures observable progress | prose |
+| `worker-timebox.md` | pilots/spikes get a 30-min budget | `timers.pilot_budget` |
+| `worker-timebox.md` | deadline math via the `now_sec` fake clock | prose |
+| `models.md` | no name given → `tieude` | `strategy.default_kind` |
+| `models.md` | implementer and reviewer must be different harnesses | `strategy.builder_reviewer_differ` |
+| `models.md` | read-only question → `detu`; design unclear → `truonglao` | prose |
+| `models.md` | unsure between two → cheaper tier first | prose |
+| `models.md` | update `Seen` after each run | prose |
+| `models.md` | routing table: kind harness/model/effort cells | `kinds.<k>.harness`, `kinds.<k>.model`, `kinds.<k>.effort` |
+| `models.md` | naming: `worker name = <name>-<task>`, lowercase, ≤20 chars | prose |
+| `models.md` | naming: task must not end in `-lead` (slug ≤27) | prose |
+| `models.md` | naming: spawn command shape (branch + report path) | prose |
+| `models.md` | naming: old names stay as-is | prose |
+| plan § `team.toml` | reviewer fallback list, first available wins | `strategy.default_reviewer` |
+| plan § `team.toml` | `can_review` set (ni, suhuynh, truonglao) | `kinds.<k>.can_review` |
+<!-- rule-key-table:end -->
 
 ## New behaviour from piggery
 **Merge queue (`quaqua merge`):** one branch at a time, in order. Note the integ commit, merge, run the project check. If it passes, record the new commit. If it conflicts or fails, undo (`merge --abort` / `reset --hard <noted>`), return rework to the Peer, and never fix it yourself. If the check fails without the branch too, ask the CoS and hold the queue. Never rewrite integ history except to undo its own last merge. Never push.
@@ -122,7 +175,7 @@ Rule → key coverage is a gate: every rule in AGENTS.md `## Rules`/`## Protocol
 | R0 | Crate scaffold `crates/quaqua/` (clap, serde, toml), `cargo test` runs from `tests/run.sh` | `cargo build --release` on macOS + Linux |
 | R1 | `team.toml` + `config validate/get` + rule → key table | table complete; invalid fixtures rejected |
 | R2 | `grid` (pure planner + apply + hook) | existing `tests/fixtures/herdr-grid` + 9 edge fixtures pass; planner output equals `plan.jq` on every fixture (differential) |
-| R3 | `worker spawn/prompt/cleanup`, `cap` | `test_spawn_worker`, `test_prompt_worker*`, `test_cleanup_worker`, `test_worker_cap` pass against shims; `--review` works for every `can_review` kind on each harness (codex, claude) |
+| R3 | `worker spawn/prompt/cleanup`, `cap` | `test_spawn_worker`, `test_prompt_worker*`, `test_cleanup_worker`, `test_worker_cap` pass against shims; `--review` works for every `can_review` kind (claude) |
 | R4 | `lead`, `pipeline`, `merge`, `taskforce` | `test_spawn_lead`, `test_cleanup_lead`, `test_pipeline` pass; new tests: merge-queue undo on failing check, taskforce weight 2, pipeline builder + reviewer land in `GRID_TAB` (2 workers → workers tab, never the Lead tab; bash bug 2026-10-15) |
 | R5 | `gate`, `init` | `test_herdr_gate`, `test_init_workspace` pass |
 | R6 | Cutover PR: shims, plugin manifest, `.claude/settings.json` hook → `quaqua gate`, 3 policy rules, AGENTS.md/models.md/`rules/_all/*` path updates, `trash` the replaced bash bodies | gate below |
@@ -140,11 +193,12 @@ Rollback: `git revert` the cutover commit. The bash bodies come back intact.
 ## Packaging
 - Platforms linux/macos; plugin keeps `min_herdr_version`; executable bits preserved.
 - Shims find the binary on `PATH`, else `$QUAQUA_BIN`; `quaqua init` prints the install line (`cargo install --path crates/quaqua`).
+- Interactive shells: on this machine an interactive zsh function named `quaqua` (a herdr launcher) shadows the binary for humans typing `quaqua …` — use `command quaqua …` or the shims. Scripts and hooks are unaffected (shell functions are not inherited).
 - Public export: no corporate or private metadata; commit history stays documented.
 
 ## Execution (to-plan 2026-10-15)
 Who: R0–R5 = Lead `quaqua-rs-lead` (SLP, pipeline per phase, Peers `--base quaqua/quaqua-rs-integ`). R6 touches `scripts/`, `rules/`, AGENTS.md, which are CoS-only per `spawn-lead.sh:138`, so the CoS runs R6 itself with one worker, no Lead.
-Kinds: builder `sude` (heavy: R2, R3, R4) or `tieude` (R0, R1, R5); reviewer `suhuynh` (quansu unavailable, anh iu 2026-10-15), on a different harness (omp/opencode vs claude).
+Kinds: builder `sude` (heavy: R2, R3, R4) or `tieude` (R0, R1, R5); reviewer `suhuynh` (anh iu 2026-10-16), on a different harness (omp/opencode vs claude).
 
 ### S0 Prerequisites (CoS)
 1. Commit this plan + `models.md` on `docs/rust-herdr-plugin-brainstorm`. Verify: `git status` clean for those paths.
