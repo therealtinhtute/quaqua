@@ -43,7 +43,9 @@
 #                  moved or renamed (e.g. a pipeline's own builder+reviewer),
 #                  but the owner's whole worker population still decides the
 #                  layout — an unlisted co-owner worker keeps the listed ones
-#                  out of the anchor tab; unlisted agents are never touched
+#                  out of the anchor tab; unlisted agents are never touched.
+#                  With --check, --only narrows by name but --tab still scopes
+#                  which groups are waited on.
 #   --dry-run      print the planned actions (or pending check ops) without touching any pane.
 # Requires herdr and jq; run inside a herdr pane or set HERDR_PANE_ID.
 set -euo pipefail
@@ -76,7 +78,8 @@ for a replan.
   --tab <label>  label of the 2-4 worker tab (default: workers)
   --only <names> comma-separated worker names: only the listed agents are
                  moved or renamed; the owner's whole worker population still
-                 decides the layout
+                 decides the layout. With --check, --only narrows by name but
+                 --tab still scopes which groups are waited on
   --dry-run      print the planned actions and exit without touching any pane.
 EOF
 }
@@ -155,7 +158,10 @@ check_grid() {
             | ($p.tokens.grid_group // "") as $pgroup
             | select($owner == "" or $powner == $owner)
             | select(($only | length) == 0 or ($only | index($name) != null))
-            | select(($only | length) > 0 or $tab == "" or is_group_tab($pgroup; $tab))
+            # --tab always scopes the check, with or without --only: an op
+            # whose pane belongs to another group tab is not one of these
+            # workers pending moves, so --only must not override --tab.
+            | select($tab == "" or is_group_tab($pgroup; $tab))
           ]' 2>/dev/null || echo "[]")
 
       if [ "$dry_run" -eq 1 ]; then

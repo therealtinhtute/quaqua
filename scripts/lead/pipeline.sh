@@ -2,7 +2,7 @@
 # Usage: pipeline.sh <task> <repo> --brief <file> [--builder sude] [--reviewer quansu]
 #                    [--review auto|always|skip] [--rounds 2] [--base <ref>]
 #        pipeline.sh --resume <task> <repo>
-#   Build -> review -> fix loop (spec-raw/quaqua-slp-slim-lock.md §1-2) on top of
+#   Build -> review -> fix loop on top of
 #   spawn-worker.sh / prompt-worker.sh / cleanup-worker.sh; counts as 2 workers
 #   toward the cap. <task> is a slug ([a-z0-9-]): builder <builder>-<task>, a
 #   fresh reviewer <reviewer>-<task>r<N> each round (spawn-worker.sh --review).
@@ -259,8 +259,8 @@ else
     || die "brief must carry the Goal:/Hard constraints:/Current design headers (rules/_all/brief.md)"
   bh=$(harness_of "$builder")  || die "unknown builder kind: $builder"
   rh=$(harness_of "$reviewer") || die "unknown reviewer kind: $reviewer"
-  case $reviewer in bacdau|quansu) ;; *)
-    die "reviewer must be a codex kind (bacdau|quansu) — spawn-worker.sh --review refuses $reviewer" ;; esac
+  case $reviewer in bacdau|quansu|ni|suhuynh|truonglao) ;; *)
+    die "reviewer must be a codex kind (bacdau|quansu) or a claude kind (ni|suhuynh|truonglao) — spawn-worker.sh --review refuses $reviewer" ;; esac
   [[ $bh != "$rh" ]] \
     || die "builder and reviewer must be different harnesses (models.md): $builder/$reviewer are both $bh"
   case $review in auto|always|skip) ;; *) die "--review must be auto|always|skip" ;; esac

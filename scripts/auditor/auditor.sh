@@ -7,8 +7,8 @@
 #   message to reports/audit-YYYY-MM-DD-HH.md via --output-last-message.
 #   The agent cannot edit anything; this script is the only writer.
 #   Before the prompt it runs cheap deterministic pre-checks on pipeline runs
-#   (runs/pipeline-*.md, spec-raw/quaqua-slp-slim-lock.md §3): unhandled
-#   disputed|blocked, clean with an unresolvable commit or no reviewer
+#   (runs/pipeline-*.md): unhandled disputed|blocked, clean with an
+#   unresolvable commit or no reviewer
 #   'Verdict:' (on the last review-round line or in the reviewer runs file it
 #   names), and unresolved '## Challenge' sections. It also flags any live
 #   task worker in herdr not started through the sandbox wrapper (missing
@@ -121,7 +121,7 @@ fi
 # Docs agents read as instructions drift from the code they describe once they
 # grow long; agents then trust the stale doc over the code. Flag only — the
 # CoS decides what to trim. Logs, evidence and reports (memory/YYYY-MM-DD.md,
-# raw/, runs/, reports/, spec-raw/) are excluded.
+# raw/, runs/, reports/) are excluded.
 for f in "$root"/*.md "$root"/rules/*/*.md "$root"/projects/*.md "$root"/memory/rules.md; do
   [[ -f $f ]] || continue
   n=$(wc -l <"$f"); n=${n//[[:space:]]/}

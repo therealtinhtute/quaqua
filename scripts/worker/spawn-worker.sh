@@ -3,7 +3,7 @@
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — spawn-lead.sh <slug>-lead)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
-#   --review      codex kinds (bacdau|quansu) only: repo read-only, $HOME/quaqua/runs writable
+#   --review      bacdau|quansu|ni|suhuynh|truonglao: repo read-only, $HOME/quaqua/runs writable
 #   Resume-safe: when $wt is already a registered worktree of <repo> (a
 #   previous attempt died after creating it) it is reused and startup
 #   continues with a fresh pane/agent. A pane this attempt created is closed
@@ -34,9 +34,9 @@ if [[ ! $name =~ ^$kind-[abcdefghijklmnopqrstuvwxyz0123456789-]+$ ]] || (( ${#na
     || [[ $name == *-lead ]]; then
   sed -n '2,3p' "$0" >&2; exit 1
 fi
-case $kind in bacdau|quansu) ;; *)
+case $kind in bacdau|quansu|ni|suhuynh|truonglao) ;; *)
   if [[ ${review+x} ]]; then
-    echo "error: --review is only supported for codex kinds (bacdau, quansu), not $kind" >&2
+    echo "error: --review is only supported for codex kinds (bacdau, quansu) and claude kinds (ni, suhuynh, truonglao), not $kind" >&2
     usage
   fi ;;
 esac
@@ -142,6 +142,40 @@ else
   access=(--approve-for-me --add-dir "$HOME/quaqua/runs")
 fi
 
+# claude review args (ni|suhuynh|truonglao). claude has no filesystem sandbox, so
+# the mirror of codex's quaqua-review profile is a permission mode plus path
+# rules:
+#   --permission-mode dontAsk — "Auto-denies every call that would otherwise
+#     prompt ... tools pre-approved via /permissions or permissions.allow rules
+#     still run" (docs: permissions → Permission modes). Nothing ever prompts,
+#     so an unattended reviewer cannot stall on a dialog the way `plan` would.
+#     A CLI flag outranks the ambient permissions.defaultMode ("auto" in
+#     ~/.claude/settings.json; docs: permission-modes → which mode a session
+#     starts in).
+#   --settings allow/deny — the file tools consult Edit(<path>)/Read(<path>)
+#     rules only (a Write(...) path rule is accepted but never checked; docs:
+#     permissions → file paths), so the runs allow and the worktree deny are both
+#     Edit() rules. deny outranks allow, and the deny also covers Bash redirect
+#     and `tee` targets under the worktree. Mutating Bash is denied wholesale
+#     (no Bash allow rule), while read-only commands — git diff|log|show, cat,
+#     grep, ls, diff — run prompt-free in every mode, so the reviewer keeps its
+#     evidence commands.
+#   --add-dir $HOME/quaqua/runs — the report target is a working directory, as
+#     for the other harnesses.
+# No Bash allow rule is added on purpose: one would re-open the repo. The rules
+# file tells workers to publish runs/.<name>.tmp with `mv`, which review mode
+# therefore denies — the reviewer writes the report with the file tools instead
+# (an auto-denial, never a prompt, so it cannot stall).
+# Guardrail, not a boundary, like the push block above: a Bash rule matches the
+# command text Claude writes, and claude has no OS-level read-only sandbox
+# (codex does), so a determined reviewer could still write through a subprocess.
+claude_review=()
+if [[ ${review+x} ]] && [[ $kind == ni || $kind == suhuynh || $kind == truonglao ]]; then
+  claude_review=(--permission-mode dontAsk --add-dir "$HOME/quaqua/runs"
+    --settings "$(jq -nc --arg runs "$HOME/quaqua/runs" --arg wt "$wt" \
+      '{permissions:{allow:["Edit(//\($runs|ltrimstr("/"))/**)"],deny:["Edit(//\($wt|ltrimstr("/"))/**)"]}}')")
+fi
+
 # tieude/detu are opencode (models.md): the model and the worker rules file
 # ride in the pane env, since the start command carries no flags for them.
 # sude is omp and takes both as flags (see the case below) — no pane env.
@@ -177,7 +211,9 @@ case $kind in
       --append-system-prompt "$rf" >/dev/null || spawn_fail ;;
   ni|suhuynh|truonglao)
     case $kind in ni) effort=low ;; suhuynh) effort=medium ;; truonglao) effort=high ;; esac
-    herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" --append-system-prompt-file "$rf" >/dev/null || spawn_fail ;;
+    # ${claude_review[@]} is empty for a non-review spawn: model, effort and the
+    # rules file are the only flags, and the ambient permission mode applies.
+    herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" "${claude_review[@]}" --append-system-prompt-file "$rf" >/dev/null || spawn_fail ;;
   bacdau)
     herdr agent start "$name" --kind codex --pane "$pane" --timeout 300000 -- "${access[@]}" -m gpt-6-astra -c model_reasoning_effort=medium -c "$codex_rules" >/dev/null || codex_start_rc=$? ;;
   quansu)

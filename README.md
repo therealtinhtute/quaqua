@@ -53,7 +53,7 @@ Rules:
 | `scripts/auditor/auditor.sh` | Auditor: read-only drift + pipeline-run audit → `reports/audit-*.md` |
 | `scripts/auditor/install-auditor.sh`, `scripts/auditor/systemd/`, `scripts/auditor/launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
 | `scripts/workspace/init-workspace.sh`, `templates/` | Bootstraps a fresh clone's gitignored personal state (dirs + `memory/rules.md`, `projects/INDEX.md`, `_template.md`, `USER.md`); idempotent, never overwrites |
-| `tests/` | Sandboxed test suite: `tests/run.sh` runs every `tests/test_*.sh` and exits non-zero on any failure |
+| `tests/` | Sandboxed test suite: `tests/run.sh` runs every `tests/test_*.sh` (the 2 slow suites only when the change touches a script they cover, or with `--slow`) and exits non-zero on any failure |
 | `codex-config.toml` | Codex config used by codex workers |
 | `USER.example.md` | Template for the per-workspace `USER.md` |
 | `SETUP-PROMPT.md` | Original prompt used to bootstrap this setup |
@@ -110,7 +110,11 @@ stub herdr/codex/managers; no network, real agents, or service activation is nee
 ```bash
 # On macOS, put your installed Bash's bin directory first on PATH as above.
 tests/run.sh   # PASS/FAIL per test, then a count; exits non-zero on any failure
+RUN_SLOW_TESTS=1 tests/run.sh   # also run the 2 slow suites (or: tests/run.sh --slow)
 ```
+
+`tests/run.sh` skips the two slow suites (`test_prompt_worker.sh`, `test_pipeline.sh`)
+unless the change touches a script they cover, and prints which it skipped and why.
 
 Tests run locally only (no CI).
 
