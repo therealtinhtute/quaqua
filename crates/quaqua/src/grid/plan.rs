@@ -370,8 +370,21 @@ pub fn plan_with_deferred(
                     .filter(|tab| {
                         let ws_ok = tab.workspace_id.as_deref() == Some(owner_ws) || owner_ws.is_empty();
                         let anchor_ok = anchor_tab.map(|at| tab.tab_id != at).unwrap_or(true);
-                        let group_ok = is_group_tab(group, tab.label.as_deref());
-                        if !(ws_ok && anchor_ok && group_ok) {
+                        // The repair labels the workers tab with the caller's
+                        // `--tab`/GRID_TAB, which need not equal the grid_group
+                        // token (group "quaqua", tab "quaqua-rs-workers"):
+                        // accept any `<X>-workers` tab that holds only this
+                        // group's workers (the occupancy test below). Else the
+                        // hook — which plans from here — moves the panes back
+                        // out of the tab the repair just made, and `--check`
+                        // never converges on that layout.
+                        let label_ok = is_group_tab(group, tab.label.as_deref())
+                            || tab
+                                .label
+                                .as_deref()
+                                .map(|l| l.ends_with("-workers"))
+                                .unwrap_or(false);
+                        if !(ws_ok && anchor_ok && label_ok) {
                             return false;
                         }
                         let occ: Vec<&Pane> = snapshot
@@ -457,25 +470,31 @@ pub fn plan_with_deferred(
                                 }
                             }
                         } else {
-                            // Need full rebuild in workers tab
+                            // The workers tab exists but does not hold the
+                            // first-spawned worker (the repair pivots the tab
+                            // on an idle one): place the missing workers into
+                            // that tab instead of creating a second one — the
+                            // hook runs on events and would move them again.
+                            let anchor = gws
+                                .iter()
+                                .find(|w| w.tab_id.as_deref() == Some(wt_id.as_str()))
+                                .map(|w| w.pane_id.clone())
+                                .unwrap_or_else(|| gws[0].pane_id.clone());
                             for i in build_order(n) {
-                                if i == 0 {
-                                    ops.push(Op {
-                                        op: "move".to_string(),
-                                        pane: gws[0].pane_id.clone(),
-                                        deferred: is_status_deferred(gws[0].agent_status.as_deref(), def_list),
-                                        target: Target::NewTab {
-                                            label: group.to_string(),
-                                        },
-                                    });
-                                } else {
-                                    ops.push(Op {
-                                        op: "move".to_string(),
-                                        pane: gws[i].pane_id.clone(),
-                                        deferred: is_status_deferred(gws[i].agent_status.as_deref(), def_list),
-                                        target: split_target(n, i, &gws, "@workers"),
-                                    });
+                                if gws[i].tab_id.as_deref() == Some(wt_id.as_str()) {
+                                    continue;
                                 }
+                                ops.push(Op {
+                                    op: "move".to_string(),
+                                    pane: gws[i].pane_id.clone(),
+                                    deferred: is_status_deferred(gws[i].agent_status.as_deref(), def_list),
+                                    target: Target::Split {
+                                        tab: wt_id.to_string(),
+                                        anchor: anchor.clone(),
+                                        direction: "right".to_string(),
+                                        ratio: 0.5,
+                                    },
+                                });
                             }
                         }
                     }

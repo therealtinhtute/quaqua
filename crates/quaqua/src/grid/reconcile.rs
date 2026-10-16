@@ -290,6 +290,15 @@ pub fn run_reconcile<D: HerdrDriver>(
         }
         order.insert(0, pivot_idx);
 
+        // A deferred (working) pane must never drain its group: it can neither
+        // create the tab nor anchor an idle pane's split (propagate_deferrals
+        // would cancel that split too).
+        let deferred_ids: HashSet<&str> = gws
+            .iter()
+            .filter(|w| is_deferred(w.agent_status.as_deref()))
+            .map(|w| w.pane_id.as_str())
+            .collect();
+
         // Determine movable workers under --only for this group
         for w in &gws {
             let name = snap
@@ -432,7 +441,11 @@ pub fn run_reconcile<D: HerdrDriver>(
                             },
                         });
                     } else {
-                        let anchor_target = if !present.is_empty() { present[0].clone() } else { w.pane_id.clone() };
+                        let anchor_target = present
+                            .iter()
+                            .find(|p| !deferred_ids.contains(p.as_str()))
+                            .cloned()
+                            .unwrap_or_else(|| w.pane_id.clone());
                         repair_ops.push(Op {
                             op: "move".to_string(),
                             pane: w.pane_id.clone(),
@@ -447,7 +460,14 @@ pub fn run_reconcile<D: HerdrDriver>(
                     }
                 } else {
                     let want_anchor = &gws[anchor_idx].pane_id;
-                    if present.contains(want_anchor) {
+                    // Never anchor on a deferred (working) pane: it is not in
+                    // the tab yet, and propagate_deferrals would cancel the
+                    // idle pane's split too (n>=3, pivot != gws[0]).
+                    let idle_in_tab = present
+                        .iter()
+                        .find(|p| !deferred_ids.contains(p.as_str()))
+                        .cloned();
+                    if present.contains(want_anchor) && !deferred_ids.contains(want_anchor.as_str()) {
                         repair_ops.push(Op {
                             op: "move".to_string(),
                             pane: w.pane_id.clone(),
@@ -459,15 +479,15 @@ pub fn run_reconcile<D: HerdrDriver>(
                                 ratio,
                             },
                         });
-                    } else if !present.is_empty() {
-                        // Fallback to present[0] in workers tab (legacy arranger 454-456)
+                    } else if let Some(anchor) = idle_in_tab {
+                        // Fallback to the pivot in the workers tab (legacy arranger 454-456)
                         repair_ops.push(Op {
                             op: "move".to_string(),
                             pane: w.pane_id.clone(),
                             deferred: is_deferred(w.agent_status.as_deref()),
                             target: Target::Split {
                                 tab: target_tab_ref.clone(),
-                                anchor: present[0].clone(),
+                                anchor,
                                 direction: dir.to_string(),
                                 ratio,
                             },

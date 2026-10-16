@@ -284,7 +284,12 @@ def propagate_deferrals:
                             ( [ $tabs[]
                                 | select((.workspace_id == $owner_ws or $owner_ws == "")
                                          and ($anchor_tab == null or .tab_id != $anchor_tab)
-                                         and is_group_tab($group; .label))
+                                         # any "<X>-workers" tab that holds only
+                                         # this group's workers (occupancy below):
+                                         # the repair labels the tab with GRID_TAB,
+                                         # which need not be the group token
+                                         and (is_group_tab($group; .label)
+                                              or (.label != null and (.label | endswith("-workers")))))
                                 | .tab_id as $tid
                                 | [ $panes[] | select(.tab_id == $tid) ] as $occ
                                 | select(($occ | length > 0)
@@ -332,27 +337,27 @@ def propagate_deferrals:
                                             }
                                         ]
                                       else
-                                        # Need full rebuild in workers tab
-                                        . + [
+                                        # The workers tab exists but does not
+                                        # hold the first-spawned worker: place
+                                        # the missing workers into it instead of
+                                        # creating a second tab.
+                                        ( [ $gws[] | select(.tab_id == $wt_id) ]
+                                          | first | .pane_id ) as $anchor_in_tab
+                                        | . + [
                                           build_order($n)[] as $i
-                                          | if $i == 0 then
-                                              {
-                                                op: "move",
-                                                pane: $gws[0].pane_id,
-                                                deferred: ($gws[0].agent_status | is_working),
-                                                target: {
-                                                  kind: "new_tab",
-                                                  label: $group
-                                                }
+                                          | select($gws[$i].tab_id != $wt_id)
+                                          | {
+                                              op: "move",
+                                              pane: $gws[$i].pane_id,
+                                              deferred: ($gws[$i].agent_status | is_working),
+                                              target: {
+                                                kind: "split",
+                                                tab: $wt_id,
+                                                anchor: $anchor_in_tab,
+                                                direction: "right",
+                                                ratio: 0.5
                                               }
-                                            else
-                                              {
-                                                op: "move",
-                                                pane: $gws[$i].pane_id,
-                                                deferred: ($gws[$i].agent_status | is_working),
-                                                target: split_target($n; $i; $gws; "@workers")
-                                              }
-                                            end
+                                            }
                                         ]
                                       end
                                   end
