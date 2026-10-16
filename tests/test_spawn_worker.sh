@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Sandbox test for spawn-worker.sh name validation (models.md Naming:
-# <kind>-<task>, ascii [a-z0-9-], <=20 chars), the optional --base <ref>
-# worktree start point, the --review read-only mode for the claude kinds
-# (including the narrow claude Bash allows for `cargo test` and the atomic
-# report `mv`), and its best-effort grid hook.
+# Sandbox test for the spawn-worker.sh shim (-> `quaqua worker spawn`) name
+# validation (models.md Naming: <kind>-<task>, ascii [a-z0-9-], <=20 chars),
+# the optional --base <ref> worktree start point, the same-name retry that
+# reuses a branch kept by cleanup, the --review read-only mode for the claude
+# kinds (including the narrow claude Bash allows for `cargo test` and the
+# atomic report `mv`), the claude workspace-trust dialog the spawn answers
+# before sending a brief, and its best-effort grid hook.
 # git+herdr are stubbed on PATH; the grid hook is stubbed next to a copy of the
 # script. Bad names must exit 1 before either is called; good names proceed.
 # The accented case runs under C and, when installed, a collating UTF-8 locale.
@@ -43,6 +45,16 @@ case " $* " in
   *" config --local --bool --get core.bare "*) [ -n "${FAKE_BARE:-}" ] && echo true; exit 0 ;;
   *" config --local --list "*) [ -n "${FAKE_WORKTREE:-}" ] && echo 'core.worktree=/tmp/fake'; exit 0 ;;
 esac
+# FAKE_BRANCH: branches that already exist (space-sep short names, e.g.
+# "quaqua/sude-x"); show-ref --verify succeeds for those and fails otherwise,
+# so a same-name retry can be told from a fresh spawn
+case " $* " in
+  *" show-ref "*)
+    for b in ${FAKE_BRANCH:-}; do
+      case " $* " in *" refs/heads/$b "*) exit 0 ;; esac
+    done
+    exit 1 ;;
+esac
 # MKMCP=1: the new worktree ships a project .mcp.json
 if [ -n "${MKMCP:-}" ] && [ "${3:-} ${4:-}" = "worktree add" ]; then
   for a in "$@"; do case $a in */.wt/*) mkdir -p "$a" && echo '{}' > "$a/.mcp.json" ;; esac; done
@@ -53,9 +65,24 @@ cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
 [ "${1:-} ${2:-}" = "pane split" ] && echo '{"result":{"pane":{"pane_id":"%1"}}}'
-if [ "${1:-} ${2:-}" = "pane wait-output" ]; then  # $DIALOGS = dialogs left to show
-  n=$(cat "${DIALOGS:-/dev/null}" 2>/dev/null || echo 0); [ "${n:-0}" -gt 0 ] || exit 1
-  echo $((n - 1)) > "$DIALOGS"
+# PANE_TEXT is what `pane read` shows (the trust-dialog clear check greps it)
+[ "${1:-} ${2:-}" = "pane read" ] && { printf '%s\n' "${PANE_TEXT:-}"; exit 0; }
+# CLAUDE_DIALOG = claude workspace-trust dialogs left to show (--match trust)
+if [ "${1:-} ${2:-}" = "pane wait-output" ]; then
+  m=""; prev=""
+  for a in "$@"; do [ "$prev" = "--match" ] && m=$a; prev=$a; done
+  case $m in
+    trust) f=${CLAUDE_DIALOG:-/dev/null} ;;
+    *) f=/dev/null ;;
+  esac
+  n=$(cat "$f" 2>/dev/null || echo 0); [ "${n:-0}" -gt 0 ] || exit 1
+  echo $((n - 1)) > "$f"
+fi
+# START_FAIL=1: `agent start` reports the startup-blocked error a slow (or
+# dialog-held) start hits — herdr prints it on stdout and exits non-zero
+if [ "${1:-} ${2:-}" = "agent start" ] && [ -n "${START_FAIL:-}" ]; then
+  echo '{"error":{"code":"agent_not_ready","message":"agent is blocked during startup and is not ready for prompts"}}'
+  exit 1
 fi
 exit 0
 STUB
@@ -277,6 +304,66 @@ spawn ni-plain ni
 ! grep -qF -- 'Bash(mv *runs/.*.tmp *runs/*.md)' "$T/calls" || fail "plain ni: review mv rule leaked: $(cat "$T/calls")"
 echo "ok: plain ni (no --review) -> ambient settings, no review mode/Bash rules"
 
+# ── claude workspace-trust dialog: accept it, then let it clear ──────────────
+# Claude Code's first session in a repo it has not been trusted in shows a
+# workspace-trust dialog ("Accessing workspace: ... / Quick safety check: is
+# this a project you created or one you trust?") whose "No, exit" button holds
+# focus and which would swallow the brief. herdr's own dialog rules do not
+# match that text (it can even report the agent ready with the dialog up), so
+# the spawn answers it the way a person would: Down onto "Yes, I trust this
+# folder", then Enter, and only then reports grid_ready=1.
+echo 1 > "$T/claude-dialog"
+spawn_args=(--review)
+spawn suhuynh-trust suhuynh CLAUDE_DIALOG="$T/claude-dialog"
+unset spawn_args
+[[ $rc -eq 0 ]] || fail "trust dialog: exit $rc, want 0: $(cat "$T/err")"
+grep -qF 'herdr pane wait-output %1 --match trust --timeout 15000' "$T/calls" \
+  || fail "trust dialog: not waited for: $(cat "$T/calls")"
+grep -qF 'herdr pane send-keys %1 down' "$T/calls" \
+  || fail "trust dialog: focus not moved off 'No, exit': $(cat "$T/calls")"
+grep -qF 'herdr pane send-keys %1 enter' "$T/calls" \
+  || fail "trust dialog: not confirmed: $(cat "$T/calls")"
+[[ $(ln_call 'wait-output') -lt $(ln_call 'send-keys %1 down') ]] \
+  && [[ $(ln_call 'send-keys %1 down') -lt $(ln_call 'send-keys %1 enter') ]] \
+  && [[ $(ln_call 'send-keys %1 enter') -lt $(ln_call 'grid_ready=1') ]] \
+  || fail "trust dialog: bad order: $(cat "$T/calls")"
+! grep -qE 'bypassPermissions|dangerously-skip|approve-for-me' "$T/calls" \
+  || fail "trust dialog: review boundary weakened: $(cat "$T/calls")"
+grep -qF -- '--permission-mode dontAsk' "$T/calls" \
+  || fail "trust dialog: review permission mode lost: $(cat "$T/calls")"
+grep -q "worker=suhuynh-trust" "$T/out" || fail "trust dialog: no success line"
+echo "ok: claude trust dialog -> wait-output trust, Down+Enter before grid_ready, boundary untouched"
+
+# an already-trusted repo (no dialog): nothing is sent, the spawn is unchanged
+spawn suhuynh-notrust suhuynh
+[[ $rc -eq 0 ]] || fail "no trust dialog: exit $rc, want 0: $(cat "$T/err")"
+! grep -qF 'pane send-keys' "$T/calls" || fail "no trust dialog: keys sent anyway: $(cat "$T/calls")"
+echo "ok: no trust dialog -> waited, nothing sent"
+
+# a start herdr could not confirm (blocked during startup, or a slow hook) is
+# not proof of failure: the spawn waits for idle instead of abandoning it
+spawn suhuynh-blocked suhuynh START_FAIL=1
+[[ $rc -eq 0 ]] || fail "blocked start: exit $rc, want 0: $(cat "$T/err")"
+grep -qF 'herdr agent wait suhuynh-blocked --until idle --timeout 120000' "$T/calls" \
+  || fail "blocked start: no idle wait: $(cat "$T/calls")"
+[[ $(ln_call 'agent start') -lt $(ln_call 'agent wait suhuynh-blocked') ]] \
+  && [[ $(ln_call 'agent wait suhuynh-blocked') -lt $(ln_call 'grid_ready=1') ]] \
+  || fail "blocked start: bad order: $(cat "$T/calls")"
+grep -q "worker=suhuynh-blocked" "$T/out" || fail "blocked start: no success line"
+echo "ok: blocked claude start -> trust wait, idle wait, then grid_ready=1"
+
+# a dialog that never clears is a loud failure, never a stalled worker
+echo 1 > "$T/claude-dialog"
+spawn suhuynh-stuck suhuynh CLAUDE_DIALOG="$T/claude-dialog" \
+  PANE_TEXT='❯ No, exit
+  Yes, I trust this folder'
+[[ $rc -eq 1 ]] || fail "stuck dialog: exit $rc, want 1: $(cat "$T/err")"
+grep -q 'workspace-trust dialog did not clear' "$T/err" \
+  || fail "stuck dialog: no clear error: $(cat "$T/err")"
+grep -qF 'herdr pane close %1' "$T/calls" || fail "stuck dialog: pane not closed: $(cat "$T/calls")"
+! grep -q 'worker=suhuynh-stuck' "$T/out" || fail "stuck dialog: reported success anyway"
+echo "ok: stuck trust dialog -> exit 1 with a clear error, pane closed"
+
 # ── --base <ref>: branch starts at <ref>, validated before any side effect ──
 spawn_args=(--base quaqua/tieude-m12bt)
 spawn tieude-basefix tieude
@@ -295,6 +382,40 @@ spawn tieude-nobase tieude
 grep -q "worktree add -b quaqua/tieude-nobase .*/tieude-nobase\$" "$T/calls" \
   || fail "no --base: worktree add has a start point: $(cat "$T/calls")"
 echo "ok: no --base -> worktree add <wt> only (HEAD), no rev-parse"
+
+# ── same-name retry: a branch kept by a cleanup is reused, not re-created ────
+# cleanup-worker.sh removes the worker's worktree but keeps quaqua/<name> for
+# the Lead to merge, so `worktree add -b` would die on
+# "a branch named 'quaqua/<name>' already exists" — the retry must reuse it.
+spawn tieude-branchfix tieude FAKE_BRANCH='quaqua/tieude-branchfix'
+[[ $rc -eq 0 ]] || fail "same-name retry: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'branch quaqua/tieude-branchfix already exists' "$T/err" \
+  || fail "same-name retry: no reuse note: $(cat "$T/err")"
+grep -q "show-ref --verify --quiet refs/heads/quaqua/tieude-branchfix" "$T/calls" \
+  || fail "same-name retry: kept branch not looked up: $(cat "$T/calls")"
+grep -q "worktree add .*/tieude-branchfix quaqua/tieude-branchfix\$" "$T/calls" \
+  || fail "same-name retry: kept branch not reused: $(cat "$T/calls")"
+! grep -q "worktree add -b" "$T/calls" \
+  || fail "same-name retry: -b on an existing branch: $(cat "$T/calls")"
+echo "ok: same-name retry -> kept branch reused, no -b"
+
+# an unrelated existing branch does not change a fresh spawn
+spawn tieude-branchother tieude FAKE_BRANCH='quaqua/sude-other'
+[[ $rc -eq 0 ]] || fail "unrelated branch: exit $rc, want 0: $(cat "$T/err")"
+grep -q "worktree add -b quaqua/tieude-branchother .*/tieude-branchother\$" "$T/calls" \
+  || fail "same-name retry: unrelated branch hijacked the add: $(cat "$T/calls")"
+echo "ok: another branch exists -> fresh -b still used"
+
+# --base on a retry cannot apply to the kept branch: say so, don't drop it
+spawn_args=(--base quaqua/tieude-m12bt)
+spawn tieude-branchbase tieude FAKE_BRANCH='quaqua/tieude-branchbase'
+unset spawn_args
+[[ $rc -eq 0 ]] || fail "same-name retry + --base: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'branch quaqua/tieude-branchbase already exists.*--base quaqua/tieude-m12bt ignored' "$T/err" \
+  || fail "same-name retry + --base: --base not reported as ignored: $(cat "$T/err")"
+! grep -q "worktree add -b" "$T/calls" \
+  || fail "same-name retry + --base: -b on an existing branch: $(cat "$T/calls")"
+echo "ok: same-name retry + --base -> branch reused, --base reported as ignored"
 
 # unknown ref: clear error, non-zero, no worktree or pane
 spawn_args=(--base badref)
@@ -418,6 +539,30 @@ CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
 grep -q 'not a git worktree' "$T/err" || fail "rw2: no refusal message: $(cat "$T/err")"
 ! grep -q 'agent start' "$T/calls" || fail "rw2: agent started over a foreign dir"
 echo "ok: foreign dir at worktree path -> refused before any agent start"
+
+# a cleaned-up worker (worktree gone, branch kept) retried under the same name:
+# real git proves the retry reuses the kept branch — the recreated worktree
+# carries the commit the first attempt left behind — where `worktree add -b`
+# would die with "a branch named 'quaqua/<name>' already exists"
+git -C "$T/.wt/sude-rw1" -c user.email=t@t -c user.name=t commit -qm retry-marker --allow-empty
+marker=$(git -C "$T/.wt/sude-rw1" rev-parse HEAD)
+git -C "$T/rgrepo" worktree remove --force "$T/.wt/sude-rw1"
+[[ -n $(git -C "$T/rgrepo" branch --list quaqua/sude-rw1) ]] || fail "rw1 retry: branch gone after cleanup"
+[[ ! -d $T/.wt/sude-rw1 ]] || fail "rw1 retry: worktree not removed"
+: > "$T/calls"
+rc=0
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
+  bash "$T/scripts/worker/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 0 ]] || fail "rw1 retry: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'branch quaqua/sude-rw1 already exists' "$T/err" \
+  || fail "rw1 retry: no reuse note: $(cat "$T/err")"
+[[ -d $T/.wt/sude-rw1 ]] || fail "rw1 retry: worktree not recreated"
+[[ $(git -C "$T/.wt/sude-rw1" rev-parse HEAD) == "$marker" ]] \
+  || fail "rw1 retry: kept branch not reused (HEAD $(git -C "$T/.wt/sude-rw1" rev-parse HEAD) != $marker)"
+[[ $(git -C "$T/.wt/sude-rw1" rev-parse --abbrev-ref HEAD) == quaqua/sude-rw1 ]] \
+  || fail "rw1 retry: branch changed: $(git -C "$T/.wt/sude-rw1" rev-parse --abbrev-ref HEAD)"
+grep -q "worker=sude-rw1" "$T/out" || fail "rw1 retry: no success line"
+echo "ok: real git -> retry after cleanup reuses the kept branch (marker commit kept), spawn succeeds"
 
 # ── real git push block: worker worktree cannot push, main checkout can ──────
 # sude-rw1 went through the reuse-respawn path above — proof the push block

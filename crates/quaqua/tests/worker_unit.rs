@@ -131,6 +131,9 @@ impl HerdrOps for MockHerdr {
     fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
         unimplemented!()
     }
+    fn pane_read(&self, _pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        unimplemented!()
+    }
     fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
         unimplemented!()
     }
@@ -181,6 +184,9 @@ impl HerdrOps for SpyHerdr {
     fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
         unimplemented!()
     }
+    fn pane_read(&self, _pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        unimplemented!()
+    }
     fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
         unimplemented!()
     }
@@ -214,6 +220,12 @@ impl GitOps for DummyGit {
         Ok(vec![])
     }
     fn worktree_add(&self, _repo: &Path, _branch: &str, _wt: &Path, _base: Option<&str>) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
+        false
+    }
+    fn worktree_add_existing(&self, _repo: &Path, _branch: &str, _wt: &Path) -> std::io::Result<Output> {
         unimplemented!()
     }
     fn worktree_remove(&self, _repo: &Path, _wt: &Path) -> std::io::Result<Output> {
@@ -414,6 +426,9 @@ fn test_taskforce_dual_lens_cap_reservation() {
         }
         fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool {
             true
+        }
+        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> {
+            Ok(String::new())
         }
         fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> {
             self.run(&[])

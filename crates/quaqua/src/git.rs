@@ -15,6 +15,13 @@ pub trait GitOps {
         wt: &Path,
         base: Option<&str>,
     ) -> std::io::Result<Output>;
+    fn branch_exists(&self, repo: &Path, branch: &str) -> bool;
+    fn worktree_add_existing(
+        &self,
+        repo: &Path,
+        branch: &str,
+        wt: &Path,
+    ) -> std::io::Result<Output>;
     fn worktree_remove(&self, repo: &Path, wt: &Path) -> std::io::Result<Output>;
     fn remote_list(&self, repo: &Path) -> std::io::Result<Vec<String>>;
     fn is_core_bare(&self, repo: &Path) -> bool;
@@ -95,6 +102,32 @@ impl GitOps for Git {
             cmd.arg(b);
         }
         cmd.output()
+    }
+
+    fn branch_exists(&self, repo: &Path, branch: &str) -> bool {
+        let ref_name = format!("refs/heads/{branch}");
+        match self.run_in(repo, &["show-ref", "--verify", "--quiet", &ref_name]) {
+            Ok(out) => out.status.success(),
+            Err(_) => false,
+        }
+    }
+
+    fn worktree_add_existing(
+        &self,
+        repo: &Path,
+        branch: &str,
+        wt: &Path,
+    ) -> std::io::Result<Output> {
+        // Reuse a branch cleanup-worker.sh kept for the merge (same-name retry):
+        // `worktree add -b` would die with "a branch named ... already exists".
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("worktree")
+            .arg("add")
+            .arg(wt)
+            .arg(branch)
+            .output()
     }
 
     fn worktree_remove(&self, repo: &Path, wt: &Path) -> std::io::Result<Output> {

@@ -27,7 +27,9 @@ mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs"
 # git stub: rev-parse HEAD is keyed on the -C dir's basename; call #1 is the
 # spawn-time base, call #2 the post-build tip, call #3+ the post-fix tip.
 # FAKE_BASE_SHA/FAKE_HEAD_SHA/FAKE_HEAD2_SHA shape each; FAKE_PORCELAIN feeds
-# `status --porcelain` (empty = clean tree).
+# `status --porcelain` (empty = clean tree). No branch exists (show-ref fails)
+# unless FAKE_BRANCHES names it — spawn-worker.sh reuses a branch cleanup kept
+# only when it is really there.
 cat > "$T/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
@@ -38,6 +40,9 @@ case " $* " in
   *"status --porcelain"*)   printf '%s\n' "${FAKE_PORCELAIN:-}" ;;
   *"diff --numstat"*)       printf '%s\n' "${FAKE_NUMSTAT:-}" ;;
   *"diff --name-only"*)     printf '%s\n' "${FAKE_NAMES:-}" ;;
+  *"show-ref --verify"*)
+    for b in ${FAKE_BRANCHES:-}; do case " $* " in *" refs/heads/$b "*) exit 0 ;; esac; done
+    exit 1 ;;
   *"rev-parse HEAD"*)
     n=$((n+1)); echo "$n" > "$cf"
     if (( n <= ${FAKE_BASECALLS:-1} )); then echo "${FAKE_BASE_SHA:-ba5eba5}";
@@ -673,13 +678,14 @@ grep -q 'agent start sude-rsf' "$T/calls" || fail "rsf: agent start not retried"
 grep -q 'reusing it' "$T/err" || fail "rsf: worktree reuse note missing: $(cat "$T/err")"
 echo "ok: failed agent start -> resume reuses worktree, retries start, prompts plan"
 
-# F4 (reviewer): agent-start failure keeps the worktree; --resume retries
-# (no kind needs a trust/idle wait any more, so the reviewer's startup
-# failure is observed at `agent start`)
+# F4 (reviewer): a claude start herdr could not confirm (workspace-trust dialog
+# or a slow startup) is answered with an idle wait, so the reviewer fails only
+# when that wait never sees idle — the spawn then keeps the worktree; --resume
+# retries it
 run_rg -- rsv "$T/rg/repo" --brief "$T/brief.md" --review always
 [[ $rc -eq 5 ]] || fail "rsv run1: exit $rc, want 5"
 run_rg FAKE_DO_COMMIT="$T/rg/.wt/sude-rsv" FAKE_FAIL_START=suhuynh-rsvr1 \
-       -- --resume rsv "$T/rg/repo"
+       FAKE_FAIL_WAIT=suhuynh-rsvr1 -- --resume rsv "$T/rg/repo"
 [[ $rc -eq 3 ]] || fail "rsv: exit $rc, want 3 (reviewer spawn failure): $(cat "$T/err")"
 [[ -d $T/rg/.wt/suhuynh-rsvr1 ]] || fail "rsv: reviewer worktree should survive"
 run_rg FAKE_REVIEW_MD=$'ok\nVerdict: clean' -- --resume rsv "$T/rg/repo"

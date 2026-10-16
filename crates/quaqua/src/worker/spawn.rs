@@ -109,6 +109,20 @@ fn get_iso_now() -> String {
 }
 
 
+/// Is Claude Code's workspace-trust dialog still on screen? Its wording varies
+/// between versions; every variant contains the word "trust" ("Quick safety
+/// check: is this a project you created or one you trust?" / "Yes, I trust this
+/// folder"), and it is word-wrapped to fit the pane, so match that one word
+/// rather than a phrase. The look is deliberately sensitive: answering a dialog
+/// that is not there costs a harmless Down and Enter on an empty prompt box,
+/// missing one leaves the worker stalled.
+fn claude_trust_dialog_up<H: HerdrOps>(herdr: &H, pane: &str) -> bool {
+    herdr
+        .pane_read(pane, "visible", 30)
+        .map(|text| text.contains("trust"))
+        .unwrap_or(false)
+}
+
 pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     opts: SpawnOptions,
     cfg: &Config,
@@ -195,9 +209,25 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         }
     } else {
         let branch = format!("quaqua/{}", opts.name);
-        let add_out = git
-            .worktree_add(&repo, &branch, &wt, opts.base.as_deref())
-            .map_err(|e| (1, format!("error: failed to add worktree: {e}\n")))?;
+        let add_out = if git.branch_exists(&repo, &branch) {
+            // cleanup-worker.sh drops the worktree but keeps the branch for the
+            // Lead to merge, so a same-name retry after a failed (or cleaned)
+            // spawn would die on `worktree add -b` with "a branch named
+            // 'quaqua/<name>' already exists". Reuse the kept branch — the
+            // retry resumes that task, commits included — and say so: a --base
+            // cannot apply to a branch that already exists.
+            let base_note = match &opts.base {
+                Some(b) => format!("; --base {b} ignored"),
+                None => String::new(),
+            };
+            eprintln!(
+                "note: branch {branch} already exists — reusing it (same-name retry){base_note}"
+            );
+            git.worktree_add_existing(&repo, &branch, &wt)
+        } else {
+            git.worktree_add(&repo, &branch, &wt, opts.base.as_deref())
+        }
+        .map_err(|e| (1, format!("error: failed to add worktree: {e}\n")))?;
         if !add_out.status.success() {
             let err_text = String::from_utf8_lossy(&add_out.stderr).to_string();
             return Err((1, err_text));
@@ -387,7 +417,59 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         }
     };
 
-    if start_res.is_err() || !start_res.unwrap().status.success() {
+    let start_failed = match &start_res {
+        Ok(out) => !out.status.success(),
+        Err(_) => true,
+    };
+
+    if harness == "claude" {
+        // Claude Code's first session in a directory tree it has not been
+        // trusted in shows a workspace-trust dialog ("Accessing workspace: ...
+        // / Quick safety check: is this a project you created or one you
+        // trust?") with "No, exit" focused; the worker's brief would be typed
+        // into it and lost. The trust decision is per repo and Claude Code
+        // writes it down on acceptance, so this costs the wait-output timeout
+        // only until the repo is trusted. herdr's own dialog rules do not know
+        // this text, so it can report the agent ready — or 'blocked during
+        // startup' when the start is slower — with the dialog still up: accept
+        // it here the way a person would (one Down to "Yes, I trust this
+        // folder", then Enter), then let it clear before continuing.
+        if herdr.pane_wait_output(&pane_id, "trust", 15000) {
+            let _ = herdr.pane_send_keys(&pane_id, "down");
+            let _ = herdr.pane_send_keys(&pane_id, "enter");
+            let mut dialog_up = false;
+            for _ in 0..8 {
+                dialog_up = claude_trust_dialog_up(herdr, &pane_id);
+                if !dialog_up {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            if dialog_up {
+                let _ = herdr.pane_close(&pane_id);
+                return Err((
+                    1,
+                    format!(
+                        "error: claude workspace-trust dialog did not clear in {pane_id} after accepting it — nothing was sent to {}; inspect the pane, then retry the spawn\n",
+                        opts.name
+                    ),
+                ));
+            }
+        }
+        if start_failed {
+            // herdr's start timeout is not proof of failure for claude either:
+            // herdr only sees 'timed out waiting for agent startup' when the
+            // dialog or a slow SessionStart hook held the start back, so wait
+            // for idle rather than abandoning a worker that is merely slow.
+            let ok = herdr
+                .agent_wait_idle(&opts.name, 120000)
+                .map(|out| out.status.success())
+                .unwrap_or(false);
+            if !ok {
+                return Err(spawn_fail(&pane_id, 1));
+            }
+        }
+    } else if start_failed {
         return Err(spawn_fail(&pane_id, 1));
     }
 
