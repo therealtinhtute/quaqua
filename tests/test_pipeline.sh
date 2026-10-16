@@ -163,7 +163,7 @@ grep -q 'plan-ready' "$T/err" || fail "isl run1: no plan-ready notice"
 [[ -f $runsdir/pipeline-isl.state ]] || fail "isl run1: no state file"
 grep -q '"task":"isl".*"status":"plan-ready"' "$tele" \
   || fail "isl run1: no plan-ready telemetry line: $(cat "$tele")"
-grep -q 'agent start sude-isl --kind opencode' "$T/calls" || fail "isl run1: builder not spawned as opencode: $(cat "$T/calls")"
+grep -q 'agent start sude-isl --kind omp' "$T/calls" || fail "isl run1: builder not spawned as omp: $(cat "$T/calls")"
 ! grep -q 'quaqua-review' "$T/calls" || fail "isl run1: builder spawned read-only"
 echo "ok: plan-ready -> exit 5, plan parked, state + telemetry written"
 

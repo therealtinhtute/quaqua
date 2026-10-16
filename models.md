@@ -6,7 +6,7 @@ Pick by task shape. Name = kind passed to `spawn-worker.sh`. Update "Seen" after
 |------|--------------------------|---------|-------|------|
 | tieude | opencode · opencode-go/deepseek-v4.1-flash | **default**: every task unless anh iu names another; cheap well-specced impl, QA passes | ambiguous design | mdqa, mdchip, mdbold |
 | detu | opencode · opencode-go/deepseek-v4.1-flash | quick lookup, research, read-only scan | implementation | – |
-| sude | opencode · opencode-go/deepseek-v4.1-flash | hard multi-file impl, audits (on request) | – | mdtree, mdstatus, mdflat |
+| sude | omp · google-antigravity/gemini-3.8-flash · high | hard multi-file impl, audits (on request) | – | mdtree, mdstatus, mdflat |
 | ni | claude · opus-5.5 · low | small Claude edits, quick answers | design, long work | – |
 | suhuynh | claude · opus-5.5 · medium | refactor, review of intent | long mechanical edits | mdside |
 | truonglao | claude · opus-5.5 · high | design, architecture, hard trade-offs | anything a cheaper tier can do | – |
@@ -20,7 +20,7 @@ Pick by task shape. Name = kind passed to `spawn-worker.sh`. Update "Seen" after
 - Old names (`mdtree`, `mdqa`…) stay as-is.
 
 ## Rules
-- No name given → `sude`, per `memory/rules.md`.
+- No name given → `tieude` (anh iu, 2026-10-15).
 - Implementer and reviewer must be different harnesses (e.g. sude builds → quansu reviews).
 - Read-only question → `detu`; design unclear → `truonglao` before any builder.
 - Unsure between two → cheaper tier first (tieude < sude < ni < suhuynh < truonglao); escalate only on a failed run.

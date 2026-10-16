@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Sandbox test for spawn-worker.sh name validation (models.md Naming:
 # <kind>-<task>, ascii [a-z0-9-], <=20 chars), the optional --base <ref>
-# worktree start point, the --review read-only mode for codex kinds, and its
-# best-effort grid hook.
+# worktree start point, the --review read-only mode for codex and claude kinds,
+# and its best-effort grid hook.
 # git+herdr are stubbed on PATH; the grid hook is stubbed next to a copy of the
 # script. Bad names must exit 1 before either is called; good names proceed.
 # The accented case runs under C and, when installed, a collating UTF-8 locale.
@@ -113,9 +113,9 @@ expect_accept tieude-spawnguard tieude "17 chars"
 expect_accept tieude-abcdefghijklm tieude "20 chars (boundary)"
 expect_accept sude-leadname sude "leadname suffix is not -lead"
 
-# ── tieude/detu/sude: opencode with deepseek-v4.1-flash in the pane env ─────
+# ── tieude/detu: opencode with deepseek-v4.1-flash in the pane env ──────────
 # (models.md) — the model travels in OPENCODE_CONFIG_CONTENT; no omp/gemini
-for k in tieude detu sude; do
+for k in tieude detu; do
   spawn "$k-model" "$k"
   [[ $rc -eq 0 ]] || fail "$k: exit $rc, want 0: $(cat "$T/err")"
   grep -qF -- '--kind opencode' "$T/calls" \
@@ -126,6 +126,24 @@ for k in tieude detu sude; do
   ! grep -q 'gemini' "$T/calls" || fail "$k: gemini flag leaked: $(cat "$T/calls")"
   echo "ok: $k -> --kind opencode, model opencode-go/deepseek-v4.1-flash"
 done
+
+# ── sude: omp with antigravity gemini-3.8-flash high, worker rules appended ──
+# (models.md) — omp takes the model, the thinking level and the rules file on
+# the command line (--append-system-prompt reads a file path), not in pane env
+spawn sude-impl sude
+[[ $rc -eq 0 ]] || fail "sude: exit $rc, want 0: $(cat "$T/err")"
+grep -qF -- '--kind omp' "$T/calls" || fail "sude: not an omp start: $(cat "$T/calls")"
+grep -qF -- '--model google-antigravity/gemini-3.8-flash' "$T/calls" \
+  || fail "sude: model not google-antigravity/gemini-3.8-flash: $(cat "$T/calls")"
+grep -qF -- '--thinking high' "$T/calls" || fail "sude: thinking level not high: $(cat "$T/calls")"
+grep -qF -- '--auto-approve' "$T/calls" \
+  || fail "sude: no --auto-approve (unattended spawn): $(cat "$T/calls")"
+grep -qF -- "--append-system-prompt $T/home/quaqua/runs/sude-impl.rules.md" "$T/calls" \
+  || fail "sude: worker rules file not appended: $(cat "$T/calls")"
+! grep -q -- '--kind opencode' "$T/calls" || fail "sude: still an opencode start: $(cat "$T/calls")"
+! grep -q 'OPENCODE_CONFIG_CONTENT' "$T/calls" \
+  || fail "sude: opencode pane env leaked into an omp start: $(cat "$T/calls")"
+echo "ok: sude -> --kind omp, google-antigravity/gemini-3.8-flash high, rules appended"
 
 # ── grid hook: a successful spawn arranges the new worker's pane ─────────────
 spawn tieude-gridhook tieude
@@ -193,7 +211,7 @@ grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=wo
 echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER"
 
 
-# ── --review: codex kinds only, repo read-only, $HOME/quaqua/runs writable ───
+# ── --review: codex + claude kinds, repo read-only, runs writable ────────────
 # The repo must stay read-only while runs stays writable; codex only honours
 # --add-dir under workspace-write, so the guard uses a permission profile
 # extending the built-in :read-only one.
@@ -238,23 +256,52 @@ grep -q -- "--add-dir $T/home/quaqua/runs" "$T/calls" \
   || fail "no --review quansu: review profile leaked: $(cat "$T/calls")"
 echo "ok: no --review -> --approve-for-me + --add-dir, unchanged"
 
-# --review on a non-codex kind: refused before any git/herdr call
+# --review on an opencode/omp kind: refused before any git/herdr call
 expect_reject_review() {  # expect_reject_review <name> <kind> <label>
   spawn_args=(--review)
   spawn "$1" "$2"
   unset spawn_args
   [[ $rc -eq 1 ]] || fail "$3: exit $rc, want 1"
   grep -q '^# Usage:' "$T/err" || fail "$3: no usage on stderr"
-  grep -q "error: --review is only supported for codex kinds" "$T/err" \
+  grep -qF "error: --review is only supported for codex kinds (bacdau, quansu) and claude kinds" "$T/err" \
     || fail "$3: no clear refusal: $(cat "$T/err")"
   [[ ! -s "$T/calls" ]] || fail "$3: git/herdr called before rejection: $(cat "$T/calls")"
   echo "ok: $3 -> exit 1, no git/herdr"
 }
 expect_reject_review tieude-revbad tieude "--review on tieude"
 expect_reject_review sude-revbad sude "--review on sude"
-expect_reject_review ni-revbad ni "--review on ni"
-expect_reject_review suhuynh-revbad suhuynh "--review on suhuynh"
-expect_reject_review truonglao-revbad truonglao "--review on truonglao"
+
+# ── --review claude kinds: repo read-only, $HOME/quaqua/runs writable ────────
+# claude has no filesystem sandbox, so the codex quaqua-review profile is
+# mirrored by --permission-mode dontAsk ("Auto-denies every call that would
+# otherwise prompt ... tools pre-approved via permissions.allow rules still
+# run"), so the unattended reviewer never stalls on a permission dialog, plus
+# Edit() path rules — the only file rules the file tools consult (a Write(...)
+# path rule is accepted but never checked). Read-only Bash (git diff/log/show,
+# cat, grep) stays prompt-free in every mode, so the reviewer keeps its
+# evidence commands; mutating Bash is denied wholesale.
+for k in ni suhuynh truonglao; do
+  case $k in ni) eff=low ;; suhuynh) eff=medium ;; truonglao) eff=high ;; esac
+  spawn_args=(--review)
+  spawn "$k-revread" "$k"
+  unset spawn_args
+  [[ $rc -eq 0 ]] || fail "--review $k: exit $rc, want 0: $(cat "$T/err")"
+  grep -qF -- '--kind claude' "$T/calls" || fail "--review $k: not a claude start: $(cat "$T/calls")"
+  grep -qF -- '--permission-mode dontAsk' "$T/calls" \
+    || fail "--review $k: no dontAsk permission mode: $(cat "$T/calls")"
+  grep -qF -- "--add-dir $T/home/quaqua/runs" "$T/calls" \
+    || fail "--review $k: runs dir not a working directory: $(cat "$T/calls")"
+  grep -qF -- "Edit(//${T#/}/home/quaqua/runs/**)" "$T/calls" \
+    || fail "--review $k: runs not writable (no Edit allow rule): $(cat "$T/calls")"
+  grep -qF -- "Edit(//${T#/}/.wt/$k-revread/**)" "$T/calls" \
+    || fail "--review $k: worktree not read-only (no Edit deny rule): $(cat "$T/calls")"
+  grep -qF -- '--model claude-opus-5-5' "$T/calls" || fail "--review $k: model changed: $(cat "$T/calls")"
+  grep -qF -- "--effort $eff" "$T/calls" || fail "--review $k: effort not $eff: $(cat "$T/calls")"
+  ! grep -qF -- '--approve-for-me' "$T/calls" || fail "--review $k: codex approval flag leaked: $(cat "$T/calls")"
+  ! grep -qF -- 'default_permissions' "$T/calls" || fail "--review $k: codex profile leaked: $(cat "$T/calls")"
+  grep -qF "worker=$k-revread" "$T/out" || fail "--review $k: no success line"
+  echo "ok: --review $k -> dontAsk + Edit() rules (runs writable, worktree denied), model/effort unchanged"
+done
 
 # ── --base <ref>: branch starts at <ref>, validated before any side effect ──
 spawn_args=(--base quaqua/tieude-m12bt)
