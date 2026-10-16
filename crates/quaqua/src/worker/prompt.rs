@@ -27,24 +27,79 @@ pub fn brief_headers_ok(text: &str) -> bool {
 pub fn brief_budget_sec(text: &str) -> Option<u64> {
     for line in text.lines() {
         let lower = line.to_lowercase();
-        if let Some(idx) = lower.find("time budget:") {
-            let rest = &lower[idx + 12..];
-            let mut num_str = String::new();
-            for c in rest.chars() {
+        let mut search_from = 0;
+        while let Some(idx) = lower[search_from..].find("time budget:") {
+            let start = search_from + idx + 12;
+            let rest = &lower[start..];
+            search_from = start;
+
+            // [^0-9]{0,8}
+            let non_digits_len = rest.chars().take_while(|c| !c.is_ascii_digit()).count();
+            if non_digits_len > 8 {
+                continue;
+            }
+            let after_prefix = &rest[non_digits_len..];
+            if after_prefix.is_empty() {
+                continue;
+            }
+
+            // [0-9]+
+            let mut digit_count = 0;
+            for c in after_prefix.chars() {
                 if c.is_ascii_digit() {
-                    num_str.push(c);
-                } else if !num_str.is_empty() {
+                    digit_count += 1;
+                } else {
                     break;
                 }
             }
-            if let Ok(n) = num_str.parse::<u64>() {
-                if rest.contains("min") || rest.contains("m") {
+            if digit_count == 0 {
+                continue;
+            }
+            let num_str = &after_prefix[..digit_count];
+            let Ok(n) = num_str.parse::<u64>() else {
+                continue;
+            };
+
+            // [[:space:]]*
+            let after_digits = after_prefix[digit_count..].trim_start();
+
+            // (min|mins|minutes|m)([^[:alnum:]]|$)
+            let matched_unit = if let Some(rem) = after_digits.strip_prefix("minutes") {
+                Some(rem)
+            } else if let Some(rem) = after_digits.strip_prefix("mins") {
+                Some(rem)
+            } else if let Some(rem) = after_digits.strip_prefix("min") {
+                Some(rem)
+            } else if let Some(rem) = after_digits.strip_prefix('m') {
+                Some(rem)
+            } else {
+                None
+            };
+
+            if let Some(rem) = matched_unit {
+                let valid_end = match rem.chars().next() {
+                    None => true,
+                    Some(c) => !c.is_alphanumeric(),
+                };
+                if valid_end {
                     return Some(n * 60);
                 }
             }
         }
     }
     None
+}
+
+pub fn validate_env_budget() -> Result<(), (i32, String)> {
+    if let Ok(v) = std::env::var("PROMPT_WORKER_BUDGET_SEC") {
+        if v.is_empty() || !v.chars().all(|c| c.is_ascii_digit()) {
+            return Err((
+                1,
+                format!("error: PROMPT_WORKER_BUDGET_SEC must be whole seconds (got '{v}')\n"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn resolve_budget_sec(task: &str) -> (u64, &'static str) {
@@ -82,6 +137,7 @@ pub fn nap(sec: u64) {
 }
 
 pub fn do_check_brief(task: &str) -> Result<(), (i32, String)> {
+    validate_env_budget()?;
     if !brief_headers_ok(task) {
         return Err((
             1,
@@ -342,11 +398,7 @@ pub fn prompt_worker(
     git: &Git,
     herdr: &Herdr,
 ) -> Result<(), (i32, String)> {
-    if let Ok(v) = std::env::var("PROMPT_WORKER_BUDGET_SEC") {
-        if !v.chars().all(|c| c.is_ascii_digit()) {
-            return Err((1, format!("error: PROMPT_WORKER_BUDGET_SEC must be whole seconds (got '{v}')\n")));
-        }
-    }
+    validate_env_budget()?;
 
     let runs_dir = default_runs_dir();
     let _ = std::fs::create_dir_all(&runs_dir);
