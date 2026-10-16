@@ -59,6 +59,8 @@ pub struct Tokens {
     pub grid_group: Option<String>,
     #[serde(default)]
     pub grid_ready: Option<serde_json::Value>,
+    #[serde(default)]
+    pub grid_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

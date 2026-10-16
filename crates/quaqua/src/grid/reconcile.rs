@@ -1,9 +1,9 @@
 use super::apply::{apply_ops, HerdrDriver};
-use super::plan::{is_group_tab, plan};
-use super::types::{Op, Snapshot};
+use super::plan::{is_candidate_worker, is_group_tab, plan};
+use super::types::{Op, Snapshot, Target};
 use std::collections::HashSet;
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 pub struct ReconcileOptions {
@@ -30,6 +30,32 @@ impl Default for ReconcileOptions {
     }
 }
 
+/// Read timestamp via shared fake-clock hook (PROMPT_WORKER_CLOCK_FILE), else system time
+pub fn now_sec() -> u64 {
+    if let Ok(clock_file) = std::env::var("PROMPT_WORKER_CLOCK_FILE") {
+        if let Ok(content) = std::fs::read_to_string(&clock_file) {
+            if let Ok(sec) = content.trim().parse::<u64>() {
+                return sec;
+            }
+        }
+    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn poll_interval() -> Duration {
+    if let Ok(poll_s) = std::env::var("GRID_CHECK_POLL_SEC") {
+        if let Ok(s) = poll_s.trim().parse::<f64>() {
+            if s > 0.0 {
+                return Duration::from_secs_f64(s);
+            }
+        }
+    }
+    Duration::from_millis(500)
+}
+
 pub fn filter_ops_for_check<'a>(
     ops: &'a [Op],
     snapshot: &Snapshot,
@@ -44,48 +70,74 @@ pub fn filter_ops_for_check<'a>(
             .collect()
     });
 
-    ops.iter()
-        .filter(|op| {
-            if op.deferred {
-                return false;
-            }
-            let pane = snapshot.panes.iter().find(|p| p.pane_id == op.pane);
-            let agent = snapshot.agents.iter().find(|a| a.pane_id.as_deref() == Some(&op.pane));
-            let name = agent
-                .and_then(|a| a.name.as_deref())
-                .or_else(|| pane.and_then(|p| p.label.as_deref()))
-                .unwrap_or("");
-            let powner = pane
-                .and_then(|p| p.tokens.as_ref())
-                .and_then(|t| t.grid_owner.as_deref())
-                .unwrap_or("cos");
-            let pgroup = pane
-                .and_then(|p| p.tokens.as_ref())
-                .and_then(|t| t.grid_group.as_deref())
-                .unwrap_or("");
+    let mut included_panes: HashSet<&str> = HashSet::new();
+    let mut workers_tab_included = false;
+    let mut result = Vec::new();
 
-            if let Some(req_owner) = owner_filter {
-                if !req_owner.is_empty() && powner != req_owner {
-                    return false;
+    for op in ops {
+        if op.deferred {
+            continue;
+        }
+
+        let pane = snapshot.panes.iter().find(|p| p.pane_id == op.pane);
+        let agent = snapshot.agents.iter().find(|a| a.pane_id.as_deref() == Some(&op.pane));
+
+        // Finding 6: name includes $a.name // $p.tokens.grid_name // $p.label
+        let name = agent
+            .and_then(|a| a.name.as_deref())
+            .or_else(|| pane.and_then(|p| p.tokens.as_ref()).and_then(|t| t.grid_name.as_deref()))
+            .or_else(|| pane.and_then(|p| p.label.as_deref()))
+            .unwrap_or("");
+
+        let powner = pane
+            .and_then(|p| p.tokens.as_ref())
+            .and_then(|t| t.grid_owner.as_deref())
+            .unwrap_or("cos");
+        let pgroup = pane
+            .and_then(|p| p.tokens.as_ref())
+            .and_then(|t| t.grid_group.as_deref())
+            .unwrap_or("");
+
+        if let Some(req_owner) = owner_filter {
+            if !req_owner.is_empty() && powner != req_owner {
+                continue;
+            }
+        }
+
+        if let Some(set) = &only_set {
+            if !set.is_empty() && !set.contains(name) {
+                continue;
+            }
+        }
+
+        // dec5a30 bugfix: --tab always scopes the check, with or without --only
+        if let Some(tab) = tab_filter {
+            if !tab.is_empty() && !is_group_tab(pgroup, Some(tab)) {
+                continue;
+            }
+        }
+
+        // Finding 3: Prevent orphaned splits if parent new_tab or anchor was filtered out
+        match &op.target {
+            Target::NewTab { .. } => {
+                workers_tab_included = true;
+                included_panes.insert(op.pane.as_str());
+            }
+            Target::Split { tab, anchor, .. } => {
+                if tab == "@workers" && !workers_tab_included {
+                    continue;
                 }
-            }
-
-            if let Some(set) = &only_set {
-                if !set.is_empty() && !set.contains(name) {
-                    return false;
+                if !included_panes.contains(anchor.as_str()) && !snapshot.panes.iter().any(|p| &p.pane_id == anchor) {
+                    continue;
                 }
+                included_panes.insert(op.pane.as_str());
             }
+        }
 
-            // dec5a30 bugfix: --tab always scopes the check, with or without --only
-            if let Some(tab) = tab_filter {
-                if !tab.is_empty() && !is_group_tab(pgroup, Some(tab)) {
-                    return false;
-                }
-            }
+        result.push(op);
+    }
 
-            true
-        })
-        .collect()
+    result
 }
 
 pub fn run_reconcile<D: HerdrDriver>(
@@ -108,9 +160,23 @@ pub fn run_reconcile<D: HerdrDriver>(
                 .unwrap_or(60)
         });
 
-        let start = Instant::now();
+        let start_ts = now_sec();
+        let poll = poll_interval();
+
         loop {
-            let snap = driver.snapshot()?;
+            // Finding 7: Retrying snapshot failure until timeout
+            let snap = match driver.snapshot() {
+                Ok(s) => s,
+                Err(e) => {
+                    let elapsed = now_sec().saturating_sub(start_ts);
+                    if elapsed >= timeout_sec {
+                        return Err(format!("grid check snapshot failed after {timeout_sec}s: {e}"));
+                    }
+                    sleep(poll);
+                    continue;
+                }
+            };
+
             let ops = plan(&snap)?;
             let rem_ops = filter_ops_for_check(
                 &ops,
@@ -134,14 +200,15 @@ pub fn run_reconcile<D: HerdrDriver>(
                 return Ok(());
             }
 
-            if start.elapsed() >= Duration::from_secs(timeout_sec) {
+            let elapsed = now_sec().saturating_sub(start_ts);
+            if elapsed >= timeout_sec {
                 let serialized = serde_json::to_string(&rem_ops).unwrap_or_default();
                 return Err(format!(
                     "grid check timed out after {timeout_sec}s; pending ops: {serialized}"
                 ));
             }
 
-            sleep(Duration::from_millis(500));
+            sleep(poll);
         }
     }
 
@@ -155,7 +222,7 @@ pub fn run_reconcile<D: HerdrDriver>(
         &snap,
         Some(&owner_env),
         opts.only.as_deref(),
-        Some(tab),
+        if opts.tab.is_some() { Some(tab) } else { None },
     );
 
     let owned_ops: Vec<Op> = filtered_ops.into_iter().cloned().collect();
@@ -166,6 +233,29 @@ pub fn run_reconcile<D: HerdrDriver>(
         return Ok(());
     }
 
-    apply_ops(driver, &owned_ops)?;
+    // Finding 5: Apply ops with scratch parking and dependent deferrals
+    apply_ops(driver, &owned_ops, Some(&snap))?;
+
+    // Finding 5: Pane renaming to agent name
+    for p in &snap.panes {
+        if is_candidate_worker(p) {
+            let powner = p.tokens.as_ref().and_then(|t| t.grid_owner.as_deref()).unwrap_or("cos");
+            if !owner_env.is_empty() && powner != owner_env {
+                continue;
+            }
+            let target_name = snap
+                .agents
+                .iter()
+                .find(|a| a.pane_id.as_deref() == Some(&p.pane_id))
+                .and_then(|a| a.name.as_deref())
+                .or_else(|| p.tokens.as_ref().and_then(|t| t.grid_name.as_deref()));
+            if let Some(tname) = target_name {
+                if p.label.as_deref() != Some(tname) {
+                    let _ = driver.rename_pane(&p.pane_id, tname);
+                }
+            }
+        }
+    }
+
     Ok(())
 }

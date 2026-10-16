@@ -234,11 +234,102 @@ fn test_fake_herdr_driver_applies_ops_cleanly() {
 
     let ops = plan(&snap).unwrap();
     assert_eq!(ops.len(), 2);
-
-    let mut driver = FakeHerdrDriver::new(snap);
-    let applied = apply_ops(&mut driver, &ops).unwrap();
+    let mut driver = FakeHerdrDriver::new(snap.clone());
+    let applied = apply_ops(&mut driver, &ops, Some(&snap)).unwrap();
     assert_eq!(applied, 2);
     assert_eq!(driver.executed_moves.len(), 2);
     assert_eq!(driver.executed_moves[0].0, "w1:p5");
     assert_eq!(driver.executed_moves[1].0, "w1:p6");
+}
+
+#[test]
+fn test_parse_move_response_and_changed_false() {
+    use quaqua::grid::apply::parse_move_response;
+
+    // 1. Success response matching real herdr shape (.result.move_result)
+    let ok_json = serde_json::json!({
+        "result": {
+            "move_result": {
+                "changed": true,
+                "reason": "ok",
+                "pane": {
+                    "pane_id": "w1:p10",
+                    "tab_id": "w1:t5"
+                },
+                "previous_pane_id": "w1:p5"
+            }
+        }
+    });
+    let res = parse_move_response(&ok_json, "w1:p5").unwrap();
+    assert_eq!(res.pane_id, "w1:p10");
+    assert_eq!(res.tab_id, "w1:t5");
+    assert_eq!(res.previous_pane_id, Some("w1:p5".to_string()));
+
+    // 2. changed=false response (e.g. same_tab or zoomed_tab)
+    let failed_json = serde_json::json!({
+        "result": {
+            "move_result": {
+                "changed": false,
+                "reason": "same_tab"
+            }
+        }
+    });
+    let err = parse_move_response(&failed_json, "w1:p5").unwrap_err();
+    assert!(
+        err.contains("changed=false, reason=same_tab"),
+        "unexpected error message: {err}"
+    );
+}
+
+#[test]
+fn test_deferred_op_propagates_to_dependent_splits() {
+    use quaqua::grid::types::Op;
+    // When op 0 (new_tab) is deferred, subsequent split ops targeting @workers must also be deferred
+    let ops = vec![
+        Op {
+            op: "move".to_string(),
+            pane: "w1:p5".to_string(),
+            deferred: true,
+            target: Target::NewTab {
+                label: "quaqua-workers".to_string(),
+            },
+        },
+        Op {
+            op: "move".to_string(),
+            pane: "w1:p6".to_string(),
+            deferred: false,
+            target: Target::Split {
+                tab: "@workers".to_string(),
+                anchor: "w1:p5".to_string(),
+                direction: "right".to_string(),
+                ratio: 0.5,
+            },
+        },
+    ];
+
+    let mut driver = FakeHerdrDriver::new(quaqua::grid::Snapshot {
+        workspaces: vec![],
+        tabs: vec![],
+        panes: vec![],
+        layouts: vec![],
+        agents: vec![],
+    });
+    let applied = apply_ops(&mut driver, &ops, None).unwrap();
+    // Neither op should be applied!
+    assert_eq!(applied, 0);
+    assert_eq!(driver.executed_moves.len(), 0);
+}
+
+#[test]
+fn test_fake_clock_now_sec() {
+    use quaqua::grid::reconcile::now_sec;
+    let tmp_clock = std::env::temp_dir().join("test_fake_clock.txt");
+    fs::write(&tmp_clock, "1729000000\n").unwrap();
+
+    std::env::set_var("PROMPT_WORKER_CLOCK_FILE", &tmp_clock);
+    let t = now_sec();
+    std::env::remove_var("PROMPT_WORKER_CLOCK_FILE");
+    let _ = fs::remove_file(&tmp_clock);
+
+    assert_eq!(t, 1729000000);
 }

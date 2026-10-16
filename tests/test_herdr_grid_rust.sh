@@ -18,14 +18,8 @@ fail() {
 # Locate or build quaqua binary
 QUAQUA_BIN="${QUAQUA_BIN:-}"
 if [ -z "$QUAQUA_BIN" ]; then
-  if [ -x "$repo_root/target/release/quaqua" ]; then
-    QUAQUA_BIN="$repo_root/target/release/quaqua"
-  elif [ -x "$repo_root/target/debug/quaqua" ]; then
-    QUAQUA_BIN="$repo_root/target/debug/quaqua"
-  else
-    (cd "$repo_root" && cargo build --release --quiet)
-    QUAQUA_BIN="$repo_root/target/release/quaqua"
-  fi
+  (cd "$repo_root" && cargo build --locked --release --quiet)
+  QUAQUA_BIN="$repo_root/target/release/quaqua"
 fi
 
 [[ -x "$QUAQUA_BIN" ]] || fail "cannot find executable quaqua binary at $QUAQUA_BIN"
@@ -92,13 +86,14 @@ echo "--- 2. dec5a30 bugfix test: --only + custom --tab ---"
 # only-custom-tab.json has workers with grid_group="quaqua".
 # When --tab mono-workers is specified, ops whose group is not mono-workers
 # are ignored, so remaining ops is empty and it converges immediately (exit 0).
+out=""
+rc=0
 out=$(HERDR_STUB_SNAPSHOT="$fixdir/only-custom-tab.json" QUAQUA_OWNER=cos "$QUAQUA_BIN" grid reconcile \
   --check \
   --tab mono-workers \
   --only sude-isl,quansu-islr1 \
   --dry-run \
-  --team-file "$repo_root/team.toml" 2>&1)
-rc=$?
+  --team-file "$repo_root/team.toml" 2>&1) || rc=$?
 if [ "$rc" -ne 0 ]; then
   fail "--check --only with custom --tab mono-workers expected exit 0, got $rc: $out"
 fi
@@ -143,5 +138,14 @@ echo "ok: 2-worker set lands in GRID_TAB (quaqua-workers), never orchestrator ta
 echo "--- 4. Verify fake driver in Rust tests ---"
 (cd "$repo_root" && cargo test --locked --test grid -- test_fake_herdr_driver_applies_ops_cleanly --quiet)
 echo "ok: fake herdr driver applied ops without real herdr calls"
+
+# ── 5. Reject --check and --repair together ─────────────────────────────────
+echo "--- 5. Reject --check and --repair together ---"
+err=""
+if err=$("$QUAQUA_BIN" grid reconcile --check --repair 2>&1); then
+  fail "expected failure when both --check and --repair are passed, got success: $err"
+fi
+[[ "$err" == *"cannot specify both --check and --repair"* ]] || fail "wrong error message for --check --repair: $err"
+echo "ok: --check and --repair together rejected with clear error"
 
 echo "PASS: all test_herdr_grid_rust.sh cases passed"

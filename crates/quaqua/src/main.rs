@@ -167,16 +167,19 @@ fn do_grid_reconcile(
         "workers".to_string()
     };
 
+    if check && repair {
+        return Err("cannot specify both --check and --repair".to_string());
+    }
+
     let opts = quaqua::grid::ReconcileOptions {
         check,
-        repair: if check { false } else { repair || true },
+        repair: if check { false } else { true },
         tab,
         only,
         owner,
         dry_run,
         timeout_sec: None,
     };
-
     let mut driver = quaqua::grid::CliHerdrDriver::new();
     quaqua::grid::run_reconcile(&mut driver, &opts, &default_workers_tab)
 }
