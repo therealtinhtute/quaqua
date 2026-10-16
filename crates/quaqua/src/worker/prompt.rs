@@ -33,35 +33,42 @@ pub fn brief_budget_sec(text: &str) -> Option<u64> {
             let rest = &lower[start..];
             search_from = start;
 
-            // [^0-9]{0,8}
-            let non_digits_len = rest.chars().take_while(|c| !c.is_ascii_digit()).count();
-            if non_digits_len > 8 {
-                continue;
-            }
-            let after_prefix = &rest[non_digits_len..];
-            if after_prefix.is_empty() {
-                continue;
-            }
-
-            // [0-9]+
-            let mut digit_count = 0;
-            for c in after_prefix.chars() {
+            // [^0-9]{0,8} using byte offsets via char_indices to avoid slicing inside multi-byte characters
+            let mut digit_start = None;
+            let mut non_digit_chars = 0;
+            for (byte_offset, c) in rest.char_indices() {
                 if c.is_ascii_digit() {
-                    digit_count += 1;
-                } else {
+                    digit_start = Some((byte_offset, non_digit_chars));
+                    break;
+                }
+                non_digit_chars += 1;
+                if non_digit_chars > 8 {
                     break;
                 }
             }
-            if digit_count == 0 {
+
+            let Some((byte_offset, _)) = digit_start else {
+                continue;
+            };
+
+            let after_prefix = &rest[byte_offset..];
+
+            // [0-9]+
+            let digit_bytes = after_prefix
+                .bytes()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
+            if digit_bytes == 0 {
                 continue;
             }
-            let num_str = &after_prefix[..digit_count];
+
+            let num_str = &after_prefix[..digit_bytes];
             let Ok(n) = num_str.parse::<u64>() else {
                 continue;
             };
 
             // [[:space:]]*
-            let after_digits = after_prefix[digit_count..].trim_start();
+            let after_digits = after_prefix[digit_bytes..].trim_start();
 
             // (min|mins|minutes|m)([^[:alnum:]]|$)
             let matched_unit = if let Some(rem) = after_digits.strip_prefix("minutes") {
@@ -90,9 +97,9 @@ pub fn brief_budget_sec(text: &str) -> Option<u64> {
     None
 }
 
-pub fn validate_env_budget() -> Result<(), (i32, String)> {
-    if let Ok(v) = std::env::var("PROMPT_WORKER_BUDGET_SEC") {
-        if v.is_empty() || !v.chars().all(|c| c.is_ascii_digit()) {
+pub fn validate_env_budget_val(val: Option<&str>) -> Result<(), (i32, String)> {
+    if let Some(v) = val {
+        if !v.is_empty() && !v.chars().all(|c| c.is_ascii_digit()) {
             return Err((
                 1,
                 format!("error: PROMPT_WORKER_BUDGET_SEC must be whole seconds (got '{v}')\n"),
@@ -102,10 +109,17 @@ pub fn validate_env_budget() -> Result<(), (i32, String)> {
     Ok(())
 }
 
+pub fn validate_env_budget() -> Result<(), (i32, String)> {
+    let var = std::env::var("PROMPT_WORKER_BUDGET_SEC").ok();
+    validate_env_budget_val(var.as_deref())
+}
+
 pub fn resolve_budget_sec(task: &str) -> (u64, &'static str) {
     if let Ok(env_val) = std::env::var("PROMPT_WORKER_BUDGET_SEC") {
-        if let Ok(n) = env_val.parse::<u64>() {
-            return (n, "env");
+        if !env_val.is_empty() {
+            if let Ok(n) = env_val.parse::<u64>() {
+                return (n, "env");
+            }
         }
     }
     if let Some(n) = brief_budget_sec(task) {

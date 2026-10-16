@@ -7,20 +7,31 @@ use crate::json::parse_json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn home_quaqua_runs() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join("quaqua/runs")
+pub fn resolve_home_quaqua_runs(home: Option<&Path>) -> PathBuf {
+    if let Some(h) = home {
+        h.join("quaqua/runs")
     } else {
         PathBuf::from("runs")
     }
 }
 
-pub fn default_runs_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
-        PathBuf::from(dir)
+pub fn resolve_default_runs_dir(override_runs: Option<&Path>, home: Option<&Path>) -> PathBuf {
+    if let Some(dir) = override_runs {
+        dir.to_path_buf()
     } else {
-        home_quaqua_runs()
+        resolve_home_quaqua_runs(home)
     }
+}
+
+pub fn home_quaqua_runs() -> PathBuf {
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    resolve_home_quaqua_runs(home.as_deref())
+}
+
+pub fn default_runs_dir() -> PathBuf {
+    let override_dir = std::env::var("QUAQUA_RUNS_DIR").ok().map(PathBuf::from);
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    resolve_default_runs_dir(override_dir.as_deref(), home.as_deref())
 }
 
 pub fn find_grid_script() -> Option<PathBuf> {

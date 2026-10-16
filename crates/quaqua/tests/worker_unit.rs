@@ -1,11 +1,13 @@
 use quaqua::cap::{count_owner_slots, is_task_worker_name, matches_pipeline_reviewer};
 use quaqua::config;
-use quaqua::herdr::{Herdr, HerdrOps};
-use quaqua::worker::cleanup::{default_runs_dir, home_quaqua_runs};
-use quaqua::worker::prompt::{brief_budget_sec, brief_headers_ok, resolve_budget_sec, validate_env_budget};
+use quaqua::git::GitOps;
+use quaqua::herdr::HerdrOps;
+use quaqua::worker::cleanup::{resolve_default_runs_dir, resolve_home_quaqua_runs};
+use quaqua::worker::prompt::{brief_budget_sec, brief_headers_ok, resolve_budget_sec, validate_env_budget_val};
 use quaqua::worker::spawn::parse_spawn_args;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[test]
 fn test_task_worker_name_validation() {
@@ -42,71 +44,55 @@ fn test_brief_headers() {
 #[test]
 fn test_brief_budget_regex_matching() {
     // Happy paths
-    assert_eq!(
-        brief_budget_sec("Time budget: 25 min"),
-        Some(1500)
-    );
-    assert_eq!(
-        brief_budget_sec("Time budget: 10m"),
-        Some(600)
-    );
-    assert_eq!(
-        brief_budget_sec("Time budget: 45 minutes"),
-        Some(2700)
-    );
-    assert_eq!(
-        brief_budget_sec("Time budget: 15 mins"),
-        Some(900)
-    );
-    assert_eq!(
-        brief_budget_sec("time budget: 20 min."),
-        Some(1200)
-    );
+    assert_eq!(brief_budget_sec("Time budget: 25 min"), Some(1500));
+    assert_eq!(brief_budget_sec("Time budget: 10m"), Some(600));
+    assert_eq!(brief_budget_sec("Time budget: 45 minutes"), Some(2700));
+    assert_eq!(brief_budget_sec("Time budget: 15 mins"), Some(900));
+    assert_eq!(brief_budget_sec("time budget: 20 min."), Some(1200));
 
     // Finding 3 edge cases: must NOT match if unit is hours or seconds, even if line contains 'm'
-    assert_eq!(
-        brief_budget_sec("Time budget: 2 hours max"),
-        None
-    );
-    assert_eq!(
-        brief_budget_sec("Time budget: 1800s (team max)"),
-        None
-    );
-    assert_eq!(
-        brief_budget_sec("Time budget: 3 days"),
-        None
-    );
+    assert_eq!(brief_budget_sec("Time budget: 2 hours max"), None);
+    assert_eq!(brief_budget_sec("Time budget: 1800s (team max)"), None);
+    assert_eq!(brief_budget_sec("Time budget: 3 days"), None);
 }
 
 #[test]
-fn test_env_budget_validation() {
-    // Valid whole seconds
-    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", "120");
-    assert!(validate_env_budget().is_ok());
+fn test_brief_budget_non_ascii_n1() {
+    // N1: multi-byte UTF-8 after 'Time budget:' must not panic and must match bash
+    assert_eq!(brief_budget_sec("Time budget: ≈ 20 min"), Some(1200));
+    assert_eq!(brief_budget_sec("Time budget: —"), None);
+    assert_eq!(brief_budget_sec("Time budget: — 45 mins"), Some(2700));
+    assert_eq!(brief_budget_sec("Time budget: ≈ 10m"), Some(600));
+}
+
+#[test]
+fn test_env_budget_validation_n3_n5() {
+    // N3: empty string = unset (valid, not err)
+    // N5: no process-global set_var mutations
+    assert!(validate_env_budget_val(Some("")).is_ok());
+    assert!(validate_env_budget_val(None).is_ok());
+    assert!(validate_env_budget_val(Some("120")).is_ok());
 
     // Invalid values
-    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", "abc");
-    assert!(validate_env_budget().is_err());
-
-    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", "12.5");
-    assert!(validate_env_budget().is_err());
-
-    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", "");
-    assert!(validate_env_budget().is_err());
-
-    std::env::remove_var("PROMPT_WORKER_BUDGET_SEC");
-    assert!(validate_env_budget().is_ok());
+    assert!(validate_env_budget_val(Some("abc")).is_err());
+    assert!(validate_env_budget_val(Some("12.5")).is_err());
+    assert!(validate_env_budget_val(Some("-5")).is_err());
 }
 
 #[test]
-fn test_pipeline_reviewer_prefix_matching() {
-    // Finding 2: must require digits after -pr or -<task>r
+fn test_pipeline_reviewer_prefix_matching_n2() {
+    // N2: quansu-prep-pr1 has '-prep' before '-pr1'; must match on second occurrence
+    assert!(matches_pipeline_reviewer("quansu-prep-pr1", "test"));
     assert!(matches_pipeline_reviewer("quansu-pr1", "test"));
     assert!(matches_pipeline_reviewer("suhuynh-pr24", "test"));
     assert!(matches_pipeline_reviewer("quansu-testr1", "test"));
     assert!(matches_pipeline_reviewer("suhuynh-testr3", "test"));
 
-    // Finding 2 bug scenario: 'tieude-prompt' has '-pr' but not followed by digit!
+    // N2: empty task matches *-r[0-9]*
+    assert!(matches_pipeline_reviewer("suhuynh-r3r2", ""));
+    assert!(matches_pipeline_reviewer("quansu-r1", ""));
+
+    // Non-reviewer workers
     assert!(!matches_pipeline_reviewer("tieude-prompt", "test"));
     assert!(!matches_pipeline_reviewer("tieude-process", "test"));
     assert!(!matches_pipeline_reviewer("sude-testrun", "test"));
@@ -159,6 +145,124 @@ impl HerdrOps for MockHerdr {
     }
 }
 
+struct SpyHerdr {
+    split_called: AtomicBool,
+}
+
+impl HerdrOps for SpyHerdr {
+    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_list(&self) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
+        unimplemented!()
+    }
+    fn agent_read(&self, _name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn agent_start(&self, _name: &str, _kind: &str, _pane: &str, _timeout_ms: u32, _extra_args: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_split(&self, _cwd: &str, _owner: &str, _envs: &[(&str, &str)]) -> std::io::Result<Output> {
+        self.split_called.store(true, Ordering::SeqCst);
+        unimplemented!()
+    }
+    fn pane_close(&self, _pane: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_report_metadata(&self, _pane: &str, _tokens: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
+        unimplemented!()
+    }
+    fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_nowait(&self, _name: &str, _prompt: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_wait_background(&self, _name: &str, _prompt: &str, _timeout_ms: u32, _log_file: std::fs::File) -> std::io::Result<Child> {
+        unimplemented!()
+    }
+}
+
+struct DummyGit;
+
+impl GitOps for DummyGit {
+    fn run_in(&self, _dir: &Path, _args: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool {
+        true
+    }
+    fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn worktree_add(&self, _repo: &Path, _branch: &str, _wt: &Path, _base: Option<&str>) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn worktree_remove(&self, _repo: &Path, _wt: &Path) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn is_core_bare(&self, _repo: &Path) -> bool {
+        false
+    }
+    fn has_core_worktree(&self, _repo: &Path) -> bool {
+        false
+    }
+    fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn set_worktree_pushurl_blocked(&self, _wt: &Path, _remote: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn is_git_dir(&self, _cwd: &Path) -> bool {
+        true
+    }
+    fn diff_and_status(&self, _cwd: &Path) -> (String, String) {
+        ("dh".to_string(), "clean".to_string())
+    }
+}
+
+#[test]
+fn test_unknown_harness_rejected_before_split_n4() {
+    let spy = SpyHerdr {
+        split_called: AtomicBool::new(false),
+    };
+    let dummy_git = DummyGit;
+
+    let mut cfg = config::Config::default();
+    cfg.kinds.insert("badkind".to_string(), config::Kind {
+        harness: "unsupported_harness".to_string(),
+        model: "m".to_string(),
+        effort: None,
+        can_review: false,
+    });
+
+    let opts = parse_spawn_args(&[
+        "badkind-task1".to_string(),
+        "badkind".to_string(),
+        "/repo".to_string(),
+    ]).unwrap();
+
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &dummy_git, &spy);
+    assert!(res.is_err());
+    // N4: pane_split must NEVER have been called!
+    assert!(!spy.split_called.load(Ordering::SeqCst));
+}
+
 #[test]
 fn test_cap_pipeline_slot_reservation_mock() {
     let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-test-{}", std::process::id()));
@@ -192,20 +296,15 @@ fn test_cap_pipeline_slot_reservation_mock() {
 }
 
 #[test]
-fn test_runs_dir_resolution() {
-    let test_home = PathBuf::from("target/test_home");
-    std::env::set_var("HOME", &test_home);
-    std::env::remove_var("QUAQUA_RUNS_DIR");
-    assert_eq!(home_quaqua_runs(), test_home.join("quaqua/runs"));
-    assert_eq!(default_runs_dir(), test_home.join("quaqua/runs"));
+fn test_runs_dir_resolution_n5() {
+    // N5: no process-global set_var mutations
+    let test_home = Path::new("target/test_home");
+    assert_eq!(resolve_home_quaqua_runs(Some(test_home)), test_home.join("quaqua/runs"));
+    assert_eq!(resolve_default_runs_dir(None, Some(test_home)), test_home.join("quaqua/runs"));
 
-    // QUAQUA_RUNS_DIR overrides default_runs_dir (used by cleanup and cap)
-    let override_dir = PathBuf::from("target/override_runs");
-    std::env::set_var("QUAQUA_RUNS_DIR", &override_dir);
-    assert_eq!(default_runs_dir(), override_dir);
-    // home_quaqua_runs (used by spawn and prompt reports) remains unchanged
-    assert_eq!(home_quaqua_runs(), test_home.join("quaqua/runs"));
-    std::env::remove_var("QUAQUA_RUNS_DIR");
+    let override_dir = Path::new("target/override_runs");
+    assert_eq!(resolve_default_runs_dir(Some(override_dir), Some(test_home)), override_dir.to_path_buf());
+    assert_eq!(resolve_home_quaqua_runs(Some(test_home)), test_home.join("quaqua/runs"));
 }
 
 #[test]

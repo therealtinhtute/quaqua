@@ -34,22 +34,26 @@ fn is_pid_alive(pid_str: &str) -> bool {
     false
 }
 
-/// Check if a worker name matches `*-pr[0-9]*` or `*-<task>r[0-9]*`.
-pub fn matches_pipeline_reviewer(w: &str, task: &str) -> bool {
-    if let Some(idx) = w.find("-pr") {
-        let after = &w[idx + 3..];
+fn contains_prefix_digit(w: &str, prefix: &str) -> bool {
+    let mut search = w;
+    while let Some(idx) = search.find(prefix) {
+        let after = &search[idx + prefix.len()..];
         if after.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
             return true;
         }
+        search = &search[idx + prefix.len()..];
     }
-    if !task.is_empty() {
-        let pat = format!("-{}r", task);
-        if let Some(idx) = w.find(&pat) {
-            let after = &w[idx + pat.len()..];
-            if after.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                return true;
-            }
-        }
+    false
+}
+
+/// Check if a worker name matches `*-pr[0-9]*` or `*-<task>r[0-9]*` (when task is empty: `*-r[0-9]*`).
+pub fn matches_pipeline_reviewer(w: &str, task: &str) -> bool {
+    if contains_prefix_digit(w, "-pr") {
+        return true;
+    }
+    let task_pat = format!("-{}r", task);
+    if contains_prefix_digit(w, &task_pat) {
+        return true;
     }
     false
 }

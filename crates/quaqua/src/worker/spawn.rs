@@ -149,6 +149,14 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         return Err((1, format!("{}\n", USAGE)));
     }
 
+    let harness = kind_info.harness.as_str();
+    if !["opencode", "omp", "claude", "codex"].contains(&harness) {
+        return Err((
+            1,
+            format!("error: unsupported harness '{harness}' for kind '{}'\n", opts.kind),
+        ));
+    }
+
     let repo = match std::fs::canonicalize(&opts.repo_path) {
         Ok(p) => p,
         Err(_) => opts.repo_path.clone(),
@@ -439,8 +447,8 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
             }
             res
         }
-        other => {
-            return Err((1, format!("error: unsupported harness '{other}' for kind '{}'\n", opts.kind)));
+        _ => {
+            return Err(spawn_fail(&pane_id, 1));
         }
     };
 
