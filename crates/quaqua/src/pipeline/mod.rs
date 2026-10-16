@@ -668,44 +668,11 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         if std::env::var("GRID_SKIP").as_deref() == Ok("1") && std::env::var("QUAQUA_TEST").as_deref() == Ok("1") {
             return true;
         }
-        if let Some(grid_sh) = crate::worker::cleanup::find_grid_script() {
-            let res = Command::new("bash")
-                .arg(&grid_sh)
-                .arg("--check")
-                .arg("--tab")
-                .arg(&grid_tab)
-                .arg("--only")
-                .arg(workers)
-                .status();
-            match res {
-                Ok(s) if s.success() => true,
-                Ok(s) => {
-                    eprintln!("warning: grid-workers.sh failed (exit {}); arrange panes manually", s.code().unwrap_or(1));
-                    false
-                }
-                Err(e) => {
-                    eprintln!("warning: grid-workers.sh failed ({e}); arrange panes manually");
-                    false
-                }
-            }
-        } else {
-            let opts = crate::grid::ReconcileOptions {
-                check: true,
-                repair: false,
-                tab: Some(grid_tab.clone()),
-                only: Some(workers.to_string()),
-                owner: Some(grid_owner.clone()),
-                dry_run: false,
-                timeout_sec: None,
-            };
-            let mut driver = crate::grid::CliHerdrDriver::new();
-            let reconcile_res = crate::grid::run_reconcile(&mut driver, &opts, &grid_tab, None);
-            match reconcile_res {
-                Ok(()) => true,
-                Err(e) => {
-                    eprintln!("warning: grid reconcile failed ({e}); arrange panes manually");
-                    false
-                }
+        match crate::grid::run_grid_check(&grid_tab, Some(workers), Some(&grid_owner)) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("warning: grid check failed ({e}); arrange panes manually");
+                false
             }
         }
     };
@@ -804,8 +771,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
             let _ = state.save(&state_file);
 
             // Execute prompt worker
-            let prompt_sh = crate::worker::cleanup::find_grid_script()
-                .and_then(|p| p.parent().map(|d| d.join("prompt-worker.sh")));
+            let prompt_sh = crate::worker::cleanup::find_engine_script("prompt-worker.sh");
 
             if let Some(psh) = prompt_sh {
                 let res = Command::new("bash")
@@ -833,8 +799,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
             if report_file.is_file() && file_mtime(&report_file) < state.prompt_ts {
                 archive_stale(&report_file, &pfile);
             }
-            let prompt_sh = crate::worker::cleanup::find_grid_script()
-                .and_then(|p| p.parent().map(|d| d.join("prompt-worker.sh")));
+            let prompt_sh = crate::worker::cleanup::find_engine_script("prompt-worker.sh");
 
             if let Some(psh) = prompt_sh {
                 let res = Command::new("bash")
@@ -958,8 +923,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     sargs.push(state.builder.clone());
                     sargs.push(state.repo.clone());
 
-                    let spawn_sh = crate::worker::cleanup::find_grid_script()
-                        .and_then(|p| p.parent().map(|d| d.join("spawn-worker.sh")));
+                    let spawn_sh = crate::worker::cleanup::find_engine_script("spawn-worker.sh");
 
                     let spawn_ok = if let Some(ssh) = spawn_sh {
                         let mut cmd = Command::new("bash");
@@ -990,7 +954,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 }
 
                 if !run_grid_hook(&bname) {
-                    let b = format!("grid-workers.sh failed for {bname} — arrange the pane per rules/_all/fanout-agent-grid.md, then 'pipeline.sh --resume {task} {}'", state.repo);
+                    let b = format!("grid check failed for {bname} — arrange the pane per rules/_all/fanout-agent-grid.md, then 'pipeline.sh --resume {task} {}'", state.repo);
                     let _ = state.save(&state_file);
                     return finish(&mut state, "blocked", 5, Some(&b));
                 }
@@ -1151,8 +1115,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                         archive_stale(&rev_report, &pfile);
                     }
 
-                    let spawn_sh = crate::worker::cleanup::find_grid_script()
-                        .and_then(|p| p.parent().map(|d| d.join("spawn-worker.sh")));
+                    let spawn_sh = crate::worker::cleanup::find_engine_script("spawn-worker.sh");
 
                     let sargs = vec![
                         "--review".to_string(),
@@ -1197,7 +1160,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
 
                 // Grid hook for builder + reviewer (2 workers -> GRID_TAB workers tab)
                 if !run_grid_hook(&format!("{bname},{revname}")) {
-                    let b = format!("grid-workers.sh failed for {revname} — arrange the panes per rules/_all/fanout-agent-grid.md, then 'pipeline.sh --resume {task} {}'", state.repo);
+                    let b = format!("grid check failed for {revname} — arrange the panes per rules/_all/fanout-agent-grid.md, then 'pipeline.sh --resume {task} {}'", state.repo);
                     let _ = state.save(&state_file);
                     return finish(&mut state, "blocked", 5, Some(&b));
                 }
@@ -1214,8 +1177,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 let rev_content = std::fs::read_to_string(&rev_report).unwrap_or_default();
 
                 let cleanup_reviewer = || {
-                    let clean_sh = crate::worker::cleanup::find_grid_script()
-                        .and_then(|p| p.parent().map(|d| d.join("cleanup-worker.sh")));
+                    let clean_sh = crate::worker::cleanup::find_engine_script("cleanup-worker.sh");
                     if let Some(csh) = clean_sh {
                         let mut cmd = Command::new("bash");
                         cmd.arg(csh);

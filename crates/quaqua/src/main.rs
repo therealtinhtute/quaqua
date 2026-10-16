@@ -342,6 +342,9 @@ fn do_grid_reconcile(
     if check && repair {
         return Err("cannot specify both --check and --repair".to_string());
     }
+    if tab.as_deref() == Some("") {
+        return Err("--tab requires a non-empty label".to_string());
+    }
 
     let opts = quaqua::grid::ReconcileOptions {
         check,
