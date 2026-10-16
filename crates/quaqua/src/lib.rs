@@ -3,3 +3,9 @@
 
 pub mod config;
 pub mod models;
+pub mod hash;
+pub mod git;
+pub mod herdr;
+pub mod json;
+pub mod cap;
+pub mod worker;
