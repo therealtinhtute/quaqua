@@ -205,6 +205,9 @@ fn config_invalid_fixtures_are_rejected() {
         ("typo-section.toml", "unknown field `project`", false),
         ("empty-reviewer.toml", "default_reviewer is empty", false),
         ("project-cap-zero.toml", "is below 1", false),
+        ("bad-timer-duration.toml", "timers.budget_default", false),
+        ("bad-timer-nudge.toml", "timers.nudge_at", false),
+        ("bad-timer-grace.toml", "timers.grace", false),
     ];
 
     for (name, needle, needs_models) in cases {
