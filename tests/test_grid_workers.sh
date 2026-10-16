@@ -1020,4 +1020,21 @@ fi
 [[ "$err" == *"cannot specify both --check and --repair"* ]] \
   || fail "--check --repair: wrong error (got: $err)"
 echo "ok: --check and --repair together -> error exit"
+
+# ── 53. --check: --only still honours --tab (a custom project tab) ───────────
+# the pipeline's workers carry grid_group=quaqua (the repo basename) while the
+# pipeline asks for its own tab mono-workers. plan.jq keeps planning a move to
+# tab "quaqua"; the check must ignore ops whose group is not the requested tab,
+# or it waits forever (rc=1) and blocks pipeline.sh. A --tab that does match
+# the worker's group still waits for its pending ops.
+HERDR_STUB_SNAPSHOT="$fixdir/only-custom-tab.json" QUAQUA_OWNER=cos GRID_CHECK_TIMEOUT_SEC=0 \
+  "$src/worker/grid-workers.sh" --check --tab mono-workers --only sude-isl,quansu-islr1 \
+  || fail "--check --only with a custom --tab: expected exit 0 (foreign-group ops ignored)"
+echo "ok: --check --only honours a custom --tab"
+if err=$(HERDR_STUB_SNAPSHOT="$fixdir/only-custom-tab.json" QUAQUA_OWNER=cos GRID_CHECK_TIMEOUT_SEC=0 \
+         "$src/worker/grid-workers.sh" --check --tab quaqua-workers --only sude-isl,quansu-islr1 2>&1 >/dev/null); then
+  fail "--check --only with a matching --tab: expected timeout non-zero exit"
+fi
+[[ "$err" == *"grid check timed out"* ]] || fail "--check --only matching --tab: wrong error (got: $err)"
+echo "ok: --check --only still waits on the requested tab's ops"
 echo "PASS"
