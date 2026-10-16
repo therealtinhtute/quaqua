@@ -372,3 +372,77 @@ fn test_cli_cap_smoke() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.trim().parse::<i64>().is_ok());
 }
+#[test]
+fn test_taskforce_dual_lens_cap_reservation() {
+    struct MockHerdr;
+    impl HerdrOps for MockHerdr {
+        fn run(&self, _: &[&str]) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn agent_list(&self) -> std::io::Result<String> {
+            Ok(r#"{"result":{"agents":[]}}"#.to_string())
+        }
+        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
+            Ok((false, String::new()))
+        }
+        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool {
+            true
+        }
+        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<Child> {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "mock"))
+        }
+    }
+
+    let tmp = std::env::temp_dir().join(format!("quaqua-cap-tf-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let mock = MockHerdr;
+
+    // Zero workers, no state -> 0
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 0);
+
+    // Active dual-lens state with current PID (alive) -> reserves 2 slots
+    let state_file = tmp.join("taskforce-mytest.state");
+    std::fs::write(
+        &state_file,
+        format!("task=mytest\nkind=dual-lens\nowner=cos\nfinished=0\ntaskforce_pid={}\n", std::process::id()),
+    ).unwrap();
+
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 2);
+
+    // Finished dual-lens -> 0 slots reserved
+    std::fs::write(
+        &state_file,
+        format!("task=mytest\nkind=dual-lens\nowner=cos\nfinished=1\ntaskforce_pid={}\n", std::process::id()),
+    ).unwrap();
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 0);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

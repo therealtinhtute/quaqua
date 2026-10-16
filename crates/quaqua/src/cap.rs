@@ -101,15 +101,21 @@ pub fn count_owner_slots<H: HerdrOps>(
         for entry in entries.flatten() {
             let path = entry.path();
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if file_name.starts_with("pipeline-") && file_name.ends_with(".state") {
-                let content = match std::fs::read_to_string(&path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                if !content.lines().any(|l| l.trim() == "finished=0") {
-                    continue;
-                }
+            let is_pipeline = file_name.starts_with("pipeline-") && file_name.ends_with(".state");
+            let is_taskforce = (file_name.starts_with("taskforce-") || file_name.starts_with("dual-lens-")) && file_name.ends_with(".state");
+            if !is_pipeline && !is_taskforce {
+                continue;
+            }
 
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if !content.lines().any(|l| l.trim() == "finished=0") {
+                continue;
+            }
+
+            if is_pipeline {
                 let mut p_lead = String::new();
                 let mut p_pid = String::new();
                 let mut p_builder = String::new();
@@ -160,9 +166,71 @@ pub fn count_owner_slots<H: HerdrOps>(
                         res_slots += 2 - p_cur_live;
                     }
                 }
+            } else if is_taskforce {
+                let mut t_lead = String::new();
+                let mut t_pid = String::new();
+                let mut t_kind = String::new();
+                let mut t_task = String::new();
+
+                for line in content.lines() {
+                    let line = line.trim();
+                    if let Some(v) = line.strip_prefix("lead=") {
+                        t_lead = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("owner=") {
+                        t_lead = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("taskforce_pid=") {
+                        t_pid = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("pid=") {
+                        t_pid = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("kind=") {
+                        t_kind = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("taskforce=") {
+                        t_kind = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("task=") {
+                        t_task = v.to_string();
+                    }
+                }
+
+                let t_owner = if t_lead.is_empty() { "cos" } else { &t_lead };
+                if t_owner != owner {
+                    continue;
+                }
+
+                let weight = if t_kind == "dual-lens" || file_name.starts_with("dual-lens-") {
+                    2
+                } else {
+                    1
+                };
+
+                let mut t_alive = false;
+                if !t_pid.is_empty() && is_pid_alive(&t_pid) {
+                    t_alive = true;
+                } else {
+                    for w in &live_workers {
+                        if (!t_task.is_empty() && w.contains(&t_task)) || w.contains("dual-lens") {
+                            t_alive = true;
+                            break;
+                        }
+                    }
+                }
+
+                if t_alive {
+                    let mut t_cur_live: i64 = 0;
+                    for w in &o_workers {
+                        let tf_file = runs_dir.join(format!("{w}.taskforce"));
+                        let w_tf = std::fs::read_to_string(&tf_file)
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_default();
+                        if !t_task.is_empty() && (w_tf == t_task || w.contains(&t_task)) {
+                            t_cur_live += 1;
+                        }
+                    }
+                    if t_cur_live < weight {
+                        res_slots += weight - t_cur_live;
+                    }
+                }
             }
         }
     }
-
     o_live + res_slots
 }

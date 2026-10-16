@@ -250,6 +250,24 @@ pub fn load(path: &Path) -> Result<Config, String> {
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
+/// Load team config from environment, relative path, home directory, or embedded fallback.
+pub fn load_team_config() -> Result<Config, (i32, String)> {
+    if let Ok(path_str) = std::env::var("QUAQUA_TEAM_TOML") {
+        return load(Path::new(&path_str)).map_err(|e| (1, format!("error: {e}\n")));
+    }
+    if Path::new("team.toml").is_file() {
+        return load(Path::new("team.toml")).map_err(|e| (1, format!("error: {e}\n")));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let home_team = PathBuf::from(home).join("quaqua/team.toml");
+        if home_team.is_file() {
+            return load(&home_team).map_err(|e| (1, format!("error: {e}\n")));
+        }
+    }
+    const DEFAULT_TOML: &str = include_str!("../../../team.toml");
+    toml::from_str(DEFAULT_TOML).map_err(|e| (1, format!("error: failed to parse default team.toml: {e}\n")))
+}
+
 
 /// Apply a project override over the defaults. Unknown project is a hard error.
 pub fn resolve(mut cfg: Config, project: Option<&str>) -> Result<Config, String> {
