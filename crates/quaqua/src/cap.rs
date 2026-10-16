@@ -34,6 +34,26 @@ fn is_pid_alive(pid_str: &str) -> bool {
     false
 }
 
+/// Check if a worker name matches `*-pr[0-9]*` or `*-<task>r[0-9]*`.
+pub fn matches_pipeline_reviewer(w: &str, task: &str) -> bool {
+    if let Some(idx) = w.find("-pr") {
+        let after = &w[idx + 3..];
+        if after.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            return true;
+        }
+    }
+    if !task.is_empty() {
+        let pat = format!("-{}r", task);
+        if let Some(idx) = w.find(&pat) {
+            let after = &w[idx + pat.len()..];
+            if after.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Calculate the number of worker slots used by `owner` (defaults to "cos").
 pub fn count_owner_slots(
     runs_dir: &Path,
@@ -124,12 +144,10 @@ pub fn count_owner_slots(
                         let w_pipe = std::fs::read_to_string(&pipe_file)
                             .map(|s| s.trim().to_string())
                             .unwrap_or_default();
-                        let is_pr = w.contains("-pr");
-                        let is_task_r = !p_task.is_empty() && w.contains(&format!("-{}r", p_task));
+                        let is_reviewer = matches_pipeline_reviewer(w, &p_task);
                         if (!p_task.is_empty() && w_pipe == p_task)
                             || w == &p_bname
-                            || is_pr
-                            || is_task_r
+                            || is_reviewer
                         {
                             p_cur_live += 1;
                         }
