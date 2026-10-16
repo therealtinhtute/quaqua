@@ -35,7 +35,7 @@ Every old script becomes a one-line shim `exec quaqua <cmd> "$@"`. That way `tes
 | `scripts/worker/grid-workers.sh` + `plugins/herdr-grid/{hook.sh,plan.jq,apply.sh}` | `quaqua grid {reconcile,hook,plan}` | plugin manifest `command = ["quaqua","grid","hook"]`; `plan` is pure (snapshot → ops JSON) |
 | `scripts/lead/spawn-lead.sh`, `cleanup-lead.sh` | `quaqua lead {spawn,cleanup}` | still injects `rules/_all/*.md` as the system prompt |
 | `scripts/lead/pipeline.sh` | `quaqua pipeline` | |
-| `scripts/hooks/herdr-gate.sh` | `quaqua gate` | same tokenizer semantics, same `test_herdr_gate.sh` cases |
+| `scripts/hooks/herdr-gate.sh` | `quaqua gate` | same tokenizer semantics, same `test_herdr_gate.sh` cases; fails closed (exit 2) on unparseable stdin (intended difference from bash, anh iu decision 2026-10-16) |
 | `scripts/workspace/init-workspace.sh` | `quaqua init` | |
 | `scripts/lib/common.sh` | internal module | |
 | — (new) | `quaqua config {validate,get}` | bash-free config access; validation runs at every command start |
@@ -193,6 +193,7 @@ Rollback: `git revert` the cutover commit. The bash bodies come back intact.
 ## Packaging
 - Platforms linux/macos; plugin keeps `min_herdr_version`; executable bits preserved.
 - Shims find the binary on `PATH`, else `$QUAQUA_BIN`; `quaqua init` prints the install line (`cargo install --path crates/quaqua`).
+- Interactive shells: on this machine an interactive zsh function named `quaqua` (a herdr launcher) shadows the binary for humans typing `quaqua …` — use `command quaqua …` or the shims. Scripts and hooks are unaffected (shell functions are not inherited).
 - Public export: no corporate or private metadata; commit history stays documented.
 
 ## Execution (to-plan 2026-10-15)

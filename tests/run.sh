@@ -61,6 +61,11 @@ else
   failed+=(cargo_test)
 fi
 
+# Ensure quaqua binary is compiled and on PATH for shims
+(cd "$here/.." && cargo build --locked --quiet)
+export PATH="$here/../target/debug:$PATH"
+export QUAQUA_BIN="${QUAQUA_BIN:-$here/../target/debug/quaqua}"
+
 for t in "$here"/test_*.sh; do
   [[ -e $t ]] || { echo "no tests found in $here" >&2; exit 1; }
   name=$(basename "$t")
@@ -78,8 +83,16 @@ for t in "$here"/test_*.sh; do
     printf 'RUN  %s (slow suite; touched: %s)\n' "$name" "$hit"
   fi
   if bash "$t" >"$T/$name.log" 2>&1; then
-    printf 'PASS %s\n' "$name"
-    pass=$((pass + 1))
+    # A suite that skips itself (its subject was replaced by the Rust binary)
+    # exits 0 but ran nothing: report it as SKIP, never as a silent pass
+    # (finding 2, suhuynh-r6r1). Its cases must be mapped in the test file.
+    if grep -q '^SKIP' "$T/$name.log"; then
+      printf 'SKIP %s (%s)\n' "$name" "$(head -n1 "$T/$name.log")"
+      skipped+=("$name")
+    else
+      printf 'PASS %s\n' "$name"
+      pass=$((pass + 1))
+    fi
   else
     printf 'FAIL %s\n' "$name"
     fail=$((fail + 1))
@@ -94,7 +107,7 @@ for name in "${failed[@]}"; do
 done
 
 if ((${#skipped[@]})); then
-  printf '\n%s passed, %s failed, %s skipped (of %s; skipped slow suites run with --slow)\n' \
+  printf '\n%s passed, %s failed, %s skipped (of %s; slow suites run with --slow;\nself-skipping suites name their Rust replacements in the test file)\n' \
     "$pass" "$fail" "${#skipped[@]}" "$((pass + fail + ${#skipped[@]}))"
 else
   printf '\n%s passed, %s failed (of %s)\n' "$pass" "$fail" "$((pass + fail))"

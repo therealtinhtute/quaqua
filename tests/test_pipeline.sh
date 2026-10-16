@@ -674,8 +674,8 @@ grep -q 'reusing it' "$T/err" || fail "rsf: worktree reuse note missing: $(cat "
 echo "ok: failed agent start -> resume reuses worktree, retries start, prompts plan"
 
 # F4 (reviewer): agent-start failure keeps the worktree; --resume retries
-# (the codex trust/idle wait is gone with the codex kinds, so the reviewer's
-# startup failure is observed at `agent start`)
+# (no kind needs a trust/idle wait any more, so the reviewer's startup
+# failure is observed at `agent start`)
 run_rg -- rsv "$T/rg/repo" --brief "$T/brief.md" --review always
 [[ $rc -eq 5 ]] || fail "rsv run1: exit $rc, want 5"
 run_rg FAKE_DO_COMMIT="$T/rg/.wt/sude-rsv" FAKE_FAIL_START=suhuynh-rsvr1 \
