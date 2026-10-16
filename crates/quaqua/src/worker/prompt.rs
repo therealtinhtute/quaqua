@@ -455,6 +455,14 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(300);
+    // Prompt-landing window (fresh prompts only): a worker still idle this long
+    // after dispatch never received/submitted the brief — `herdr agent prompt
+    // --wait` reports agent_prompt_stalled when the agent does not leave idle
+    // within 5s, leaving the typed text unsent. 0 disables the check.
+    let land_sec: u64 = std::env::var("PROMPT_WORKER_LAND_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(15);
 
     let prev_elapsed: u64;
     let mut budget: u64;
@@ -565,6 +573,12 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let mut grace_used = grace_file.exists();
     let mut gone_since = 0;
     let mut blind_warned = false;
+    // Prompt-landing state (fresh prompts only; reset by --resume).
+    let land_deadline = start + land_sec;
+    let mut prompt_landed = resume || land_sec == 0;
+    let mut prompt_recovered = false;
+    let mut recover_at: u64 = 0;
+    let mut recover_deadline: u64 = 0;
     let mut last_progress: u64 = std::fs::read_to_string(&progress_file)
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -608,6 +622,39 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             }
             if question_seen(&obs.pane_text) {
                 return Err(watchdog_exit(5, "pane shows a pending question/permission prompt", &Some(obs), change_ts));
+            }
+
+            // Prompt landing: a fresh prompt that leaves the agent idle and
+            // silent never reached the pane. Recover once with a stray Enter
+            // (submits text typed but not sent); still idle -> exit 3.
+            if !prompt_landed {
+                if st == "working" || st == "blocked" {
+                    prompt_landed = true;
+                } else if st == "idle" || st == "done" {
+                    if is_waiting {
+                        prompt_landed = true;
+                    } else if prompt_recovered {
+                        if now >= recover_deadline {
+                            return Err(watchdog_exit(
+                                3,
+                                &format!("prompt not landed: agent {st} for {}s after a send-keys enter", now - recover_at),
+                                &Some(obs),
+                                change_ts,
+                            ));
+                        }
+                    } else if now >= land_deadline {
+                        let _ = herdr.agent_send_keys(name, "enter");
+                        prompt_recovered = true;
+                        recover_at = now;
+                        recover_deadline = now + land_sec;
+                        eprintln!(
+                            "WATCHDOG prompt-not-landed | name={name} {st} {}s after prompt — sent enter once (input may be typed but unsubmitted)",
+                            now - start
+                        );
+                    }
+                }
+                // unknown/gone: leave prompt_landed false — the gone/blind
+                // paths own those states, recovery needs a known idle.
             }
 
             if obs.fp != prev_fp {

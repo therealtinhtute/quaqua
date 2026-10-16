@@ -134,6 +134,9 @@ impl HerdrOps for MockHerdr {
     fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
         unimplemented!()
     }
+    fn agent_send_keys(&self, _name: &str, _key: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
     fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
         unimplemented!()
     }
@@ -179,6 +182,9 @@ impl HerdrOps for SpyHerdr {
         unimplemented!()
     }
     fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_send_keys(&self, _name: &str, _key: &str) -> std::io::Result<Output> {
         unimplemented!()
     }
     fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
@@ -410,6 +416,9 @@ fn test_taskforce_dual_lens_cap_reservation() {
             true
         }
         fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> {
             self.run(&[])
         }
         fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> {
