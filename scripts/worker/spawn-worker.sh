@@ -157,15 +157,28 @@ fi
 #     permissions → file paths), so the runs allow and the worktree deny are both
 #     Edit() rules. deny outranks allow, and the deny also covers Bash redirect
 #     and `tee` targets under the worktree. Mutating Bash is denied wholesale
-#     (no Bash allow rule), while read-only commands — git diff|log|show, cat,
-#     grep, ls, diff — run prompt-free in every mode, so the reviewer keeps its
-#     evidence commands.
+#     except the two narrow Bash allow rules below, while read-only commands —
+#     git diff|log|show, cat, grep, ls, diff — run prompt-free in every mode, so
+#     the reviewer keeps its evidence commands.
 #   --add-dir $HOME/quaqua/runs — the report target is a working directory, as
 #     for the other harnesses.
-# No Bash allow rule is added on purpose: one would re-open the repo. The rules
-# file tells workers to publish runs/.<name>.tmp with `mv`, which review mode
-# therefore denies — the reviewer writes the report with the file tools instead
-# (an auto-denial, never a prompt, so it cannot stall).
+#   --settings Bash rules — mutating Bash stays denied wholesale EXCEPT two
+#     narrow allow rules (both wildcards match the command text; a `*` stands
+#     for any text, so the rules cover the `~/`, absolute and bare-relative
+#     spellings of the same paths):
+#       Bash(cargo test:*)                — run the reviewer's test suite;
+#                                           `:*` is the trailing-wildcard form,
+#                                           so `cargo test --locked`, piped into
+#                                           the read-only `tail`, all match.
+#       Bash(mv *runs/.*.tmp *runs/*.md)  — the rules file's atomic publish
+#                                           (write runs/.<name>.tmp, then `mv`
+#                                           it to runs/<name>.md) otherwise
+#                                           auto-denied; the two `runs/` arms
+#                                           are what keep it narrow — an mv that
+#                                           isn't runs/*.tmp -> runs/*.md has
+#                                           no allow rule and stays denied.
+#     Everything else that would prompt (mkdir, tee, arbitrary mv/rm) is still
+#     auto-denied by dontAsk, never a stalled prompt.
 # Guardrail, not a boundary, like the push block above: a Bash rule matches the
 # command text Claude writes, and claude has no OS-level read-only sandbox
 # (codex does), so a determined reviewer could still write through a subprocess.
@@ -173,7 +186,7 @@ claude_review=()
 if [[ ${review+x} ]] && [[ $kind == ni || $kind == suhuynh || $kind == truonglao ]]; then
   claude_review=(--permission-mode dontAsk --add-dir "$HOME/quaqua/runs"
     --settings "$(jq -nc --arg runs "$HOME/quaqua/runs" --arg wt "$wt" \
-      '{permissions:{allow:["Edit(//\($runs|ltrimstr("/"))/**)"],deny:["Edit(//\($wt|ltrimstr("/"))/**)"]}}')")
+      '{permissions:{allow:["Edit(//\($runs|ltrimstr("/"))/**)","Bash(cargo test:*)","Bash(mv *runs/.*.tmp *runs/*.md)"],deny:["Edit(//\($wt|ltrimstr("/"))/**)"]}}')")
 fi
 
 # tieude/detu are opencode (models.md): the model and the worker rules file
