@@ -27,7 +27,9 @@ mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs"
 # git stub: rev-parse HEAD is keyed on the -C dir's basename; call #1 is the
 # spawn-time base, call #2 the post-build tip, call #3+ the post-fix tip.
 # FAKE_BASE_SHA/FAKE_HEAD_SHA/FAKE_HEAD2_SHA shape each; FAKE_PORCELAIN feeds
-# `status --porcelain` (empty = clean tree).
+# `status --porcelain` (empty = clean tree). No branch exists (show-ref fails)
+# unless FAKE_BRANCHES names it — spawn-worker.sh reuses a branch cleanup kept
+# only when it is really there.
 cat > "$T/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
@@ -38,6 +40,9 @@ case " $* " in
   *"status --porcelain"*)   printf '%s\n' "${FAKE_PORCELAIN:-}" ;;
   *"diff --numstat"*)       printf '%s\n' "${FAKE_NUMSTAT:-}" ;;
   *"diff --name-only"*)     printf '%s\n' "${FAKE_NAMES:-}" ;;
+  *"show-ref --verify"*)
+    for b in ${FAKE_BRANCHES:-}; do case " $* " in *" refs/heads/$b "*) exit 0 ;; esac; done
+    exit 1 ;;
   *"rev-parse HEAD"*)
     n=$((n+1)); echo "$n" > "$cf"
     if (( n <= ${FAKE_BASECALLS:-1} )); then echo "${FAKE_BASE_SHA:-ba5eba5}";
