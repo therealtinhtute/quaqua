@@ -142,10 +142,16 @@ archive_stale() {  # <file> — a report that predates this phase's prompt is st
 }
 
 blocked_outcome() {  # <file> — the report declares itself unfinished (nudge
-  # reports carry '## Blockers'; a worker may also write 'Outcome: BLOCKED')
+  # reports carry '## Blockers'; a worker may also write 'Outcome: BLOCKED').
+  # A '## Blockers' body of just 'none' means the same as an empty section:
+  # nothing blocked. Bullet, case and a trailing period are all accepted
+  # ('none', 'None', '- none'), any other body is a blocker.
   grep -qiE '^(Outcome|Status|Result):[[:space:]]*(BLOCKED|PARTIAL|INCOMPLETE|FAILED)' "$1" \
     && return 0
-  awk '/^## Blockers/{f=1; next} /^## /{f=0} f && NF {x=1} END{exit !x}' "$1"
+  awk '/^## Blockers/{f=1; next} /^## /{f=0}
+       f && NF { l=tolower($0); gsub(/^[[:space:]*-]+/,"",l); gsub(/[[:space:].]+$/,"",l)
+                 if (l != "none") x=1 }
+       END{exit !x}' "$1"
 }
 
 log_blockers() {  # <file> — copy the worker's unfinished-evidence into the run file
