@@ -104,6 +104,26 @@ fn format_json_string(s: &str) -> String {
     out.push('"');
     out
 }
+fn get_iso_now() -> String {
+    if let Ok(out) = Command::new("date").arg("-Iseconds").output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    if let Ok(out) = Command::new("date").arg("+%Y-%m-%dT%H:%M:%S%z").output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    "2026-10-16T09:00:00+0000".to_string()
+}
+
 
 pub fn spawn_worker(
     opts: SpawnOptions,
@@ -253,7 +273,7 @@ pub fn spawn_worker(
         let _ = std::fs::write(runs_dir.join(format!("{}.pipeline", opts.name)), format!("{pt}\n"));
     }
 
-    let iso_now = "2026-10-16T09:00:00+0000";
+    let iso_now = get_iso_now();
     let srt_json = format!(
         "{{\"name\":\"{}\",\"kind\":\"{}\",\"created\":\"{}\",\"sandbox\":true,\"owner\":\"{}\",\"review\":{}}}\n",
         opts.name, opts.kind, iso_now, owner, opts.review

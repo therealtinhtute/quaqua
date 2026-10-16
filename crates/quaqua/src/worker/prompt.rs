@@ -730,14 +730,13 @@ pub fn prompt_worker(
     let report_content = std::fs::read_to_string(&out).unwrap_or_default();
     if expect_verdict {
         let has_verdict = report_content.lines().any(|l| {
-            let t = l.trim_start();
-            t.starts_with("Verdict:") || t.starts_with("verdict:")
+            l.trim_start().starts_with("Verdict:")
         });
         if !has_verdict {
             return Err(malformed_report("'Verdict:' line"));
         }
     } else {
-        let has_lessons = report_content.lines().any(|l| l.trim_start().starts_with("## Lessons"));
+        let has_lessons = report_content.lines().any(|l| l.starts_with("## Lessons"));
         if !has_lessons {
             return Err(malformed_report("'## Lessons' section"));
         }
