@@ -950,3 +950,60 @@ fn test_edge_fixture_cross_checker_owner_group() {
     assert!(matches!(&ops[1].target, Target::NewTab { label } if label == "lead-workers"));
     assert!(matches!(&ops[2].target, Target::Split { tab, anchor, .. } if tab == "@workers" && anchor == "w1:p6"));
 }
+
+#[test]
+fn test_reconcile_converges_when_single_worker_already_beside_anchor() {
+    // Regression: the check used to demand the 2/5|3/5 rects, but a herdr pane
+    // split lands 50/50 and the repair path accepts "same tab as the anchor".
+    // That disagreement made `--check` time out on an already-arranged pane, so
+    // `worker prompt` was blocked right after a spawn.
+    let snap = load_edge_fixture("single-worker-in-anchor-tab");
+    // The fixture is a real capture: 206x78 split at 103|103, not the 82|124 the
+    // old rect test wanted.
+    let l = snap.layouts.iter().find(|l| l.tab_id == "w9:t1A").unwrap();
+    assert_eq!(l.panes[0].rect.unwrap().width, l.panes[1].rect.unwrap().width);
+
+    let ops = plan(&snap).expect("plan must succeed");
+    assert!(ops.is_empty(), "a worker beside its anchor needs no move: {ops:?}");
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = ReconcileOptions {
+        check: true,
+        repair: false,
+        tab: Some("quaqua-workers".to_string()),
+        only: Some("tieude-1".to_string()),
+        owner: Some("cos".to_string()),
+        dry_run: true,
+        timeout_sec: Some(0),
+    };
+    assert!(
+        run_reconcile(&mut driver, &opts, "workers", None).is_ok(),
+        "check must converge on an already-arranged single worker"
+    );
+}
+
+#[test]
+fn test_check_converges_when_dependent_split_follows_deferred_anchor() {
+    // Regression: a split whose anchor is working is unrunnable (apply defers it),
+    // but the plan used to flag it non-deferred, so `--check` counted it as
+    // pending and timed out until the anchor idled.
+    let snap = load_edge_fixture("deferred-anchor-dependent-split");
+    let ops = plan(&snap).expect("plan must succeed");
+    assert_eq!(ops.len(), 2);
+    assert!(ops.iter().all(|op| op.deferred), "all ops depend on a working anchor: {ops:?}");
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = ReconcileOptions {
+        check: true,
+        repair: false,
+        tab: Some("quaqua-workers".to_string()),
+        only: Some("sude-1".to_string()),
+        owner: Some("cos".to_string()),
+        dry_run: true,
+        timeout_sec: Some(0),
+    };
+    assert!(
+        run_reconcile(&mut driver, &opts, "workers", None).is_ok(),
+        "check must converge while the anchor is still working"
+    );
+}

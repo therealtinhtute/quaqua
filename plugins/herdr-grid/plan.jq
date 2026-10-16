@@ -182,6 +182,28 @@ def find_owner_pane($owner; $panes; $agents; $ws):
   //
   null;
 
+# A split whose anchor is deferred cannot run, and a split into @workers
+# cannot run while the group's new tab is deferred. apply_ops and the hook
+# propagate deferral by this same rule; the planner must too, or the check
+# counts an unrunnable op as pending and times out while its anchor works.
+def propagate_deferrals:
+  ( reduce .[] as $op
+      ( {ops: [], deferred: [], tab_deferred: false};
+        if $op.deferred then
+          { ops: (.ops + [$op]),
+            deferred: (.deferred + [$op.pane]),
+            tab_deferred: (if $op.target.kind == "new_tab" then true else .tab_deferred end) }
+        elif ($op.target.kind == "split"
+              and (((.deferred | index($op.target.anchor)) != null)
+                   or ($op.target.tab == "@workers" and .tab_deferred))) then
+          { ops: (.ops + [$op + {deferred: true}]),
+            deferred: (.deferred + [$op.pane]),
+            tab_deferred: .tab_deferred }
+        else
+          { ops: (.ops + [$op]), deferred: .deferred, tab_deferred: .tab_deferred }
+        end )
+    | .ops );
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -197,7 +219,7 @@ def find_owner_pane($owner; $panes; $agents; $ws):
 
 # Extract all candidate workers in allocation order
 | [ $panes[] | select(is_candidate_worker) ] as $candidate_workers
-| if ($candidate_workers | length) == 0 then
+| ( if ($candidate_workers | length) == 0 then
     []
   else
     # Distinct owners in first-seen order
@@ -220,19 +242,11 @@ def find_owner_pane($owner; $panes; $agents; $ws):
                   # 1 worker total for this owner -> split beside owner
                   # ---------------------------------------------------------
                   $owner_workers[0] as $w
-                  | ($layout_by_tab[$anchor_tab] // null) as $anchor_layout
-                  | ($anchor_layout.area // {x:0, y:0, width:200, height:50}) as $anchor_area
-                  | ([ $anchor_layout.panes[] | select(.pane_id == $anchor_pane.pane_id) | .rect ] | first // null) as $anchor_rect
-                  | (if $w.tab_id == $anchor_tab then
-                       ([ $anchor_layout.panes[] | select(.pane_id == $w.pane_id) | .rect ] | first // null)
-                     else null end) as $w_rect
-                  | cells(1; $anchor_area) as $c1
-                  | ( ($anchor_tab != null)
-                      and ($w.tab_id == $anchor_tab)
-                      and ($anchor_rect != null)
-                      and ($w_rect != null)
-                      and rect_near($anchor_rect; $c1[0])
-                      and rect_near($w_rect; $c1[1]) ) as $in_place
+                  # "Beside the anchor" = shares its tab. The repair path
+                  # (reconcile.rs `beside`) accepts the same, and a herdr pane
+                  # split lands 50/50, so a ratio-based test here would make
+                  # --check time out on an already-arranged pane.
+                  | ( ($anchor_tab != null) and ($w.tab_id == $anchor_tab) ) as $in_place
 
                   | if $in_place then
                       .
@@ -372,3 +386,4 @@ def find_owner_pane($owner; $panes; $agents; $ws):
             end
         )
   end
+) | propagate_deferrals

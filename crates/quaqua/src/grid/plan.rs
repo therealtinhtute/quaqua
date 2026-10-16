@@ -1,5 +1,5 @@
 use super::types::{Agent, Op, Pane, Rect, Snapshot, Target};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 const TOL: i64 = 2;
 
@@ -210,6 +210,33 @@ pub fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) 
     None
 }
 
+/// A split whose anchor is deferred cannot run, and a split into `@workers`
+/// cannot run while the group's new tab is deferred (there is nowhere to land).
+/// The apply path and the hook both propagate that through this same rule;
+/// the planner must too, or the check counts an unrunnable op as pending and
+/// times out while its anchor is still working.
+fn propagate_deferrals(ops: &mut [Op]) {
+    let mut deferred_panes: HashSet<String> = HashSet::new();
+    let mut workers_tab_deferred = false;
+    for op in ops.iter_mut() {
+        if op.deferred {
+            deferred_panes.insert(op.pane.clone());
+            if matches!(op.target, Target::NewTab { .. }) {
+                workers_tab_deferred = true;
+            }
+            continue;
+        }
+        if let Target::Split { tab, anchor, .. } = &op.target {
+            if deferred_panes.contains(anchor.as_str())
+                || (tab == "@workers" && workers_tab_deferred)
+            {
+                op.deferred = true;
+                deferred_panes.insert(op.pane.clone());
+            }
+        }
+    }
+}
+
 /// Pure layout planner: turns a snapshot into an ordered list of layout ops.
 pub fn plan(snapshot: &Snapshot) -> Result<Vec<Op>, String> {
     plan_with_deferred(snapshot, None)
@@ -272,35 +299,14 @@ pub fn plan_with_deferred(
 
         if total == 1 && anchor_pane.is_some() {
             let w = owner_workers[0];
-            let anchor_layout = anchor_tab.and_then(|tid| {
-                snapshot.layouts.iter().find(|l| l.tab_id == tid)
-            });
-            let anchor_area = anchor_layout
-                .and_then(|l| l.area)
-                .unwrap_or(Rect { x: 0, y: 0, width: 200, height: 50 });
-            let anchor_rect = anchor_layout.and_then(|l| {
-                l.panes
-                    .iter()
-                    .find(|p| p.pane_id == anchor_pane.unwrap().pane_id)
-                    .and_then(|p| p.rect)
-            });
-            let w_rect = if w.tab_id.as_deref() == anchor_tab {
-                anchor_layout.and_then(|l| {
-                    l.panes
-                        .iter()
-                        .find(|p| p.pane_id == w.pane_id)
-                        .and_then(|p| p.rect)
-                })
-            } else {
-                None
-            };
-            let c1 = cells(1, &anchor_area);
-            let in_place = anchor_tab.is_some()
-                && w.tab_id.as_deref() == anchor_tab
-                && anchor_rect.is_some()
-                && w_rect.is_some()
-                && rect_near(&anchor_rect.unwrap(), &c1[0])
-                && rect_near(&w_rect.unwrap(), &c1[1]);
+            // "Beside the anchor" is acceptance, not a target ratio: the pane is
+            // arranged as soon as it shares the anchor's tab. The repair path
+            // (reconcile.rs `beside`) uses exactly this test, so the check and the
+            // repair must not disagree — a herdr `pane split` lands 50/50, never
+            // the old 2/5|3/5, and the old rect_near test made `--check` time out
+            // forever on an already-arranged pane.
+            let atab = anchor_tab.unwrap_or_default();
+            let in_place = anchor_tab.is_some() && w.tab_id.as_deref() == Some(atab);
 
             if !in_place {
                 ops.push(Op {
@@ -308,7 +314,7 @@ pub fn plan_with_deferred(
                     pane: w.pane_id.clone(),
                     deferred: is_status_deferred(w.agent_status.as_deref(), def_list),
                     target: Target::Split {
-                        tab: anchor_tab.unwrap().to_string(),
+                        tab: atab.to_string(),
                         anchor: anchor_pane.unwrap().pane_id.clone(),
                         direction: "right".to_string(),
                         ratio: 0.4,
@@ -499,5 +505,6 @@ pub fn plan_with_deferred(
         }
     }
 
+    propagate_deferrals(&mut ops);
     Ok(ops)
 }
