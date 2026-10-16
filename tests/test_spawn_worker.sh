@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Sandbox test for spawn-worker.sh name validation (models.md Naming:
 # <kind>-<task>, ascii [a-z0-9-], <=20 chars), the optional --base <ref>
-# worktree start point, the --review read-only mode for codex and claude kinds,
-# and its best-effort grid hook.
+# worktree start point, the --review read-only mode for codex and claude kinds
+# (including the narrow claude Bash allows for `cargo test` and the atomic
+# report `mv`), and its best-effort grid hook.
 # git+herdr are stubbed on PATH; the grid hook is stubbed next to a copy of the
 # script. Bad names must exit 1 before either is called; good names proceed.
 # The accented case runs under C and, when installed, a collating UTF-8 locale.
@@ -279,7 +280,9 @@ expect_reject_review sude-revbad sude "--review on sude"
 # Edit() path rules — the only file rules the file tools consult (a Write(...)
 # path rule is accepted but never checked). Read-only Bash (git diff/log/show,
 # cat, grep) stays prompt-free in every mode, so the reviewer keeps its
-# evidence commands; mutating Bash is denied wholesale.
+# evidence commands; mutating Bash is denied except two narrow allows the
+# reviewer needs to finish a review: `cargo test` (its suite) and the
+# runs/.<name>.tmp -> runs/<name>.md atomic report `mv`.
 for k in ni suhuynh truonglao; do
   case $k in ni) eff=low ;; suhuynh) eff=medium ;; truonglao) eff=high ;; esac
   spawn_args=(--review)
@@ -295,13 +298,28 @@ for k in ni suhuynh truonglao; do
     || fail "--review $k: runs not writable (no Edit allow rule): $(cat "$T/calls")"
   grep -qF -- "Edit(//${T#/}/.wt/$k-revread/**)" "$T/calls" \
     || fail "--review $k: worktree not read-only (no Edit deny rule): $(cat "$T/calls")"
+  grep -qF -- 'Bash(cargo test:*)' "$T/calls" \
+    || fail "--review $k: cargo test not allowed: $(cat "$T/calls")"
+  grep -qF -- 'Bash(mv *runs/.*.tmp *runs/*.md)' "$T/calls" \
+    || fail "--review $k: atomic report mv not allowed: $(cat "$T/calls")"
+  ! grep -qF -- '"Bash"' "$T/calls" || fail "--review $k: bare Bash allow leaked: $(cat "$T/calls")"
+  ! grep -qF -- 'Bash(*)' "$T/calls" || fail "--review $k: Bash(*) allow leaked: $(cat "$T/calls")"
+  ! grep -qF -- 'Bash(mv:*' "$T/calls" || fail "--review $k: unbounded mv allow leaked: $(cat "$T/calls")"
   grep -qF -- '--model claude-opus-5-5' "$T/calls" || fail "--review $k: model changed: $(cat "$T/calls")"
   grep -qF -- "--effort $eff" "$T/calls" || fail "--review $k: effort not $eff: $(cat "$T/calls")"
   ! grep -qF -- '--approve-for-me' "$T/calls" || fail "--review $k: codex approval flag leaked: $(cat "$T/calls")"
   ! grep -qF -- 'default_permissions' "$T/calls" || fail "--review $k: codex profile leaked: $(cat "$T/calls")"
   grep -qF "worker=$k-revread" "$T/out" || fail "--review $k: no success line"
-  echo "ok: --review $k -> dontAsk + Edit() rules (runs writable, worktree denied), model/effort unchanged"
+  echo "ok: --review $k -> dontAsk + Edit() rules (runs writable, worktree denied) + narrow Bash allows (cargo test, atomic mv), model/effort unchanged"
 done
+
+# the review Bash allows are review-only: a plain claude spawn keeps ambient settings
+spawn ni-plain ni
+[[ $rc -eq 0 ]] || fail "plain ni: exit $rc, want 0: $(cat "$T/err")"
+! grep -qF -- '--permission-mode dontAsk' "$T/calls" || fail "plain ni: review mode leaked: $(cat "$T/calls")"
+! grep -qF -- 'Bash(cargo test:*)' "$T/calls" || fail "plain ni: review cargo rule leaked: $(cat "$T/calls")"
+! grep -qF -- 'Bash(mv *runs/.*.tmp *runs/*.md)' "$T/calls" || fail "plain ni: review mv rule leaked: $(cat "$T/calls")"
+echo "ok: plain ni (no --review) -> ambient settings, no review mode/Bash rules"
 
 # ── --base <ref>: branch starts at <ref>, validated before any side effect ──
 spawn_args=(--base quaqua/tieude-m12bt)
