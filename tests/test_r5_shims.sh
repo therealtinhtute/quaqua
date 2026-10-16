@@ -54,6 +54,18 @@ git -C "$I" init -q && git -C "$I" add -A
 echo "=== quaqua gate vs tests/test_herdr_gate.sh (shim root $G) ==="
 bash "$G/tests/test_herdr_gate.sh"
 
+# finding 1 (runs/suhuynh-r5r1.md): an empty word from an unquoted command
+# substitution vanishes under bash's TAB/IFS re-split, so the herdr call after
+# it is still the executable. Each spelling must exit 2 through the shim.
+for c in '$(true) herdr pane split' '`:` herdr tab create --label x' \
+         'sudo $(true) herdr workspace close w7' 'X=1 $(true) herdr agent start x'; do
+  rc=0
+  jq -nc --arg c "$c" '{tool_name:"Bash",tool_input:{command:$c}}' \
+    | bash "$G/scripts/hooks/herdr-gate.sh" 2>/dev/null || rc=$?
+  [[ $rc == 2 ]] || { echo "FAIL: shim did not block: $c (rc=$rc)" >&2; exit 1; }
+done
+echo "ok: finding-1 empty-word spellings -> blocked through the quaqua gate shim"
+
 echo "=== quaqua init vs tests/test_init_workspace.sh (shim root $I) ==="
 bash "$I/tests/test_init_workspace.sh"
 

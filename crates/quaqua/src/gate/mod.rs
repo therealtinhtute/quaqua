@@ -19,7 +19,17 @@ pub fn run() -> i32 {
         use std::io::Read;
         let _ = std::io::stdin().read_to_string(&mut buf);
     }
-    let cmd = extract_command(&buf);
+    let cmd = match extract_command(&buf) {
+        Ok(cmd) => cmd,
+        Err(()) => {
+            // Non-empty input we cannot parse: the gate cannot evaluate the
+            // command, so it fails closed instead of silently allowing it.
+            // (bash's `jq` aborts with its own non-zero status here — rc 5 for
+            // jq 1.8.1 — which Claude Code treats as a non-blocking error.)
+            eprintln!("{BLOCK_MESSAGE}");
+            return 2;
+        }
+    };
     if cmd.is_empty() {
         return 0;
     }
@@ -33,16 +43,20 @@ pub fn run() -> i32 {
 }
 
 /// The hook contract: `{"tool_name":"Bash","tool_input":{"command":"…"}}`.
-/// Missing/unparseable input yields an empty command (the bash script reads
-/// `.tool_input.command // ""`).
-fn extract_command(json: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|v| {
-            v.get("tool_input")?
-                .get("command")?
-                .as_str()
-                .map(String::from)
-        })
-        .unwrap_or_default()
+/// Missing/empty input yields an empty command (bash reads
+/// `.tool_input.command // ""`; `jq` on empty/whitespace-only stdin produces no
+/// output and exits 0). `Err` means non-empty input that is not valid JSON.
+fn extract_command(json: &str) -> Result<String, ()> {
+    if json.trim().is_empty() {
+        return Ok(String::new());
+    }
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(v) => Ok(v
+            .get("tool_input")
+            .and_then(|t| t.get("command"))
+            .and_then(|c| c.as_str())
+            .map(String::from)
+            .unwrap_or_default()),
+        Err(_) => Err(()),
+    }
 }

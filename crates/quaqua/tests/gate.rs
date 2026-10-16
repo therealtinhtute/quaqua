@@ -166,6 +166,23 @@ fn help_shaped_words_outside_a_help_position_are_blocked() {
 }
 
 #[test]
+fn empty_substitution_words_still_resolve_the_executable() {
+    // Finding 1 (runs/suhuynh-r5r1.md): bash joins words with TAB and re-splits
+    // with IFS, so an empty word from an unquoted command substitution vanishes;
+    // the executable is still `herdr` and the call is blocked.
+    assert_cases(
+        &[
+            "$(true) herdr pane split",
+            "`:` herdr tab create --label x",
+            "sudo $(true) herdr workspace close w7",
+            "X=1 $(true) herdr agent start x",
+        ],
+        Verdict::Block,
+        "empty-word",
+    );
+}
+
+#[test]
 fn binary_follows_the_hook_json_contract() {
     let bin = env!("CARGO_BIN_EXE_quaqua");
     let run = |json: &str| -> Option<i32> {
@@ -195,4 +212,10 @@ fn binary_follows_the_hook_json_contract() {
         "allowed command must exit 0",
     );
     assert_eq!(run(""), Some(0), "empty stdin must exit 0");
+    assert_eq!(run("   \n"), Some(0), "whitespace-only stdin must exit 0");
+    assert_eq!(
+        run("not json"),
+        Some(2),
+        "unparseable non-empty stdin must fail closed (finding 2)",
+    );
 }

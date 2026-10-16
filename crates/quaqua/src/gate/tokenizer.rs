@@ -51,7 +51,11 @@ fn fw(f: &mut Frame) {
             f.hdocs.push((f.hdoc_strip, f.word.clone()));
         } else if f.skip {
             f.skip = false;
-        } else {
+        } else if !f.word.is_empty() {
+            // Bash joins the words with TAB and re-splits with
+            // `IFS=$'\t' read -r -a`, so empty words vanish. An empty word is
+            // never the executable — dropping it here keeps the two in parity
+            // (`$(true) herdr pane split` must still resolve `herdr`).
             f.line.push(f.word.clone());
         }
     }

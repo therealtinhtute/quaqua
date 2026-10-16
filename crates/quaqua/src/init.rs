@@ -42,7 +42,7 @@ pub fn run() -> Result<(), String> {
         seed(&root, src, dst)?;
     }
 
-    wire_hooks(&root);
+    wire_hooks(&root)?;
     tag_cos_pane(&root);
 
     println!("workspace ready in {}", root.display());
@@ -50,21 +50,33 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// Root = the nearest ancestor of `QUAQUA_SCRIPT_DIR` (shim) or cwd holding
-/// `templates/`. In the shim layout the script sits at `<root>/scripts/workspace`,
-/// so this equals the bash `dirname($0)/../..`.
+/// Root = the shim's `<QUAQUA_SCRIPT_DIR>/../..` (bash: `dirname($0)/../..`)
+/// when the shim sets the variable, else the nearest cwd ancestor holding
+/// `templates/`. The result is canonicalized (`pwd -P`), so a symlinked
+/// checkout compares equal to herdr's real cwd.
 fn resolve_root() -> Result<PathBuf, String> {
     if let Ok(sd) = std::env::var("QUAQUA_SCRIPT_DIR") {
-        if let Some(r) = find_root_up(&PathBuf::from(sd)) {
-            return Ok(r);
+        if !sd.is_empty() {
+            let p = PathBuf::from(&sd);
+            let cand = p
+                .parent()
+                .and_then(|x| x.parent())
+                .map(PathBuf::from)
+                .unwrap_or(p);
+            return Ok(canonical(cand));
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
         if let Some(r) = find_root_up(&cwd) {
-            return Ok(r);
+            return Ok(canonical(r));
         }
+        return Ok(canonical(cwd));
     }
     Err("init-workspace: no templates/ in repo root".to_string())
+}
+
+fn canonical(p: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&p).unwrap_or(p)
 }
 
 fn find_root_up(start: &Path) -> Option<PathBuf> {
@@ -92,10 +104,11 @@ fn seed(root: &Path, src_rel: &str, dst_rel: &str) -> Result<(), String> {
 
 /// Wire `core.hooksPath` -> `<root>/scripts/hooks` on a real git repo, only when
 /// nothing else owns it. An existing different value (local or global) is left
-/// in place with a warning.
-fn wire_hooks(root: &Path) {
+/// in place with a warning. A failed write fails the run, like the bash script's
+/// `set -e`.
+fn wire_hooks(root: &Path) -> Result<(), String> {
     if !git_ok(root, &["rev-parse", "--git-dir"]) {
-        return;
+        return Ok(());
     }
     let want = root.join("scripts/hooks");
     let want_str = want.to_string_lossy().to_string();
@@ -110,11 +123,15 @@ fn wire_hooks(root: &Path) {
             );
         }
         _ => {
-            if git_ok(root, &["config", "core.hooksPath", &want_str]) {
-                println!("hooks: core.hooksPath={want_str}");
+            if !git_ok(root, &["config", "core.hooksPath", &want_str]) {
+                return Err(format!(
+                    "init-workspace: failed to set core.hooksPath to {want_str}"
+                ));
             }
+            println!("hooks: core.hooksPath={want_str}");
         }
     }
+    Ok(())
 }
 
 fn git_ok(root: &Path, args: &[&str]) -> bool {
