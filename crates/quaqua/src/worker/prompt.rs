@@ -6,7 +6,7 @@ use crate::hash::md5_hex;
 use crate::herdr::Herdr;
 use crate::json::parse_json;
 use crate::worker::cleanup::home_quaqua_runs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 pub const USAGE: &str = "\
@@ -482,29 +482,7 @@ pub fn prompt_worker(
             let grid_tab = std::fs::read_to_string(runs_dir.join(format!("{name}.grid")))
                 .unwrap_or_default();
             let grid_tab = grid_tab.trim();
-            let mut grid_script: Option<PathBuf> = None;
-            if let Ok(dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
-                let c = PathBuf::from(dir).join("grid-workers.sh");
-                if c.is_file() {
-                    grid_script = Some(c);
-                }
-            }
-            if grid_script.is_none() {
-                if let Ok(exe) = std::env::current_exe() {
-                    if let Some(dir) = exe.parent() {
-                        let c = dir.join("grid-workers.sh");
-                        if c.is_file() {
-                            grid_script = Some(c);
-                        }
-                    }
-                }
-            }
-            if grid_script.is_none() {
-                let c = PathBuf::from("scripts/worker/grid-workers.sh");
-                if c.is_file() {
-                    grid_script = Some(c);
-                }
-            }
+            let grid_script = crate::worker::cleanup::find_grid_script();
             if let Some(script) = grid_script {
                 let mut cmd = Command::new("bash");
                 cmd.arg(script).arg("--check");

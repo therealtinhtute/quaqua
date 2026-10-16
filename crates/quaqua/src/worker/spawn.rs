@@ -420,7 +420,7 @@ pub fn spawn_worker(
     }
 
     println!("worker={} kind={} pane={} worktree={}", opts.name, opts.kind, pane_id, wt.display());
-    run_grid_hook(&repo, &grid_tab);
+    run_grid_hook(&grid_tab);
 
     Ok(())
 }

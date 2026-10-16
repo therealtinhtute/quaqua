@@ -23,7 +23,43 @@ pub fn default_runs_dir() -> PathBuf {
     }
 }
 
-pub fn run_grid_hook(repo: &Path, grid_tab: &str) {
+pub fn find_grid_script() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
+        let candidate = PathBuf::from(dir).join("grid-workers.sh");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("grid-workers.sh");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Ok(team_path) = std::env::var("QUAQUA_TEAM_TOML") {
+        if let Some(parent) = Path::new(&team_path).parent() {
+            let candidate = parent.join("scripts/worker/grid-workers.sh");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let candidate = PathBuf::from(home).join("quaqua/scripts/worker/grid-workers.sh");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let candidate = PathBuf::from("scripts/worker/grid-workers.sh");
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    None
+}
+
+pub fn run_grid_hook(grid_tab: &str) {
     if std::env::var("GRID_SKIP").as_deref() == Ok("1") {
         let is_pipeline = std::env::var("PIPELINE_TASK").is_ok();
         let is_test = std::env::var("QUAQUA_TEST").as_deref() == Ok("1");
@@ -33,37 +69,7 @@ pub fn run_grid_hook(repo: &Path, grid_tab: &str) {
         eprintln!("warning: GRID_SKIP=1 ignored outside pipeline.sh/tests (rules/_all/fanout-agent-grid.md)");
     }
 
-    let mut grid_script: Option<PathBuf> = None;
-    if let Ok(dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
-        let candidate = PathBuf::from(dir).join("grid-workers.sh");
-        if candidate.is_file() {
-            grid_script = Some(candidate);
-        }
-    }
-    if grid_script.is_none() {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let candidate = dir.join("grid-workers.sh");
-                if candidate.is_file() {
-                    grid_script = Some(candidate);
-                }
-            }
-        }
-    }
-    if grid_script.is_none() {
-        let candidate = repo.join("scripts/worker/grid-workers.sh");
-        if candidate.is_file() {
-            grid_script = Some(candidate);
-        }
-    }
-    if grid_script.is_none() {
-        let candidate = PathBuf::from("scripts/worker/grid-workers.sh");
-        if candidate.is_file() {
-            grid_script = Some(candidate);
-        }
-    }
-
-    if let Some(script) = grid_script {
+    if let Some(script) = find_grid_script() {
         let res = Command::new("bash")
             .arg(script)
             .arg("--check")
@@ -137,7 +143,7 @@ pub fn cleanup_worker(name: &str, repo_path: &Path, git: &Git, herdr: &Herdr) ->
         .unwrap_or("repo");
     let grid_tab = std::env::var("GRID_TAB").unwrap_or_else(|_| format!("{repo_name}-workers"));
 
-    run_grid_hook(&repo, &grid_tab);
+    run_grid_hook(&grid_tab);
 
     let rm_out = git
         .worktree_remove(&repo, &wt)
