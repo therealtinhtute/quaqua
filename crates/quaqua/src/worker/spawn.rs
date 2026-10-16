@@ -382,7 +382,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
                 let runs_clean = runs_str.trim_start_matches('/');
                 let wt_clean = wt_str.trim_start_matches('/');
                 let settings = format!(
-                    "{{\"permissions\":{{\"allow\":[\"Edit(//{}/**)\"],\"deny\":[\"Edit(//{}/**)\"]}}}}",
+                    "{{\"permissions\":{{\"allow\":[\"Edit(//{}/**)\",\"Bash(cargo test:*)\",\"Bash(mv *runs/.*.tmp *runs/*.md)\"],\"deny\":[\"Edit(//{}/**)\"]}}}}",
                     runs_clean, wt_clean
                 );
                 extra_args.push("--permission-mode".to_string());
