@@ -1,0 +1,20 @@
+# invalid: builder_reviewer_differ is outside none|harness|kind.
+schema_version = 2
+
+[strategy]
+default_kind = "tieude"
+default_reviewer = ["quansu"]
+builder_reviewer_differ = "weird"
+
+[kinds.tieude]
+harness = "opencode"
+model = "m"
+can_review = false
+
+[kinds.quansu]
+harness = "codex"
+model = "m"
+can_review = true
+
+[merge]
+integ_branch = "quaqua/{slug}-integ"

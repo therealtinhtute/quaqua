@@ -104,6 +104,50 @@ Resolution: project override → defaults → reject. Validation rejects: worker
 
 Rule → key coverage is a gate: every rule in AGENTS.md `## Rules`/`## Protocol`, `worker-cap.sh`, `worker-timebox.md` and `models.md` must map to a key or stay prose by name. Nothing is dropped silently.
 
+### Rule → key (R1)
+
+33 rules → 33 rows. Every rule keeps a home: a `team.toml` key, or named "prose" when it is an
+authority/CLI-shape fact no config value can carry. `models.md` `## Rules` prose stays in
+`models.md`; only the routing cell moves to `[kinds.*]`.
+
+<!-- rule-key-table:start -->
+| Source | Rule | team.toml key |
+|---|---|---|
+| AGENTS.md `## Rules` | push / branch delete / main merge need anh iu's approval | prose (human gate) |
+| AGENTS.md `## Rules` | a Lead merges Peer branches into its project integration branch | `merge.integ_branch` |
+| AGENTS.md `## Rules` | max 4 task workers per orchestrator; a pipeline counts 2 | `limits.max_workers_per_orchestrator`, `limits.weights.pipeline` |
+| AGENTS.md `## Rules` | one task per worker | prose |
+| AGENTS.md `## Rules` | only the CoS writes `rules/`, `AGENTS.md` | prose |
+| AGENTS.md `## Rules` | `projects/INDEX.md` owner column | prose |
+| AGENTS.md `## Rules` | every redirect flows through the CoS | prose |
+| AGENTS.md `## Protocol` | spawn then grid (mandatory) | `grid.workers_tab` |
+| AGENTS.md `## Protocol` | `--check-brief` + watchdog exit codes 0, 2–6 | `timers.budget_default`, `timers.hard_cap`, `timers.stall`, `timers.idle` |
+| AGENTS.md `## Protocol` | trust `runs/<name>.md`, re-run the test | prose |
+| AGENTS.md `## Protocol` | blocked → read the pane first | prose |
+| AGENTS.md `## Protocol` | timeout/stall → read before re-prompt | prose |
+| AGENTS.md `## Protocol` | cleanup right after the run file is read | prose |
+| `worker-cap.sh` | a live task worker counts 1 | `limits.weights.default` |
+| `worker-cap.sh` | an active pipeline reserves 2 | `limits.weights.pipeline` |
+| `worker-cap.sh` | `<slug>-lead` agents never count | prose |
+| `worker-cap.sh` | max 4 slots per owner | `limits.max_workers_per_orchestrator` |
+| `worker-timebox.md` | brief `Time budget:` wins, else 2700s | `timers.budget_default` |
+| `worker-timebox.md` | hard cap 7200s | `timers.hard_cap` |
+| `worker-timebox.md` | stall window 600s | `timers.stall` |
+| `worker-timebox.md` | idle window 120s | `timers.idle` |
+| `worker-timebox.md` | one soft nudge at 80% | `timers.nudge_at` |
+| `worker-timebox.md` | one grace of 25%, once per task | `timers.grace` |
+| `worker-timebox.md` | `--extend` is the only extension | prose (CLI flag) |
+| `worker-timebox.md` | pilots/spikes get a 30-min budget | `timers.pilot_budget` |
+| `worker-timebox.md` | deadline math via the `now_sec` fake clock | prose |
+| `models.md` | no name given → `tieude` | `strategy.default_kind` |
+| `models.md` | default reviewer list, first available wins | `strategy.default_reviewer` |
+| `models.md` | implementer and reviewer differ by harness | `strategy.builder_reviewer_differ` |
+| `models.md` | kind harness/model/effort cells | `kinds.<k>.harness`, `kinds.<k>.model`, `kinds.<k>.effort` |
+| `models.md` | a kind may review | `kinds.<k>.can_review` |
+| `models.md` | read-only → `detu`; design → `truonglao`; cheaper tier first | prose |
+| `models.md` | naming: ≤20 chars, `-lead` reserved | prose |
+<!-- rule-key-table:end -->
+
 ## New behaviour from piggery
 **Merge queue (`quaqua merge`):** one branch at a time, in order. Note the integ commit, merge, run the project check. If it passes, record the new commit. If it conflicts or fails, undo (`merge --abort` / `reset --hard <noted>`), return rework to the Peer, and never fix it yourself. If the check fails without the branch too, ask the CoS and hold the queue. Never rewrite integ history except to undo its own last merge. Never push.
 
