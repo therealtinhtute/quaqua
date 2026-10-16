@@ -20,6 +20,7 @@ pub trait HerdrOps {
     fn pane_report_metadata(&self, pane: &str, tokens: &[&str]) -> std::io::Result<Output>;
     fn pane_wait_output(&self, pane: &str, pattern: &str, timeout_ms: u32) -> bool;
     fn pane_send_keys(&self, pane: &str, key: &str) -> std::io::Result<Output>;
+    fn agent_send_keys(&self, name: &str, key: &str) -> std::io::Result<Output>;
     fn agent_wait_idle(&self, name: &str, timeout_ms: u32) -> std::io::Result<Output>;
     fn agent_prompt_nowait(&self, name: &str, prompt: &str) -> std::io::Result<Output>;
     fn agent_prompt_wait_background(
@@ -119,6 +120,10 @@ impl HerdrOps for Herdr {
 
     fn pane_send_keys(&self, pane: &str, key: &str) -> std::io::Result<Output> {
         self.run(&["pane", "send-keys", pane, key])
+    }
+
+    fn agent_send_keys(&self, name: &str, key: &str) -> std::io::Result<Output> {
+        self.run(&["agent", "send-keys", name, key])
     }
 
     fn agent_wait_idle(&self, name: &str, timeout_ms: u32) -> std::io::Result<Output> {

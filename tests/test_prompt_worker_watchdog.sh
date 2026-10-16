@@ -77,6 +77,13 @@ case "${1:-} ${2:-}" in
       ( sleep "$FAKE_DELAY"; printf 'fake summary\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
     fi
     exit "${FAKE_RC:-0}" ;;
+  "agent send-keys")
+    # Prompt-landing recovery: a real receiver would submit whatever is in the
+    # input box. FAKE_WRITE_ON_KEYS makes the write happen so the recovered
+    # path is observable.
+    [ "${FAKE_WRITE_ON_KEYS:-0}" = 1 ] \
+      && printf 'fake summary\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md"
+    exit 0 ;;
 esac
 exit 0
 STUB
@@ -286,6 +293,48 @@ run sude-idle FAKE_DELAY=0 FAKE_STATUS=idle PROMPT_WORKER_POLL_SEC=1 \
 [[ $rc -eq 3 ]] || fail "sude-idle: exit $rc, want 3: $(cat "$T/err")"
 grep -q 'agent idle' "$T/err" || fail "sude-idle: no idle reason: $(cat "$T/err")"
 echo "ok: agent idle without run file -> exit 3"
+
+# ── PROMPT LANDING: agent still idle right after the prompt ─────────────────
+# herdr `agent prompt --wait` returns agent_prompt_stalled when the agent never
+# leaves idle within 5s: the typed brief can sit unsubmitted in the input box
+# (or be lost), and the old watchdog just polled with status=idle until the
+# 120s idle path. LAND_SEC is the post-prompt window to confirm the prompt
+# landed; the recovery is one `agent send-keys <name> enter`.
+printf '%s\n' 1700000000 > "$T/clock"
+run sude-landstall FAKE_DELAY=0 FAKE_STATUS=idle FAKE_PANE='empty input box' \
+  PROMPT_WORKER_LAND_SEC=2 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=9999 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 3 ]] || fail "sude-landstall: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'WATCHDOG exit=3' "$T/err" || fail "sude-landstall: no exit=3 line: $(cat "$T/err")"
+grep -q 'prompt not landed' "$T/err" \
+  || fail "sude-landstall: no prompt-not-landed reason: $(cat "$T/err")"
+[[ $(grep -c 'agent send-keys sude-landstall enter' "$T/calls") -eq 1 ]] \
+  || fail "sude-landstall: enter not sent exactly once: $(cat "$T/calls")"
+[[ ! -s $T/out ]] || fail "sude-landstall: printed a path: $(cat "$T/out")"
+echo "ok: still idle after the prompt -> one send-keys enter, then exit 3"
+
+# the recovery works when Enter submits a typed-but-unsent brief
+printf '%s\n' 1700000000 > "$T/clock"
+run sude-landok FAKE_DELAY=0 FAKE_STATUS=idle FAKE_PANE='brief typed in box' \
+  FAKE_WRITE_ON_KEYS=1 PROMPT_WORKER_LAND_SEC=2 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=9999 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 0 ]] || fail "sude-landok: exit $rc, want 0: $(cat "$T/err")"
+[[ "$(cat "$T/out")" == "$T/home/quaqua/runs/sude-landok.md" ]] \
+  || fail "sude-landok: stdout not the runs path: $(cat "$T/out")"
+grep -q 'agent send-keys sude-landok enter' "$T/calls" \
+  || fail "sude-landok: no recovery enter: $(cat "$T/calls")"
+! grep -q 'exit=3' "$T/err" || fail "sude-landok: exit 3 after a successful recovery: $(cat "$T/err")"
+echo "ok: idle after the prompt -> enter recovers, report accepted (exit 0)"
+
+# a working agent is never disturbed: no recovery enter
+printf '%s\n' 1700000000 > "$T/clock"
+run sude-landwork FAKE_DELAY=0 FAKE_STATUS=working PROMPT_WORKER_LAND_SEC=1 \
+  PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_STALL_SEC=2 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_BUDGET_SEC=9999 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 3 ]] || fail "sude-landwork: exit $rc, want 3 (stall): $(cat "$T/err")"
+! grep -q 'agent send-keys' "$T/calls" || fail "sude-landwork: sent enter to a working agent: $(cat "$T/calls")"
+! grep -q 'prompt not landed' "$T/err" || fail "sude-landwork: false prompt-not-landed: $(cat "$T/err")"
+echo "ok: working agent -> no recovery enter, ordinary stall path"
 
 # ── read fallback: recent-unwrapped errors -> visible still observed ────────
 run sude-vis FAKE_DELAY=0 FAKE_READ_ERR=1 PROMPT_WORKER_POLL_SEC=1 \
