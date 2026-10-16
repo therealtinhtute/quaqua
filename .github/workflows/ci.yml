@@ -1,0 +1,55 @@
+name: CI
+
+# Every PR into main — and every push to main — runs the full workspace test
+# suite, so a merge cannot depend on someone remembering to run it locally.
+# The check name is "CI / cargo test (workspace)"; make it a required status
+# check in branch protection to block merges on red.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# The job only reads the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR supersedes the run in flight.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned by SHA: dtolnay/rust-toolchain ref "1.99.0" (the toolchain the
+      # workspace is developed and verified against). There is no
+      # rust-toolchain.toml in the repo, so the pin lives here.
+      - uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7
+        with:
+          toolchain: 1.99.0
+
+      # Requires neither herdr nor tmux: no test in the workspace shells out to
+      # either (verified by running this exact command with an empty HOME and
+      # herdr off PATH). Nothing is excluded, filtered or #[ignore]d.
+      - name: cargo test --locked
+        run: cargo test --locked
+
+      # Always runs, so the run page states the outcome even when tests fail.
+      - name: Report outcome
+        if: always()
+        env:
+          OUTCOME: ${{ job.status }}
+          TRIGGER: ${{ github.event_name }}
+          TARGET_REF: ${{ github.ref_name }}
+        run: |
+          {
+            echo "## cargo test (workspace): ${OUTCOME}"
+            echo
+            echo "\`cargo test --locked\` on \`ubuntu-latest\` with Rust 1.99.0."
+            echo "Trigger: \`${TRIGGER}\` on \`${TARGET_REF}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
