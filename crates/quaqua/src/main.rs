@@ -144,7 +144,14 @@ fn do_grid_plan(file_opt: Option<PathBuf>, path_opt: Option<PathBuf>) -> Result<
     let val: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("invalid snapshot JSON: {e}"))?;
     let snap = quaqua::grid::parse_snapshot_value(&val)?;
-    let ops = quaqua::grid::plan(&snap)?;
+    let def_statuses = team_file(&None)
+        .ok()
+        .and_then(|p| config::load(&p).ok())
+        .map(|c| c.grid.deferred_statuses);
+    let def_slices: Option<Vec<&str>> = def_statuses
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.as_str()).collect());
+    let ops = quaqua::grid::plan_with_deferred(&snap, def_slices.as_deref())?;
     let json_out = serde_json::to_string(&ops).map_err(|e| e.to_string())?;
     println!("{json_out}");
     Ok(())

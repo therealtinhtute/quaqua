@@ -1,6 +1,6 @@
 use super::apply::{apply_ops, HerdrDriver};
 use super::plan::{is_candidate_worker, is_group_tab, plan};
-use super::types::{Op, Snapshot, Target};
+use super::types::{Op, Snapshot};
 use std::collections::HashSet;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -70,74 +70,53 @@ pub fn filter_ops_for_check<'a>(
             .collect()
     });
 
-    let mut included_panes: HashSet<&str> = HashSet::new();
-    let mut workers_tab_included = false;
-    let mut result = Vec::new();
-
-    for op in ops {
-        if op.deferred {
-            continue;
-        }
-
-        let pane = snapshot.panes.iter().find(|p| p.pane_id == op.pane);
-        let agent = snapshot.agents.iter().find(|a| a.pane_id.as_deref() == Some(&op.pane));
-
-        // Finding 6: name includes $a.name // $p.tokens.grid_name // $p.label
-        let name = agent
-            .and_then(|a| a.name.as_deref())
-            .or_else(|| pane.and_then(|p| p.tokens.as_ref()).and_then(|t| t.grid_name.as_deref()))
-            .or_else(|| pane.and_then(|p| p.label.as_deref()))
-            .unwrap_or("");
-
-        let powner = pane
-            .and_then(|p| p.tokens.as_ref())
-            .and_then(|t| t.grid_owner.as_deref())
-            .unwrap_or("cos");
-        let pgroup = pane
-            .and_then(|p| p.tokens.as_ref())
-            .and_then(|t| t.grid_group.as_deref())
-            .unwrap_or("");
-
-        if let Some(req_owner) = owner_filter {
-            if !req_owner.is_empty() && powner != req_owner {
-                continue;
+    ops.iter()
+        .filter(|op| {
+            if op.deferred {
+                return false;
             }
-        }
 
-        if let Some(set) = &only_set {
-            if !set.is_empty() && !set.contains(name) {
-                continue;
-            }
-        }
+            let pane = snapshot.panes.iter().find(|p| p.pane_id == op.pane);
+            let agent = snapshot.agents.iter().find(|a| a.pane_id.as_deref() == Some(&op.pane));
 
-        // dec5a30 bugfix: --tab always scopes the check, with or without --only
-        if let Some(tab) = tab_filter {
-            if !tab.is_empty() && !is_group_tab(pgroup, Some(tab)) {
-                continue;
-            }
-        }
+            // Finding 6: name includes $a.name // $p.tokens.grid_name // $p.label
+            let name = agent
+                .and_then(|a| a.name.as_deref())
+                .or_else(|| pane.and_then(|p| p.tokens.as_ref()).and_then(|t| t.grid_name.as_deref()))
+                .or_else(|| pane.and_then(|p| p.label.as_deref()))
+                .unwrap_or("");
 
-        // Finding 3: Prevent orphaned splits if parent new_tab or anchor was filtered out
-        match &op.target {
-            Target::NewTab { .. } => {
-                workers_tab_included = true;
-                included_panes.insert(op.pane.as_str());
-            }
-            Target::Split { tab, anchor, .. } => {
-                if tab == "@workers" && !workers_tab_included {
-                    continue;
+            let powner = pane
+                .and_then(|p| p.tokens.as_ref())
+                .and_then(|t| t.grid_owner.as_deref())
+                .unwrap_or("cos");
+            let pgroup = pane
+                .and_then(|p| p.tokens.as_ref())
+                .and_then(|t| t.grid_group.as_deref())
+                .unwrap_or("");
+
+            if let Some(req_owner) = owner_filter {
+                if !req_owner.is_empty() && powner != req_owner {
+                    return false;
                 }
-                if !included_panes.contains(anchor.as_str()) && !snapshot.panes.iter().any(|p| &p.pane_id == anchor) {
-                    continue;
-                }
-                included_panes.insert(op.pane.as_str());
             }
-        }
 
-        result.push(op);
-    }
+            if let Some(set) = &only_set {
+                if !set.is_empty() && !set.contains(name) {
+                    return false;
+                }
+            }
 
-    result
+            // dec5a30 bugfix: --tab always scopes the check, with or without --only
+            if let Some(tab) = tab_filter {
+                if !tab.is_empty() && !is_group_tab(pgroup, Some(tab)) {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect()
 }
 
 pub fn run_reconcile<D: HerdrDriver>(
@@ -216,27 +195,53 @@ pub fn run_reconcile<D: HerdrDriver>(
     let snap = driver.snapshot()?;
     let all_ops = plan(&snap)?;
 
-    // Filter ops by owner, --only and --tab
-    let filtered_ops = filter_ops_for_check(
-        &all_ops,
-        &snap,
-        Some(&owner_env),
-        opts.only.as_deref(),
-        if opts.tab.is_some() { Some(tab) } else { None },
-    );
+    // Finding 7: In repair mode, arrange all groups (do not filter out groups by --tab)
+    let only_set: Option<HashSet<&str>> = opts.only.as_deref().map(|s| {
+        s.split(',')
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .collect()
+    });
 
-    let owned_ops: Vec<Op> = filtered_ops.into_iter().cloned().collect();
+    let repair_ops: Vec<Op> = all_ops
+        .into_iter()
+        .filter(|op| {
+            let pane = snap.panes.iter().find(|p| p.pane_id == op.pane);
+            let agent = snap.agents.iter().find(|a| a.pane_id.as_deref() == Some(&op.pane));
+            let name = agent
+                .and_then(|a| a.name.as_deref())
+                .or_else(|| pane.and_then(|p| p.tokens.as_ref()).and_then(|t| t.grid_name.as_deref()))
+                .or_else(|| pane.and_then(|p| p.label.as_deref()))
+                .unwrap_or("");
+            let powner = pane
+                .and_then(|p| p.tokens.as_ref())
+                .and_then(|t| t.grid_owner.as_deref())
+                .unwrap_or("cos");
+
+            if !owner_env.is_empty() && powner != owner_env {
+                return false;
+            }
+
+            if let Some(set) = &only_set {
+                if !set.is_empty() && !set.contains(name) {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect();
 
     if opts.dry_run {
-        let serialized = serde_json::to_string(&owned_ops).map_err(|e| e.to_string())?;
+        let serialized = serde_json::to_string(&repair_ops).map_err(|e| e.to_string())?;
         println!("{serialized}");
         return Ok(());
     }
 
-    // Finding 5: Apply ops with scratch parking and dependent deferrals
-    apply_ops(driver, &owned_ops, Some(&snap))?;
+    // Finding 1 & 5: Apply ops and capture remapped pane IDs
+    let pane_map = apply_ops(driver, &repair_ops, Some(&snap))?;
 
-    // Finding 5: Pane renaming to agent name
+    // Finding 1: Rename panes using remapped IDs and only for --only listed workers
     for p in &snap.panes {
         if is_candidate_worker(p) {
             let powner = p.tokens.as_ref().and_then(|t| t.grid_owner.as_deref()).unwrap_or("cos");
@@ -248,11 +253,17 @@ pub fn run_reconcile<D: HerdrDriver>(
                 .iter()
                 .find(|a| a.pane_id.as_deref() == Some(&p.pane_id))
                 .and_then(|a| a.name.as_deref())
-                .or_else(|| p.tokens.as_ref().and_then(|t| t.grid_name.as_deref()));
+                .or_else(|| p.tokens.as_ref().and_then(|t| t.grid_name.as_deref()))
+                .or_else(|| p.label.as_deref());
+
             if let Some(tname) = target_name {
-                if p.label.as_deref() != Some(tname) {
-                    let _ = driver.rename_pane(&p.pane_id, tname);
+                if let Some(set) = &only_set {
+                    if !set.is_empty() && !set.contains(tname) {
+                        continue; // Never touch unlisted workers!
+                    }
                 }
+                let cur_pane = pane_map.get(&p.pane_id).cloned().unwrap_or_else(|| p.pane_id.clone());
+                let _ = driver.rename_pane(&cur_pane, tname);
             }
         }
     }

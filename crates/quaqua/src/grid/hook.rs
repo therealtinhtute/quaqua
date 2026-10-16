@@ -1,7 +1,7 @@
 use super::apply::{apply_ops, CliHerdrDriver, HerdrDriver};
 use super::plan::{is_candidate_worker, plan};
 use super::types::{Op, Snapshot, Target};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{create_dir, create_dir_all, remove_dir, remove_file, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,26 +21,28 @@ pub fn state_dir() -> PathBuf {
 }
 
 pub fn is_shadow_mode(state_dir: &Path) -> bool {
+    let mut shadow_mode = true;
     if let Ok(v) = std::env::var("HERDR_GRID_SHADOW") {
         let lower = v.trim().to_lowercase();
         if lower == "0" || lower == "false" || lower == "off" {
-            return false;
+            shadow_mode = false;
         }
-        return true;
     }
-    let shadow_file = state_dir.join("shadow");
-    if shadow_file.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&shadow_file) {
-            let lower = content.trim().to_lowercase();
-            if lower.contains("0") || lower.contains("false") || lower.contains("off") {
-                return false;
+    if shadow_mode {
+        let shadow_file = state_dir.join("shadow");
+        if shadow_file.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&shadow_file) {
+                let lower = content.trim().to_lowercase();
+                if lower.contains("0") || lower.contains("false") || lower.contains("off") {
+                    shadow_mode = false;
+                }
             }
         }
     }
-    true
+    shadow_mode
 }
 
-fn is_pid_alive(pid_str: &str) -> bool {
+pub fn is_pid_alive(pid_str: &str) -> bool {
     if pid_str.trim().is_empty() {
         return false;
     }
@@ -51,9 +53,9 @@ fn is_pid_alive(pid_str: &str) -> bool {
         .unwrap_or(false)
 }
 
-struct LockGuard {
-    lock_dir: PathBuf,
-    pid_file: PathBuf,
+pub struct LockGuard {
+    pub lock_dir: PathBuf,
+    pub pid_file: PathBuf,
 }
 
 impl Drop for LockGuard {
@@ -63,7 +65,7 @@ impl Drop for LockGuard {
     }
 }
 
-fn acquire_lock(lock_dir: &Path, pid_file: &Path) -> Result<LockGuard, String> {
+pub fn acquire_lock(lock_dir: &Path, pid_file: &Path) -> Result<LockGuard, String> {
     let mut attempts = 0;
     let my_pid = std::process::id().to_string();
 
@@ -98,7 +100,7 @@ fn acquire_lock(lock_dir: &Path, pid_file: &Path) -> Result<LockGuard, String> {
 }
 
 /// Early exit check on pane.agent_status_changed events that change nothing
-fn should_early_exit(event_name: Option<&str>, event_json: Option<&str>, last_snap_file: &Path) -> bool {
+pub fn should_early_exit(event_name: Option<&str>, event_json: Option<&str>, last_snap_file: &Path) -> bool {
     if event_name != Some("pane.agent_status_changed") {
         return false;
     }
@@ -118,10 +120,11 @@ fn should_early_exit(event_name: Option<&str>, event_json: Option<&str>, last_sn
         Some(s) => s,
         None => return false,
     };
-    let new_status = val
-        .get("agent_status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    // Finding 8: if new_status is missing/empty, do not early exit
+    let new_status = match val.get("agent_status").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return false,
+    };
 
     let last_snap_text = match std::fs::read_to_string(last_snap_file) {
         Ok(t) => t,
@@ -153,20 +156,41 @@ fn should_early_exit(event_name: Option<&str>, event_json: Option<&str>, last_sn
     old_working == new_working
 }
 
-fn compute_snapshot_signature(snap: &Snapshot) -> String {
+/// Compute signature of snapshot matching hook.sh:240-258
+pub fn compute_snapshot_signature(snap: &Snapshot) -> String {
     let mut sigs = Vec::new();
+    let tab_labels: HashMap<&str, &str> = snap
+        .tabs
+        .iter()
+        .map(|t| (t.tab_id.as_str(), t.label.as_deref().unwrap_or("")))
+        .collect();
+
     for p in &snap.panes {
-        if is_candidate_worker(p) {
-            let role = p.tokens.as_ref().and_then(|t| t.grid_role.as_deref()).unwrap_or("");
-            let owner = p.tokens.as_ref().and_then(|t| t.grid_owner.as_deref()).unwrap_or("");
-            let group = p.tokens.as_ref().and_then(|t| t.grid_group.as_deref()).unwrap_or("");
+        let role = p.tokens.as_ref().and_then(|t| t.grid_role.as_deref()).unwrap_or("");
+        // Finding 4: All workers with grid_role == "worker"
+        if role == "worker" {
+            let tid = p.tab_id.as_deref().unwrap_or("");
+            let tlabel = tab_labels.get(tid).copied().unwrap_or("");
+            // Finding 4: Normalize scratch tabs starting with grid-scratch- to @scratch
+            let tab_repr = if tlabel.starts_with("grid-scratch-") {
+                "@scratch"
+            } else {
+                tid
+            };
             let status = if p.agent_status.as_deref() == Some("working") {
                 "working"
             } else {
                 "idle"
             };
-            let tab = p.tab_id.as_deref().unwrap_or("");
-            sigs.push(format!("{}:{}:{}:{}:{}:{}", p.pane_id, tab, status, role, owner, group));
+            let owner = p.tokens.as_ref().and_then(|t| t.grid_owner.as_deref()).unwrap_or("");
+            let group = p.tokens.as_ref().and_then(|t| t.grid_group.as_deref()).unwrap_or("");
+            let ready = p
+                .tokens
+                .as_ref()
+                .and_then(|t| t.grid_ready.as_ref())
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            sigs.push(format!("{}:{}:{}:{}:{}:{}:{}", p.pane_id, tab_repr, status, role, owner, group, ready));
         }
     }
     sigs.sort();
@@ -188,8 +212,18 @@ fn chrono_or_simple_time() -> String {
     format!("{secs}")
 }
 
-fn reconcile_step(sdir: &Path, driver: &mut CliHerdrDriver) -> Result<(), String> {
-    let mut snap = driver.snapshot()?;
+pub fn reconcile_step<D: HerdrDriver>(sdir: &Path, driver: &mut D) -> Result<(), String> {
+    // Finding 8: An empty or failing snapshot returns Ok(()) without failure
+    let mut snap = match driver.snapshot() {
+        Ok(s) => {
+            if s.panes.is_empty() && s.workspaces.is_empty() {
+                return Ok(());
+            }
+            s
+        }
+        Err(_) => return Ok(()),
+    };
+
     let shadow_log = sdir.join("shadow.log");
     let last_snap_file = sdir.join("last_snapshot.json");
     let failed_ops_file = sdir.join("failed_ops.json");
@@ -335,7 +369,18 @@ fn reconcile_step(sdir: &Path, driver: &mut CliHerdrDriver) -> Result<(), String
         Err(e) => {
             log_line(&shadow_log, &format!("apply error: {e}"));
             let _ = std::fs::write(&failed_ops_file, &non_deferred_json);
-            let _ = std::fs::write(&failed_snap_file, &snap_sig);
+            // Finding 4: Record the POST-FAILURE snapshot signature
+            let mut post_snap_sig = snap_sig;
+            if let Ok(err_snap) = driver.snapshot() {
+                if let Ok(err_json) = serde_json::to_string(&err_snap) {
+                    let tmp = last_snap_file.with_extension("tmp");
+                    if std::fs::write(&tmp, &err_json).is_ok() {
+                        let _ = std::fs::rename(tmp, &last_snap_file);
+                    }
+                }
+                post_snap_sig = compute_snapshot_signature(&err_snap);
+            }
+            let _ = std::fs::write(&failed_snap_file, &post_snap_sig);
             Err(e)
         }
     }
@@ -362,16 +407,29 @@ pub fn run_hook() -> Result<(), String> {
 
     let lock_dir = sdir.join("lock");
     let pid_file = lock_dir.join("pid");
-    let _guard = acquire_lock(&lock_dir, &pid_file)?;
+    let guard = acquire_lock(&lock_dir, &pid_file)?;
 
     let mut driver = CliHerdrDriver::new();
 
     // Main loop handling pending counter
     loop {
         let _ = remove_file(&pending_file);
-        reconcile_step(&sdir, &mut driver)?;
+        let _ = reconcile_step(&sdir, &mut driver);
         if !pending_file.is_file() {
             break;
+        }
+    }
+
+    // Drop lock
+    drop(guard);
+
+    // Finding 8: Unlock-window recheck (hook.sh:365-377)
+    if pending_file.is_file() {
+        if let Ok(_guard2) = acquire_lock(&lock_dir, &pid_file) {
+            while pending_file.is_file() {
+                let _ = remove_file(&pending_file);
+                let _ = reconcile_step(&sdir, &mut driver);
+            }
         }
     }
 

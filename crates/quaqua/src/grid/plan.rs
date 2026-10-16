@@ -50,8 +50,8 @@ pub fn is_candidate_worker(pane: &Pane) -> bool {
         && tokens.grid_group.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
 }
 
-fn is_working(status: Option<&str>) -> bool {
-    status == Some("working")
+fn is_status_deferred(status: Option<&str>, deferred_list: &[&str]) -> bool {
+    status.map(|s| deferred_list.contains(&s)).unwrap_or(false)
 }
 
 pub fn is_group_tab(group: &str, label: Option<&str>) -> bool {
@@ -212,6 +212,15 @@ fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) -> O
 
 /// Pure layout planner: turns a snapshot into an ordered list of layout ops.
 pub fn plan(snapshot: &Snapshot) -> Result<Vec<Op>, String> {
+    plan_with_deferred(snapshot, None)
+}
+
+/// Layout planner with custom deferred statuses from config.
+pub fn plan_with_deferred(
+    snapshot: &Snapshot,
+    deferred_statuses: Option<&[&str]>,
+) -> Result<Vec<Op>, String> {
+    let def_list = deferred_statuses.unwrap_or(&["working"]);
     let candidate_workers: Vec<&Pane> = snapshot
         .panes
         .iter()
@@ -221,7 +230,6 @@ pub fn plan(snapshot: &Snapshot) -> Result<Vec<Op>, String> {
     if candidate_workers.is_empty() {
         return Ok(vec![]);
     }
-
     // Distinct owners in sorted order (jq: `[ $candidate_workers[].tokens.grid_owner ] | unique`)
     let mut owners: BTreeSet<&str> = BTreeSet::new();
     for p in &candidate_workers {
@@ -298,7 +306,7 @@ pub fn plan(snapshot: &Snapshot) -> Result<Vec<Op>, String> {
                 ops.push(Op {
                     op: "move".to_string(),
                     pane: w.pane_id.clone(),
-                    deferred: is_working(w.agent_status.as_deref()),
+                    deferred: is_status_deferred(w.agent_status.as_deref(), def_list),
                     target: Target::Split {
                         tab: anchor_tab.unwrap().to_string(),
                         anchor: anchor_pane.unwrap().pane_id.clone(),
@@ -437,7 +445,7 @@ pub fn plan(snapshot: &Snapshot) -> Result<Vec<Op>, String> {
                                     ops.push(Op {
                                         op: "move".to_string(),
                                         pane: gws[i].pane_id.clone(),
-                                        deferred: is_working(gws[i].agent_status.as_deref()),
+                                        deferred: is_status_deferred(gws[i].agent_status.as_deref(), def_list),
                                         target: split_target(n, i, &gws, wt_id),
                                     });
                                 }
@@ -449,7 +457,7 @@ pub fn plan(snapshot: &Snapshot) -> Result<Vec<Op>, String> {
                                     ops.push(Op {
                                         op: "move".to_string(),
                                         pane: gws[0].pane_id.clone(),
-                                        deferred: is_working(gws[0].agent_status.as_deref()),
+                                        deferred: is_status_deferred(gws[0].agent_status.as_deref(), def_list),
                                         target: Target::NewTab {
                                             label: group.to_string(),
                                         },
@@ -458,7 +466,7 @@ pub fn plan(snapshot: &Snapshot) -> Result<Vec<Op>, String> {
                                     ops.push(Op {
                                         op: "move".to_string(),
                                         pane: gws[i].pane_id.clone(),
-                                        deferred: is_working(gws[i].agent_status.as_deref()),
+                                        deferred: is_status_deferred(gws[i].agent_status.as_deref(), def_list),
                                         target: split_target(n, i, &gws, "@workers"),
                                     });
                                 }
@@ -472,7 +480,7 @@ pub fn plan(snapshot: &Snapshot) -> Result<Vec<Op>, String> {
                             ops.push(Op {
                                 op: "move".to_string(),
                                 pane: gws[0].pane_id.clone(),
-                                deferred: is_working(gws[0].agent_status.as_deref()),
+                                deferred: is_status_deferred(gws[0].agent_status.as_deref(), def_list),
                                 target: Target::NewTab {
                                     label: group.to_string(),
                                 },
@@ -481,7 +489,7 @@ pub fn plan(snapshot: &Snapshot) -> Result<Vec<Op>, String> {
                             ops.push(Op {
                                 op: "move".to_string(),
                                 pane: gws[i].pane_id.clone(),
-                                deferred: is_working(gws[i].agent_status.as_deref()),
+                                deferred: is_status_deferred(gws[i].agent_status.as_deref(), def_list),
                                 target: split_target(n, i, &gws, "@workers"),
                             });
                         }

@@ -1,3 +1,4 @@
+use super::plan::is_candidate_worker;
 use super::types::{Op, Snapshot, Target};
 use std::collections::{HashMap, HashSet};
 
@@ -162,7 +163,10 @@ impl HerdrDriver for CliHerdrDriver {
     }
 }
 
-/// Fake driver for testing without calling real herdr
+/// Fake driver for testing without calling real herdr.
+/// Models reality:
+/// - Assigns a new pane ID on move.
+/// - Updates current_snapshot with the new pane ID and tab ID.
 pub struct FakeHerdrDriver {
     pub current_snapshot: Snapshot,
     pub executed_moves: Vec<(String, Target)>,
@@ -192,46 +196,48 @@ impl HerdrDriver for FakeHerdrDriver {
         self.executed_moves.push((pane.to_string(), target.clone()));
         self.next_pane_counter += 1;
         self.next_tab_counter += 1;
+        let new_pane_id = format!("w1:p{}", self.next_pane_counter);
         let tab_id = match target {
             Target::NewTab { .. } => format!("w1:t_{}", self.next_tab_counter),
             Target::Split { tab, .. } => tab.clone(),
         };
+
+        // Update current_snapshot so subsequent fresh snapshots reflect the moved pane
+        if let Some(p) = self.current_snapshot.panes.iter_mut().find(|p| p.pane_id == pane) {
+            p.pane_id = new_pane_id.clone();
+            p.tab_id = Some(tab_id.clone());
+        }
+
         Ok(MoveResult {
-            pane_id: pane.to_string(),
+            pane_id: new_pane_id,
             tab_id,
-            previous_pane_id: None,
+            previous_pane_id: Some(pane.to_string()),
         })
     }
 
     fn rename_pane(&mut self, pane: &str, label: &str) -> Result<(), String> {
         self.executed_renames.push((pane.to_string(), label.to_string()));
+        if let Some(p) = self.current_snapshot.panes.iter_mut().find(|p| p.pane_id == pane) {
+            p.label = Some(label.to_string());
+        }
         Ok(())
     }
 }
 
-/// Execute layout ops via a HerdrDriver, propagating deferrals, parking panes
-/// if in-tab repositioning, and remapping pane/tab IDs as needed.
+/// Execute layout ops via a HerdrDriver, verifying fresh snapshots before each move,
+/// propagating deferrals, parking panes if in-tab repositioning, and returning
+/// the remapped ID dictionary.
 pub fn apply_ops<D: HerdrDriver>(
     driver: &mut D,
     ops: &[Op],
-    snapshot: Option<&Snapshot>,
-) -> Result<usize, String> {
+    _initial_snapshot: Option<&Snapshot>,
+) -> Result<HashMap<String, String>, String> {
     let mut pane_map: HashMap<String, String> = HashMap::new();
-    let mut pane_tabs: HashMap<String, String> = HashMap::new();
     let mut latest_tab: Option<String> = None;
-    let mut applied_count = 0;
     let mut scratch_counter = 0;
 
     let mut deferred_panes: HashSet<String> = HashSet::new();
     let mut workers_tab_deferred = false;
-
-    if let Some(snap) = snapshot {
-        for p in &snap.panes {
-            if let Some(tid) = &p.tab_id {
-                pane_tabs.insert(p.pane_id.clone(), tid.clone());
-            }
-        }
-    }
 
     for op in ops {
         // Finding 3: Propagate deferral to dependent ops
@@ -251,7 +257,34 @@ pub fn apply_ops<D: HerdrDriver>(
         }
 
         let actual_pane = pane_map.get(&op.pane).cloned().unwrap_or_else(|| op.pane.clone());
-        let current_tab = pane_tabs.get(&actual_pane).cloned();
+
+        // Finding 5: Fetch fresh snapshot before each move to verify pane state
+        let fresh_snap = driver.snapshot()?;
+        let pane_info = fresh_snap.panes.iter().find(|p| p.pane_id == actual_pane);
+        let pane_obj = match pane_info {
+            Some(p) => p,
+            None => return Err(format!("apply: pane {actual_pane} missing from snapshot")),
+        };
+
+        if !is_candidate_worker(pane_obj) {
+            return Err(format!("apply: pane {actual_pane} is not a candidate worker"));
+        }
+
+        // Finding 2: Recheck idle status before each move
+        if pane_obj.agent_status.as_deref() == Some("working") {
+            return Err(format!("pane {actual_pane} became busy; replan required"));
+        }
+
+        let current_tab = pane_obj.tab_id.clone();
+
+        // Finding 5: Check if current tab is zoomed
+        if let Some(ctab) = &current_tab {
+            if let Some(layout) = fresh_snap.layouts.iter().find(|l| &l.tab_id == ctab) {
+                if layout.zoomed == Some(true) {
+                    return Err(format!("apply: tab {ctab} is zoomed"));
+                }
+            }
+        }
 
         let remapped_target = match &op.target {
             Target::NewTab { label } => Target::NewTab {
@@ -263,15 +296,45 @@ pub fn apply_ops<D: HerdrDriver>(
                 direction,
                 ratio,
             } => {
-                let actual_tab = if tab == "@workers" {
-                    latest_tab.clone().unwrap_or_else(|| tab.clone())
-                } else {
-                    tab.clone()
-                };
                 let actual_anchor = pane_map
                     .get(anchor)
                     .cloned()
                     .unwrap_or_else(|| anchor.clone());
+
+                // Finding 5: Resolve @workers to anchor's actual tab (apply.sh:197)
+                let actual_tab = if tab == "@workers" {
+                    let anchor_pane = fresh_snap.panes.iter().find(|p| &p.pane_id == &actual_anchor);
+                    anchor_pane
+                        .and_then(|p| p.tab_id.clone())
+                        .or_else(|| latest_tab.clone())
+                        .unwrap_or_else(|| tab.clone())
+                } else {
+                    tab.clone()
+                };
+
+                // Finding 5: Target tab zoom and anchor verification
+                if let Some(layout) = fresh_snap.layouts.iter().find(|l| l.tab_id == actual_tab) {
+                    if layout.zoomed == Some(true) {
+                        return Err(format!("apply: target tab {actual_tab} is zoomed"));
+                    }
+                }
+
+                let anchor_pane = fresh_snap
+                    .panes
+                    .iter()
+                    .find(|p| p.pane_id == actual_anchor)
+                    .ok_or_else(|| format!("apply: anchor {actual_anchor} missing from snapshot"))?;
+
+                if let Some(atokens) = &anchor_pane.tokens {
+                    if atokens.grid_role.as_deref() == Some("worker") {
+                        let anchor_owner = atokens.grid_owner.as_deref().unwrap_or("");
+                        let pane_owner = pane_obj.tokens.as_ref().and_then(|t| t.grid_owner.as_deref()).unwrap_or("");
+                        if anchor_owner != pane_owner {
+                            return Err(format!("apply: anchor owner {anchor_owner} != pane owner {pane_owner}"));
+                        }
+                    }
+                }
+
                 Target::Split {
                     tab: actual_tab,
                     anchor: actual_anchor,
@@ -281,12 +344,17 @@ pub fn apply_ops<D: HerdrDriver>(
             }
         };
 
-        // Findings 1 & 5: If current_tab == target_tab during split, park in scratch tab first
+        // Findings 1, 5, 9: If current_tab == target_tab during split, park in scratch tab first
         let mut parked_pane: Option<String> = None;
-        let effective_pane = if let Target::Split { tab: ref target_tab, .. } = &remapped_target {
-            if current_tab.as_ref() == Some(target_tab) {
+        let effective_pane = if let Target::Split { tab: target_tab, .. } = &remapped_target {
+            if current_tab.as_deref() == Some(target_tab.as_str()) {
                 scratch_counter += 1;
-                let scratch_label = format!("grid-scratch-quaqua-{}", scratch_counter);
+                let worker_group = pane_obj
+                    .tokens
+                    .as_ref()
+                    .and_then(|t| t.grid_group.as_deref())
+                    .unwrap_or("workers");
+                let scratch_label = format!("grid-scratch-{}-{}-{}", worker_group, std::process::id(), scratch_counter);
                 let park_res = driver.move_pane(
                     &actual_pane,
                     &Target::NewTab {
@@ -315,15 +383,10 @@ pub fn apply_ops<D: HerdrDriver>(
             pane_map.insert(parked, new_id.clone());
         }
 
-        if !res.tab_id.is_empty() {
-            pane_tabs.insert(new_id.clone(), res.tab_id.clone());
-            if matches!(op.target, Target::NewTab { .. }) {
-                latest_tab = Some(res.tab_id);
-            }
+        if !res.tab_id.is_empty() && matches!(op.target, Target::NewTab { .. }) {
+            latest_tab = Some(res.tab_id);
         }
-
-        applied_count += 1;
     }
 
-    Ok(applied_count)
+    Ok(pane_map)
 }
