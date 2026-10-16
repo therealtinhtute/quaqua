@@ -19,6 +19,49 @@ enum Command {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
+    /// Agent grid layout planner and reconciler.
+    Grid {
+        #[command(subcommand)]
+        cmd: GridCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum GridCmd {
+    /// Pure layout planner: snapshot JSON on stdin/file -> ops JSON on stdout.
+    Plan {
+        /// Path to snapshot JSON file (default: stdin).
+        #[arg(long, short)]
+        file: Option<PathBuf>,
+        /// Optional positional snapshot file path.
+        path: Option<PathBuf>,
+    },
+    /// Reconcile worker panes into the agent grid layout.
+    Reconcile {
+        /// Block until grid check has no pending moves for these workers.
+        #[arg(long)]
+        check: bool,
+        /// Repair / arrange workers into grid (default).
+        #[arg(long)]
+        repair: bool,
+        /// Label of the worker tab (default: from team.toml [grid] or 'workers').
+        #[arg(long)]
+        tab: Option<String>,
+        /// Comma-separated worker names to scope moves.
+        #[arg(long)]
+        only: Option<String>,
+        /// Owner scope (default: $QUAQUA_OWNER or 'cos').
+        #[arg(long)]
+        owner: Option<String>,
+        /// Print planned actions without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Path to team.toml.
+        #[arg(long)]
+        team_file: Option<PathBuf>,
+    },
+    /// Herdr event hook reconciler.
+    Hook,
 }
 
 #[derive(Subcommand)]
@@ -82,6 +125,62 @@ fn do_get(key: &str, args: &ConfigArgs) -> Result<String, String> {
     config::get(&cfg, key, args.project.as_deref())
 }
 
+fn do_grid_plan(file_opt: Option<PathBuf>, path_opt: Option<PathBuf>) -> Result<(), String> {
+    let target = file_opt.or(path_opt);
+    let content = match target {
+        Some(path) => {
+            std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        }
+        None => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| format!("cannot read stdin: {e}"))?;
+            buf
+        }
+    };
+
+    let val: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("invalid snapshot JSON: {e}"))?;
+    let snap = quaqua::grid::parse_snapshot_value(&val)?;
+    let ops = quaqua::grid::plan(&snap)?;
+    let json_out = serde_json::to_string(&ops).map_err(|e| e.to_string())?;
+    println!("{json_out}");
+    Ok(())
+}
+
+fn do_grid_reconcile(
+    check: bool,
+    repair: bool,
+    tab: Option<String>,
+    only: Option<String>,
+    owner: Option<String>,
+    dry_run: bool,
+    team_opt: Option<PathBuf>,
+) -> Result<(), String> {
+    let default_workers_tab = if let Ok(tf) = team_file(&team_opt) {
+        config::load(&tf)
+            .map(|c| c.grid.workers_tab)
+            .unwrap_or_else(|_| "workers".to_string())
+    } else {
+        "workers".to_string()
+    };
+
+    let opts = quaqua::grid::ReconcileOptions {
+        check,
+        repair: if check { false } else { repair || true },
+        tab,
+        only,
+        owner,
+        dry_run,
+        timeout_sec: None,
+    };
+
+    let mut driver = quaqua::grid::CliHerdrDriver::new();
+    quaqua::grid::run_reconcile(&mut driver, &opts, &default_workers_tab)
+}
+
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
@@ -101,6 +200,37 @@ fn main() {
                     println!("{value}");
                     0
                 }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            },
+        },
+        Some(Command::Grid { cmd }) => match cmd {
+            GridCmd::Plan { file, path } => match do_grid_plan(file, path) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            },
+            GridCmd::Reconcile {
+                check,
+                repair,
+                tab,
+                only,
+                owner,
+                dry_run,
+                team_file,
+            } => match do_grid_reconcile(check, repair, tab, only, owner, dry_run, team_file) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            },
+            GridCmd::Hook => match quaqua::grid::run_hook() {
+                Ok(()) => 0,
                 Err(e) => {
                     eprintln!("error: {e}");
                     1
