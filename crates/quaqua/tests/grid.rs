@@ -1212,3 +1212,99 @@ fn test_plan_accepts_the_tab_the_repair_made() {
         );
     }
 }
+
+#[test]
+fn test_plan_and_repair_agree_on_a_foreign_workers_tab() {
+    // Finding 1: a foreign `<X>-workers` tab (`mono-workers`) holds only this
+    // group's panes while the group's own spawn-labelled tab
+    // (`quaqua-rs-workers`) holds the rest. The planner used to widen on
+    // `ends_with("-workers")` and adopt the foreign tab (first in snapshot
+    // order) while the repair only accepted its own `--tab` label: hook and
+    // repair pulled the panes in opposite directions. Both now share
+    // `accepts_workers_tab`, so both choose the tab the panes were spawned into.
+    let snap = load_edge_fixture("foreign-workers-tab");
+    let ops = plan(&snap).expect("plan must succeed");
+    assert_eq!(ops.len(), 1, "only the pane outside the spawn tab moves: {ops:?}");
+    assert_eq!(ops[0].pane, "w1:p5");
+    match &ops[0].target {
+        Target::Split { tab, .. } => {
+            assert_eq!(tab, "w1:t3", "planner must target the spawn-labelled tab, never mono-workers");
+        }
+        other => panic!("expected a split into the workers tab, got {other:?}"),
+    }
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = repair_opts("cos", "quaqua-rs-workers");
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+    assert_eq!(driver.executed_moves.len(), 1, "repair moves only w1:p5: {:?}", driver.executed_moves);
+    let (moved, target) = &driver.executed_moves[0];
+    assert_eq!(moved, "w1:p5");
+    match target {
+        Target::Split { tab, .. } => {
+            assert_eq!(tab, "w1:t3", "repair must choose the same tab as the planner");
+        }
+        other => panic!("expected a split into the workers tab, got {other:?}"),
+    }
+    assert!(
+        panes_in(&driver, "w1:t2").is_empty(),
+        "the foreign mono-workers tab must never be adopted: {:?}",
+        panes_in(&driver, "w1:t2")
+    );
+}
+
+#[test]
+fn test_check_is_not_vacuous_when_grid_tab_differs_from_group() {
+    // Finding 2: with GRID_TAB (`quaqua-rs-workers`) != the group token
+    // (`quaqua`), the check dropped every op (`is_group_tab` false) and returned
+    // Ok on any layout. The shared predicate accepts the pane's spawn label, so
+    // an unarranged layout must report pending ops.
+    let snap = load_edge_fixture("grid-tab-unarranged");
+    let ops = plan(&snap).expect("plan must succeed");
+    assert_eq!(ops.len(), 2);
+    assert!(
+        matches!(&ops[0].target, Target::NewTab { label } if label == "quaqua-rs-workers"),
+        "the new tab must carry the spawn label, got {:?}",
+        ops[0].target
+    );
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = ReconcileOptions {
+        check: true,
+        repair: false,
+        tab: Some("quaqua-rs-workers".to_string()),
+        only: None,
+        owner: Some("cos".to_string()),
+        dry_run: true,
+        timeout_sec: Some(0),
+    };
+    let res = run_reconcile(&mut driver, &opts, "workers", None);
+    assert!(res.is_err(), "check must not be vacuous when GRID_TAB != group");
+    assert!(
+        res.unwrap_err().contains("pending ops"),
+        "the check must report the pending ops"
+    );
+}
+
+#[test]
+fn test_check_converges_after_repair_when_grid_tab_differs_from_group() {
+    // The same predicate that finds the pending ops must accept the tab the
+    // repair makes, or the pre-prompt check never converges on that layout.
+    let snap = load_edge_fixture("grid-tab-unarranged");
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = repair_opts("cos", "quaqua-rs-workers");
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+
+    let check = ReconcileOptions {
+        check: true,
+        repair: false,
+        tab: Some("quaqua-rs-workers".to_string()),
+        only: None,
+        owner: Some("cos".to_string()),
+        dry_run: true,
+        timeout_sec: Some(0),
+    };
+    assert!(
+        run_reconcile(&mut driver, &check, "workers", None).is_ok(),
+        "check must converge on the repaired layout"
+    );
+}

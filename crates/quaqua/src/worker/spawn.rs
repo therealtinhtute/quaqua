@@ -337,11 +337,15 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         (code, String::new())
     };
 
-    // Report initial metadata tokens
+    // Report initial metadata tokens. `grid_tab` carries GRID_TAB (the workers
+    // tab label, which need not equal the repo-derived group) so the planner,
+    // the repair and the pre-prompt check can accept that tab by its exact
+    // label instead of guessing from the group token.
     let initial_tokens = [
         "grid_role=worker",
         &format!("grid_group={repo_name}"),
         &format!("grid_owner={owner}"),
+        &format!("grid_tab={grid_tab}"),
     ];
     let rep_res = herdr.pane_report_metadata(&pane_id, &initial_tokens);
     if rep_res.is_err() || !rep_res.unwrap().status.success() {

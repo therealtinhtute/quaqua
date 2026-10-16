@@ -30,6 +30,7 @@
           "grid_role": "worker",
           "grid_owner": "quaqua-rs-lead",
           "grid_group": "quaqua",
+          "grid_tab": "quaqua-rs-workers",
           "grid_ready": "1"
         }
       },
@@ -44,6 +45,7 @@
           "grid_role": "worker",
           "grid_owner": "quaqua-rs-lead",
           "grid_group": "quaqua",
+          "grid_tab": "quaqua-rs-workers",
           "grid_ready": "1"
         }
       }

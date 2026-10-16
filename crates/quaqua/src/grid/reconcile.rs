@@ -1,5 +1,7 @@
 use super::apply::{apply_ops, CliHerdrDriver, HerdrDriver};
-use super::plan::{is_candidate_worker, is_group_tab, plan_with_deferred};
+use super::plan::{
+    accepts_workers_tab, group_expected_tab, is_candidate_worker, plan_with_deferred,
+};
 use super::types::{Op, Snapshot, Target};
 use std::collections::HashSet;
 use std::thread::sleep;
@@ -93,6 +95,9 @@ pub fn filter_ops_for_check<'a>(
                 .and_then(|p| p.tokens.as_ref())
                 .and_then(|t| t.grid_group.as_deref())
                 .unwrap_or("");
+            let pgtab = pane
+                .and_then(|p| p.tokens.as_ref())
+                .and_then(|t| t.grid_tab.as_deref());
 
             if let Some(req_owner) = owner_filter {
                 if !req_owner.is_empty() && powner != req_owner {
@@ -106,9 +111,15 @@ pub fn filter_ops_for_check<'a>(
                 }
             }
 
-            // dec5a30 bugfix: --tab always scopes the check, with or without --only
+            // dec5a30 bugfix: --tab always scopes the check, with or without --only.
+            // Same acceptance predicate the planner and the repair use: the
+            // requested tab is accepted when it is the group tab or the exact
+            // label the pane was spawned into (`grid_tab`). Testing only
+            // `is_group_tab` made the check vacuous whenever GRID_TAB differed
+            // from the group token (group `quaqua`, tab `quaqua-rs-workers`):
+            // every op was dropped, so `--check` returned Ok on any layout.
             if let Some(tab) = tab_filter {
-                if !tab.is_empty() && !is_group_tab(pgroup, Some(tab)) {
+                if !tab.is_empty() && !accepts_workers_tab(pgroup, pgtab, Some(tab)) {
                     return false;
                 }
             }
@@ -340,18 +351,20 @@ pub fn run_reconcile<D: HerdrDriver>(
             }
         } else {
             // !beside -> Dedicated workers tab (N1: never orchestrator tab!)
+            // The one acceptance predicate shared with the planner and the check:
+            // the group tab, or the exact label the panes were spawned into.
+            // `--tab`/GRID_TAB wins when given; else fall back to the pane's
+            // `grid_tab` token, so a repair without `--tab` still reuses the tab
+            // the panes were spawned into instead of creating a second one.
+            let expected_tab = requested.clone().or_else(|| group_expected_tab(&gws));
             let mut matching_tabs: Vec<&super::types::Tab> = snap
                 .tabs
                 .iter()
                 .filter(|t| {
                     let ws_ok = t.workspace_id.as_deref() == Some(owner_ws) || owner_ws.is_empty();
                     let anchor_ok = anchor_tab.map(|at| t.tab_id != at).unwrap_or(true);
-                    let requested_ok = match (requested.as_deref(), t.label.as_deref()) {
-                        (Some(r), Some(l)) => r == l,
-                        _ => false,
-                    };
                     let group_ok =
-                        super::plan::is_group_tab(group, t.label.as_deref()) || requested_ok;
+                        accepts_workers_tab(group, expected_tab.as_deref(), t.label.as_deref());
                     if !(ws_ok && anchor_ok && group_ok) {
                         return false;
                     }
@@ -437,7 +450,7 @@ pub fn run_reconcile<D: HerdrDriver>(
                             pane: w.pane_id.clone(),
                             deferred: is_deferred(w.agent_status.as_deref()),
                             target: Target::NewTab {
-                                label: requested.clone().unwrap_or_else(|| group.clone()),
+                                label: expected_tab.clone().unwrap_or_else(|| group.clone()),
                             },
                         });
                     } else {
@@ -499,7 +512,7 @@ pub fn run_reconcile<D: HerdrDriver>(
                             pane: w.pane_id.clone(),
                             deferred: is_deferred(w.agent_status.as_deref()),
                             target: Target::NewTab {
-                                label: requested.clone().unwrap_or_else(|| group.clone()),
+                                label: expected_tab.clone().unwrap_or_else(|| group.clone()),
                             },
                         });
                     }

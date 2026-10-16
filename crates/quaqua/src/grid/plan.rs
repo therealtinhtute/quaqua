@@ -65,6 +65,41 @@ pub fn is_group_tab(group: &str, label: Option<&str>) -> bool {
         || l == "workers"
 }
 
+/// The one acceptance predicate for a group's workers tab, shared by the
+/// planner (`plan`), the repair (`reconcile`) and the pre-prompt check
+/// (`filter_ops_for_check`). A tab is the group's workers tab when its label is
+/// the group tab (`is_group_tab`) or exactly the label the group's panes were
+/// spawned into (`grid_tab`, i.e. GRID_TAB — which need not equal the group, e.g.
+/// group `quaqua`, tab `quaqua-rs-workers`).
+///
+/// Widening this in one place is the point: two hand-mirrored widenings (the
+/// planner's `ends_with("-workers")` vs the repair's `== requested`) disagreed on
+/// the first foreign `<X>-workers` tab — the hook adopted it while the repair
+/// moved the panes to its own tab, pulling them in opposite directions, and the
+/// check (which tested only `is_group_tab`) dropped every op and was vacuous.
+pub fn accepts_workers_tab(group: &str, expected: Option<&str>, label: Option<&str>) -> bool {
+    if is_group_tab(group, label) {
+        return true;
+    }
+    match (expected, label) {
+        (Some(e), Some(l)) => !e.is_empty() && e == l,
+        _ => false,
+    }
+}
+
+/// The workers tab label the group's panes were spawned into (GRID_TAB), read
+/// from the pane tokens. `None` for legacy panes that carry no `grid_tab`; such
+/// panes still match a group-derived label through `is_group_tab`.
+pub fn group_expected_tab(gws: &[&Pane]) -> Option<String> {
+    gws.iter().find_map(|w| {
+        w.tokens
+            .as_ref()
+            .and_then(|t| t.grid_tab.as_deref())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
 fn cells(n: usize, a: &Rect) -> Vec<Rect> {
     let x = a.x;
     let y = a.y;
@@ -351,12 +386,17 @@ pub fn plan_with_deferred(
                     return Err(format!("too many workers in group {group}: {n} (max 4)"));
                 }
 
+                // The exact workers tab label this group was spawned into
+                // (GRID_TAB), shared with the repair and the check through
+                // `accepts_workers_tab`.
+                let expected_tab = group_expected_tab(&gws);
+
                 // Search for an existing valid workers tab for this group
                 // jq:
                 // [ $tabs[]
                 //   | select((.workspace_id == $owner_ws or $owner_ws == "")
                 //            and ($anchor_tab == null or .tab_id != $anchor_tab)
-                //            and is_group_tab($group; .label))
+                //            and accepts_workers_tab($group; $expected; .label))
                 //   | .tab_id as $tid
                 //   | [ $panes[] | select(.tab_id == $tid) ] as $occ
                 //   | select(($occ | length > 0)
@@ -370,20 +410,8 @@ pub fn plan_with_deferred(
                     .filter(|tab| {
                         let ws_ok = tab.workspace_id.as_deref() == Some(owner_ws) || owner_ws.is_empty();
                         let anchor_ok = anchor_tab.map(|at| tab.tab_id != at).unwrap_or(true);
-                        // The repair labels the workers tab with the caller's
-                        // `--tab`/GRID_TAB, which need not equal the grid_group
-                        // token (group "quaqua", tab "quaqua-rs-workers"):
-                        // accept any `<X>-workers` tab that holds only this
-                        // group's workers (the occupancy test below). Else the
-                        // hook — which plans from here — moves the panes back
-                        // out of the tab the repair just made, and `--check`
-                        // never converges on that layout.
-                        let label_ok = is_group_tab(group, tab.label.as_deref())
-                            || tab
-                                .label
-                                .as_deref()
-                                .map(|l| l.ends_with("-workers"))
-                                .unwrap_or(false);
+                        let label_ok =
+                            accepts_workers_tab(group, expected_tab.as_deref(), tab.label.as_deref());
                         if !(ws_ok && anchor_ok && label_ok) {
                             return false;
                         }
@@ -499,7 +527,11 @@ pub fn plan_with_deferred(
                         }
                     }
                 } else {
-                    // No valid workers tab exists -> create new tab and split
+                    // No valid workers tab exists -> create new tab and split.
+                    // Label the tab with the pane's spawn label when it has one
+                    // (`expected_tab`), so the hook and the repair create the
+                    // same tab instead of fighting over `group` vs `--tab`.
+                    let new_label = expected_tab.clone().unwrap_or_else(|| group.to_string());
                     for i in build_order(n) {
                         if i == 0 {
                             ops.push(Op {
@@ -507,7 +539,7 @@ pub fn plan_with_deferred(
                                 pane: gws[0].pane_id.clone(),
                                 deferred: is_status_deferred(gws[0].agent_status.as_deref(), def_list),
                                 target: Target::NewTab {
-                                    label: group.to_string(),
+                                    label: new_label.clone(),
                                 },
                             });
                         } else {

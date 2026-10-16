@@ -69,6 +69,13 @@ def is_group_tab($group; $label):
     or ($label == "workers")
   end;
 
+# The one acceptance predicate for a group's workers tab, shared with plan.rs
+# and reconcile.rs: the group tab (is_group_tab), or the exact label the group's
+# panes were spawned into (GRID_TAB, carried on the pane as `grid_tab`).
+def accepts_workers_tab($group; $expected; $label):
+  is_group_tab($group; $label)
+  or (($expected != null) and ($expected != "") and ($label == $expected));
+
 # Desired cells for n workers in area $a (index 0 = first spawned)
 def cells($n; $a):
   ($a.x // 0) as $x | ($a.y // 0) as $y | ($a.width // 200) as $w | ($a.height // 50) as $h
@@ -276,6 +283,9 @@ def propagate_deferrals:
                         ( [ $owner_workers[] | select(.tokens.grid_group == $group) ]
                           | sort_by((.pane_id | pane_seq), .pane_id) ) as $gws
                         | ($gws | length) as $n
+                        # The exact workers tab label this group was spawned
+                        # into (GRID_TAB); null for legacy panes with no token.
+                        | ([ $gws[] | (.tokens.grid_tab // "") | select(. != "") ] | first // null) as $expected
 
                         | if $n > 4 then
                             error("too many workers in group \($group): \($n) (max 4)")
@@ -284,12 +294,11 @@ def propagate_deferrals:
                             ( [ $tabs[]
                                 | select((.workspace_id == $owner_ws or $owner_ws == "")
                                          and ($anchor_tab == null or .tab_id != $anchor_tab)
-                                         # any "<X>-workers" tab that holds only
-                                         # this group's workers (occupancy below):
-                                         # the repair labels the tab with GRID_TAB,
-                                         # which need not be the group token
-                                         and (is_group_tab($group; .label)
-                                              or (.label != null and (.label | endswith("-workers")))))
+                                         # the one acceptance predicate shared with
+                                         # plan.rs/reconcile.rs: the group tab, or
+                                         # the exact spawn label; still gated by the
+                                         # occupancy test below (one project per tab)
+                                         and accepts_workers_tab($group; $expected; .label))
                                 | .tab_id as $tid
                                 | [ $panes[] | select(.tab_id == $tid) ] as $occ
                                 | select(($occ | length > 0)
@@ -362,7 +371,11 @@ def propagate_deferrals:
                                       end
                                   end
                               else
-                                # No valid workers tab exists -> create new tab and split
+                                # No valid workers tab exists -> create new tab and
+                                # split. Label it with the pane's spawn label when
+                                # it has one ($expected), so the hook and the repair
+                                # create the same tab instead of fighting over
+                                # group vs --tab.
                                 . + [
                                   build_order($n)[] as $i
                                   | if $i == 0 then
@@ -372,7 +385,7 @@ def propagate_deferrals:
                                         deferred: ($gws[0].agent_status | is_working),
                                         target: {
                                           kind: "new_tab",
-                                          label: $group
+                                          label: ($expected // $group)
                                         }
                                       }
                                     else
