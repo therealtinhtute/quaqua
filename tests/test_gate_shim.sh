@@ -30,12 +30,30 @@ grep -q 'not found' <<<"$err" || fail "missing binary: no diagnostic: $err"
 grep -q 'fail-closed' <<<"$err" || fail "missing binary: diagnostic does not say fail-closed: $err"
 echo "ok: no quaqua on PATH -> exit 2 with a fail-closed diagnostic"
 
-# ── empty PATH is enough of a trap: no shell fallback resurrects the gate ────
-rc=0
-printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' \
-  | env QUAQUA_BIN=/nonexistent/quaqua PATH="$noq_path" "$BASH" "$shim" >/dev/null 2>&1 || rc=$?
-[[ $rc -eq 2 ]] || fail "QUAQUA_BIN pointing nowhere: exit $rc, want 2"
-echo "ok: QUAQUA_BIN pointing at a missing file -> exit 2"
+# ── without the binary the fallback blocks only the guarded commands ─────────
+# r1 (fail-open) stays fixed: the fallback still exits 2 on spawn+move. But it
+# must not lock the agent out of the shell — a guarded command blocks, every
+# other Bash call passes with a warning.
+for c in 'herdr pane split' 'sudo herdr workspace close w7' \
+         'bash -c '\''herdr agent start x'\''' '/usr/bin/herdr tab create --label y'; do
+  rc=0 err=''
+  err=$(printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$c" \
+    | env QUAQUA_BIN=/nonexistent/quaqua PATH="$noq_path" "$BASH" "$shim" 2>&1 >/dev/null) || rc=$?
+  [[ $rc -eq 2 ]] || fail "missing binary, guarded '$c': exit $rc, want 2; stderr: $err"
+  grep -q 'not found' <<<"$err" || fail "missing binary, guarded '$c': no diagnostic: $err"
+  grep -q 'fail-closed' <<<"$err" || fail "missing binary, guarded '$c': no fail-closed note: $err"
+done
+echo "ok: missing binary -> guarded spawn/move still exit 2 (fail-closed)"
+
+for c in 'cat x' 'cargo build --locked' 'git status' 'herdr agent list' \
+         'herdr pane send-keys w1:p5 enter'; do
+  rc=0 err=''
+  err=$(printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$c" \
+    | env QUAQUA_BIN=/nonexistent/quaqua PATH="$noq_path" "$BASH" "$shim" 2>&1 >/dev/null) || rc=$?
+  [[ $rc -eq 0 ]] || fail "missing binary, plain '$c': exit $rc, want 0; stderr: $err"
+  grep -q 'not found' <<<"$err" || fail "missing binary, plain '$c': no warning: $err"
+done
+echo "ok: missing binary -> non-guarded commands pass with a warning"
 
 # ── $QUAQUA_BIN is honoured and gets `gate` + the hook's stdin ───────────────
 cat > "$T/stub" <<'STUB'
