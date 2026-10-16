@@ -28,7 +28,10 @@ echo "ok: direct herdr split/move/tab+workspace create/workspace close/agent sta
 
 # equivalent spellings of the same calls must not slip past the gate:
 # quoted/escaped executable, path-qualified executable, bash -c payload,
-# eval, prefix wrappers, command substitutions, keywords
+# eval, prefix wrappers, command substitutions, keywords. The last four are
+# finding 1 (runs/suhuynh-r5r1.md): an empty word from an unquoted command
+# substitution vanishes under bash's TAB/IFS re-split, so the herdr call after
+# it is still the executable and must block.
 for c in '"herdr" pane split --current' \
          "'herdr' pane move w1:p5 --new-tab" \
          'h\e\rdr tab create --label x' \
@@ -48,7 +51,11 @@ for c in '"herdr" pane split --current' \
          'if herdr workspace close w7; then echo x; fi' \
          'echo `herdr tab create`' \
          'y="$(herdr agent start z)"' \
-         'herdr >&2 pane split'; do
+         'herdr >&2 pane split' \
+         '$(true) herdr pane split' \
+         '`:` herdr tab create --label x' \
+         'sudo $(true) herdr workspace close w7' \
+         'X=1 $(true) herdr agent start x'; do
   [[ $(gate "$c") == 2 ]] || fail "not blocked: $c"
 done
 echo "ok: quoted/pathed/-c/eval/wrapper/substitution spellings -> blocked"
