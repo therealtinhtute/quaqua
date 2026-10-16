@@ -6,9 +6,15 @@
 #   --review      bacdau|quansu|ni|suhuynh|truonglao: repo read-only, $HOME/quaqua/runs writable
 #   Resume-safe: when $wt is already a registered worktree of <repo> (a
 #   previous attempt died after creating it) it is reused and startup
-#   continues with a fresh pane/agent. A pane this attempt created is closed
-#   if the agent never becomes ready; the worktree+branch stay for resume.
+#   continues with a fresh pane/agent; when $wt is gone but branch
+#   quaqua/<name> survives a cleanup (cleanup keeps branches for the merge),
+#   the branch is reused and any --base is ignored. A pane this attempt
+#   created is closed if the agent never becomes ready; the worktree+branch
+#   stay for resume.
 #   A dir at $wt that is not a worktree of <repo> is refused, never reused.
+#   claude kinds (ni|suhuynh|truonglao): Claude Code's first session in a repo
+#   it has not been trusted in shows a workspace-trust dialog that swallows
+#   the brief, so the spawn accepts it before continuing.
 set -euo pipefail
 
 USAGE_LAST=5
@@ -69,6 +75,14 @@ if [[ -d $wt ]]; then
     echo "error: $wt exists but is not a git worktree of $repo — remove it or pick another name" >&2
     exit 1
   fi
+elif git -C "$repo" show-ref --verify --quiet "refs/heads/quaqua/$name"; then
+  # cleanup-worker.sh drops the worktree but keeps the branch for the Lead to
+  # merge, so a same-name retry after a failed (or cleaned) spawn would die on
+  # `worktree add -b` with "a branch named 'quaqua/<name>' already exists".
+  # Reuse the kept branch — the retry resumes that task, commits included — and
+  # say so: a --base cannot apply to a branch that already exists.
+  echo "note: branch quaqua/$name already exists — reusing it (same-name retry)${base:+; --base $base ignored}" >&2
+  git -C "$repo" worktree add "$wt" "quaqua/$name" >&2
 else
   git -C "$repo" worktree add -b "quaqua/$name" "$wt" ${base:+"$base"} >&2
 fi
@@ -202,6 +216,17 @@ pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
 # (the pane); the worktree+branch stay so a --resume can reuse them (F4)
 spawn_fail() { herdr pane close "$pane" >/dev/null 2>&1 || true; exit "${1:-1}"; }
 
+# claude_trust_dialog_up <pane> — is Claude Code's workspace-trust dialog still
+# on screen? Its wording varies between versions; every variant contains the
+# word "trust" ("Quick safety check: is this a project you created or one you
+# trust?" / "Yes, I trust this folder"), and it is word-wrapped to fit the
+# pane, so match that one word rather than a phrase. The look is deliberately
+# sensitive: answering a dialog that is not there costs a harmless Down and
+# Enter on an empty prompt box, missing one leaves the worker stalled.
+claude_trust_dialog_up() {
+  herdr pane read "$1" --source visible --lines 30 2>/dev/null | grep -q trust
+}
+
 # Pane tokens (herdr-grid R5): role/group/owner right after split, grid_ready=1
 # set last after trust/send-keys handling
 grid_group=$(basename "$repo")
@@ -226,25 +251,57 @@ case $kind in
     case $kind in ni) effort=low ;; suhuynh) effort=medium ;; truonglao) effort=high ;; esac
     # ${claude_review[@]} is empty for a non-review spawn: model, effort and the
     # rules file are the only flags, and the ambient permission mode applies.
-    herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" "${claude_review[@]}" --append-system-prompt-file "$rf" >/dev/null || spawn_fail ;;
+    claude_start_rc=0
+    herdr agent start "$name" --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --effort "$effort" "${claude_review[@]}" --append-system-prompt-file "$rf" >/dev/null || claude_start_rc=$?
+    # Claude Code's first session in a directory tree it has not been trusted
+    # in shows a workspace-trust dialog ("Accessing workspace: ... / Quick
+    # safety check: is this a project you created or one you trust?") with "No,
+    # exit" focused; the worker's brief would be typed into it and lost. The
+    # trust decision is per repo and Claude Code writes it down on acceptance,
+    # so this costs the wait-output timeout only until the repo is trusted.
+    # herdr's own dialog rules do not know this text, so it can report the agent
+    # ready — or 'blocked during startup' when the start is slower — with the
+    # dialog still up: accept it here the way a person would (one Down to "Yes,
+    # I trust this folder", then Enter), then let it clear before continuing.
+    if herdr pane wait-output "$pane" --match trust --timeout 15000 >/dev/null 2>&1; then
+      herdr pane send-keys "$pane" down >/dev/null
+      herdr pane send-keys "$pane" enter >/dev/null
+      for _ in 1 2 3 4 5 6 7 8; do
+        claude_trust_dialog_up "$pane" || break
+        sleep 0.5
+      done
+      if claude_trust_dialog_up "$pane"; then
+        echo "error: claude workspace-trust dialog did not clear in $pane after accepting it — nothing was sent to $name; inspect the pane, then retry the spawn" >&2
+        spawn_fail
+      fi
+    fi
+    (( claude_start_rc == 0 )) \
+      || herdr agent wait "$name" --until idle --timeout 120000 >/dev/null || spawn_fail ;;
   bacdau)
     herdr agent start "$name" --kind codex --pane "$pane" --timeout 300000 -- "${access[@]}" -m gpt-6-astra -c model_reasoning_effort=medium -c "$codex_rules" >/dev/null || codex_start_rc=$? ;;
   quansu)
     herdr agent start "$name" --kind codex --pane "$pane" --timeout 300000 -- "${access[@]}" -m gpt-6.1-sol -c model_reasoning_effort=high -c "$codex_rules" >/dev/null || codex_start_rc=$? ;;
 esac
 case $kind in bacdau|quansu)
-  # herdr's start timeout is not proof of failure for codex: the TUI can sit
-  # on "Trust this folder?" (new worktree, untrusted dir) or spend minutes on
-  # app-server-daemon init before the SessionStart hook reports the agent —
-  # herdr only sees 'timed out waiting for agent startup'. Fail loudly, then
-  # keep going: accept the trust dialog if present and wait for idle.
+  # herdr's start timeout is not proof of failure for codex: the TUI can sit on
+  # a startup dialog (an untrusted dir, or a pending codex update) or spend
+  # minutes on app-server-daemon init before the SessionStart hook reports the
+  # agent — herdr only sees 'timed out waiting for agent startup'. Fail loudly,
+  # then keep going: answer the dialogs and wait for idle. A clean start (rc 0)
+  # means herdr saw codex at its prompt, so there is nothing to answer.
   if [[ ${codex_start_rc:-0} -ne 0 ]]; then
     echo "warning: herdr agent start $name failed (rc=$codex_start_rc); continuing to trust/idle wait" >&2
-  fi
-  # new worktree -> codex asks "Trust this folder?"; accept default "Trust and continue".
-  # start may already have failed with agent_not_ready while the dialog blocked readiness, so confirm idle here
-  if herdr pane wait-output "$pane" --match "Trust this folder" --timeout 30000 >/dev/null 2>&1; then
-    herdr pane send-keys "$pane" enter >/dev/null
+    # A pending codex update is the FIRST dialog and hides the folder-trust one
+    # behind a menu whose focused item is "Update now" — a network install, not
+    # ours to run on anh iu's behalf. Skip it for this run with esc ("esc skip";
+    # the word Skip survives the dialog's word wrap in a narrow pane).
+    if herdr pane wait-output "$pane" --match Skip --timeout 20000 >/dev/null 2>&1; then
+      herdr pane send-keys "$pane" esc >/dev/null
+    fi
+    # new worktree -> codex asks "Trust this folder?"; accept default "Trust and continue".
+    if herdr pane wait-output "$pane" --match "Trust this folder" --timeout 30000 >/dev/null 2>&1; then
+      herdr pane send-keys "$pane" enter >/dev/null
+    fi
   fi
   herdr agent wait "$name" --until idle --timeout 300000 >/dev/null || spawn_fail
 esac
