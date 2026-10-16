@@ -149,7 +149,7 @@ pub fn spawn_worker(
     }
 
     let owner = std::env::var("QUAQUA_OWNER").unwrap_or_else(|_| "cos".to_string());
-    let runs_dir = crate::worker::cleanup::default_runs_dir();
+    let runs_dir = crate::worker::cleanup::home_quaqua_runs();
     let _ = std::fs::create_dir_all(&runs_dir);
 
     if std::env::var("PIPELINE_TASK").is_err() {

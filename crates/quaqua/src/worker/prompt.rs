@@ -5,7 +5,7 @@ use crate::git::Git;
 use crate::hash::md5_hex;
 use crate::herdr::Herdr;
 use crate::json::parse_json;
-use crate::worker::cleanup::default_runs_dir;
+use crate::worker::cleanup::home_quaqua_runs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -400,7 +400,7 @@ pub fn prompt_worker(
 ) -> Result<(), (i32, String)> {
     validate_env_budget()?;
 
-    let runs_dir = default_runs_dir();
+    let runs_dir = home_quaqua_runs();
     let _ = std::fs::create_dir_all(&runs_dir);
 
     let out = runs_dir.join(format!("{name}.md"));
