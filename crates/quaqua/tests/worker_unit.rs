@@ -5,6 +5,7 @@ use quaqua::herdr::HerdrOps;
 use quaqua::worker::cleanup::{resolve_default_runs_dir, resolve_home_quaqua_runs};
 use quaqua::worker::prompt::{brief_budget_sec, brief_headers_ok, resolve_budget_sec, validate_env_budget_val};
 use quaqua::worker::spawn::parse_spawn_args;
+use quaqua::workspace::resolve_workspace_root;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -323,6 +324,11 @@ fn test_runs_dir_resolution_n5() {
     let override_dir = Path::new("target/override_runs");
     assert_eq!(resolve_default_runs_dir(Some(override_dir), Some(test_home)), override_dir.to_path_buf());
     assert_eq!(resolve_home_quaqua_runs(Some(test_home)), test_home.join("quaqua/runs"));
+
+    // workspace_root: QUAQUA_HOME wins, else $HOME/quaqua
+    let quaqua_home = Path::new("target/quaqua_home");
+    assert_eq!(resolve_workspace_root(Some(quaqua_home), Some(test_home)), quaqua_home.to_path_buf());
+    assert_eq!(resolve_workspace_root(None, Some(test_home)), test_home.join("quaqua"));
 }
 
 #[test]

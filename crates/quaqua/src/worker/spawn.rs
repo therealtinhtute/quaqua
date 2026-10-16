@@ -253,8 +253,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     }
 
     // Worker rules dump
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
-    let rules_dir = home.join("quaqua/rules");
+    let rules_dir = crate::workspace::workspace_root().join("rules");
     let rf = runs_dir.join(format!("{}.rules.md", opts.name));
     if let Some(parent) = rf.parent() {
         let _ = std::fs::create_dir_all(parent);

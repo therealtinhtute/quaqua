@@ -2,6 +2,7 @@
 //! this module set, which lets tests call load/resolve/validate/get in-process.
 
 pub mod config;
+pub mod workspace;
 pub mod gate;
 pub mod init;
 pub mod models;

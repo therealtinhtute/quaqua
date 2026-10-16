@@ -8,11 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn resolve_home_quaqua_runs(home: Option<&Path>) -> PathBuf {
-    if let Some(h) = home {
-        h.join("quaqua/runs")
-    } else {
-        PathBuf::from("runs")
-    }
+    crate::workspace::resolve_workspace_root(None, home).join("runs")
 }
 
 pub fn resolve_default_runs_dir(override_runs: Option<&Path>, home: Option<&Path>) -> PathBuf {
@@ -24,14 +20,14 @@ pub fn resolve_default_runs_dir(override_runs: Option<&Path>, home: Option<&Path
 }
 
 pub fn home_quaqua_runs() -> PathBuf {
-    let home = std::env::var("HOME").ok().map(PathBuf::from);
-    resolve_home_quaqua_runs(home.as_deref())
+    crate::workspace::workspace_root().join("runs")
 }
 
 pub fn default_runs_dir() -> PathBuf {
-    let override_dir = std::env::var("QUAQUA_RUNS_DIR").ok().map(PathBuf::from);
-    let home = std::env::var("HOME").ok().map(PathBuf::from);
-    resolve_default_runs_dir(override_dir.as_deref(), home.as_deref())
+    if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
+        return PathBuf::from(dir);
+    }
+    home_quaqua_runs()
 }
 
 pub fn find_grid_script() -> Option<PathBuf> {
