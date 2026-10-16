@@ -18,6 +18,7 @@ pub const ROLE_CLASSES: [&str; 4] = ["cos", "lead", "peer", "taskforce"];
 pub const ROLE_NAMES: [&str; 3] = ["cos", "lead", "peer"];
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub schema_version: u32,
     #[serde(default)]
@@ -58,6 +59,7 @@ impl Default for Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Limits {
     #[serde(default = "default_depth")]
     pub depth: i64,
@@ -81,6 +83,7 @@ fn default_depth() -> i64 {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Timers {
     pub budget_default: String,
     pub hard_cap: String,
@@ -92,6 +95,7 @@ pub struct Timers {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Role {
     #[serde(default)]
     pub can_spawn: Vec<String>,
@@ -102,6 +106,7 @@ pub struct Role {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Strategy {
     pub default_kind: String,
     #[serde(default)]
@@ -125,6 +130,7 @@ fn default_differ() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Kind {
     pub harness: String,
     pub model: String,
@@ -135,6 +141,7 @@ pub struct Kind {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Taskforce {
     #[serde(default)]
     pub members: Vec<String>,
@@ -143,11 +150,13 @@ pub struct Taskforce {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Merge {
     pub integ_branch: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Grid {
     pub workers_tab: String,
     #[serde(default)]
@@ -155,6 +164,7 @@ pub struct Grid {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectOverride {
     pub max_workers_per_orchestrator: Option<i64>,
 }
@@ -203,6 +213,9 @@ pub fn validate(cfg: &Config, models: Option<&BTreeMap<String, ModelsKind>>) -> 
     }
     for (slug, ov) in &cfg.projects {
         if let Some(p) = ov.max_workers_per_orchestrator {
+            if p < 1 {
+                return Err(format!("project {slug} cap {p} is below 1"));
+            }
             if p > cap {
                 return Err(format!("project {slug} cap {p} exceeds global cap {cap}"));
             }
@@ -235,6 +248,9 @@ pub fn validate(cfg: &Config, models: Option<&BTreeMap<String, ModelsKind>>) -> 
 
     if !cfg.kinds.contains_key(&cfg.strategy.default_kind) {
         return Err(format!("unknown kind '{}'", cfg.strategy.default_kind));
+    }
+    if cfg.strategy.default_reviewer.is_empty() {
+        return Err("strategy.default_reviewer is empty: no reviewer to fall back to".to_string());
     }
     for r in &cfg.strategy.default_reviewer {
         if !cfg.kinds.contains_key(r) {
@@ -291,6 +307,14 @@ pub fn validate(cfg: &Config, models: Option<&BTreeMap<String, ModelsKind>>) -> 
                         ));
                     }
                 }
+            }
+        }
+        // Reverse: every models.md kind must have a [kinds.*] table too.
+        for name in models.keys() {
+            if !cfg.kinds.contains_key(name) {
+                return Err(format!(
+                    "kind '{name}' drift: in models.md but absent from team.toml"
+                ));
             }
         }
     }

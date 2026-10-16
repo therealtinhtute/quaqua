@@ -61,8 +61,14 @@ fn do_validate(args: &ConfigArgs) -> Result<(), String> {
     let file = team_file(&args.file)?;
     let cfg = config::load(&file)?;
     let models = config::load_models(args.models.as_deref(), &file)?;
-    let resolved = config::resolve(cfg, args.project.as_deref())?;
-    config::validate(&resolved, models.as_ref())
+    // Validate the raw file first: project overrides are checked against the
+    // top-level cap, so a bad override is caught even without --project.
+    config::validate(&cfg, models.as_ref())?;
+    if args.project.is_some() {
+        let resolved = config::resolve(cfg, args.project.as_deref())?;
+        config::validate(&resolved, models.as_ref())?;
+    }
+    Ok(())
 }
 
 fn do_get(key: &str, args: &ConfigArgs) -> Result<String, String> {

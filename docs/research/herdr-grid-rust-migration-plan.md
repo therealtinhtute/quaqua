@@ -106,9 +106,11 @@ Rule → key coverage is a gate: every rule in AGENTS.md `## Rules`/`## Protocol
 
 ### Rule → key (R1)
 
-33 rules → 33 rows. Every rule keeps a home: a `team.toml` key, or named "prose" when it is an
-authority/CLI-shape fact no config value can carry. `models.md` `## Rules` prose stays in
-`models.md`; only the routing cell moves to `[kinds.*]`.
+40 rules → 40 rows. Every rule keeps a home: a `team.toml` key, or named "prose" when it is an
+authority/CLI-shape fact no config value can carry. `models.md` `## Rules`/`## Naming` prose stays
+in `models.md`; only the routing cell moves to `[kinds.*]`. Two rows cite the plan/`team.toml`
+comment (the `can_review` set and the reviewer fallback order), because those rules live there,
+not in `models.md`.
 
 <!-- rule-key-table:start -->
 | Source | Rule | team.toml key |
@@ -134,18 +136,25 @@ authority/CLI-shape fact no config value can carry. `models.md` `## Rules` prose
 | `worker-timebox.md` | hard cap 7200s | `timers.hard_cap` |
 | `worker-timebox.md` | stall window 600s | `timers.stall` |
 | `worker-timebox.md` | idle window 120s | `timers.idle` |
-| `worker-timebox.md` | one soft nudge at 80% | `timers.nudge_at` |
 | `worker-timebox.md` | one grace of 25%, once per task | `timers.grace` |
 | `worker-timebox.md` | `--extend` is the only extension | prose (CLI flag) |
+| `worker-timebox.md` | one soft nudge at 80% | `timers.nudge_at` |
+| `worker-timebox.md` | on exit 3–5 read the pane, then `--resume`; never blind re-prompt | prose |
+| `worker-timebox.md` | long silent waits are fine; the stall clock measures observable progress | prose |
 | `worker-timebox.md` | pilots/spikes get a 30-min budget | `timers.pilot_budget` |
 | `worker-timebox.md` | deadline math via the `now_sec` fake clock | prose |
 | `models.md` | no name given → `tieude` | `strategy.default_kind` |
-| `models.md` | default reviewer list, first available wins | `strategy.default_reviewer` |
-| `models.md` | implementer and reviewer differ by harness | `strategy.builder_reviewer_differ` |
-| `models.md` | kind harness/model/effort cells | `kinds.<k>.harness`, `kinds.<k>.model`, `kinds.<k>.effort` |
-| `models.md` | a kind may review | `kinds.<k>.can_review` |
-| `models.md` | read-only → `detu`; design → `truonglao`; cheaper tier first | prose |
-| `models.md` | naming: ≤20 chars, `-lead` reserved | prose |
+| `models.md` | implementer and reviewer must be different harnesses | `strategy.builder_reviewer_differ` |
+| `models.md` | read-only question → `detu`; design unclear → `truonglao` | prose |
+| `models.md` | unsure between two → cheaper tier first | prose |
+| `models.md` | update `Seen` after each run | prose |
+| `models.md` | routing table: kind harness/model/effort cells | `kinds.<k>.harness`, `kinds.<k>.model`, `kinds.<k>.effort` |
+| `models.md` | naming: `worker name = <name>-<task>`, lowercase, ≤20 chars | prose |
+| `models.md` | naming: task must not end in `-lead` (slug ≤27) | prose |
+| `models.md` | naming: spawn command shape (branch + report path) | prose |
+| `models.md` | naming: old names stay as-is | prose |
+| plan § `team.toml` | reviewer fallback list, first available wins | `strategy.default_reviewer` |
+| plan § `team.toml` | `can_review` set (bacdau, quansu, ni, suhuynh, truonglao) | `kinds.<k>.can_review` |
 <!-- rule-key-table:end -->
 
 ## New behaviour from piggery

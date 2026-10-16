@@ -55,26 +55,32 @@ check_reject unknown-role.toml            "unknown role 'ghost'"
 check_reject same-harness.toml            "share harness"
 check_reject reviewer-cannot-review.toml  "can_review = false"
 check_reject model-drift.toml             "drift" --models "$root/models.md"
+check_reject missing-kind.toml            "absent from team.toml" --models "$root/models.md"
 check_reject bad-schema.toml              "unsupported schema_version"
 check_reject integ-branch.toml            "{slug}"
 check_reject differ-policy.toml           "unknown differ policy"
+check_reject typo-key.toml                "unknown field \`can_reveiw\`"
+check_reject typo-section.toml            "unknown field \`project\`"
+check_reject empty-reviewer.toml          "default_reviewer is empty"
+check_reject project-cap-zero.toml        "is below 1"
 
 # ── Rule -> key table covers every source rule ────────────────────────────────
 plan="$root/docs/research/herdr-grid-rust-migration-plan.md"
 rows=$(sed -n '/rule-key-table:start/,/rule-key-table:end/p' "$plan" | grep -c '^| ')
 data=$(( rows - 1 ))   # drop the header row (the |---| separator is not "^| ")
-[[ $data -eq 33 ]] || fail "rule->key table has $data data rows, expected 33"
+[[ $data -eq 40 ]] || fail "rule->key table has $data data rows, expected 40"
 
 count() { sed -n '/rule-key-table:start/,/rule-key-table:end/p' "$plan" | grep -c "^| $1"; }
 [[ "$(count 'AGENTS\.md')" -eq 13 ]]       || fail "AGENTS.md rows != 13 (7 Rules + 6 Protocol)"
 [[ "$(count '`worker-cap\.sh`')" -eq 4 ]]  || fail "worker-cap.sh rows != 4"
-[[ "$(count '`worker-timebox\.md`')" -eq 9 ]] || fail "worker-timebox.md rows != 9"
-[[ "$(count '`models\.md`')" -eq 7 ]]      || fail "models.md rows != 7"
+[[ "$(count '`worker-timebox\.md`')" -eq 11 ]] || fail "worker-timebox.md rows != 11 (one per bullet)"
+[[ "$(count '`models\.md`')" -eq 10 ]]     || fail "models.md rows != 10"
+[[ "$(count 'plan')" -eq 2 ]]              || fail "plan team.toml rows != 2"
 
 # every data row names a key (backticked) or explicitly says prose, none dropped
 unmapped=$(sed -n '/rule-key-table:start/,/rule-key-table:end/p' "$plan" \
   | grep '^| ' | tail -n +2 | grep -v '`' | grep -vc 'prose' || true)
 [[ "$unmapped" -eq 0 ]] || fail "$unmapped rule->key row(s) map to neither a key nor prose"
-echo "ok: rule->key table = 33 rows (AGENTS 13, cap 4, timebox 9, models 7), all mapped"
+echo "ok: rule->key table = 40 rows (AGENTS 13, cap 4, timebox 11, models 10, plan 2), all mapped"
 
 echo "PASS test_config.sh"

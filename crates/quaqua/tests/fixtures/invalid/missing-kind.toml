@@ -1,0 +1,21 @@
+# invalid: team.toml omits a kind that models.md still lists (reverse drift).
+# Run with --models pointing at the repo models.md.
+schema_version = 2
+
+[strategy]
+default_kind = "tieude"
+default_reviewer = ["quansu"]
+
+[kinds.tieude]
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+can_review = false
+
+[kinds.quansu]
+harness = "codex"
+model = "gpt-6.1-sol"
+effort = "high"
+can_review = true
+
+[merge]
+integ_branch = "quaqua/{slug}-integ"

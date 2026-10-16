@@ -150,9 +150,14 @@ fn config_invalid_fixtures_are_rejected() {
         ("same-harness.toml", "share harness", false),
         ("reviewer-cannot-review.toml", "can_review = false", false),
         ("model-drift.toml", "drift", true),
+        ("missing-kind.toml", "absent from team.toml", true),
         ("bad-schema.toml", "unsupported schema_version", false),
         ("integ-branch.toml", "{slug}", false),
         ("differ-policy.toml", "unknown differ policy", false),
+        ("typo-key.toml", "unknown field `can_reveiw`", false),
+        ("typo-section.toml", "unknown field `project`", false),
+        ("empty-reviewer.toml", "default_reviewer is empty", false),
+        ("project-cap-zero.toml", "is below 1", false),
     ];
 
     for (name, needle, needs_models) in cases {
