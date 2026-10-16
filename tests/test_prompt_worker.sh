@@ -286,23 +286,23 @@ Current design: x" FAKE_WRITE=1 \
 echo "ok: builder report with '## Lessons' -> exit 0"
 
 # reviewer (srt.json review:true) without 'Verdict:' -> exit 6
-printf '{"name":"quansu-rv1","kind":"quansu","review":true}\n' \
-  > "$T/home/quaqua/runs/quansu-rv1.srt.json"
-prompt quansu-rv1 "Goal: review it
+printf '{"name":"suhuynh-rv1","kind":"suhuynh","review":true}\n' \
+  > "$T/home/quaqua/runs/suhuynh-rv1.srt.json"
+prompt suhuynh-rv1 "Goal: review it
 Hard constraints: read-only
 Current design: diff" FAKE_WRITE=1 \
   FAKE_CONTENT=$'findings here\n\n## Lessons\n- none'   # a Lessons tail is NOT a reviewer tail
-malformed "reviewer missing Verdict" quansu-rv1 "'Verdict:' line"
+malformed "reviewer missing Verdict" suhuynh-rv1 "'Verdict:' line"
 
 # reviewer with 'Verdict:' -> exit 0 (indented and trailing-space forms count)
-printf '{"name":"quansu-rv2","kind":"quansu","review":true}\n' \
-  > "$T/home/quaqua/runs/quansu-rv2.srt.json"
-prompt quansu-rv2 "Goal: review it
+printf '{"name":"suhuynh-rv2","kind":"suhuynh","review":true}\n' \
+  > "$T/home/quaqua/runs/suhuynh-rv2.srt.json"
+prompt suhuynh-rv2 "Goal: review it
 Hard constraints: read-only
 Current design: diff" FAKE_WRITE=1 \
   FAKE_CONTENT=$'findings here\n  Verdict: 2 findings'
 [[ $rc -eq 0 ]] || fail "reviewer with Verdict: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/out")" == "$T/home/quaqua/runs/quansu-rv2.md" ]] \
+[[ "$(cat "$T/out")" == "$T/home/quaqua/runs/suhuynh-rv2.md" ]] \
   || fail "reviewer with Verdict: stdout not the runs path"
 echo "ok: reviewer report with 'Verdict:' -> exit 0"
 

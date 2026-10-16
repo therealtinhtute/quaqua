@@ -42,7 +42,7 @@ EOF
 
 cat > "$T_SHIM/scripts/lead/pipeline.sh" << EOF
 #!/usr/bin/env bash
-# Usage: pipeline.sh <task> <repo> --brief <file> [--builder sude] [--reviewer quansu]
+# Usage: pipeline.sh <task> <repo> --brief <file> [--builder sude] [--reviewer suhuynh]
 #                    [--review auto|always|skip] [--rounds 2] [--base <ref>]
 #        pipeline.sh --resume <task> <repo>
 export QUAQUA_SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
@@ -52,7 +52,7 @@ EOF
 # Create temporary shims in $T_SHIM/scripts/worker/
 cat > "$T_SHIM/scripts/worker/spawn-worker.sh" << EOF
 #!/usr/bin/env bash
-# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu> <repo-path>
+# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
 export QUAQUA_SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
 exec "$bin" worker spawn "\$@"
 EOF

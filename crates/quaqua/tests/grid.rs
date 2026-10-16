@@ -1,5 +1,7 @@
+use quaqua::grid::hook::{compute_snapshot_signature, reconcile_step};
 use quaqua::grid::{
-    apply_ops, parse_snapshot_value, plan, run_reconcile, FakeHerdrDriver, ReconcileOptions, Target,
+    apply_ops, parse_snapshot_value, plan, run_reconcile, FakeHerdrDriver, HerdrDriver, MoveResult,
+    ReconcileOptions, Snapshot, Target,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -192,7 +194,7 @@ fn test_reconcile_only_with_custom_tab_converges_immediately() {
         check: true,
         repair: false,
         tab: Some("mono-workers".to_string()),
-        only: Some("sude-isl,quansu-islr1".to_string()),
+        only: Some("sude-isl,suhuynh-islr1".to_string()),
         owner: Some("cos".to_string()),
         dry_run: true,
         timeout_sec: Some(0),
@@ -210,7 +212,7 @@ fn test_reconcile_only_with_custom_tab_converges_immediately() {
         check: true,
         repair: false,
         tab: Some("quaqua-workers".to_string()),
-        only: Some("sude-isl,quansu-islr1".to_string()),
+        only: Some("sude-isl,suhuynh-islr1".to_string()),
         owner: Some("cos".to_string()),
         dry_run: true,
         timeout_sec: Some(0),
@@ -747,4 +749,204 @@ fn test_reconcile_honours_deferred_statuses() {
     // When "paused" is in deferred_statuses, check converges immediately with 0 pending ops!
     let res = run_reconcile(&mut driver, &opts, "workers", Some(&["working", "paused"]));
     assert!(res.is_ok(), "paused worker must be deferred and converge immediately");
+}
+
+fn load_edge_fixture(name: &str) -> quaqua::grid::Snapshot {
+    let fix = fixtures_dir().join(format!("{name}.json"));
+    let content = fs::read_to_string(&fix)
+        .unwrap_or_else(|e| panic!("failed reading {}: {e}", fix.display()));
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    parse_snapshot_value(&val).unwrap()
+}
+
+#[test]
+fn test_edge_fixture_worker_in_wrong_tab() {
+    let snap = load_edge_fixture("worker_in_wrong_tab");
+    let ops = plan(&snap).expect("plan must succeed for worker_in_wrong_tab");
+    assert_eq!(ops.len(), 2);
+    assert_eq!(ops[0].pane, "w1:p5");
+    assert_eq!(ops[1].pane, "w1:p6");
+    assert!(matches!(&ops[0].target, Target::NewTab { label } if label == "quaqua-workers"));
+    assert!(matches!(&ops[1].target, Target::Split { tab, anchor, .. } if tab == "@workers" && anchor == "w1:p5"));
+}
+
+#[test]
+fn test_edge_fixture_worker_with_foreign_pane() {
+    let snap = load_edge_fixture("worker_with_foreign_pane");
+    let ops = plan(&snap).expect("plan must succeed for worker_with_foreign_pane");
+    assert_eq!(ops.len(), 2);
+    assert_eq!(ops[0].pane, "w1:p5");
+    assert_eq!(ops[1].pane, "w1:p6");
+    assert!(matches!(&ops[0].target, Target::NewTab { label } if label == "quaqua-workers"));
+}
+
+#[test]
+fn test_edge_fixture_zoomed_anchor_tab() {
+    // edgecases §4: "validate tab zoom state before first pane move". The
+    // planner still targets the anchor tab, and apply_ops must refuse it while
+    // that tab is zoomed — the fixture's whole point.
+    let snap = load_edge_fixture("zoomed_anchor_tab");
+    assert!(
+        snap.layouts.iter().any(|l| l.zoomed == Some(true)),
+        "fixture must carry the zoom state"
+    );
+    let ops = plan(&snap).expect("plan must succeed for zoomed_anchor_tab");
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].pane, "w1:p5");
+    assert!(matches!(&ops[0].target, Target::Split { tab, anchor, .. } if tab == "w1:t1" && anchor == "w1:p1"));
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let err = apply_ops(&mut driver, &ops, None)
+        .expect_err("apply must refuse a zoomed anchor tab");
+    assert!(err.contains("is zoomed"), "unexpected refusal: {err}");
+    assert!(
+        driver.executed_moves.is_empty(),
+        "no pane may move while the anchor tab is zoomed: {:?}",
+        driver.executed_moves
+    );
+}
+
+#[test]
+fn test_edge_fixture_missing_workers_tab() {
+    let snap = load_edge_fixture("missing_workers_tab");
+    let ops = plan(&snap).expect("plan must succeed for missing_workers_tab");
+    assert_eq!(ops.len(), 2);
+    assert_eq!(ops[0].pane, "w1:p5");
+    assert!(matches!(&ops[0].target, Target::NewTab { label } if label == "quaqua-workers"));
+    assert!(matches!(&ops[1].target, Target::Split { tab, anchor, .. } if tab == "@workers" && anchor == "w1:p5"));
+}
+
+#[test]
+fn test_edge_fixture_stale_session_path() {
+    let snap = load_edge_fixture("stale_session_path");
+    let ops = plan(&snap).expect("plan must succeed for stale_session_path");
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].pane, "w1:p5");
+    assert!(matches!(&ops[0].target, Target::Split { tab, anchor, .. } if tab == "w1:t1" && anchor == "w1:p1"));
+}
+
+/// A driver that fails every move while `fail` is set, then delegates to the
+/// fake driver — the fixture files cannot describe a failure, so the backoff
+/// test has to cause one.
+struct FailOnceDriver {
+    inner: FakeHerdrDriver,
+    fail: bool,
+}
+
+impl HerdrDriver for FailOnceDriver {
+    fn snapshot(&mut self) -> Result<Snapshot, String> {
+        self.inner.snapshot()
+    }
+    fn move_pane(&mut self, pane: &str, target: &Target) -> Result<MoveResult, String> {
+        if self.fail {
+            return Err("simulated apply failure".to_string());
+        }
+        self.inner.move_pane(pane, target)
+    }
+    fn rename_pane(&mut self, pane: &str, label: &str) -> Result<(), String> {
+        self.inner.rename_pane(pane, label)
+    }
+}
+
+fn edge_state_dir(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("quaqua-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("shadow"), "0").unwrap(); // live mode: reconcile applies ops
+    d
+}
+
+#[test]
+fn test_edge_fixture_event_storm_after_move() {
+    // The layout has already converged. A storm of post-move events must be
+    // absorbed: every pass on the unchanged snapshot is a no-op, no pane moves
+    // a second time, and the debounce key (the snapshot signature) is stable.
+    let snap = load_edge_fixture("event_storm_after_move");
+    let ops = plan(&snap).expect("plan must succeed for event_storm_after_move");
+    assert!(ops.is_empty(), "event storm after move should converge with 0 ops");
+
+    let sdir = edge_state_dir("edge-storm");
+    let mut driver = FakeHerdrDriver::new(snap.clone());
+    for pass in 0..5 {
+        reconcile_step(&sdir, &mut driver, None)
+            .unwrap_or_else(|e| panic!("storm pass {pass} must be a no-op: {e}"));
+    }
+    assert!(
+        driver.executed_moves.is_empty(),
+        "an event storm on a converged layout must not move anything: {:?}",
+        driver.executed_moves
+    );
+    let log = fs::read_to_string(sdir.join("shadow.log")).unwrap_or_default();
+    assert!(
+        !log.contains("apply ops:"),
+        "storm must never reach apply: {log}"
+    );
+    let cached: Snapshot =
+        serde_json::from_str(&fs::read_to_string(sdir.join("last_snapshot.json")).unwrap()).unwrap();
+    assert_eq!(
+        compute_snapshot_signature(&snap),
+        compute_snapshot_signature(&cached),
+        "the cached snapshot (the debounce key) must not churn across the storm"
+    );
+    let _ = fs::remove_dir_all(&sdir);
+}
+
+#[test]
+fn test_edge_fixture_divide_initial_empty_workspace() {
+    let snap = load_edge_fixture("divide_initial_empty_workspace");
+    let ops = plan(&snap).expect("plan must succeed for divide_initial_empty_workspace");
+    assert!(ops.is_empty(), "empty workspace should yield 0 ops");
+}
+
+#[test]
+fn test_edge_fixture_failed_apply_then_backoff() {
+    // One split is planned (the worker sits in scratch, the workers tab holds
+    // the anchor). Live reconcile must try it, record the backoff state when it
+    // fails, then skip that op on the unchanged layout instead of looping.
+    let snap = load_edge_fixture("failed_apply_then_backoff");
+    let ops = plan(&snap).expect("plan must succeed for failed_apply_then_backoff");
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].pane, "w1:p6");
+    assert!(matches!(&ops[0].target, Target::Split { tab, anchor, .. } if tab == "w1:t2" && anchor == "w1:p5"));
+
+    let sdir = edge_state_dir("edge-backoff");
+    let mut driver = FailOnceDriver { inner: FakeHerdrDriver::new(snap), fail: true };
+    let err = reconcile_step(&sdir, &mut driver, None)
+        .expect_err("a failed apply must surface as an error");
+    assert!(err.contains("simulated apply failure"), "unexpected error: {err}");
+
+    let failed_ops = fs::read_to_string(sdir.join("failed_ops.json"))
+        .expect("backoff must record the failed ops");
+    assert!(failed_ops.contains("w1:p6"), "failed ops: {failed_ops}");
+    let failed_sig = fs::read_to_string(sdir.join("failed_snap.json"))
+        .expect("backoff must record the snapshot signature");
+    assert!(!failed_sig.trim().is_empty(), "backoff signature must not be empty");
+
+    // Same (unchanged) layout again: the previously failed op is skipped.
+    driver.fail = false;
+    reconcile_step(&sdir, &mut driver, None).expect("the backoff pass must not error");
+    assert!(
+        driver.inner.executed_moves.is_empty(),
+        "backoff must skip the previously failed op: {:?}",
+        driver.inner.executed_moves
+    );
+    let log = fs::read_to_string(sdir.join("shadow.log")).unwrap_or_default();
+    assert!(
+        log.contains("backoff: skipping previously failed ops"),
+        "no backoff log: {log}"
+    );
+    let _ = fs::remove_dir_all(&sdir);
+}
+
+#[test]
+fn test_edge_fixture_cross_checker_owner_group() {
+    let snap = load_edge_fixture("cross_checker_owner_group");
+    let ops = plan(&snap).expect("plan must succeed for cross_checker_owner_group");
+    assert_eq!(ops.len(), 3);
+    assert_eq!(ops[0].pane, "w1:p5");
+    assert_eq!(ops[1].pane, "w1:p6");
+    assert_eq!(ops[2].pane, "w1:p7");
+    assert!(matches!(&ops[0].target, Target::Split { tab, anchor, .. } if tab == "w1:t1" && anchor == "w1:p1"));
+    assert!(matches!(&ops[1].target, Target::NewTab { label } if label == "lead-workers"));
+    assert!(matches!(&ops[2].target, Target::Split { tab, anchor, .. } if tab == "@workers" && anchor == "w1:p6"));
 }

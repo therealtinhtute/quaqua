@@ -26,7 +26,7 @@ This repo is the live workspace: clone it to `~/quaqua`. Per-workspace personal 
  Lead (<slug>-lead) — project state, plan approval, acceptance,
         │ task brief                   merges into the project integration branch
         ▼
- Peers — build (sude) ⇄ review (quansu, codex read-only), own worktree each
+ Peers — build (sude) ⇄ review (suhuynh, claude read-only), own worktree each
         │ result                     default 2 review rounds (--rounds overrides); kill after ≥3 stuck
         ▼
  runs/pipeline-<task>.md ──► Lead accepts / merges      runs/telemetry.jsonl (1 line per run)
@@ -54,7 +54,6 @@ Rules:
 | `scripts/auditor/install-auditor.sh`, `scripts/auditor/systemd/`, `scripts/auditor/launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
 | `scripts/workspace/init-workspace.sh`, `templates/` | Bootstraps a fresh clone's gitignored personal state (dirs + `memory/rules.md`, `projects/INDEX.md`, `_template.md`, `USER.md`); idempotent, never overwrites |
 | `tests/` | Sandboxed test suite: `tests/run.sh` runs every `tests/test_*.sh` (the 2 slow suites only when the change touches a script they cover, or with `--slow`) and exits non-zero on any failure |
-| `codex-config.toml` | Codex config used by codex workers |
 | `USER.example.md` | Template for the per-workspace `USER.md` |
 | `SETUP-PROMPT.md` | Original prompt used to bootstrap this setup |
 | `docs/slp.png` | Diagram: Principal → CoS → Lead → Peers |
@@ -92,12 +91,12 @@ Linux: the installer symlinks the user service/timer and calls only
 
 macOS: install a current Bash (e.g. `brew install bash`), then put its `bin` directory
 first on PATH (`export PATH="$(brew --prefix bash)/bin:$PATH"` for Homebrew).
-Run `bash scripts/auditor/install-auditor.sh` with `codex` on PATH. The installer requires
+Run `bash scripts/auditor/install-auditor.sh` with `claude` on PATH. The installer requires
 Bash >= 4.4 from `command -v bash` and refuses the macOS system Bash 3.2.
 It renders `scripts/auditor/launchd/com.quaqua.auditor.plist.in` into
 `~/Library/LaunchAgents/com.quaqua.auditor.plist`, pinning the discovered Bash,
 this checkout's absolute `scripts/auditor/auditor.sh` path, and the install-time PATH (including
-codex's directory). Logs go to `~/Library/Logs/quaqua-auditor.log`; reports still go
+claude's directory). Logs go to `~/Library/Logs/quaqua-auditor.log`; reports still go
 in this checkout's `reports/`. It never calls launchctl; run the printed bootstrap
 command yourself. Reinstall after moving the checkout or changing toolchain paths.
 Calendar intervals run at 07:00/19:00; unlike systemd's `Persistent=true`, launchd does
@@ -105,7 +104,7 @@ not replay missed runs while logged out (sleep wakeups may coalesce missed inter
 
 Tests live in `tests/` and require Bash >= 4.4 (macOS system Bash 3.2 is insufficient),
 git, jq, Perl, python3 (for plist validation), and ripgrep. They use temporary homes and
-stub herdr/codex/managers; no network, real agents, or service activation is needed:
+stub herdr/claude/managers; no network, real agents, or service activation is needed:
 
 ```bash
 # On macOS, put your installed Bash's bin directory first on PATH as above.

@@ -8,15 +8,15 @@ reports_to = "cos"
 
 [strategy]
 default_kind = "tieude"
-default_reviewer = ["quansu"]
+default_reviewer = ["suhuynh"]
 
 [kinds.tieude]
 harness = "opencode"
 model = "m"
 can_review = false
 
-[kinds.quansu]
-harness = "codex"
+[kinds.suhuynh]
+harness = "claude"
 model = "m"
 can_review = true
 

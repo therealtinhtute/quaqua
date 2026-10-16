@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sandbox test for spawn-worker.sh name validation (models.md Naming:
 # <kind>-<task>, ascii [a-z0-9-], <=20 chars), the optional --base <ref>
-# worktree start point, the --review read-only mode for codex and claude kinds
+# worktree start point, the --review read-only mode for the claude kinds
 # (including the narrow claude Bash allows for `cargo test` and the atomic
 # report `mv`), and its best-effort grid hook.
 # git+herdr are stubbed on PATH; the grid hook is stubbed next to a copy of the
@@ -212,50 +212,6 @@ grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=wo
 echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER"
 
 
-# ── --review: codex + claude kinds, repo read-only, runs writable ────────────
-# The repo must stay read-only while runs stays writable; codex only honours
-# --add-dir under workspace-write, so the guard uses a permission profile
-# extending the built-in :read-only one.
-spawn_args=(--review)
-spawn quansu-revread quansu
-unset spawn_args
-[[ $rc -eq 0 ]] || fail "--review quansu: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- '--kind codex' "$T/calls" || fail "--review quansu: not a codex start: $(cat "$T/calls")"
-grep -q -- '-a never' "$T/calls" || fail "--review quansu: no -a never: $(cat "$T/calls")"
-grep -q -- 'default_permissions="quaqua-review"' "$T/calls" \
-  || fail "--review quansu: no read-only profile: $(cat "$T/calls")"
-grep -q -- 'permissions.quaqua-review.extends=":read-only"' "$T/calls" \
-  || fail "--review quansu: profile does not extend :read-only: $(cat "$T/calls")"
-grep -qF -- "permissions.quaqua-review.filesystem={\"$T/home/quaqua/runs\"=\"write\"}" "$T/calls" \
-  || fail "--review quansu: runs not writable: $(cat "$T/calls")"
-! grep -q -- '--approve-for-me' "$T/calls" \
-  || fail "--review quansu: --approve-for-me conflicts with read-only: $(cat "$T/calls")"
-! grep -q -- '--add-dir' "$T/calls" \
-  || fail "--review quansu: --add-dir ignored under read-only: $(cat "$T/calls")"
-! grep -q -- ' -s read-only' "$T/calls" \
-  || fail "--review quansu: -s read-only would block runs writes: $(cat "$T/calls")"
-grep -q "worker=quansu-revread" "$T/out" || fail "--review quansu: no success line"
-[[ $(ln_call 'agent wait') -lt $(ln_call 'grid_ready=1') ]] \
-  || fail "--review quansu: grid_ready=1 set before codex idle wait: $(cat "$T/calls")"
-echo "ok: --review quansu -> read-only profile + runs writable, no --approve-for-me/--add-dir, grid_ready=1 after idle wait"
-
-# --review is accepted for both codex kinds and leaves non-review spawns untouched
-spawn_args=(--review)
-spawn bacdau-revread bacdau
-unset spawn_args
-[[ $rc -eq 0 ]] || fail "--review bacdau: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- 'default_permissions="quaqua-review"' "$T/calls" \
-  || fail "--review bacdau: no read-only profile: $(cat "$T/calls")"
-echo "ok: --review bacdau -> read-only profile"
-
-spawn quansu-write quansu
-[[ $rc -eq 0 ]] || fail "no --review quansu: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- '--approve-for-me' "$T/calls" || fail "no --review quansu: no --approve-for-me"
-grep -q -- "--add-dir $T/home/quaqua/runs" "$T/calls" \
-  || fail "no --review quansu: no --add-dir: $(cat "$T/calls")"
-! grep -q -- 'default_permissions' "$T/calls" \
-  || fail "no --review quansu: review profile leaked: $(cat "$T/calls")"
-echo "ok: no --review -> --approve-for-me + --add-dir, unchanged"
 
 # --review on an opencode/omp kind: refused before any git/herdr call
 expect_reject_review() {  # expect_reject_review <name> <kind> <label>
@@ -264,7 +220,7 @@ expect_reject_review() {  # expect_reject_review <name> <kind> <label>
   unset spawn_args
   [[ $rc -eq 1 ]] || fail "$3: exit $rc, want 1"
   grep -q '^# Usage:' "$T/err" || fail "$3: no usage on stderr"
-  grep -qF "error: --review is only supported for codex kinds (bacdau, quansu) and claude kinds" "$T/err" \
+  grep -qF "error: --review is only supported for claude kinds (ni, suhuynh, truonglao)" "$T/err" \
     || fail "$3: no clear refusal: $(cat "$T/err")"
   [[ ! -s "$T/calls" ]] || fail "$3: git/herdr called before rejection: $(cat "$T/calls")"
   echo "ok: $3 -> exit 1, no git/herdr"
@@ -273,8 +229,8 @@ expect_reject_review tieude-revbad tieude "--review on tieude"
 expect_reject_review sude-revbad sude "--review on sude"
 
 # ── --review claude kinds: repo read-only, $HOME/quaqua/runs writable ────────
-# claude has no filesystem sandbox, so the codex quaqua-review profile is
-# mirrored by --permission-mode dontAsk ("Auto-denies every call that would
+# claude has no filesystem sandbox, so the reviewer is held read-only by
+# --permission-mode dontAsk ("Auto-denies every call that would
 # otherwise prompt ... tools pre-approved via permissions.allow rules still
 # run"), so the unattended reviewer never stalls on a permission dialog, plus
 # Edit() path rules — the only file rules the file tools consult (a Write(...)
@@ -307,8 +263,8 @@ for k in ni suhuynh truonglao; do
   ! grep -qF -- 'Bash(mv:*' "$T/calls" || fail "--review $k: unbounded mv allow leaked: $(cat "$T/calls")"
   grep -qF -- '--model claude-opus-5-5' "$T/calls" || fail "--review $k: model changed: $(cat "$T/calls")"
   grep -qF -- "--effort $eff" "$T/calls" || fail "--review $k: effort not $eff: $(cat "$T/calls")"
-  ! grep -qF -- '--approve-for-me' "$T/calls" || fail "--review $k: codex approval flag leaked: $(cat "$T/calls")"
-  ! grep -qF -- 'default_permissions' "$T/calls" || fail "--review $k: codex profile leaked: $(cat "$T/calls")"
+  ! grep -qF -- '--approve-for-me' "$T/calls" || fail "--review $k: approval flag leaked: $(cat "$T/calls")"
+  ! grep -qF -- 'default_permissions' "$T/calls" || fail "--review $k: foreign profile leaked: $(cat "$T/calls")"
   grep -qF "worker=$k-revread" "$T/out" || fail "--review $k: no success line"
   echo "ok: --review $k -> dontAsk + Edit() rules (runs writable, worktree denied) + narrow Bash allows (cargo test, atomic mv), model/effort unchanged"
 done

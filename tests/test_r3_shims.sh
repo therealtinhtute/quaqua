@@ -27,11 +27,11 @@ cp -R "$repo/plugins" "$T_SHIM/plugins"
 # Create temporary shims in $T_SHIM/scripts/worker/
 cat > "$T_SHIM/scripts/worker/spawn-worker.sh" << EOF
 #!/usr/bin/env bash
-# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu> <repo-path>
+# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — spawn-lead.sh <slug>-lead)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
-#   --review      bacdau|quansu|ni|suhuynh|truonglao: repo read-only, \$HOME/quaqua/runs writable
+#   --review      ni|suhuynh|truonglao: repo read-only, \$HOME/quaqua/runs writable
 export QUAQUA_SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
 exec "$bin" worker spawn "\$@"
 EOF

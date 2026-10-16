@@ -127,8 +127,8 @@ fn run_advisor(
         .taskforce
         .get("advisor")
         .map(|t| t.members.clone())
-        .unwrap_or_else(|| vec!["quansu".to_string()]);
-    let kind = members.first().map(|s| s.as_str()).unwrap_or("quansu");
+        .unwrap_or_else(|| vec!["suhuynh".to_string()]);
+    let kind = members.first().map(|s| s.as_str()).unwrap_or("suhuynh");
     let worker_name = format!("{kind}-{}", args.task);
 
     let opts = crate::worker::spawn::SpawnOptions {
@@ -176,9 +176,9 @@ fn run_dual_lens(
         .taskforce
         .get("dual-lens")
         .map(|t| t.members.clone())
-        .unwrap_or_else(|| vec!["truonglao".to_string(), "quansu".to_string()]);
+        .unwrap_or_else(|| vec!["truonglao".to_string(), "suhuynh".to_string()]);
     let kind1 = members.first().map(|s| s.as_str()).unwrap_or("truonglao");
-    let kind2 = members.get(1).map(|s| s.as_str()).unwrap_or("quansu");
+    let kind2 = members.get(1).map(|s| s.as_str()).unwrap_or("suhuynh");
 
     let w1 = format!("{kind1}-{}dl1", args.task);
     let w2 = format!("{kind2}-{}dl2", args.task);

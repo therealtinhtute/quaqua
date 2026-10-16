@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Sandbox test for auditor.sh: report naming, the codex exec invocation
-# (read-only sandbox, -C repo root, -o report path, quansu-tier model), the
-# prompt contents, AUDITOR_MODEL/AUDITOR_OUT overrides, codex failure
-# handling, and that nothing but the report lands in the repo tree. codex is
-# stubbed on PATH (it logs argv and writes a fake final message to the -o
-# file); the repo is a temp dir. No real codex, repo, or reports touched.
+# Sandbox test for auditor.sh: report naming, the claude -p invocation
+# (read-only tool whitelist, repo-root cwd, report on stdout, default model),
+# the prompt contents, AUDITOR_MODEL/AUDITOR_OUT overrides, claude failure
+# handling, and that nothing but the report lands in the repo tree. claude is
+# stubbed on PATH (it logs argv + cwd and writes a fake final message to
+# stdout); the repo is a temp dir. No real claude, repo, or reports touched.
 # Usage: tests/test_auditor.sh   (exit 0 = pass)
 set -euo pipefail
 
@@ -16,24 +16,28 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# ── sandbox: stub codex + fake repo with scripts/auditor/auditor.sh ──────────
+# ── sandbox: stub claude + fake repo with scripts/auditor/auditor.sh ─────────
 mkdir -p "$T/bin" "$T/repo/scripts/auditor" "$T/repo/memory" "$T/repo/projects"
 cp "$src/auditor/auditor.sh" "$T/repo/scripts/auditor/auditor.sh"
-cat > "$T/bin/codex" <<'STUB'
+cat > "$T/bin/claude" <<'STUB'
 #!/usr/bin/env bash
-echo "codex $*" >> "$CALLS"
-out=""
-prev=""
+echo "claude $*" >> "$CALLS"
+echo "cwd=$PWD" >> "$CALLS"
+# finding 3 (suhuynh-r6r1): pin the exact argv, one bracketed arg per line for
+# everything but the prompt, and keep the prompt in its own file.
+n=$#; i=0
+: > "$ARGS_HEAD"; : > "$ARGS_PROMPT"
 for a in "$@"; do
-  [ "$prev" = -o ] && out=$a
-  prev=$a
+  i=$((i + 1))
+  if [ "$i" -eq "$n" ]; then printf '%s' "$a" > "$ARGS_PROMPT"
+  else printf '[%s]\n' "$a" >> "$ARGS_HEAD"; fi
 done
-if [ -n "$out" ] && [ "${FAKE_RC:-0}" = 0 ]; then
-  printf '## Drift\n- none\n\n## Stale docs\n- none\n\nVerdict: clean\n' > "$out"
+if [ "${FAKE_RC:-0}" = 0 ]; then
+  printf '## Drift\n- none\n\n## Stale docs\n- none\n\nVerdict: clean\n'
 fi
 exit "${FAKE_RC:-0}"
 STUB
-chmod +x "$T/bin/codex"
+chmod +x "$T/bin/claude"
 
 # ── precheck runs are hermetic: no real herdr on PATH yet, so stub a failing
 #    one. Without this the prechecks would consult the host's herdr, and a
@@ -50,10 +54,11 @@ exit 0
 HERDR
 chmod +x "$T/bin/herdr"
 
-run() {  # run [VAR=val...]; sets rc, $T/out, $T/err, $T/calls
-  : > "$T/calls"
+run() {  # run [VAR=val...]; sets rc, $T/out, $T/err, $T/calls, $T/args.head|prompt
+  : > "$T/calls"; : > "$T/args.head"; : > "$T/args.prompt"
   rc=0
-  CALLS="$T/calls" PATH="$T/bin:$PATH" \
+  CALLS="$T/calls" ARGS_HEAD="$T/args.head" ARGS_PROMPT="$T/args.prompt" \
+    PATH="$T/bin:$PATH" \
     env "$@" bash "$T/repo/scripts/auditor/auditor.sh" >"$T/out" 2>"$T/err" || rc=$?
 }
 
@@ -66,11 +71,35 @@ report=$(printf '%s\n' "$T"/repo/reports/audit-????-??-??-??.md)
 grep -q 'Verdict: clean' "$report" || fail "happy: agent final message not in report"
 [[ $(cat "$T/out") == "$report" ]] || fail "happy: stdout not the report path: $(cat "$T/out")"
 calls=$(cat "$T/calls")
-grep -q 'codex exec ' <<<"$calls" || fail "happy: codex not called with exec"
-grep -q -- '--sandbox read-only' <<<"$calls" || fail "happy: no read-only sandbox"
-grep -q -- "-C $T/repo" <<<"$calls" || fail "happy: not rooted at repo (-C)"
-grep -q -- "-o $report" <<<"$calls" || fail "happy: no -o <report path>"
-grep -q -- '-m gpt-6.1-sol' <<<"$calls" || fail "happy: default model not the quansu tier"
+grep -q 'claude -p ' <<<"$calls" || fail "happy: claude not called with -p"
+grep -q -- '--permission-mode dontAsk' <<<"$calls" || fail "happy: no dontAsk permission mode"
+grep -qF -- '--allowedTools Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*)' <<<"$calls" \
+  || fail "happy: read-only tool whitelist missing"
+grep -qF -- "cwd=$T/repo" <<<"$calls" || fail "happy: not rooted at the repo (cwd)"
+grep -q -- '--model claude-opus-5-5' <<<"$calls" || fail "happy: default model not claude-opus-5-5"
+# exact argv (finding 3): whitelist, the git --output deny and the empty
+# settings-sources list are pinned as an ordered list, not grepped piecemeal
+cat > "$T/expected" <<'EXP'
+[-p]
+[--model]
+[claude-opus-5-5]
+[--permission-mode]
+[dontAsk]
+[--setting-sources]
+[]
+[--allowedTools]
+[Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*)]
+[--disallowedTools]
+[Bash(git *--output*)]
+EXP
+cmp -s "$T/expected" "$T/args.head" || {
+  echo "--- expected"; cat "$T/expected"
+  echo "--- got"; cat "$T/args.head"
+  fail "happy: argv differs from the pinned read-only invocation"
+}
+grep -qF 'You are the Auditor for the quaqua repo' "$T/args.prompt" \
+  || fail "happy: last argv is not the audit prompt"
+echo "ok: argv -> exact read-only invocation (dontAsk, empty setting sources, --output denied, prompt last)"
 for kw in 'memory/' 'projects/' 'git log' 'READ-ONLY' \
     '## Unhandled' '[audit]' '## Lessons' 'runs/'; do
   grep -qF "$kw" <<<"$calls" || fail "happy: prompt missing '$kw'"
@@ -78,18 +107,18 @@ done
 after=$(find "$T/repo" -type f | sort)
 [[ $(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after")) == "$report" ]] \
   || fail "happy: repo tree changed beyond the report file"
-echo "ok: happy -> report written, codex exec --sandbox read-only, prompt covers all audits"
+echo "ok: happy -> report written, claude -p with the read-only whitelist, prompt covers all audits"
 
 # ── overrides: AUDITOR_MODEL + AUDITOR_OUT ──────────────────────────────────
 rm -rf "$T/repo/reports"
 run AUDITOR_MODEL=other-model AUDITOR_OUT="$T/custom.md"
 [[ $rc -eq 0 ]] || fail "overrides: exit $rc: $(cat "$T/err")"
 [[ -f $T/custom.md ]] || fail "overrides: AUDITOR_OUT ignored"
-grep -q -- '-m other-model' "$T/calls" || fail "overrides: AUDITOR_MODEL ignored"
+grep -q -- '--model other-model' "$T/calls" || fail "overrides: AUDITOR_MODEL ignored"
 [[ ! -d $T/repo/reports ]] || fail "overrides: default reports dir still used"
 echo "ok: overrides -> model + output path honored"
 
-# ── codex failure: nonzero exit, failure report, stderr passthrough ─────────
+# ── claude failure: nonzero exit, failure report, stderr passthrough ────────
 run FAKE_RC=3
 [[ $rc -eq 3 ]] || fail "failure: exit $rc, want 3"
 report=$(printf '%s\n' "$T"/repo/reports/audit-????-??-??-??.md)
@@ -115,7 +144,7 @@ grep -q 'reports/audit-' "$root/AGENTS.md" \
 echo "ok: packaging -> systemd + launchd share scripts/auditor/auditor.sh; legacy retired"
 
 # ── pipeline pre-checks: one fixture per flag + clean no-flag cases ─────────
-# Fixtures live in the sandbox repo (runs/, memory/); the stub codex logs argv,
+# Fixtures live in the sandbox repo (runs/, memory/); the stub claude logs argv,
 # so the deterministic flags are asserted on the embedded prompt text.
 mkdir -p "$T/repo/runs"
 git -C "$T/repo" init -q
@@ -133,20 +162,20 @@ printf -- '- review: skipped (gate: auto)\n- status: clean · commit deadbeef ·
   > "$T/repo/runs/pipeline-badsha.md"
 # flagged: clean, review ran, no Verdict on the last review-round line AND
 # no reviewer runs file behind it
-printf -- '- review round 1: NO VERDICT LINE (quansu-noverdictr1.md)\n- status: clean · commit %s · elapsed 6m\n' "$sha" \
+printf -- '- review round 1: NO VERDICT LINE (suhuynh-noverdictr1.md)\n- status: clean · commit %s · elapsed 6m\n' "$sha" \
   > "$T/repo/runs/pipeline-noverdict.md"
 # flagged: same, but the named reviewer file exists without a Verdict line
-printf -- '- review round 1: NO VERDICT LINE (quansu-novlineR1.md)\n- status: clean · commit %s · elapsed 6m\n' "$sha" \
+printf -- '- review round 1: NO VERDICT LINE (suhuynh-novlineR1.md)\n- status: clean · commit %s · elapsed 6m\n' "$sha" \
   > "$T/repo/runs/pipeline-novline.md"
-printf -- '# quansu-novlineR1\n\n## Findings\n- one thing\n' > "$T/repo/runs/quansu-novlineR1.md"
+printf -- '# suhuynh-novlineR1\n\n## Findings\n- one thing\n' > "$T/repo/runs/suhuynh-novlineR1.md"
 # no flag: the Verdict lives in the reviewer runs file the round line names —
 # both the '(file.md)' shape and the '<name> spawned on ...' shape
-printf -- '- review round 1: NO VERDICT LINE (quansu-revfiler1.md)\n- status: clean · commit %s · elapsed 6m\n' "$sha" \
+printf -- '- review round 1: NO VERDICT LINE (suhuynh-revfiler1.md)\n- status: clean · commit %s · elapsed 6m\n' "$sha" \
   > "$T/repo/runs/pipeline-revfile.md"
-printf -- '# quansu-revfiler1\n\nVerdict: clean\n' > "$T/repo/runs/quansu-revfiler1.md"
-printf -- '- review round 1: quansu-revspawnr1 spawned on %s (quaqua/sude-revspawn tip)\n- status: clean · commit %s · elapsed 6m\n' "$sha" "$sha" \
+printf -- '# suhuynh-revfiler1\n\nVerdict: clean\n' > "$T/repo/runs/suhuynh-revfiler1.md"
+printf -- '- review round 1: suhuynh-revspawnr1 spawned on %s (quaqua/sude-revspawn tip)\n- status: clean · commit %s · elapsed 6m\n' "$sha" "$sha" \
   > "$T/repo/runs/pipeline-revspawn.md"
-printf -- '# quansu-revspawnr1\n\nVerdict: 2 findings\n' > "$T/repo/runs/quansu-revspawnr1.md"
+printf -- '# suhuynh-revspawnr1\n\nVerdict: 2 findings\n' > "$T/repo/runs/suhuynh-revspawnr1.md"
 # flagged: unresolved ## Challenge in a worker runs file
 printf -- '# x\n## Challenge\n- premise wrong, evidence\n' > "$T/repo/runs/worker-chal.md"
 # flagged: disputed + copied Challenge (also covers sude-copied.build.md)
@@ -156,7 +185,7 @@ printf -- '# x\n## Challenge\n- disputed a finding\n' > "$T/repo/runs/sude-copie
 # no flag: clean with resolvable commit + Verdict; handled disputed; plan-ready
 # pause; challenge resolved via memory line; .rules.md dump; phase file whose
 # worker name is mentioned in memory
-printf -- '- review round 1: Verdict: clean (quansu-okr1.md)\n- status: clean · commit %s · elapsed 7m\n' "$sha" \
+printf -- '- review round 1: Verdict: clean (suhuynh-okr1.md)\n- status: clean · commit %s · elapsed 7m\n' "$sha" \
   > "$T/repo/runs/pipeline-ok.md"
 printf -- '- review: skipped (gate: auto)\n- status: clean · commit %s · elapsed 2m\n' "$sha" \
   > "$T/repo/runs/pipeline-skip.md"
@@ -168,7 +197,7 @@ printf -- '# x\n## Challenge\n- was wrong, resolved\n' > "$T/repo/runs/worker-ok
 printf -- '# x\n## Challenge\n- premise wrong, evidence\n' > "$T/repo/runs/sude-phs.plan.md"
 printf -- '## Challenge\n- rule text mentioning it — must not flag\n' > "$T/repo/runs/x.rules.md"
 cat > "$T/repo/memory/2026-10-08.md" <<'MEM'
-- [quaqua] pipeline-handled disputed — quansu reviewing
+- [quaqua] pipeline-handled disputed — suhuynh reviewing
 - [quaqua] worker-ok done; its Challenge resolved: premise accepted
 - [quaqua] sude-phs plan challenged, resolved by CoS
 MEM
@@ -192,7 +221,7 @@ done
 for absent in 'pipeline-ok.md' 'pipeline-skip.md' 'pipeline-handled.md' \
     'pipeline-paused.md' 'worker-ok.md' 'sude-copied.build.md' 'sude-phs' \
     'x.rules' 'pipeline-revfile.md' 'pipeline-revspawn.md' \
-    'quansu-revfiler1' 'quansu-revspawnr1' ; do
+    'suhuynh-revfiler1' 'suhuynh-revspawnr1' ; do
   grep -qF "$absent" <<<"$calls" && fail "precheck: false flag '$absent'"
 done
 echo "ok: precheck -> each flag raised; clean/handled/copied cases silent"
@@ -207,7 +236,7 @@ git -C "$T/proj" -c user.email=t@t -c user.name=t commit -qm p2 --allow-empty
 psha2=$(git -C "$T/proj" rev-parse --short HEAD)
 rm -f "$T"/repo/runs/pipeline-*.md "$T/repo/memory/2026-10-08.md"
 # valid commit in the recorded project repo -> no flag
-printf -- '- task: xproj · repo: %s\n- review round 1: Verdict: clean (quansu-xprojr1.md)\n- status: clean · commit %s · elapsed 7m\n' \
+printf -- '- task: xproj · repo: %s\n- review round 1: Verdict: clean (suhuynh-xprojr1.md)\n- status: clean · commit %s · elapsed 7m\n' \
   "$T/proj" "$psha" > "$T/repo/runs/pipeline-xproj.md"
 # a sha that exists in the auditor repo but NOT in the recorded repo -> flag
 printf -- '- task: badproj · repo: %s\n- status: clean · commit %s · elapsed 4m\n' \
@@ -264,7 +293,7 @@ grep -qF "live worker 'sude-unsandboxed': not started through sandbox wrapper (m
 echo "ok: live worker sandbox audit -> unsandboxed worker flagged; sandboxed worker and Lead silent"
 
 # ── herdr agent list failure is reported, never silently 'none' ─────────────
-# Under launchd/codex the herdr socket call can fail (EPERM). A silent skip
+# Under launchd the herdr socket call can fail (EPERM). A silent skip
 # reads as "no live workers" — the failure itself must become a finding.
 run HERDR_LIST_RC=1 HERDR_LIST_ERR='herdr: Operation not permitted'
 [[ $rc -eq 0 ]] || fail "herdr EPERM: exit $rc: $(cat "$T/err")"

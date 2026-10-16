@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const USAGE: &str = "\
-# Usage: pipeline.sh <task> <repo> --brief <file> [--builder sude] [--reviewer quansu]
+# Usage: pipeline.sh <task> <repo> --brief <file> [--builder sude] [--reviewer suhuynh]
 #                    [--review auto|always|skip] [--rounds 2] [--base <ref>]
 #        pipeline.sh --resume <task> <repo>
 #   Build -> review -> fix loop on top of
@@ -57,7 +57,6 @@ pub fn harness_of(kind: &str) -> Option<&'static str> {
         "tieude" | "detu" => Some("opencode"),
         "sude" => Some("omp"),
         "ni" | "suhuynh" | "truonglao" => Some("claude"),
-        "bacdau" | "quansu" => Some("codex"),
         _ => None,
     }
 }
@@ -569,8 +568,8 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         let reviewer = match reviewer_opt {
             Some(r) => {
                 let rh = harness_of_kind(&r, &cfg).ok_or_else(|| (1, format!("unknown reviewer kind: {r}\n")))?;
-                if !["bacdau", "quansu", "ni", "suhuynh", "truonglao"].contains(&r.as_str()) {
-                    return Err((1, format!("reviewer must be a codex kind (bacdau|quansu) or a claude kind (ni|suhuynh|truonglao) — spawn-worker.sh --review refuses {r}\n")));
+                if !["ni", "suhuynh", "truonglao"].contains(&r.as_str()) {
+                    return Err((1, format!("reviewer must be a claude kind (ni|suhuynh|truonglao) — spawn-worker.sh --review refuses {r}\n")));
                 }
                 if bh == rh {
                     return Err((1, format!("builder and reviewer must be different harnesses (models.md): {builder}/{r} are both {bh}\n")));

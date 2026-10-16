@@ -6,8 +6,8 @@ use crate::json::parse_json;
 use std::path::Path;
 use std::process::Command;
 
-const WORKER_KINDS: [&str; 8] = [
-    "tieude", "detu", "sude", "ni", "suhuynh", "truonglao", "bacdau", "quansu",
+const WORKER_KINDS: [&str; 6] = [
+    "tieude", "detu", "sude", "ni", "suhuynh", "truonglao",
 ];
 
 /// Check if a worker name matches `<kind>-...` and does not end with `-lead`.

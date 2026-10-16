@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 fn test_task_worker_name_validation() {
     assert!(is_task_worker_name("tieude-task1"));
     assert!(is_task_worker_name("sude-hardimpl"));
-    assert!(is_task_worker_name("quansu-review2"));
+    assert!(is_task_worker_name("suhuynh-review2"));
     assert!(is_task_worker_name("ni-quickfix"));
 
     // Leads do not count as task workers
@@ -81,16 +81,16 @@ fn test_env_budget_validation_n3_n5() {
 
 #[test]
 fn test_pipeline_reviewer_prefix_matching_n2() {
-    // N2: quansu-prep-pr1 has '-prep' before '-pr1'; must match on second occurrence
-    assert!(matches_pipeline_reviewer("quansu-prep-pr1", "test"));
-    assert!(matches_pipeline_reviewer("quansu-pr1", "test"));
+    // N2: suhuynh-prep-pr1 has '-prep' before '-pr1'; must match on second occurrence
+    assert!(matches_pipeline_reviewer("suhuynh-prep-pr1", "test"));
+    assert!(matches_pipeline_reviewer("suhuynh-pr1", "test"));
     assert!(matches_pipeline_reviewer("suhuynh-pr24", "test"));
-    assert!(matches_pipeline_reviewer("quansu-testr1", "test"));
+    assert!(matches_pipeline_reviewer("suhuynh-testr1", "test"));
     assert!(matches_pipeline_reviewer("suhuynh-testr3", "test"));
 
     // N2: empty task matches *-r[0-9]*
     assert!(matches_pipeline_reviewer("suhuynh-r3r2", ""));
-    assert!(matches_pipeline_reviewer("quansu-r1", ""));
+    assert!(matches_pipeline_reviewer("ni-r1", ""));
 
     // Non-reviewer workers
     assert!(!matches_pipeline_reviewer("tieude-prompt", "test"));
@@ -328,11 +328,13 @@ fn test_team_toml_harness_routing() {
     assert_eq!(cfg.kinds["ni"].model, "opus-5.5");
     assert!(cfg.kinds["ni"].can_review);
 
-    // bacdau/quansu are codex with can_review=true
-    assert_eq!(cfg.kinds["bacdau"].harness, "codex");
-    assert!(cfg.kinds["bacdau"].can_review);
-    assert_eq!(cfg.kinds["quansu"].harness, "codex");
-    assert!(cfg.kinds["quansu"].can_review);
+    // suhuynh/truonglao are claude with can_review=true; every kind is opencode/omp/claude
+    assert_eq!(cfg.kinds["suhuynh"].harness, "claude");
+    assert!(cfg.kinds["suhuynh"].can_review);
+    assert_eq!(cfg.kinds["truonglao"].harness, "claude");
+    assert!(cfg.kinds["truonglao"].can_review);
+    assert_eq!(cfg.kinds.len(), 6, "only the six surviving kinds");
+    assert!(cfg.kinds.values().all(|k| ["opencode", "omp", "claude"].contains(&k.harness.as_str())));
 }
 
 #[test]
@@ -341,20 +343,20 @@ fn test_spawn_args_parsing() {
         "--base".to_string(),
         "main".to_string(),
         "--review".to_string(),
-        "quansu-rev1".to_string(),
-        "quansu".to_string(),
+        "suhuynh-rev1".to_string(),
+        "suhuynh".to_string(),
         "/repo".to_string(),
     ];
     let opts = parse_spawn_args(&args).expect("valid args");
     assert_eq!(opts.base.as_deref(), Some("main"));
     assert!(opts.review);
-    assert_eq!(opts.name, "quansu-rev1");
-    assert_eq!(opts.kind, "quansu");
+    assert_eq!(opts.name, "suhuynh-rev1");
+    assert_eq!(opts.kind, "suhuynh");
 
     // Trailing base without value
     let bad = vec![
-        "quansu-rev1".to_string(),
-        "quansu".to_string(),
+        "suhuynh-rev1".to_string(),
+        "suhuynh".to_string(),
         "/repo".to_string(),
         "--base".to_string(),
     ];
@@ -472,36 +474,32 @@ fn test_strategy_default_reviewer_selection() {
 schema_version = 2
 [strategy]
 default_kind = "tieude"
-default_reviewer = ["quansu", "suhuynh"]
+default_reviewer = ["suhuynh", "ni"]
 builder_reviewer_differ = "harness"
 [kinds.sude]
 harness = "omp"
 model = "google-antigravity/gemini-3.8-flash"
 can_review = false
-[kinds.quansu]
-harness = "codex"
-model = "gpt-6.1-sol"
-can_review = true
 [kinds.suhuynh]
+harness = "claude"
+model = "opus-5.5"
+can_review = true
+[kinds.ni]
 harness = "claude"
 model = "opus-5.5"
 can_review = true
 "#;
     let cfg: quaqua::config::Config = toml::from_str(toml_str).unwrap();
 
-    // 1. With builder sude (omp), select_default_reviewer selects quansu
+    // 1. With builder sude (omp), select_default_reviewer selects suhuynh
     let sel1 = select_default_reviewer("sude", &cfg).unwrap();
-    assert_eq!(sel1, "quansu");
+    assert_eq!(sel1, "suhuynh");
 
-    // 2. When quansu is unavailable (via QUAQUA_UNAVAILABLE_REVIEWERS probe), falls back to suhuynh
-    std::env::set_var("QUAQUA_UNAVAILABLE_REVIEWERS", "quansu");
+    // 2. When suhuynh is unavailable (via QUAQUA_UNAVAILABLE_REVIEWERS probe), falls back to ni
+    std::env::set_var("QUAQUA_UNAVAILABLE_REVIEWERS", "suhuynh");
     let sel_fallback = select_default_reviewer("sude", &cfg).unwrap();
     std::env::remove_var("QUAQUA_UNAVAILABLE_REVIEWERS");
-    assert_eq!(sel_fallback, "suhuynh");
-
-    // 3. With builder quansu (codex), skips quansu (same harness) and selects suhuynh
-    let sel2 = select_default_reviewer("quansu", &cfg).unwrap();
-    assert_eq!(sel2, "suhuynh");
+    assert_eq!(sel_fallback, "ni");
 }
 
 #[test]

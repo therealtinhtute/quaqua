@@ -21,6 +21,32 @@ apply_fixdir="$fixdir/apply"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# plugins/herdr-grid/apply.sh was removed by the R6 cutover (moves are applied
+# in-process by `quaqua grid hook`), so this suite cannot execute. Finding 2
+# (suhuynh-r6r1) requires the 13 cases to be mapped, not silently skipped:
+#
+#   "empty ops -> exit 0, no moves"                    -> grid.rs::test_0_workers_yields_empty_ops
+#   "1 worker -> split beside owner"                   -> grid.rs::test_1_worker_split_beside_anchor
+#   "2 workers -> new_tab + split into @workers (resolved to w1:t90)"
+#                                                      -> grid.rs::test_2_workers_lands_in_grid_tab_never_orchestrator_tab
+#   "3 workers -> new_tab + 2 splits in build order"   -> grid.rs::test_differential_all_fixtures_against_plan_jq
+#   "pane IDs remapped correctly across moves"         -> grid.rs::test_repair_renames_with_new_pane_ids_and_respects_only
+#   "deferred op skipped"                              -> grid.rs::test_deferred_op_propagates_to_dependent_splits
+#   "failed move stops subsequent ops"                 -> grid.rs::test_apply_ops_rechecks_idle_and_fails_if_busy
+#   "zoomed tab detected in snapshot before move"      -> grid.rs::test_edge_fixture_zoomed_anchor_tab
+#   "zoomed_tab reason handled and reported"           -> grid.rs::test_edge_fixture_zoomed_anchor_tab
+#   "untagged and not-ready panes rejected, no move attempted"
+#                                                      -> grid.rs::test_edge_fixture_worker_with_foreign_pane
+#   "other-owner anchor rejected, no move attempted"    -> grid.rs::test_apply_ops_refuses_when_anchor_not_in_target_tab
+#   "pipeline plan.jq | apply.sh is idempotent"        -> grid.rs::test_differential_all_fixtures_against_plan_jq + test_edge_fixture_event_storm_after_move
+#
+# Dropped: "closed pane detected and aborted without moves" — the Rust
+# reconcile_step logs the same snapshot-diff diagnostic to shadow.log; it is a
+# log-only signal, with no state change for the bash case to assert.
+if [[ ! -f "$apply_sh" ]]; then
+  echo "SKIP: plugins/herdr-grid/apply.sh has been replaced by quaqua in R6 cutover"
+  exit 0
+fi
 [[ -x "$apply_sh" ]] || fail "missing or non-executable apply.sh at $apply_sh"
 [[ -f "$plan_jq" ]] || fail "missing plan.jq at $plan_jq"
 [[ -d "$fixdir" ]] || fail "missing fixtures dir at $fixdir"
