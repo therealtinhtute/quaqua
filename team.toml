@@ -1,0 +1,80 @@
+# quaqua team.toml — single source of truth for roles, limits, timers, kinds.
+# Rust migration plan R1: docs/research/herdr-grid-rust-migration-plan.md § `team.toml`.
+# [kinds.*] harness/model/effort values are copied verbatim from models.md — never changed.
+schema_version = 2
+
+[limits]
+depth = 2                         # CoS -> Lead -> Peer
+max_workers_per_orchestrator = 4  # CoS and each Lead; Leads don't count
+weights = { default = 1, pipeline = 2, "dual-lens" = 2 }
+
+[timers]                          # watchdog, rules/_all/worker-timebox.md
+budget_default = "45m"            # brief `Time budget:` wins
+hard_cap = "120m"
+stall = "10m"
+idle = "2m"
+nudge_at = 0.8
+grace = 0.25
+pilot_budget = "30m"
+
+[roles.cos]
+can_spawn  = ["lead", "peer", "taskforce"]
+can_prompt = ["lead", "peer"]
+[roles.lead]
+can_spawn  = ["peer", "taskforce"]
+can_prompt = ["peer"]
+reports_to = "cos"
+[roles.peer]
+can_spawn  = []
+can_prompt = []
+reports_to = "owner"
+
+[strategy]
+default_kind = "tieude"                   # anh iu, 2026-10-15
+default_reviewer = ["suhuynh"]           # first available wins (anh iu, 2026-10-16)
+builder_reviewer_differ = "harness"
+
+[kinds.tieude]                    # harness · model · effort move here from models.md; prose stays there
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+can_review = false                # true for ni, suhuynh, truonglao (claude read-only flags)
+[kinds.detu]
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+can_review = false
+[kinds.sude]
+harness = "omp"
+model = "google-antigravity/gemini-3.8-flash"
+effort = "high"
+can_review = false
+[kinds.ni]
+harness = "claude"
+model = "opus-5.5"
+effort = "low"
+can_review = true
+[kinds.suhuynh]
+harness = "claude"
+model = "opus-5.5"
+effort = "medium"
+can_review = true
+[kinds.truonglao]
+harness = "claude"
+model = "opus-5.5"
+effort = "high"
+can_review = true
+[taskforce.advisor]
+members = ["suhuynh"]
+read_only = true
+[taskforce.dual-lens]
+members = ["truonglao", "suhuynh"]
+read_only = true
+
+[merge]
+integ_branch = "quaqua/{slug}-integ"
+
+[grid]                            # was M3: groups, tab names, deferred statuses
+workers_tab = "workers"
+deferred_statuses = ["working"]
+
+[projects.zimage]                 # optional per-project override, merged over defaults
+max_workers_per_orchestrator = 3

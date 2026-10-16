@@ -2,10 +2,10 @@
 # Usage: auditor.sh
 #   Read-only drift audit of this repo, run by systemd (Linux) or launchd
 #   (macOS), 2x/day. See scripts/auditor/systemd/ and scripts/auditor/launchd/.
-#   Builds the prompt,
-#   runs `codex exec` in a read-only sandbox, and writes the agent's final
-#   message to reports/audit-YYYY-MM-DD-HH.md via --output-last-message.
-#   The agent cannot edit anything; this script is the only writer.
+#   Builds the prompt, runs `claude -p` (print mode) with a read-only tool
+#   whitelist plus a deny rule for git's own `--output` flag and no settings
+#   sources, and writes the agent's final message to
+#   reports/audit-YYYY-MM-DD-HH.md (stdout). This script is the only writer.
 #   Before the prompt it runs cheap deterministic pre-checks on pipeline runs
 #   (runs/pipeline-*.md): unhandled disputed|blocked, clean with an
 #   unresolvable commit or no reviewer
@@ -16,8 +16,8 @@
 #   of silently finding nothing — and flags instruction docs over 100 lines
 #   (doc-rot). Findings are embedded in the prompt for the
 #   agent to verify, correct, and extend.
-#   Env: AUDITOR_MODEL overrides the model (default gpt-6.1-sol, the quansu
-#   tier); AUDITOR_OUT overrides the output path (tests).
+#   Env: AUDITOR_MODEL overrides the model (default claude-opus-5-5);
+#   AUDITOR_OUT overrides the output path (tests).
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -114,7 +114,7 @@ else
     if [[ ! -f "$root/runs/$w.srt.json" ]]; then
       flag "live worker '$w': not started through sandbox wrapper (missing runs/$w.srt.json)"
     fi
-  done < <(jq -r '.result.agents[]? | select((.name // "") | test("^(tieude|detu|sude|ni|suhuynh|truonglao|bacdau|quansu)-") and (test("-lead$") | not)) | .name' <<<"$agents")
+  done < <(jq -r '.result.agents[]? | select((.name // "") | test("^(tieude|detu|sude|ni|suhuynh|truonglao)-") and (test("-lead$") | not)) | .name' <<<"$agents")
 fi
 
 # ── deterministic doc-rot pre-check ─────────────────────────────────────────
@@ -188,18 +188,24 @@ EOF
 pc=${precheck%$'\n'}
 prompt=${prompt//__PRECHECK__/"${pc:-- none}"}
 
-args=(exec --ephemeral -C "$root" --sandbox read-only
-  -c project_doc_max_bytes=0
-  -o "$out")
-auditor_model=${AUDITOR_MODEL:-${SUPERVISOR_MODEL:-gpt-6.1-sol}}
-args+=(-m "$auditor_model")
-args+=("$prompt")
-
+auditor_model=${AUDITOR_MODEL:-claude-opus-5-5}
+# Read-only by tool whitelist, not only by prompt (finding 3, suhuynh-r6r1):
+#   - no Write/Edit tool is granted and Bash is limited to three read-only git
+#     commands;
+#   - --disallowedTools removes those tools' own file-writing flag,
+#     `git ... --output=<file>`, which the allow pattern would otherwise match;
+#   - --setting-sources '' loads no user/project/local settings files, so no
+#     ambient allow rule can re-widen the whitelist under dontAsk.
+# cwd is the repo root so the agent's relative paths resolve there.
 rc=0
-codex "${args[@]}" 2>"$log" >/dev/null || rc=$?
+(cd "$root" && claude -p --model "$auditor_model" --permission-mode dontAsk \
+  --setting-sources "" \
+  --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*)" \
+  --disallowedTools "Bash(git *--output*)" \
+  "$prompt") >"$out" 2>"$log" || rc=$?
 if (( rc != 0 )); then
   cat "$log" >&2
-  [[ -s $out ]] || printf '# Auditor %s — FAILED\n\n`codex exec` exited %d; see scheduler stderr logs (journal or Library/Logs/quaqua-auditor.log).\n' \
+  [[ -s $out ]] || printf '# Auditor %s — FAILED\n\n`claude -p` exited %d; see scheduler stderr logs (journal or Library/Logs/quaqua-auditor.log).\n' \
     "$(date '+%F %H:%M')" "$rc" > "$out"
   exit "$rc"
 fi

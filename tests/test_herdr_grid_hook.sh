@@ -27,6 +27,52 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# plugins/herdr-grid/hook.sh was removed by the R6 cutover (the manifest now
+# runs `quaqua grid hook`), so this suite cannot execute. Finding 2
+# (suhuynh-r6r1) requires the 23 cases to be mapped, not silently skipped:
+#
+#   "shadow mode logged ops and cached snapshot"       -> grid.rs::test_hook_shadow_mode_file_precedence_and_empty_snapshot
+#   "non-shadow mode piped non-deferred ops to apply.sh" -> grid.rs::test_fake_herdr_driver_applies_ops_cleanly
+#   "3a untagged/orchestrator pane status change early-exits" -> grid.rs::test_hook_status_early_exit
+#   "3b non-working to non-working transition early-exits"    -> grid.rs::test_hook_status_early_exit
+#   "3c working state flip reconciles"                 -> grid.rs::test_hook_status_early_exit
+#   "3d working->idle transition reconciles"           -> grid.rs::test_hook_status_early_exit
+#   "killed lock holder PID was successfully reclaimed" -> grid.rs::test_hook_locking_and_dead_pid_reclaim
+#   "stale lock dir with empty pid was successfully reclaimed"
+#                                                      -> grid.rs::test_hook_locking_and_dead_pid_reclaim
+#   "non-shadow live apply converges layout to [] idempotently"
+#                                                      -> grid.rs::test_edge_fixture_event_storm_after_move
+#   "foreign / untagged pane rejected without moves"    -> grid.rs::test_edge_fixture_worker_with_foreign_pane
+#   "event storm absorbed, no duplicate moves, layout converges"
+#                                                      -> grid.rs::test_edge_fixture_event_storm_after_move
+#   "working panes deferred until agent_status_changed to idle"
+#                                                      -> grid.rs::test_reconcile_honours_deferred_statuses
+#   "HERDR_GRID_SHADOW=1 successfully rolls back to shadow mode"
+#                                                      -> grid.rs::test_hook_shadow_mode_file_precedence_and_empty_snapshot
+#   "1-worker freshly spawned in same tab moves into place (ratio 0.4) and grid-workers.sh --check returns 0"
+#                                                      -> grid.rs::test_1_worker_split_beside_anchor + test_reconcile_only_with_custom_tab_converges_immediately
+#   "when apply.sh fails, its stderr reaches shadow.log" -> grid.rs::test_edge_fixture_failed_apply_then_backoff (apply error is logged)
+#   "failing move op backs off on unchanged layout without error loop"
+#                                                      -> grid.rs::test_edge_fixture_failed_apply_then_backoff + test_hook_failure_backoff_uses_post_failure_sig_and_scratch_normalization
+#   "2 freshly spawned workers in same tab converge to [] under event triggers"
+#                                                      -> grid.rs::test_2_workers_lands_in_grid_tab_never_orchestrator_tab
+#   "non-cos owner without orchestrator targets group tab, leaves CoS tab untouched"
+#                                                      -> grid.rs::test_repair_arranges_all_groups_using_tab_as_default
+#
+# Dropped because the mechanism no longer exists as bash (the Rust lock guard
+# and the in-process apply replace the script plumbing, so there is nothing
+# left to assert from a shell): "closed pane detected via snapshot diff",
+# "event arriving during unlock was safely handled", "concurrent events
+# serialized without lock leaks", "partial-apply stops execution, leaves
+# subsequent panes unmoved, and releases lock" (the Rust apply_ops error path
+# is grid.rs::test_apply_ops_rechecks_idle_and_fails_if_busy), "plugin manifest
+# subscribes only to allowed events and never layout.updated" (the manifest is
+# static data in herdr-plugin.toml after the cutover).
+if [[ ! -f "$hook_src" ]]; then
+  echo "SKIP: plugins/herdr-grid/hook.sh has been replaced by quaqua in R6 cutover"
+  exit 0
+fi
+
 # Setup sandbox
 mkdir -p "$T/bin" "$T/state" "$T/plugin"
 cp "$hook_src" "$T/plugin/hook.sh"

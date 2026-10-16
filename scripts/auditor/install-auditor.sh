@@ -16,12 +16,12 @@ case $(uname -s) in
       exit 1
     fi
     bash_bin="$(cd "$(dirname "$bash_bin")" && pwd -P)/$(basename "$bash_bin")"
-    codex=$(command -v codex) \
-      || { echo 'error: codex must be on PATH before installing the auditor' >&2; exit 1; }
-    codex="$(cd "$(dirname "$codex")" && pwd -P)/$(basename "$codex")"
+    claude=$(command -v claude) \
+      || { echo 'error: claude must be on PATH before installing the auditor' >&2; exit 1; }
+    claude="$(cd "$(dirname "$claude")" && pwd -P)/$(basename "$claude")"
     # launchd does not source shell profiles. Keep the install-time toolchain
-    # (e.g. node/mise) as well as Bash and the directory containing codex.
-    job_path="$(dirname "$bash_bin"):$(dirname "$codex"):${PATH:-/usr/bin:/bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    # (e.g. node/mise) as well as Bash and the directory containing claude.
+    job_path="$(dirname "$bash_bin"):$(dirname "$claude"):${PATH:-/usr/bin:/bin}:/usr/bin:/bin:/usr/sbin:/sbin"
     dst="$HOME/Library/LaunchAgents"
     plist="$dst/com.quaqua.auditor.plist"
     mkdir -p "$dst" "$HOME/Library/Logs"

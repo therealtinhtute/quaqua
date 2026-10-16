@@ -83,9 +83,9 @@ grep -q 'reports/audit-\*\.md\|reports/audit-' "$root/AGENTS.md" \
   || fail "AGENTS session-start glob != scripts/auditor/auditor.sh output"
 echo "ok: auditor entrypoint + scheduling assets agree"
 
-# ── routing consistency: quansu findings flow through the pipeline ────────────
+# ── routing consistency: review findings flow through the pipeline ────────────
 ! grep -q 'to CoS → sude fix\|to CoS -> sude fix' "$root/models.md" \
   || fail "models.md still routes review findings around the pipeline"
-echo "ok: quansu findings route back to the builder via pipeline.sh"
+echo "ok: review findings route back to the builder via pipeline.sh"
 
 echo "PASS"

@@ -7,24 +7,24 @@ platforms = ["linux", "macos"]
 
 [[events]]
 on = "pane.created"
-command = ["bash", "hook.sh"]
+command = ["quaqua", "grid", "hook"]
 
 [[events]]
 on = "pane.agent_detected"
-command = ["bash", "hook.sh"]
+command = ["quaqua", "grid", "hook"]
 
 [[events]]
 on = "pane.agent_status_changed"
-command = ["bash", "hook.sh"]
+command = ["quaqua", "grid", "hook"]
 
 [[events]]
 on = "pane.moved"
-command = ["bash", "hook.sh"]
+command = ["quaqua", "grid", "hook"]
 
 [[events]]
 on = "tab.closed"
-command = ["bash", "hook.sh"]
+command = ["quaqua", "grid", "hook"]
 
 [[events]]
 on = "workspace.closed"
-command = ["bash", "hook.sh"]
+command = ["quaqua", "grid", "hook"]

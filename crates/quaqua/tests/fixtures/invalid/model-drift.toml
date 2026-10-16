@@ -1,0 +1,21 @@
+# invalid: kinds.tieude.model differs from the models.md routing cell.
+# Run with --models pointing at the repo models.md so the drift rule is active.
+schema_version = 2
+
+[strategy]
+default_kind = "tieude"
+default_reviewer = ["suhuynh"]
+
+[kinds.tieude]
+harness = "opencode"
+model = "opencode-go/ghost"
+can_review = false
+
+[kinds.suhuynh]
+harness = "claude"
+model = "opus-5.5"
+effort = "medium"
+can_review = true
+
+[merge]
+integ_branch = "quaqua/{slug}-integ"
