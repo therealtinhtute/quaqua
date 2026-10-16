@@ -47,6 +47,10 @@ enum Command {
         #[command(subcommand)]
         cmd: GridCmd,
     },
+    /// PreToolUse(Bash) hook: block direct pane/workspace spawn/move calls.
+    Gate,
+    /// Boot the per-workspace personal state a fresh clone needs.
+    Init,
 }
 
 #[derive(Subcommand)]
@@ -412,6 +416,14 @@ fn main() {
                     1
                 }
             },
+        },
+        Some(Command::Gate) => quaqua::gate::run(),
+        Some(Command::Init) => match quaqua::init::run() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
         },
         None => 0,
     };
