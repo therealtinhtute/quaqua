@@ -1,0 +1,48 @@
+//! `quaqua gate` — the PreToolUse(Bash) hook that replaced
+//! `scripts/hooks/herdr-gate.sh`: a stateless tokenizer + policy check over the
+//! hook JSON on stdin. A blocked command prints the message below to stderr and
+//! exits 2; anything else exits 0.
+
+pub mod policy;
+pub mod tokenizer;
+
+pub use policy::{check, check_segments, Verdict};
+
+const BLOCK_MESSAGE: &str = "blocked: spawn/move panes and workspaces only via scripts/ (spawn-worker.sh, spawn-lead.sh, grid-workers.sh, cleanup-worker.sh, cleanup-lead.sh) — rules/_all/fanout-agent-grid.md";
+
+/// Entry point for `quaqua gate`: read the Claude Code hook JSON on stdin,
+/// check `.tool_input.command`, print the block message to stderr and return
+/// the process exit code (2 = blocked, 0 = allow).
+pub fn run() -> i32 {
+    let mut buf = String::new();
+    {
+        use std::io::Read;
+        let _ = std::io::stdin().read_to_string(&mut buf);
+    }
+    let cmd = extract_command(&buf);
+    if cmd.is_empty() {
+        return 0;
+    }
+    match check(&cmd) {
+        Verdict::Block => {
+            eprintln!("{BLOCK_MESSAGE}");
+            2
+        }
+        Verdict::Allow => 0,
+    }
+}
+
+/// The hook contract: `{"tool_name":"Bash","tool_input":{"command":"…"}}`.
+/// Missing/unparseable input yields an empty command (the bash script reads
+/// `.tool_input.command // ""`).
+fn extract_command(json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.get("tool_input")?
+                .get("command")?
+                .as_str()
+                .map(String::from)
+        })
+        .unwrap_or_default()
+}
