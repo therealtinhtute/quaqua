@@ -372,3 +372,177 @@ fn test_cli_cap_smoke() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.trim().parse::<i64>().is_ok());
 }
+#[test]
+fn test_taskforce_dual_lens_cap_reservation() {
+    struct MockHerdr;
+    impl HerdrOps for MockHerdr {
+        fn run(&self, _: &[&str]) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn agent_list(&self) -> std::io::Result<String> {
+            Ok(r#"{"result":{"agents":[]}}"#.to_string())
+        }
+        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
+            Ok((false, String::new()))
+        }
+        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool {
+            true
+        }
+        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> {
+            self.run(&[])
+        }
+        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<Child> {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "mock"))
+        }
+    }
+
+    let tmp = std::env::temp_dir().join(format!("quaqua-cap-tf-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let mock = MockHerdr;
+
+    // Zero workers, no state -> 0
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 0);
+
+    // Active dual-lens state with current PID (alive) -> reserves 2 slots
+    let state_file = tmp.join("taskforce-mytest.state");
+    std::fs::write(
+        &state_file,
+        format!("task=mytest\nkind=dual-lens\nowner=cos\nfinished=0\ntaskforce_pid={}\n", std::process::id()),
+    ).unwrap();
+
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 2);
+
+    // Finished dual-lens -> 0 slots reserved
+    std::fs::write(
+        &state_file,
+        format!("task=mytest\nkind=dual-lens\nowner=cos\nfinished=1\ntaskforce_pid={}\n", std::process::id()),
+    ).unwrap();
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 0);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_pipeline_blockers_none_exemption() {
+    use quaqua::pipeline::has_real_blockers;
+
+    assert!(!has_real_blockers("## Blockers\n- none\n"));
+    assert!(!has_real_blockers("## Blockers\nnone\n"));
+    assert!(!has_real_blockers("## Blockers\n* none\n"));
+    assert!(!has_real_blockers("## Blockers\n- None\n"));
+    assert!(!has_real_blockers("## Blockers\n\n- none\n\n## Lessons\n- none\n"));
+    assert!(!has_real_blockers("Just plan text\n\n## Lessons\n- none\n"));
+
+    // Real blockers must return true
+    assert!(has_real_blockers("## Blockers\n- cannot plan without the spec\n"));
+    assert!(has_real_blockers("## Blockers\n- implementation incomplete\n"));
+    assert!(has_real_blockers("## Blockers\n- none\n- also a real blocker\n"));
+}
+
+#[test]
+fn test_strategy_default_reviewer_selection() {
+    use quaqua::pipeline::select_default_reviewer;
+
+    let toml_str = r#"
+schema_version = 2
+[strategy]
+default_kind = "tieude"
+default_reviewer = ["quansu", "suhuynh"]
+builder_reviewer_differ = "harness"
+[kinds.sude]
+harness = "omp"
+model = "google-antigravity/gemini-3.8-flash"
+can_review = false
+[kinds.quansu]
+harness = "codex"
+model = "gpt-6.1-sol"
+can_review = true
+[kinds.suhuynh]
+harness = "claude"
+model = "opus-5.5"
+can_review = true
+"#;
+    let cfg: quaqua::config::Config = toml::from_str(toml_str).unwrap();
+
+    // 1. With builder sude (omp), select_default_reviewer selects quansu
+    let sel1 = select_default_reviewer("sude", &cfg).unwrap();
+    assert_eq!(sel1, "quansu");
+
+    // 2. When quansu is unavailable (via QUAQUA_UNAVAILABLE_REVIEWERS probe), falls back to suhuynh
+    std::env::set_var("QUAQUA_UNAVAILABLE_REVIEWERS", "quansu");
+    let sel_fallback = select_default_reviewer("sude", &cfg).unwrap();
+    std::env::remove_var("QUAQUA_UNAVAILABLE_REVIEWERS");
+    assert_eq!(sel_fallback, "suhuynh");
+
+    // 3. With builder quansu (codex), skips quansu (same harness) and selects suhuynh
+    let sel2 = select_default_reviewer("quansu", &cfg).unwrap();
+    assert_eq!(sel2, "suhuynh");
+}
+
+#[test]
+fn test_pipeline_project_override_cap() {
+    let toml_str = r#"
+schema_version = 2
+[limits]
+max_workers_per_orchestrator = 4
+weights = { pipeline = 2 }
+[projects.zimage]
+max_workers_per_orchestrator = 3
+"#;
+    let base_cfg: quaqua::config::Config = toml::from_str(toml_str).unwrap();
+    let resolved = quaqua::config::resolve(base_cfg.clone(), Some("zimage")).unwrap();
+    assert_eq!(resolved.limits.max_workers_per_orchestrator, 3);
+
+    let pipe_weight = resolved.limits.weights.get("pipeline").copied().unwrap_or(2);
+    let slots_used = 2; // owner has 2 slots in use
+    // For standard project (cap 4): 2 + 2 <= 4 -> ok
+    assert!(slots_used + pipe_weight <= base_cfg.limits.max_workers_per_orchestrator);
+    // For zimage (cap 3): 2 + 2 > 3 -> refused
+    assert!(slots_used + pipe_weight > resolved.limits.max_workers_per_orchestrator);
+}
+
+#[test]
+fn test_sude_harness_mapped_to_omp() {
+    use quaqua::pipeline::harness_of;
+    assert_eq!(harness_of("sude"), Some("omp"));
+}
+
+#[test]
+fn test_claude_review_mode_verification() {
+    use quaqua::worker::spawn::parse_spawn_args;
+
+    let args = vec![
+        "--review".to_string(),
+        "suhuynh-testrev".to_string(),
+        "suhuynh".to_string(),
+        ".".to_string(),
+    ];
+    let opts = parse_spawn_args(&args).unwrap();
+    assert!(opts.review);
+    assert_eq!(opts.kind, "suhuynh");
+}

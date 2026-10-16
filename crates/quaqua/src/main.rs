@@ -47,6 +47,26 @@ enum Command {
         #[command(subcommand)]
         cmd: GridCmd,
     },
+    /// Project Lead operations: spawn, cleanup.
+    Lead {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Taskforce operations: advisor, dual-lens.
+    Taskforce {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Lead merge queue.
+    Merge {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Pipeline orchestration: build -> review -> fix.
+    Pipeline {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// PreToolUse(Bash) hook: block direct pane/workspace spawn/move calls.
     Gate,
     /// Boot the per-workspace personal state a fresh clone needs.
@@ -378,6 +398,42 @@ fn main() {
             }
         },
         Some(Command::Cap { args }) => match handle_cap(&args, &herdr) {
+            Ok(()) => 0,
+            Err((rc, err)) => {
+                if !err.is_empty() {
+                    eprint!("{err}");
+                }
+                rc
+            }
+        },
+        Some(Command::Lead { args }) => match quaqua::lead::handle_lead(&args, &git, &herdr) {
+            Ok(()) => 0,
+            Err((rc, err)) => {
+                if !err.is_empty() {
+                    eprint!("{err}");
+                }
+                rc
+            }
+        },
+        Some(Command::Taskforce { args }) => match quaqua::taskforce::handle_taskforce(&args, &git, &herdr) {
+            Ok(()) => 0,
+            Err((rc, err)) => {
+                if !err.is_empty() {
+                    eprint!("{err}");
+                }
+                rc
+            }
+        },
+        Some(Command::Merge { args }) => match quaqua::merge::handle_merge(&args, &git) {
+            Ok(()) => 0,
+            Err((rc, err)) => {
+                if !err.is_empty() {
+                    eprint!("{err}");
+                }
+                rc
+            }
+        },
+        Some(Command::Pipeline { args }) => match quaqua::pipeline::handle_pipeline(&args, &git, &herdr) {
             Ok(()) => 0,
             Err((rc, err)) => {
                 if !err.is_empty() {

@@ -36,9 +36,20 @@ pub fn default_runs_dir() -> PathBuf {
 
 pub fn find_grid_script() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
-        let candidate = PathBuf::from(dir).join("grid-workers.sh");
+        let p = PathBuf::from(&dir);
+        let candidate = p.join("grid-workers.sh");
         if candidate.is_file() {
             return Some(candidate);
+        }
+        let candidate2 = p.join("../worker/grid-workers.sh");
+        if candidate2.is_file() {
+            return Some(candidate2);
+        }
+        if let Some(parent) = p.parent() {
+            let candidate3 = parent.join("worker/grid-workers.sh");
+            if candidate3.is_file() {
+                return Some(candidate3);
+            }
         }
     }
     if let Ok(exe) = std::env::current_exe() {

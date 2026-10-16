@@ -95,21 +95,38 @@ pub fn count_owner_slots<H: HerdrOps>(
             o_workers.push(w.clone());
         }
     }
+    let cfg_opt = crate::config::load_team_config().ok();
+    let pipe_weight = cfg_opt
+        .as_ref()
+        .and_then(|c| c.limits.weights.get("pipeline"))
+        .copied()
+        .unwrap_or(2);
+    let dual_lens_weight = cfg_opt
+        .as_ref()
+        .and_then(|c| c.limits.weights.get("dual-lens"))
+        .copied()
+        .unwrap_or(2);
 
     let mut res_slots: i64 = 0;
     if let Ok(entries) = std::fs::read_dir(runs_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if file_name.starts_with("pipeline-") && file_name.ends_with(".state") {
-                let content = match std::fs::read_to_string(&path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                if !content.lines().any(|l| l.trim() == "finished=0") {
-                    continue;
-                }
+            let is_pipeline = file_name.starts_with("pipeline-") && file_name.ends_with(".state");
+            let is_taskforce = (file_name.starts_with("taskforce-") || file_name.starts_with("dual-lens-")) && file_name.ends_with(".state");
+            if !is_pipeline && !is_taskforce {
+                continue;
+            }
 
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if !content.lines().any(|l| l.trim() == "finished=0") {
+                continue;
+            }
+
+            if is_pipeline {
                 let mut p_lead = String::new();
                 let mut p_pid = String::new();
                 let mut p_builder = String::new();
@@ -156,13 +173,92 @@ pub fn count_owner_slots<H: HerdrOps>(
                             p_cur_live += 1;
                         }
                     }
-                    if p_cur_live < 2 {
-                        res_slots += 2 - p_cur_live;
+                    if p_cur_live < pipe_weight {
+                        res_slots += pipe_weight - p_cur_live;
+                    }
+                }
+            } else if is_taskforce {
+                let mut t_lead = String::new();
+                let mut t_pid = String::new();
+                let mut t_kind = String::new();
+                let mut t_task = String::new();
+
+                for line in content.lines() {
+                    let line = line.trim();
+                    if let Some(v) = line.strip_prefix("lead=") {
+                        t_lead = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("owner=") {
+                        t_lead = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("taskforce_pid=") {
+                        t_pid = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("pid=") {
+                        t_pid = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("kind=") {
+                        t_kind = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("taskforce=") {
+                        t_kind = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("task=") {
+                        t_task = v.to_string();
+                    }
+                }
+
+                let t_owner = if t_lead.is_empty() { "cos" } else { &t_lead };
+                if t_owner != owner {
+                    continue;
+                }
+
+                let weight = if t_kind == "dual-lens" || file_name.starts_with("dual-lens-") {
+                    dual_lens_weight
+                } else {
+                    cfg_opt
+                        .as_ref()
+                        .and_then(|c| c.limits.weights.get(&t_kind))
+                        .copied()
+                        .unwrap_or(1)
+                };
+
+                let mut t_alive = false;
+                if !t_pid.is_empty() && is_pid_alive(&t_pid) {
+                    t_alive = true;
+                } else if !t_task.is_empty() {
+                    for w in &live_workers {
+                        let tf_file = runs_dir.join(format!("{w}.taskforce"));
+                        let w_tf = std::fs::read_to_string(&tf_file)
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_default();
+                        if w_tf == t_task
+                            || w.ends_with(&format!("-{t_task}"))
+                            || w.ends_with(&format!("-{t_task}dl1"))
+                            || w.ends_with(&format!("-{t_task}dl2"))
+                        {
+                            t_alive = true;
+                            break;
+                        }
+                    }
+                }
+
+                if t_alive {
+                    let mut t_cur_live: i64 = 0;
+                    for w in &o_workers {
+                        let tf_file = runs_dir.join(format!("{w}.taskforce"));
+                        let w_tf = std::fs::read_to_string(&tf_file)
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_default();
+                        if !t_task.is_empty()
+                            && (w_tf == t_task
+                                || w.ends_with(&format!("-{t_task}"))
+                                || w.ends_with(&format!("-{t_task}dl1"))
+                                || w.ends_with(&format!("-{t_task}dl2")))
+                        {
+                            t_cur_live += 1;
+                        }
+                    }
+                    if t_cur_live < weight {
+                        res_slots += weight - t_cur_live;
                     }
                 }
             }
         }
     }
-
     o_live + res_slots
 }
