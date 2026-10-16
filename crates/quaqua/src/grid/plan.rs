@@ -215,7 +215,7 @@ pub fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) 
 /// The apply path and the hook both propagate that through this same rule;
 /// the planner must too, or the check counts an unrunnable op as pending and
 /// times out while its anchor is still working.
-fn propagate_deferrals(ops: &mut [Op]) {
+pub(crate) fn propagate_deferrals(ops: &mut [Op]) {
     let mut deferred_panes: HashSet<String> = HashSet::new();
     let mut workers_tab_deferred = false;
     for op in ops.iter_mut() {

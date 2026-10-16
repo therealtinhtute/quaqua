@@ -11,6 +11,12 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 src="$(cd "$here/.." && pwd)/scripts"
+# The binary under test: the repo build (so the suite exercises the working
+# tree, like tests/test_pipeline_grid.sh), else `quaqua` on PATH. QUAQUA_BIN
+# picked by the caller always wins.
+if [[ -z "${QUAQUA_BIN:-}" && -x "$here/../target/debug/quaqua" ]]; then
+  export QUAQUA_BIN="$here/../target/debug/quaqua"
+fi
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-pipeline.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -85,6 +91,15 @@ case "${1:-} ${2:-}" in
     fi
     exit "${FAKE_RC:-0}" ;;
   "pane split") printf '{"result":{"pane":{"pane_id":"%%1"}}}\n' ;;
+  "pane move")
+    # GRID_MOVE_FAIL makes the move a no-op (changed=false) so a repair failure
+    # can be exercised; otherwise the pane lands in a stub tab.
+    if [ -n "${GRID_MOVE_FAIL:-}" ]; then
+      printf '{"result":{"move_result":{"changed":false,"reason":"same_tab"}}}\n'
+    else
+      printf '{"result":{"move_result":{"changed":true,"pane":{"pane_id":"%%9","tab_id":"w1:t9"}}}}\n'
+    fi
+    exit 0 ;;
   "pane wait-output") exit 1 ;;   # no first-run trust dialog
   "api snapshot")
     # the pipeline's grid check is in-process: GRID_FAIL fails every check
@@ -344,30 +359,45 @@ run_pipe2 GRID_TAB=my-tab -- gto "$T/repo" --brief "$T/brief.md"
 [[ "$(nchecks)" -ge 1 ]] || fail "gto: no grid check: $(cat "$T/calls")"
 echo "ok: GRID_TAB overrides the workers tab label"
 
-# --tab + --only scope the in-process check: the fixture's only pending move
-# belongs to group "my-tab" and to sude-gto, so GRID_TAB=my-tab picks it up
-# (check fails, GRID_CHECK_TIMEOUT_SEC=0) while the derived repo-workers does not
-cat > "$T/gto-pending.json" <<'JSON'
+# A mis-arranged owner population is repaired into GRID_TAB before any prompt:
+# two workers of the owner sit in the orchestrator tab, one working + one idle.
+# The idle one creates the tab labelled GRID_TAB; the working one is reported
+# deferred and never moved (rules/_all/fanout-agent-grid.md).
+cat > "$T/misarranged.json" <<'JSON'
 {"snapshot":{"workspaces":[{"workspace_id":"w1","label":"repo"}],
- "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":1},
-         {"tab_id":"w1:t2","workspace_id":"w1","label":"2","pane_count":1}],
+ "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":3}],
  "panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle",
            "tokens":{"grid_role":"orchestrator","grid_owner":"cos","grid_ready":"1"}},
-          {"pane_id":"w1:p5","tab_id":"w1:t2","workspace_id":"w1","agent_status":"idle","label":"sude-gtox",
+          {"pane_id":"w1:p5","tab_id":"w1:t1","workspace_id":"w1","agent_status":"working","label":"sude-gtm",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"my-tab","grid_ready":"1"}},
+          {"pane_id":"w1:p6","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle","label":"sude-gtm2",
            "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"my-tab","grid_ready":"1"}}],
- "layouts":[],"agents":[{"name":"sude-gtox","pane_id":"w1:p5","agent_status":"idle"}]}}
+ "layouts":[],"agents":[{"name":"sude-gtm","pane_id":"w1:p5","agent_status":"working"},
+                        {"name":"sude-gtm2","pane_id":"w1:p6","agent_status":"idle"}]}}
 JSON
-run_pipe2 GRID_TAB=my-tab GRID_SNAPSHOT="$T/gto-pending.json" GRID_CHECK_TIMEOUT_SEC=0 \
-          -- gtox "$T/repo" --brief "$T/brief.md"
-[[ $rc -eq 5 ]] || fail "gtox: exit $rc, want 5: $(cat "$T/err")"
-grep -q 'warning: grid check failed' "$T/err" \
-  || fail "gtox: pending my-tab move not detected: $(cat "$T/err")"
-run_pipe2 GRID_SNAPSHOT="$T/gto-pending.json" GRID_CHECK_TIMEOUT_SEC=0 \
-          -- gtox2 "$T/repo" --brief "$T/brief.md"
-[[ $rc -eq 5 ]] || fail "gtox2: exit $rc, want 5: $(cat "$T/err")"
+run_pipe2 GRID_TAB=my-tab GRID_SNAPSHOT="$T/misarranged.json" \
+          -- gtm "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "gtm: exit $rc, want 5 (plan-ready): $(cat "$T/err")"
 ! grep -q 'warning: grid check failed' "$T/err" \
-  || fail "gtox2: the derived tab must not scope the my-tab move in: $(cat "$T/err")"
-echo "ok: --tab + --only scope the in-process grid check"
+  || fail "gtm: a repairable layout must not warn: $(cat "$T/err")"
+grep -q 'pane move w1:p6 --new-tab --label my-tab --no-focus' "$T/calls" \
+  || fail "gtm: idle worker not moved into GRID_TAB: $(cat "$T/calls")"
+! grep -q 'pane move w1:p5' "$T/calls" \
+  || fail "gtm: the working worker must never move: $(cat "$T/calls")"
+grep -q 'deferred: w1:p5 (working)' "$T/err" \
+  || fail "gtm: working worker not reported deferred: $(cat "$T/err")"
+move_line=$(lineno 'pane move w1:p6')
+prompt_line=$(lineno 'agent prompt sude-gtm')
+[[ -n "$move_line" && -n "$prompt_line" && "$move_line" -lt "$prompt_line" ]] \
+  || fail "gtm: repair not before the prompt: $(cat "$T/calls")"
+echo "ok: mis-arranged owner population repaired into GRID_TAB before the prompt"
+
+# without GRID_TAB the repair labels the tab it creates <repo>-workers
+run_pipe2 GRID_SNAPSHOT="$T/misarranged.json" -- gtd "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "gtd: exit $rc, want 5: $(cat "$T/err")"
+grep -q 'pane move w1:p6 --new-tab --label repo-workers --no-focus' "$T/calls" \
+  || fail "gtd: derived workers tab label not used: $(cat "$T/calls")"
+echo "ok: without GRID_TAB the repair labels the created tab <repo>-workers"
 
 # a failing grid PAUSES the pipeline before any prompt (F12, MANDATORY rule)
 run_pipe2 GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0 -- gfx "$T/repo" --brief "$T/brief.md"
@@ -384,10 +414,11 @@ grep -q 'agent prompt sude-gfx' "$T/calls" \
   || fail "gfx resume: plan prompt not sent after arrange"
 echo "ok: grid failure pauses pre-prompt; resume after arranging continues"
 
-# the reviewer-phase grid failure also pauses before the review prompt: the
-# pending move belongs to the reviewer (suhuynh-gfrr1), so the builder's
-# --only sude-gfr checks converge and only the reviewer check trips
-cat > "$T/reviewer-pending.json" <<'JSON'
+# a repair that cannot move (herdr answers changed=false) also pauses before the
+# review prompt: the reviewer's own pane is mis-arranged, so its repair trips
+# (the builder is not in this snapshot). The reviewer sits alone in a scratch
+# tab, not beside the CoS anchor.
+cat > "$T/reviewer-misarranged.json" <<'JSON'
 {"snapshot":{"workspaces":[{"workspace_id":"w1","label":"repo"}],
  "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":1},
          {"tab_id":"w1:t2","workspace_id":"w1","label":"2","pane_count":1}],
@@ -401,7 +432,7 @@ run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
           -- gfr "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "gfr run1: exit $rc, want 5"
 run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
-          GRID_SNAPSHOT="$T/reviewer-pending.json" GRID_CHECK_TIMEOUT_SEC=0 \
+          GRID_SNAPSHOT="$T/reviewer-misarranged.json" GRID_MOVE_FAIL=1 \
           FAKE_REVIEW_MD=$'ok\nVerdict: clean' -- --resume gfr "$T/repo"
 [[ $rc -eq 5 ]] || fail "gfr: exit $rc, want 5 (reviewer-grid pause): $(cat "$T/err")"
 grep -q 'warning: grid check failed' "$T/err" || fail "gfr: no grid warning: $(cat "$T/err")"

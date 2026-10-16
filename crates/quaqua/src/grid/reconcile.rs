@@ -125,6 +125,7 @@ pub fn run_reconcile<D: HerdrDriver>(
     deferred_statuses: Option<&[&str]>,
 ) -> Result<(), String> {
     let tab = opts.tab.as_deref().unwrap_or(default_tab);
+    let requested = opts.tab.clone().filter(|t| !t.is_empty());
     let owner_env = opts
         .owner
         .clone()
@@ -268,6 +269,27 @@ pub fn run_reconcile<D: HerdrDriver>(
             return Err(format!("too many workers in group {group}: {n} (max 4)"));
         }
 
+        // Pivot: the tab is created by an idle worker, never by a working one.
+        // A deferred anchor must not cancel the runnable panes of its own group
+        // (a working pane is never moved, but the idle ones still are; the
+        // working pane is reported deferred and a later pass moves it).
+        let build_orders = match n {
+            1 => vec![0],
+            2 => vec![0, 1],
+            3 => vec![0, 2, 1],
+            4 => vec![0, 2, 1, 3],
+            _ => vec![],
+        };
+        let pivot_idx = gws
+            .iter()
+            .position(|w| !is_deferred(w.agent_status.as_deref()))
+            .unwrap_or(0);
+        let mut order = build_orders.clone();
+        if let Some(p) = order.iter().position(|i| *i == pivot_idx) {
+            order.remove(p);
+        }
+        order.insert(0, pivot_idx);
+
         // Determine movable workers under --only for this group
         for w in &gws {
             let name = snap
@@ -315,7 +337,12 @@ pub fn run_reconcile<D: HerdrDriver>(
                 .filter(|t| {
                     let ws_ok = t.workspace_id.as_deref() == Some(owner_ws) || owner_ws.is_empty();
                     let anchor_ok = anchor_tab.map(|at| t.tab_id != at).unwrap_or(true);
-                    let group_ok = super::plan::is_group_tab(group, t.label.as_deref());
+                    let requested_ok = match (requested.as_deref(), t.label.as_deref()) {
+                        (Some(r), Some(l)) => r == l,
+                        _ => false,
+                    };
+                    let group_ok =
+                        super::plan::is_group_tab(group, t.label.as_deref()) || requested_ok;
                     if !(ws_ok && anchor_ok && group_ok) {
                         return false;
                     }
@@ -351,19 +378,11 @@ pub fn run_reconcile<D: HerdrDriver>(
                 Vec::new()
             };
 
-            let build_orders = match n {
-                1 => vec![0],
-                2 => vec![0, 1],
-                3 => vec![0, 2, 1],
-                4 => vec![0, 2, 1, 3],
-                _ => vec![],
-            };
-
             let target_tab_ref = valid_tab
                 .map(|t| t.tab_id.clone())
                 .unwrap_or_else(|| "@workers".to_string());
 
-            for idx in build_orders {
+            for (pos, idx) in order.iter().copied().enumerate() {
                 let w = gws[idx];
                 let is_movable = movable_workers.iter().any(|(p, _)| p.pane_id == w.pane_id);
 
@@ -387,8 +406,10 @@ pub fn run_reconcile<D: HerdrDriver>(
                     continue;
                 }
 
-                // N1: Fallback logic mirroring the legacy arranger (441-461)
-                let (mode, anchor_idx, dir, ratio) = if idx == 0 {
+                // N1: Fallback logic mirroring the legacy arranger (441-461).
+                // `pos` decides who creates the tab (always the idle pivot);
+                // `idx` keeps the per-worker geometry table unchanged.
+                let (mode, anchor_idx, dir, ratio) = if pos == 0 {
                     ("new-tab", 0, "right", 0.5)
                 } else if n == 2 {
                     ("split", 0, "right", 0.5)
@@ -406,7 +427,9 @@ pub fn run_reconcile<D: HerdrDriver>(
                             op: "move".to_string(),
                             pane: w.pane_id.clone(),
                             deferred: is_deferred(w.agent_status.as_deref()),
-                            target: Target::NewTab { label: group.clone() },
+                            target: Target::NewTab {
+                                label: requested.clone().unwrap_or_else(|| group.clone()),
+                            },
                         });
                     } else {
                         let anchor_target = if !present.is_empty() { present[0].clone() } else { w.pane_id.clone() };
@@ -455,7 +478,9 @@ pub fn run_reconcile<D: HerdrDriver>(
                             op: "move".to_string(),
                             pane: w.pane_id.clone(),
                             deferred: is_deferred(w.agent_status.as_deref()),
-                            target: Target::NewTab { label: group.clone() },
+                            target: Target::NewTab {
+                                label: requested.clone().unwrap_or_else(|| group.clone()),
+                            },
                         });
                     }
                 }
@@ -463,6 +488,11 @@ pub fn run_reconcile<D: HerdrDriver>(
             }
         }
     }
+
+    // The planned flags must equal what apply_ops will really do: a split whose
+    // anchor is deferred cannot run either, and reporting it as runnable would
+    // hide the reason a repair moved fewer panes than it planned.
+    super::plan::propagate_deferrals(&mut repair_ops);
 
     if opts.dry_run {
         let serialized = serde_json::to_string(&repair_ops).map_err(|e| e.to_string())?;
@@ -472,6 +502,18 @@ pub fn run_reconcile<D: HerdrDriver>(
 
     let pane_map = apply_ops(driver, &repair_ops, Some(&snap))?;
 
+    // A working pane is never moved; say so instead of exiting 0 silently.
+    for op in repair_ops.iter().filter(|op| op.deferred) {
+        let status = snap
+            .panes
+            .iter()
+            .find(|p| p.pane_id == op.pane)
+            .and_then(|p| p.agent_status.as_deref())
+            .filter(|s| def_list.contains(s))
+            .unwrap_or("working");
+        eprintln!("deferred: {} ({})", op.pane, status);
+    }
+
     // Finding 1 remainder: Rename failure is NOT swallowed; matches bash set -e!
     for (w, target_name) in movable_workers {
         let cur_pane = pane_map.get(&w.pane_id).cloned().unwrap_or_else(|| w.pane_id.clone());
@@ -479,6 +521,24 @@ pub fn run_reconcile<D: HerdrDriver>(
     }
 
     Ok(())
+}
+
+/// In-process grid repair: the owner-wide arrange used by the pipeline after a
+/// spawn/cleanup. `tab` is the workers tab: the scope it reuses and the label of
+/// the tab it creates. Idle panes move; working ones stay put and are reported
+/// `deferred: <pane> (<status>)` on stderr.
+pub fn run_grid_repair(tab: &str, owner: Option<&str>) -> Result<(), String> {
+    let opts = ReconcileOptions {
+        check: false,
+        repair: true,
+        tab: Some(tab.to_string()),
+        only: None,
+        owner: owner.map(str::to_string),
+        dry_run: false,
+        timeout_sec: None,
+    };
+    let mut driver = CliHerdrDriver::new();
+    run_reconcile(&mut driver, &opts, tab, None)
 }
 
 /// In-process grid check: the Rust replacement for the legacy arranger's

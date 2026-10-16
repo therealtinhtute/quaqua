@@ -49,8 +49,10 @@ pub const USAGE: &str = "\
 #   Env budgets (sec): PIPELINE_PLAN_BUDGET_SEC 900 · _BUILD_ 2700 · _REVIEW_
 #   900 · _FIX_ 1200 · PIPELINE_MAX_SEC 7200 (work time; time between
 #   invocations does not count) · PIPELINE_REVIEW_LINES 150.
-#   Grid: after each spawn/cleanup its own workers are arranged into tab
-#   GRID_TAB (default <repo-basename>-workers); GRID_SKIP=1 with QUAQUA_TEST=1 disables (tests).";
+#   Grid: after each spawn/cleanup the pipeline arranges its whole owner
+#   population into tab GRID_TAB (default <repo-basename>-workers): idle panes
+#   move, working ones are reported 'deferred: <pane> (working)'; GRID_SKIP=1
+#   with QUAQUA_TEST=1 disables (tests).";
 
 pub fn harness_of(kind: &str) -> Option<&'static str> {
     match kind {
@@ -664,11 +666,11 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         format!("{bname}-workers")
     });
     let grid_owner = if state.lead.is_empty() { "cos".to_string() } else { state.lead.clone() };
-    let run_grid_hook = |workers: &str| -> bool {
+    let run_grid_hook = || -> bool {
         if std::env::var("GRID_SKIP").as_deref() == Ok("1") && std::env::var("QUAQUA_TEST").as_deref() == Ok("1") {
             return true;
         }
-        match crate::grid::run_grid_check(&grid_tab, Some(workers), Some(&grid_owner)) {
+        match crate::grid::run_grid_repair(&grid_tab, Some(&grid_owner)) {
             Ok(()) => true,
             Err(e) => {
                 eprintln!("warning: grid check failed ({e}); arrange panes manually");
@@ -953,7 +955,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     let _ = state.save(&state_file);
                 }
 
-                if !run_grid_hook(&bname) {
+                if !run_grid_hook() {
                     let b = format!("grid check failed for {bname} — arrange the pane per rules/_all/fanout-agent-grid.md, then 'pipeline.sh --resume {task} {}'", state.repo);
                     let _ = state.save(&state_file);
                     return finish(&mut state, "blocked", 5, Some(&b));
@@ -1159,7 +1161,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 }
 
                 // Grid hook for builder + reviewer (2 workers -> GRID_TAB workers tab)
-                if !run_grid_hook(&format!("{bname},{revname}")) {
+                if !run_grid_hook() {
                     let b = format!("grid check failed for {revname} — arrange the panes per rules/_all/fanout-agent-grid.md, then 'pipeline.sh --resume {task} {}'", state.repo);
                     let _ = state.save(&state_file);
                     return finish(&mut state, "blocked", 5, Some(&b));
@@ -1189,7 +1191,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     } else {
                         let _ = crate::worker::cleanup::cleanup_worker(&revname, Path::new(&state.repo), git, herdr);
                     }
-                    let _ = run_grid_hook(&bname);
+                    let _ = run_grid_hook();
                 };
 
                 if rev_content.lines().any(|l| l.trim().starts_with("## Challenge")) {

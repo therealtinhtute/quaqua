@@ -75,6 +75,8 @@ case "${1:-} ${2:-}" in
     printf '{"result":{"agent":{"agent_status":"working","pane_id":"%%1"}}}\n' ;;
   "pane split")
     printf '{"result":{"pane":{"pane_id":"%%1"}}}\n' ;;
+  "pane move")
+    printf '{"result":{"move_result":{"changed":true,"pane":{"pane_id":"%%9","tab_id":"w1:t9"}}}}\n' ;;
   "agent prompt")
     w=$3
     case "$4" in
@@ -159,6 +161,47 @@ GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0 "$bin" pipeline gfail "$T/repo" --brief "$T
 grep -q 'warning: grid check failed' "$T/err" || fail "grid failure: no warning: $(cat "$T/err")"
 ! grep -q 'agent prompt' "$T/calls" || fail "grid failure: prompted anyway: $(cat "$T/calls")"
 echo "ok: unreachable herdr -> grid check warning + pause before any prompt"
+
+# ── 1c. a mis-arranged owner population is repaired into GRID_TAB ────────────
+# Two workers of the Lead sit in the Lead's tab, one working + one idle (the
+# shape two parallel pipelines produce). The idle worker creates the tab
+# labelled GRID_TAB; the working one is reported deferred and never moved
+# (rules/_all/fanout-agent-grid.md).
+cat > "$T/misarranged.json" << 'JSON'
+{"snapshot":{"workspaces":[{"workspace_id":"ws1","label":"q"}],
+ "tabs":[{"tab_id":"t1","workspace_id":"ws1","label":"lead-tab","pane_count":3}],
+ "panes":[
+   {"pane_id":"%lead","tab_id":"t1","workspace_id":"ws1","agent_status":"idle",
+    "tokens":{"grid_role":"lead","grid_owner":"mylead-lead","grid_ready":"1"}},
+   {"pane_id":"%a","tab_id":"t1","workspace_id":"ws1","agent_status":"working",
+    "tokens":{"grid_role":"worker","grid_owner":"mylead-lead","grid_group":"myrepo","grid_ready":"1"}},
+   {"pane_id":"%b","tab_id":"t1","workspace_id":"ws1","agent_status":"idle",
+    "tokens":{"grid_role":"worker","grid_owner":"mylead-lead","grid_group":"myrepo","grid_ready":"1"}}
+ ],
+ "layouts":[{"tab_id":"t1","workspace_id":"ws1","area":{"x":0,"y":0,"width":200,"height":50},
+             "panes":[{"pane_id":"%lead"},{"pane_id":"%a"},{"pane_id":"%b"}]}],
+ "agents":[{"name":"mylead-lead","pane_id":"%lead","agent_status":"idle"}]}}
+JSON
+: > "$CALLS"
+rc=0
+GRID_SNAPSHOT="$T/misarranged.json" \
+  "$bin" pipeline pgm "$T/repo" --brief "$T/brief.md" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 5 ]] || fail "pgm: exit $rc, want 5 (plan-ready): $(cat "$T/err")"
+! grep -q 'warning: grid check failed' "$T/err" \
+  || fail "pgm: a repairable layout must not warn: $(cat "$T/err")"
+grep -q 'pane move %b --new-tab --label myrepo-workers --no-focus' "$CALLS" \
+  || fail "pgm: idle worker not moved into GRID_TAB: $(cat "$CALLS")"
+! grep -q 'pane move %a' "$CALLS" \
+  || fail "pgm: the working worker must never move: $(cat "$CALLS")"
+! grep -q -- '--tab t1' "$CALLS" \
+  || fail "pgm: a worker was moved into the Lead tab: $(cat "$CALLS")"
+grep -q 'deferred: %a (working)' "$T/err" \
+  || fail "pgm: working worker not reported deferred: $(cat "$T/err")"
+mv_line=$(grep -n 'pane move %b' "$CALLS" | head -1 | cut -d: -f1 || true)
+pr_line=$(grep -n 'prompt sude-pgm' "$CALLS" | head -1 | cut -d: -f1 || true)
+[[ -n "$mv_line" && -n "$pr_line" && "$mv_line" -lt "$pr_line" ]] \
+  || fail "pgm: repair not before the prompt: $(cat "$CALLS")"
+echo "ok: mis-arranged owner population repaired into GRID_TAB before the prompt"
 
 # ── 2. Pure grid planner verification: 2 workers placed in workers tab, not anchor tab ─
 # Snapshot representing:
