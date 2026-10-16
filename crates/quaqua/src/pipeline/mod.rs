@@ -5,7 +5,7 @@ use crate::cap::count_owner_slots;
 use crate::config::load_team_config;
 use crate::git::{Git, GitOps};
 use crate::herdr::Herdr;
-use crate::worker::cleanup::home_quaqua_runs;
+use crate::worker::cleanup::default_runs_dir;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +60,13 @@ pub fn harness_of(kind: &str) -> Option<&'static str> {
         "bacdau" | "quansu" => Some("codex"),
         _ => None,
     }
+}
+
+pub fn harness_of_kind<'a>(kind: &str, cfg: &'a crate::config::Config) -> Option<&'a str> {
+    if let Some(k) = cfg.kinds.get(kind) {
+        return Some(&k.harness);
+    }
+    harness_of(kind)
 }
 
 pub fn now_sec() -> u64 {
@@ -340,7 +347,7 @@ fn append_telemetry(runs_dir: &Path, ts: &str, task: &str, repo: &str, builder: 
 
 pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, String)> {
     let inv_start = now_sec();
-    let runs_dir = home_quaqua_runs();
+    let runs_dir = default_runs_dir();
     let _ = std::fs::create_dir_all(&runs_dir);
 
     let plan_budget = std::env::var("PIPELINE_PLAN_BUDGET_SEC").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(900);
@@ -485,12 +492,12 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         }
 
         let cfg = load_team_config()?;
-        let bh = harness_of(&builder).ok_or_else(|| (1, format!("unknown builder kind: {builder}\n")))?;
+        let bh = harness_of_kind(&builder, &cfg).ok_or_else(|| (1, format!("unknown builder kind: {builder}\n")))?;
 
         // Reviewer selection
         let reviewer = match reviewer_opt {
             Some(r) => {
-                let rh = harness_of(&r).ok_or_else(|| (1, format!("unknown reviewer kind: {r}\n")))?;
+                let rh = harness_of_kind(&r, &cfg).ok_or_else(|| (1, format!("unknown reviewer kind: {r}\n")))?;
                 if !["bacdau", "quansu", "ni", "suhuynh", "truonglao"].contains(&r.as_str()) {
                     return Err((1, format!("reviewer must be a codex kind (bacdau|quansu) or a claude kind (ni|suhuynh|truonglao) — spawn-worker.sh --review refuses {r}\n")));
                 }
@@ -503,7 +510,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 // Sourced from strategy.default_reviewer (first available)
                 let mut chosen: Option<String> = None;
                 for cand in &cfg.strategy.default_reviewer {
-                    if let Some(rh) = harness_of(cand) {
+                    if let Some(rh) = harness_of_kind(cand, &cfg) {
                         if bh != rh {
                             if let Some(kind_cfg) = cfg.kinds.get(cand) {
                                 if kind_cfg.can_review {
@@ -518,7 +525,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
             }
         };
 
-        let rh = harness_of(&reviewer).unwrap();
+        let rh = harness_of_kind(&reviewer, &cfg).unwrap();
         if !["auto", "always", "skip"].contains(&review.as_str()) {
             return Err((1, "--review must be auto|always|skip\n".to_string()));
         }
@@ -534,8 +541,8 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
             return Err((1, format!("reviewer name {reviewer}-{task}r{rounds} exceeds 20 chars\n")));
         }
 
-        let owner = std::env::var("QUAQUA_OWNER")
-            .or_else(|_| std::env::var("PIPELINE_LEAD"))
+        let owner = std::env::var("PIPELINE_LEAD")
+            .or_else(|_| std::env::var("QUAQUA_OWNER"))
             .unwrap_or_else(|_| "cos".to_string());
         let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr);
         if slots_used + 2 > 4 {
@@ -599,7 +606,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         let bname = repo_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
         format!("{bname}-workers")
     });
-
+    let grid_owner = if state.lead.is_empty() { "cos".to_string() } else { state.lead.clone() };
     let run_grid_hook = |workers: &str| -> bool {
         if std::env::var("GRID_SKIP").as_deref() == Ok("1") && std::env::var("QUAQUA_TEST").as_deref() == Ok("1") {
             return true;
@@ -625,7 +632,24 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 }
             }
         } else {
-            true
+            let opts = crate::grid::ReconcileOptions {
+                check: true,
+                repair: false,
+                tab: Some(grid_tab.clone()),
+                only: Some(workers.to_string()),
+                owner: Some(grid_owner.clone()),
+                dry_run: false,
+                timeout_sec: None,
+            };
+            let mut driver = crate::grid::CliHerdrDriver::new();
+            let reconcile_res = crate::grid::run_reconcile(&mut driver, &opts, &grid_tab, None);
+            match reconcile_res {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("warning: grid reconcile failed ({e}); arrange panes manually");
+                    false
+                }
+            }
         }
     };
 
@@ -735,10 +759,17 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     .status();
                 rc = res.map(|s| s.code().unwrap_or(1)).unwrap_or(1);
             } else {
+                let _prev_b = std::env::var("PROMPT_WORKER_BUDGET_SEC").ok();
+                std::env::set_var("PROMPT_WORKER_BUDGET_SEC", budget.to_string());
                 rc = match crate::worker::prompt::prompt_worker(worker, Some(prompt), false, None, git, herdr) {
                     Ok(()) => 0,
                     Err((c, _)) => c,
                 };
+                if let Some(pb) = _prev_b {
+                    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", pb);
+                } else {
+                    std::env::remove_var("PROMPT_WORKER_BUDGET_SEC");
+                }
             }
         } else {
             // Resume
@@ -757,10 +788,17 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     .status();
                 rc = res.map(|s| s.code().unwrap_or(1)).unwrap_or(1);
             } else {
+                let _prev_b = std::env::var("PROMPT_WORKER_BUDGET_SEC").ok();
+                std::env::set_var("PROMPT_WORKER_BUDGET_SEC", budget.to_string());
                 rc = match crate::worker::prompt::prompt_worker(worker, None, true, None, git, herdr) {
                     Ok(()) => 0,
                     Err((c, _)) => c,
                 };
+                if let Some(pb) = _prev_b {
+                    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", pb);
+                } else {
+                    std::env::remove_var("PROMPT_WORKER_BUDGET_SEC");
+                }
             }
         }
 
@@ -875,9 +913,15 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                         cmd.env("GRID_SKIP", "1");
                         cmd.status().map(|s| s.success()).unwrap_or(false)
                     } else {
-                        let opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
-                        let cfg = load_team_config()?;
-                        crate::worker::spawn::spawn_worker(opts, &cfg, git, herdr).is_ok()
+                        std::env::set_var("PIPELINE_TASK", &task);
+                        std::env::set_var("QUAQUA_OWNER", if state.lead.is_empty() { "cos" } else { &state.lead });
+                        let spawn_res = (|| -> Result<(), (i32, String)> {
+                            let opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
+                            let cfg = load_team_config()?;
+                            crate::worker::spawn::spawn_worker(opts, &cfg, git, herdr)
+                        })();
+                        std::env::remove_var("PIPELINE_TASK");
+                        spawn_res.is_ok()
                     };
 
                     if !spawn_ok {
@@ -1071,9 +1115,15 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                         cmd.env("GRID_SKIP", "1");
                         cmd.status().map(|s| s.success()).unwrap_or(false)
                     } else {
-                        let opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
-                        let cfg = load_team_config()?;
-                        crate::worker::spawn::spawn_worker(opts, &cfg, git, herdr).is_ok()
+                        std::env::set_var("PIPELINE_TASK", &task);
+                        std::env::set_var("QUAQUA_OWNER", if state.lead.is_empty() { "cos" } else { &state.lead });
+                        let spawn_res = (|| -> Result<(), (i32, String)> {
+                            let opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
+                            let cfg = load_team_config()?;
+                            crate::worker::spawn::spawn_worker(opts, &cfg, git, herdr)
+                        })();
+                        std::env::remove_var("PIPELINE_TASK");
+                        spawn_res.is_ok()
                     };
 
                     if !spawn_ok {

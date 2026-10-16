@@ -4,7 +4,7 @@
 use crate::cap::count_owner_slots;
 use crate::git::Git;
 use crate::herdr::Herdr;
-use crate::worker::cleanup::home_quaqua_runs;
+use crate::worker::cleanup::default_runs_dir;
 use std::path::{Path, PathBuf};
 
 pub const USAGE: &str = "\
@@ -76,13 +76,19 @@ pub fn parse_taskforce_args(args: &[String]) -> Result<TaskforceArgs, (i32, Stri
 pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, String)> {
     let targs = parse_taskforce_args(args)?;
     let owner = std::env::var("QUAQUA_OWNER").unwrap_or_else(|_| "cos".to_string());
-    let runs_dir = home_quaqua_runs();
+    let runs_dir = default_runs_dir();
     let _ = std::fs::create_dir_all(&runs_dir);
 
-    let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr);
-    let weight = if targs.mode == "dual-lens" { 2 } else { 1 };
-    let max_workers = 4;
+    let cfg = crate::config::load_team_config()?;
+    let max_workers = cfg.limits.max_workers_per_orchestrator;
+    let weight = cfg
+        .limits
+        .weights
+        .get(&targs.mode)
+        .copied()
+        .unwrap_or(if targs.mode == "dual-lens" { 2 } else { 1 });
 
+    let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr);
     if slots_used + weight > max_workers {
         return Err((
             2,
@@ -97,9 +103,9 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
         .map_err(|e| (1, format!("cannot read brief {}: {e}\n", targs.brief.display())))?;
 
     if targs.mode == "advisor" {
-        run_advisor(&targs, &brief_content, &runs_dir, &owner, git, herdr)
+        run_advisor(&targs, &brief_content, &runs_dir, &owner, &cfg, git, herdr)
     } else {
-        run_dual_lens(&targs, &brief_content, &runs_dir, &owner, git, herdr)
+        run_dual_lens(&targs, &brief_content, &runs_dir, &owner, &cfg, git, herdr)
     }
 }
 
@@ -107,22 +113,33 @@ fn run_advisor(
     args: &TaskforceArgs,
     brief: &str,
     runs_dir: &Path,
-    _owner: &str,
+    owner: &str,
+    cfg: &crate::config::Config,
     git: &Git,
     herdr: &Herdr,
 ) -> Result<(), (i32, String)> {
-    let worker_name = format!("quansu-{}", args.task);
-    let cfg = crate::config::load_team_config()?;
+    let members = cfg
+        .taskforce
+        .get("advisor")
+        .map(|t| t.members.clone())
+        .unwrap_or_else(|| vec!["quansu".to_string()]);
+    let kind = members.first().map(|s| s.as_str()).unwrap_or("quansu");
+    let worker_name = format!("{kind}-{}", args.task);
 
     let opts = crate::worker::spawn::SpawnOptions {
         base: args.base.clone(),
         review: true,
         name: worker_name.clone(),
-        kind: "quansu".to_string(),
+        kind: kind.to_string(),
         repo_path: args.repo.clone(),
     };
 
-    crate::worker::spawn::spawn_worker(opts, &cfg, git, herdr)?;
+    // Set PIPELINE_TASK during inner spawn to prevent double-charging the reservation
+    std::env::set_var("PIPELINE_TASK", &args.task);
+    std::env::set_var("QUAQUA_OWNER", owner);
+    let spawn_res = crate::worker::spawn::spawn_worker(opts, cfg, git, herdr);
+    std::env::remove_var("PIPELINE_TASK");
+    spawn_res?;
 
     // Write taskforce marker
     let tf_marker = runs_dir.join(format!("{worker_name}.taskforce"));
@@ -134,10 +151,10 @@ fn run_advisor(
     );
 
     let prompt_res = crate::worker::prompt::prompt_worker(&worker_name, Some(&prompt_text), false, None, git, herdr);
-
-    let _ = crate::worker::cleanup::cleanup_worker(&worker_name, &args.repo, git, herdr);
-    let _ = std::fs::remove_file(tf_marker);
-
+    let report_path = runs_dir.join(format!("{worker_name}.md"));
+    if prompt_res.is_ok() {
+        println!("{}", report_path.display());
+    }
     prompt_res
 }
 
@@ -146,9 +163,21 @@ fn run_dual_lens(
     brief: &str,
     runs_dir: &Path,
     owner: &str,
+    cfg: &crate::config::Config,
     git: &Git,
     herdr: &Herdr,
 ) -> Result<(), (i32, String)> {
+    let members = cfg
+        .taskforce
+        .get("dual-lens")
+        .map(|t| t.members.clone())
+        .unwrap_or_else(|| vec!["truonglao".to_string(), "quansu".to_string()]);
+    let kind1 = members.first().map(|s| s.as_str()).unwrap_or("truonglao");
+    let kind2 = members.get(1).map(|s| s.as_str()).unwrap_or("quansu");
+
+    let w1 = format!("{kind1}-{}dl1", args.task);
+    let w2 = format!("{kind2}-{}dl2", args.task);
+
     let state_file = runs_dir.join(format!("taskforce-{}.state", args.task));
     let pid = std::process::id();
     let state_content = format!(
@@ -157,15 +186,16 @@ fn run_dual_lens(
     );
     let _ = std::fs::write(&state_file, state_content);
 
-    let cfg = crate::config::load_team_config()?;
-    let w1 = format!("truonglao-{}dl1", args.task);
-    let w2 = format!("quansu-{}dl2", args.task);
+    let tf1 = runs_dir.join(format!("{w1}.taskforce"));
+    let tf2 = runs_dir.join(format!("{w2}.taskforce"));
+    let _ = std::fs::write(&tf1, &args.task);
+    let _ = std::fs::write(&tf2, &args.task);
 
     let opts1 = crate::worker::spawn::SpawnOptions {
         base: args.base.clone(),
         review: true,
         name: w1.clone(),
-        kind: "truonglao".to_string(),
+        kind: kind1.to_string(),
         repo_path: args.repo.clone(),
     };
 
@@ -173,24 +203,29 @@ fn run_dual_lens(
         base: args.base.clone(),
         review: true,
         name: w2.clone(),
-        kind: "quansu".to_string(),
+        kind: kind2.to_string(),
         repo_path: args.repo.clone(),
     };
 
-    if let Err(e) = crate::worker::spawn::spawn_worker(opts1, &cfg, git, herdr) {
+    std::env::set_var("PIPELINE_TASK", &args.task);
+    std::env::set_var("QUAQUA_OWNER", owner);
+    let s1 = crate::worker::spawn::spawn_worker(opts1, cfg, git, herdr);
+    let s2 = if s1.is_ok() {
+        crate::worker::spawn::spawn_worker(opts2, cfg, git, herdr)
+    } else {
+        Ok(())
+    };
+    std::env::remove_var("PIPELINE_TASK");
+
+    if let Err(e) = s1 {
         let _ = std::fs::write(&state_file, format!("task={}\nkind=dual-lens\nowner={}\nfinished=1\n", args.task, owner));
         return Err(e);
     }
-    if let Err(e) = crate::worker::spawn::spawn_worker(opts2, &cfg, git, herdr) {
+    if let Err(e) = s2 {
         let _ = crate::worker::cleanup::cleanup_worker(&w1, &args.repo, git, herdr);
         let _ = std::fs::write(&state_file, format!("task={}\nkind=dual-lens\nowner={}\nfinished=1\n", args.task, owner));
         return Err(e);
     }
-
-    let tf1 = runs_dir.join(format!("{w1}.taskforce"));
-    let tf2 = runs_dir.join(format!("{w2}.taskforce"));
-    let _ = std::fs::write(&tf1, &args.task);
-    let _ = std::fs::write(&tf2, &args.task);
 
     let prompt1 = format!(
         "Goal: dual-lens assessment (lens 1) for task '{}'\nHard constraints: read-only — do not edit or create files outside ~/quaqua/runs.\nCurrent design (open to challenge): {}\nEvidence: assessment, agreements, and concerns. Write to a temp file and rename it to ~/quaqua/runs/{w1}.md — publish atomically, never a partial file.",
@@ -201,19 +236,18 @@ fn run_dual_lens(
         args.task, brief
     );
 
-    let _ = crate::worker::prompt::prompt_worker(&w1, Some(&prompt1), false, None, git, herdr);
-    let _ = crate::worker::prompt::prompt_worker(&w2, Some(&prompt2), false, None, git, herdr);
-
-    let _ = crate::worker::cleanup::cleanup_worker(&w1, &args.repo, git, herdr);
-    let _ = crate::worker::cleanup::cleanup_worker(&w2, &args.repo, git, herdr);
-    let _ = std::fs::remove_file(tf1);
-    let _ = std::fs::remove_file(tf2);
+    let p1_res = crate::worker::prompt::prompt_worker(&w1, Some(&prompt1), false, None, git, herdr);
+    let p2_res = crate::worker::prompt::prompt_worker(&w2, Some(&prompt2), false, None, git, herdr);
 
     let _ = std::fs::write(
         &state_file,
         format!("task={}\nkind=dual-lens\nowner={}\nfinished=1\ntaskforce_pid={}\n", args.task, owner, pid),
     );
 
-    println!("taskforce dual-lens for {} complete", args.task);
+    p1_res?;
+    p2_res?;
+
+    println!("{}", runs_dir.join(format!("{w1}.md")).display());
+    println!("{}", runs_dir.join(format!("{w2}.md")).display());
     Ok(())
 }

@@ -80,7 +80,7 @@ chmod +x "$T/check.sh"
 # ── 1. Undo on a failing check: feature-a fails check -> reset --hard, feature-b not merged ─
 rc=0
 "$bin" merge --check "$T/check.sh" --repo "$T/repo" myapp feature-a feature-b >"$T/out" 2>"$T/err" || rc=$?
-[[ $rc -eq 1 ]] || fail "failing check: exit $rc, want 1"
+[[ $rc -eq 2 ]] || fail "failing check: exit $rc, want 2 (rework to Peer)"
 grep -q "check failed with branch 'feature-a' — undoing merge and returning rework to Peer" "$T/err" \
   || fail "failing check: wrong error message: $(cat "$T/err")"
 
@@ -100,7 +100,7 @@ chmod +x "$T/check_always_fail.sh"
 
 rc=0
 "$bin" merge --check "$T/check_always_fail.sh" --repo "$T/repo" myapp feature-b >"$T/out" 2>"$T/err" || rc=$?
-[[ $rc -eq 1 ]] || fail "integ base fail: exit $rc, want 1"
+[[ $rc -eq 3 ]] || fail "integ base fail: exit $rc, want 3 (ask CoS and hold queue)"
 grep -q "check fails on integ base without 'feature-b' — ask CoS and hold queue" "$T/err" \
   || fail "integ base fail: wrong error message: $(cat "$T/err")"
 curr_integ=$(git -C "$T/repo" rev-parse HEAD)

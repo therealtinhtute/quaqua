@@ -214,11 +214,15 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         };
 
         let branch_res = git.run_in(repo, &["branch", &integ, &base]);
-        if let Ok(out) = branch_res {
-            if !out.status.success() {
+        match branch_res {
+            Ok(out) if !out.status.success() => {
                 let err = String::from_utf8_lossy(&out.stderr).to_string();
                 return Err((1, err));
             }
+            Err(e) => {
+                return Err((1, format!("git branch {integ} {base} failed: {e}\n")));
+            }
+            _ => {}
         }
     }
 
@@ -272,7 +276,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
 
     // Tag Lead pane as orchestrator
     let grid_owner_tok = format!("grid_owner={name}");
-    let _ = herdr.run(&[
+    let meta_out = herdr.run(&[
         "pane",
         "report-metadata",
         pane,
@@ -282,13 +286,16 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         "grid_role=orchestrator",
         "--token",
         &grid_owner_tok,
-    ]);
+    ]).map_err(|e| (1, format!("herdr pane report-metadata failed: {e}\n")))?;
+    if !meta_out.status.success() {
+        return Err((1, String::from_utf8_lossy(&meta_out.stderr).to_string()));
+    }
 
     // Start agent
     let lead_model = std::env::var("LEAD_MODEL").unwrap_or_else(|_| "claude-opus-5-5".to_string());
     let lead_effort = std::env::var("LEAD_EFFORT").unwrap_or_else(|_| "low".to_string());
     let rf_str = rf.to_string_lossy().to_string();
-    let _ = herdr.run(&[
+    let start_out = herdr.run(&[
         "agent",
         "start",
         &name,
@@ -305,8 +312,10 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         &lead_effort,
         "--append-system-prompt-file",
         &rf_str,
-    ]);
-
+    ]).map_err(|e| (1, format!("herdr agent start failed: {e}\n")))?;
+    if !start_out.status.success() {
+        return Err((1, String::from_utf8_lossy(&start_out.stderr).to_string()));
+    }
     // Update projects/INDEX.md with mkdir lock
     let lock_dir = root.join("projects/INDEX.md.lock.d");
     let mut locked = false;

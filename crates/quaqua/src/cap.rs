@@ -205,9 +205,17 @@ pub fn count_owner_slots<H: HerdrOps>(
                 let mut t_alive = false;
                 if !t_pid.is_empty() && is_pid_alive(&t_pid) {
                     t_alive = true;
-                } else {
+                } else if !t_task.is_empty() {
                     for w in &live_workers {
-                        if (!t_task.is_empty() && w.contains(&t_task)) || w.contains("dual-lens") {
+                        let tf_file = runs_dir.join(format!("{w}.taskforce"));
+                        let w_tf = std::fs::read_to_string(&tf_file)
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_default();
+                        if w_tf == t_task
+                            || w.ends_with(&format!("-{t_task}"))
+                            || w.ends_with(&format!("-{t_task}dl1"))
+                            || w.ends_with(&format!("-{t_task}dl2"))
+                        {
                             t_alive = true;
                             break;
                         }
@@ -221,7 +229,12 @@ pub fn count_owner_slots<H: HerdrOps>(
                         let w_tf = std::fs::read_to_string(&tf_file)
                             .map(|s| s.trim().to_string())
                             .unwrap_or_default();
-                        if !t_task.is_empty() && (w_tf == t_task || w.contains(&t_task)) {
+                        if !t_task.is_empty()
+                            && (w_tf == t_task
+                                || w.ends_with(&format!("-{t_task}"))
+                                || w.ends_with(&format!("-{t_task}dl1"))
+                                || w.ends_with(&format!("-{t_task}dl2")))
+                        {
                             t_cur_live += 1;
                         }
                     }

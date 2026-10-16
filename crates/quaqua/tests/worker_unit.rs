@@ -446,3 +446,93 @@ fn test_taskforce_dual_lens_cap_reservation() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn test_pipeline_blockers_none_exemption() {
+    use quaqua::pipeline::has_real_blockers;
+
+    assert!(!has_real_blockers("## Blockers\n- none\n"));
+    assert!(!has_real_blockers("## Blockers\nnone\n"));
+    assert!(!has_real_blockers("## Blockers\n* none\n"));
+    assert!(!has_real_blockers("## Blockers\n- None\n"));
+    assert!(!has_real_blockers("## Blockers\n\n- none\n\n## Lessons\n- none\n"));
+    assert!(!has_real_blockers("Just plan text\n\n## Lessons\n- none\n"));
+
+    // Real blockers must return true
+    assert!(has_real_blockers("## Blockers\n- cannot plan without the spec\n"));
+    assert!(has_real_blockers("## Blockers\n- implementation incomplete\n"));
+    assert!(has_real_blockers("## Blockers\n- none\n- also a real blocker\n"));
+}
+
+#[test]
+fn test_strategy_default_reviewer_selection() {
+    use quaqua::pipeline::harness_of_kind;
+
+    let toml_str = r#"
+schema_version = 2
+[strategy]
+default_kind = "tieude"
+default_reviewer = ["quansu", "suhuynh"]
+builder_reviewer_differ = "harness"
+[kinds.sude]
+harness = "omp"
+model = "google-antigravity/gemini-3.8-flash"
+can_review = false
+[kinds.quansu]
+harness = "codex"
+model = "gpt-6.1-sol"
+can_review = true
+[kinds.suhuynh]
+harness = "claude"
+model = "opus-5.5"
+can_review = true
+"#;
+    let cfg: quaqua::config::Config = toml::from_str(toml_str).unwrap();
+
+    // With builder sude (omp), quansu (codex) is selected as first available differing harness
+    let bh = harness_of_kind("sude", &cfg).unwrap();
+    let mut chosen = None;
+    for cand in &cfg.strategy.default_reviewer {
+        if let Some(rh) = harness_of_kind(cand, &cfg) {
+            if bh != rh && cfg.kinds.get(cand).map(|k| k.can_review).unwrap_or(false) {
+                chosen = Some(cand.as_str());
+                break;
+            }
+        }
+    }
+    assert_eq!(chosen, Some("quansu"));
+
+    // With builder quansu (codex), quansu is skipped and suhuynh (claude) is selected
+    let bh_codex = harness_of_kind("quansu", &cfg).unwrap();
+    let mut chosen_for_codex = None;
+    for cand in &cfg.strategy.default_reviewer {
+        if let Some(rh) = harness_of_kind(cand, &cfg) {
+            if bh_codex != rh && cfg.kinds.get(cand).map(|k| k.can_review).unwrap_or(false) {
+                chosen_for_codex = Some(cand.as_str());
+                break;
+            }
+        }
+    }
+    assert_eq!(chosen_for_codex, Some("suhuynh"));
+}
+
+#[test]
+fn test_sude_harness_mapped_to_omp() {
+    use quaqua::pipeline::harness_of;
+    assert_eq!(harness_of("sude"), Some("omp"));
+}
+
+#[test]
+fn test_claude_review_mode_verification() {
+    use quaqua::worker::spawn::parse_spawn_args;
+
+    let args = vec![
+        "--review".to_string(),
+        "suhuynh-testrev".to_string(),
+        "suhuynh".to_string(),
+        ".".to_string(),
+    ];
+    let opts = parse_spawn_args(&args).unwrap();
+    assert!(opts.review);
+    assert_eq!(opts.kind, "suhuynh");
+}

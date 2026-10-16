@@ -70,6 +70,8 @@ fn resolve_project_repo(slug: &str, explicit_repo: Option<&Path>) -> Result<Path
     if let Some(r) = explicit_repo {
         if r.is_dir() {
             return Ok(r.to_path_buf());
+        } else {
+            return Err((1, format!("repo path '{}' does not exist or is not a directory\n", r.display())));
         }
     }
 
@@ -96,11 +98,9 @@ fn resolve_project_repo(slug: &str, explicit_repo: Option<&Path>) -> Result<Path
                 }
             }
         }
+        return Err((1, format!("unknown project slug '{slug}' — no row in {}\n", index.display())));
     }
 
-    if let Ok(cwd) = std::env::current_dir() {
-        return Ok(cwd);
-    }
     Err((1, format!("cannot resolve project repo for slug '{slug}'\n")))
 }
 
@@ -139,6 +139,18 @@ pub fn handle_merge(args: &[String], git: &Git) -> Result<(), (i32, String)> {
         &cfg.merge.integ_branch
     };
     let integ = integ_pattern.replace("{slug}", &opts.slug);
+    // Check dirty worktree BEFORE checking out integ branch
+    let st_out = git.run_in(&repo, &["status", "--porcelain"])
+        .map_err(|e| (1, format!("failed to check status: {e}\n")))?;
+    let dirty = String::from_utf8_lossy(&st_out.stdout).trim().to_string();
+    if !dirty.is_empty() {
+        return Err((1, format!("worktree in {} is dirty — cannot run merge queue\n", repo.display())));
+    }
+
+    // Save current branch to restore if needed
+    let _orig_branch = git.run_in(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
 
     // Verify integration branch exists
     let integ_ref = format!("refs/heads/{}", integ);
@@ -154,12 +166,8 @@ pub fn handle_merge(args: &[String], git: &Git) -> Result<(), (i32, String)> {
         return Err((1, format!("failed to checkout {integ}: {err}\n")));
     }
 
-    // Verify worktree is clean
-    let st_out = git.run_in(&repo, &["status", "--porcelain"])
-        .map_err(|e| (1, format!("failed to check status: {e}\n")))?;
-    let dirty = String::from_utf8_lossy(&st_out.stdout).trim().to_string();
-    if !dirty.is_empty() {
-        return Err((1, format!("worktree in {} is dirty — cannot run merge queue\n", repo.display())));
+    if opts.check_cmd.is_none() && std::env::var("QUAQUA_CHECK_CMD").is_err() && std::env::var("MERGE_CHECK_CMD").is_err() {
+        eprintln!("warning: no check command configured; merging without checks");
     }
 
     for branch in &opts.branches {
@@ -190,18 +198,23 @@ pub fn handle_merge(args: &[String], git: &Git) -> Result<(), (i32, String)> {
             println!("merged {branch} into {integ} ({new_rev})");
         } else {
             // Undo merge: git reset --hard <head_before>
-            let _ = git.run_in(&repo, &["reset", "--hard", &head_before]);
+            let reset_out = git.run_in(&repo, &["reset", "--hard", &head_before])
+                .map_err(|e| (1, format!("failed to reset --hard: {e}\n")))?;
+            if !reset_out.status.success() {
+                let err = String::from_utf8_lossy(&reset_out.stderr).to_string();
+                return Err((1, format!("error: reset --hard failed: {err}\n")));
+            }
 
             // Check if check fails without the branch too
             let base_check_pass = run_check(&repo, opts.check_cmd.as_deref());
             if !base_check_pass {
                 return Err((
-                    1,
+                    3,
                     format!("error: check fails on integ base without '{branch}' — ask CoS and hold queue\n"),
                 ));
             } else {
                 return Err((
-                    1,
+                    2,
                     format!("error: check failed with branch '{branch}' — undoing merge and returning rework to Peer\n"),
                 ));
             }
