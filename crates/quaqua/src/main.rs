@@ -166,12 +166,14 @@ fn do_grid_reconcile(
     dry_run: bool,
     team_opt: Option<PathBuf>,
 ) -> Result<(), String> {
-    let default_workers_tab = if let Ok(tf) = team_file(&team_opt) {
-        config::load(&tf)
-            .map(|c| c.grid.workers_tab)
-            .unwrap_or_else(|_| "workers".to_string())
+    let (default_workers_tab, def_statuses) = if let Ok(tf) = team_file(&team_opt) {
+        let cfg = config::load(&tf).ok();
+        (
+            cfg.as_ref().map(|c| c.grid.workers_tab.clone()).unwrap_or_else(|| "workers".to_string()),
+            cfg.map(|c| c.grid.deferred_statuses),
+        )
     } else {
-        "workers".to_string()
+        ("workers".to_string(), None)
     };
 
     if check && repair {
@@ -188,7 +190,10 @@ fn do_grid_reconcile(
         timeout_sec: None,
     };
     let mut driver = quaqua::grid::CliHerdrDriver::new();
-    quaqua::grid::run_reconcile(&mut driver, &opts, &default_workers_tab)
+    let def_slices: Option<Vec<&str>> = def_statuses
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.as_str()).collect());
+    quaqua::grid::run_reconcile(&mut driver, &opts, &default_workers_tab, def_slices.as_deref())
 }
 
 fn main() {

@@ -1,5 +1,5 @@
 use super::apply::{apply_ops, CliHerdrDriver, HerdrDriver};
-use super::plan::{is_candidate_worker, plan};
+use super::plan::{is_candidate_worker, plan_with_deferred};
 use super::types::{Op, Snapshot, Target};
 use std::collections::{HashMap, HashSet};
 use std::fs::{create_dir, create_dir_all, remove_dir, remove_file, OpenOptions};
@@ -212,7 +212,11 @@ fn chrono_or_simple_time() -> String {
     format!("{secs}")
 }
 
-pub fn reconcile_step<D: HerdrDriver>(sdir: &Path, driver: &mut D) -> Result<(), String> {
+pub fn reconcile_step<D: HerdrDriver>(
+    sdir: &Path,
+    driver: &mut D,
+    deferred_statuses: Option<&[&str]>,
+) -> Result<(), String> {
     // Finding 8: An empty or failing snapshot returns Ok(()) without failure
     let mut snap = match driver.snapshot() {
         Ok(s) => {
@@ -254,19 +258,24 @@ pub fn reconcile_step<D: HerdrDriver>(sdir: &Path, driver: &mut D) -> Result<(),
         }
     }
 
-    // In-flight spawn poll: if worker present without grid_ready=1, poll briefly
-    let mut has_unready = snap.panes.iter().any(|p| {
-        p.tokens.as_ref().and_then(|t| t.grid_role.as_deref()) == Some("worker")
-            && !is_candidate_worker(p)
-    });
+    // In-flight spawn poll (N3): poll only when grid_ready is null or empty (hook.sh:169-173)
+    let is_unready_spawn = |p: &super::types::Pane| {
+        let is_worker = p.tokens.as_ref().and_then(|t| t.grid_role.as_deref()) == Some("worker");
+        let ready_empty = match p.tokens.as_ref().and_then(|t| t.grid_ready.as_ref()) {
+            None => true,
+            Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::String(s)) => s.is_empty(),
+            _ => false,
+        };
+        is_worker && ready_empty
+    };
+
+    let mut has_unready = snap.panes.iter().any(is_unready_spawn);
     if has_unready {
         for _ in 0..15 {
             sleep(Duration::from_millis(200));
             if let Ok(fresh) = driver.snapshot() {
-                has_unready = fresh.panes.iter().any(|p| {
-                    p.tokens.as_ref().and_then(|t| t.grid_role.as_deref()) == Some("worker")
-                        && !is_candidate_worker(p)
-                });
+                has_unready = fresh.panes.iter().any(is_unready_spawn);
                 snap = fresh;
                 if !has_unready {
                     break;
@@ -283,7 +292,7 @@ pub fn reconcile_step<D: HerdrDriver>(sdir: &Path, driver: &mut D) -> Result<(),
         }
     }
 
-    let ops = plan(&snap)?;
+    let ops = plan_with_deferred(&snap, deferred_statuses)?;
     if ops.is_empty() {
         let _ = remove_file(&failed_ops_file);
         let _ = remove_file(&failed_snap_file);
@@ -309,7 +318,7 @@ pub fn reconcile_step<D: HerdrDriver>(sdir: &Path, driver: &mut D) -> Result<(),
                 workers_tab_deferred = true;
             }
         } else if let Target::Split { tab, anchor, .. } = &op.target {
-            if deferred_panes.contains(anchor) || (tab == "@workers" && workers_tab_deferred) {
+            if deferred_panes.contains(anchor.as_str()) || (tab == "@workers" && workers_tab_deferred) {
                 deferred_panes.insert(op.pane.clone());
             } else {
                 non_deferred.push(op);
@@ -399,6 +408,17 @@ pub fn run_hook() -> Result<(), String> {
         return Ok(());
     }
 
+    // Finding 9 remainder: Read deferred_statuses from team.toml
+    let team_file_path = std::env::var("QUAQUA_TEAM_TOML")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("team.toml"));
+    let def_statuses = crate::config::load(&team_file_path)
+        .ok()
+        .map(|c| c.grid.deferred_statuses);
+    let def_slices: Option<Vec<&str>> = def_statuses
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.as_str()).collect());
+
     let pending_file = sdir.join("pending");
     let pid_str = std::process::id().to_string();
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&pending_file) {
@@ -414,7 +434,7 @@ pub fn run_hook() -> Result<(), String> {
     // Main loop handling pending counter
     loop {
         let _ = remove_file(&pending_file);
-        let _ = reconcile_step(&sdir, &mut driver);
+        reconcile_step(&sdir, &mut driver, def_slices.as_deref())?;
         if !pending_file.is_file() {
             break;
         }
@@ -428,7 +448,7 @@ pub fn run_hook() -> Result<(), String> {
         if let Ok(_guard2) = acquire_lock(&lock_dir, &pid_file) {
             while pending_file.is_file() {
                 let _ = remove_file(&pending_file);
-                let _ = reconcile_step(&sdir, &mut driver);
+                let _ = reconcile_step(&sdir, &mut driver, def_slices.as_deref())?;
             }
         }
     }

@@ -198,7 +198,7 @@ fn test_reconcile_only_with_custom_tab_converges_immediately() {
         timeout_sec: Some(0),
     };
 
-    let res = run_reconcile(&mut driver, &opts, "workers");
+    let res = run_reconcile(&mut driver, &opts, "workers", None);
     assert!(
         res.is_ok(),
         "custom tab mono-workers must converge immediately: {:?}",
@@ -215,7 +215,7 @@ fn test_reconcile_only_with_custom_tab_converges_immediately() {
         dry_run: true,
         timeout_sec: Some(0),
     };
-    let res_matching = run_reconcile(&mut driver, &opts_matching, "workers");
+    let res_matching = run_reconcile(&mut driver, &opts_matching, "workers", None);
     assert!(
         res_matching.is_err(),
         "matching tab quaqua-workers must report pending ops"
@@ -350,7 +350,15 @@ fn test_repair_renames_with_new_pane_ids_and_respects_only() {
         timeout_sec: None,
     };
 
-    run_reconcile(&mut driver, &opts, "workers").unwrap();
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+    // B was moved into quaqua-workers (NewTab), matching bash grid-workers.sh:450-460, :557
+    assert_eq!(driver.executed_moves.len(), 1);
+    let (moved_pane, target) = &driver.executed_moves[0];
+    assert_eq!(moved_pane, "w1:p6");
+    match target {
+        Target::NewTab { label } => assert_eq!(label, "quaqua-workers"),
+        _ => panic!("expected NewTab for B into quaqua-workers, got {:?}", target),
+    }
     // Only sude-1 should be renamed (tieude-1 was unlisted and must be untouched!)
     assert_eq!(driver.executed_renames.len(), 1);
     let (renamed_pane, label) = &driver.executed_renames[0];
@@ -406,7 +414,7 @@ fn test_check_only_waits_when_listed_split_dependency_is_unlisted() {
     };
 
     // Must find pending ops and fail with pending ops error, NOT report [] or exit 0!
-    let res = run_reconcile(&mut driver, &opts, "workers");
+    let res = run_reconcile(&mut driver, &opts, "workers", None);
     assert!(
         res.is_err(),
         "check must wait on listed worker's split even when worker 0 is unlisted"
@@ -545,7 +553,7 @@ fn test_repair_arranges_all_groups_using_tab_as_default() {
         timeout_sec: None,
     };
 
-    run_reconcile(&mut driver, &opts, "workers").unwrap();
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
     // Lead has workers in lead-workers group: both moves must be executed!
     assert_eq!(driver.executed_moves.len(), 2);
 }
@@ -571,7 +579,7 @@ fn test_hook_shadow_mode_file_precedence_and_empty_snapshot() {
         layouts: vec![],
         agents: vec![],
     });
-    assert!(reconcile_step(&tmp_state, &mut driver).is_ok());
+    assert!(reconcile_step(&tmp_state, &mut driver, None).is_ok());
     let _ = fs::remove_dir_all(&tmp_state);
 }
 
@@ -593,4 +601,150 @@ fn test_grid_deferred_statuses_from_config() {
     // With custom ["working", "paused"], "paused" is deferred
     let ops_custom = plan_with_deferred(&snap, Some(&["working", "paused"])).unwrap();
     assert!(ops_custom[0].deferred);
+}
+
+#[test]
+fn test_reviewer_n1_scenario_b_never_lands_in_orchestrator_tab() {
+    // Reviewer N1 scenario:
+    // Worker A sits beside CoS in w1:t1 (the orchestrator tab!).
+    // Worker B spawns in w1:t2.
+    // Someone runs `grid reconcile --repair --only B`.
+    // B must NEVER land in w1:t1!
+    let fix = fixtures_dir().join("2-workers.json");
+    let content = fs::read_to_string(fix).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let mut snap = parse_snapshot_value(&val).unwrap();
+
+    // Worker A (w1:p5) sits in w1:t1 beside CoS
+    snap.panes[1].tab_id = Some("w1:t1".to_string());
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = ReconcileOptions {
+        check: false,
+        repair: true,
+        tab: None,
+        only: Some("sude-1".to_string()), // only B (w1:p6)
+        owner: Some("cos".to_string()),
+        dry_run: false,
+        timeout_sec: None,
+    };
+
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+
+    // B must be moved
+    assert_eq!(driver.executed_moves.len(), 1);
+    let (moved_pane, target) = &driver.executed_moves[0];
+    assert_eq!(moved_pane, "w1:p6");
+
+    // Critical assertion: B must NEVER target w1:t1 (orchestrator tab)!
+    match target {
+        Target::NewTab { label } => {
+            assert_eq!(label, "quaqua-workers");
+        }
+        Target::Split { tab, .. } => {
+            assert_ne!(tab, "w1:t1", "worker B must NEVER land in orchestrator tab w1:t1");
+        }
+    }
+}
+
+#[test]
+fn test_apply_ops_refuses_when_anchor_not_in_target_tab() {
+    // Finding 5 remainder: anchor must be in target tab (apply.sh:209-213)
+    use quaqua::grid::types::Op;
+    let fix = fixtures_dir().join("2-workers.json");
+    let content = fs::read_to_string(fix).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let snap = parse_snapshot_value(&val).unwrap();
+
+    // Op targets w1:t2, but anchor w1:p1 is in w1:t1!
+    let ops = vec![Op {
+        op: "move".to_string(),
+        pane: "w1:p5".to_string(),
+        deferred: false,
+        target: Target::Split {
+            tab: "w1:t2".to_string(),
+            anchor: "w1:p1".to_string(), // w1:p1 is in w1:t1!
+            direction: "right".to_string(),
+            ratio: 0.5,
+        },
+    }];
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let res = apply_ops(&mut driver, &ops, None);
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("expected target tab w1:t2"),
+        "unexpected error message: {err}"
+    );
+}
+
+struct FailingRenameDriver {
+    fake: FakeHerdrDriver,
+}
+
+impl quaqua::grid::HerdrDriver for FailingRenameDriver {
+    fn snapshot(&mut self) -> Result<quaqua::grid::Snapshot, String> {
+        self.fake.snapshot()
+    }
+    fn move_pane(&mut self, pane: &str, target: &Target) -> Result<quaqua::grid::MoveResult, String> {
+        self.fake.move_pane(pane, target)
+    }
+    fn rename_pane(&mut self, _pane: &str, _label: &str) -> Result<(), String> {
+        Err("pane rename failed: connection reset".to_string())
+    }
+}
+
+#[test]
+fn test_repair_fails_if_rename_fails() {
+    // Finding 1 remainder: failed rename must not be swallowed (matches bash set -e)
+    let fix = fixtures_dir().join("1-worker.json");
+    let content = fs::read_to_string(fix).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let snap = parse_snapshot_value(&val).unwrap();
+
+    let mut driver = FailingRenameDriver {
+        fake: FakeHerdrDriver::new(snap),
+    };
+    let opts = ReconcileOptions {
+        check: false,
+        repair: true,
+        tab: None,
+        only: Some("tieude-1".to_string()),
+        owner: Some("cos".to_string()),
+        dry_run: false,
+        timeout_sec: None,
+    };
+
+    let res = run_reconcile(&mut driver, &opts, "workers", None);
+    assert!(res.is_err(), "rename failure must be propagated");
+    let err = res.unwrap_err();
+    assert!(err.contains("pane rename failed"), "unexpected error: {err}");
+}
+
+#[test]
+fn test_reconcile_honours_deferred_statuses() {
+    // Finding 9 remainder: reconcile check honours custom deferred_statuses
+    let fix = fixtures_dir().join("1-worker.json");
+    let content = fs::read_to_string(fix).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let mut snap = parse_snapshot_value(&val).unwrap();
+
+    // Mark worker as paused
+    snap.panes[1].agent_status = Some("paused".to_string());
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = ReconcileOptions {
+        check: true,
+        repair: false,
+        tab: Some("workers".to_string()),
+        only: None,
+        owner: Some("cos".to_string()),
+        dry_run: true,
+        timeout_sec: Some(0),
+    };
+
+    // When "paused" is in deferred_statuses, check converges immediately with 0 pending ops!
+    let res = run_reconcile(&mut driver, &opts, "workers", Some(&["working", "paused"]));
+    assert!(res.is_ok(), "paused worker must be deferred and converge immediately");
 }

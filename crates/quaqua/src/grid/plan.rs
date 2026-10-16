@@ -160,7 +160,7 @@ fn split_target(n: usize, i: usize, gws: &[&Pane], tab_ref: &str) -> Target {
     }
 }
 
-fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) -> Option<String> {
+pub fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) -> Option<String> {
     // 1. Pane tagged with matching grid_owner and non-worker role
     for p in panes {
         if let Some(t) = &p.tokens {
