@@ -82,16 +82,59 @@ fn default_depth() -> i64 {
     2
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+fn default_budget() -> String {
+    "45m".to_string()
+}
+fn default_hard_cap() -> String {
+    "120m".to_string()
+}
+fn default_stall() -> String {
+    "10m".to_string()
+}
+fn default_idle() -> String {
+    "2m".to_string()
+}
+fn default_nudge_at() -> f64 {
+    0.8
+}
+fn default_grace() -> f64 {
+    0.25
+}
+fn default_pilot_budget() -> String {
+    "30m".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Timers {
+    #[serde(default = "default_budget")]
     pub budget_default: String,
+    #[serde(default = "default_hard_cap")]
     pub hard_cap: String,
+    #[serde(default = "default_stall")]
     pub stall: String,
+    #[serde(default = "default_idle")]
     pub idle: String,
+    #[serde(default = "default_nudge_at")]
     pub nudge_at: f64,
+    #[serde(default = "default_grace")]
     pub grace: f64,
+    #[serde(default = "default_pilot_budget")]
     pub pilot_budget: String,
+}
+
+impl Default for Timers {
+    fn default() -> Self {
+        Timers {
+            budget_default: default_budget(),
+            hard_cap: default_hard_cap(),
+            stall: default_stall(),
+            idle: default_idle(),
+            nudge_at: default_nudge_at(),
+            grace: default_grace(),
+            pilot_budget: default_pilot_budget(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -169,6 +212,38 @@ pub struct ProjectOverride {
     pub max_workers_per_orchestrator: Option<i64>,
 }
 
+/// Parse a duration string like "45m", "120s", "2h" into seconds.
+pub fn parse_duration(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty duration string".to_string());
+    }
+    let split_idx = s.find(|c: char| !c.is_ascii_digit());
+    let (num_str, unit_str) = match split_idx {
+        Some(idx) => (&s[..idx], &s[idx..]),
+        None => return Err(format!("missing unit in duration '{s}' (e.g. 45m, 120s)")),
+    };
+    if num_str.is_empty() {
+        return Err(format!("invalid duration '{s}': missing number"));
+    }
+    let n: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid duration number in '{s}'"))?;
+    let multiplier: u64 = match unit_str {
+        "s" | "sec" | "secs" => 1,
+        "m" | "min" | "mins" => 60,
+        "h" | "hr" | "hrs" => 3600,
+        _ => return Err(format!("unknown duration unit '{unit_str}' in '{s}'")),
+    };
+    let total = n
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("duration '{s}' overflowed"))?;
+    if total == 0 {
+        return Err(format!("duration '{s}' must be greater than zero"));
+    }
+    Ok(total)
+}
+
 /// Read and parse a team.toml. Parse errors name the file.
 pub fn load(path: &Path) -> Result<Config, String> {
     let text = std::fs::read_to_string(path)
@@ -220,6 +295,23 @@ pub fn validate(cfg: &Config, models: Option<&BTreeMap<String, ModelsKind>>) -> 
                 return Err(format!("project {slug} cap {p} exceeds global cap {cap}"));
             }
         }
+    }
+    parse_duration(&cfg.timers.budget_default).map_err(|e| format!("timers.budget_default: {e}"))?;
+    parse_duration(&cfg.timers.hard_cap).map_err(|e| format!("timers.hard_cap: {e}"))?;
+    parse_duration(&cfg.timers.stall).map_err(|e| format!("timers.stall: {e}"))?;
+    parse_duration(&cfg.timers.idle).map_err(|e| format!("timers.idle: {e}"))?;
+    parse_duration(&cfg.timers.pilot_budget).map_err(|e| format!("timers.pilot_budget: {e}"))?;
+    if cfg.timers.nudge_at <= 0.0 || cfg.timers.nudge_at >= 1.0 || cfg.timers.nudge_at.is_nan() {
+        return Err(format!(
+            "timers.nudge_at {} must be in (0, 1)",
+            cfg.timers.nudge_at
+        ));
+    }
+    if cfg.timers.grace <= 0.0 || cfg.timers.grace >= 1.0 || cfg.timers.grace.is_nan() {
+        return Err(format!(
+            "timers.grace {} must be in (0, 1)",
+            cfg.timers.grace
+        ));
     }
 
     for (name, role) in &cfg.roles {
