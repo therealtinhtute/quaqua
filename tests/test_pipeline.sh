@@ -423,6 +423,22 @@ grep -q 'fix needs schema access' "$runsdir/pipeline-pb3.md" || fail "pb3: evide
 ! grep -q 'agent start quansu-pb3r2' "$T/calls" || fail "pb3: round-2 reviewer spawned"
 echo "ok: blocked fix report -> blocked, no next review round"
 
+# F1b (regression): a '## Blockers' section whose body only says none is
+# finished — the r3 run of quaqua-rs stopped falsely on a 'Blockers: none'
+# report. Accepts none / None / '- none' (case-insensitive, optional bullet).
+run_pipe FAKE_PLAN_MD=$'plan v1\n\n## Blockers\n- none\n\n## Lessons\n- none\n' \
+         -- pbz "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "pbz: exit $rc, want 5 plan-ready ('## Blockers: - none' is not a blocker): $(cat "$T/out")"
+grep -q 'plan-ready' "$T/err" || fail "pbz: no plan-ready notice"
+! grep -q 'status=blocked' "$T/out" || fail "pbz: 'none' blockers wrongly blocked: $(cat "$T/out")"
+[[ -f $runsdir/sude-pbz.plan.md ]] || fail "pbz: plan not advanced to plan-ready"
+
+run_pipe FAKE_PLAN_MD=$'plan v2\n\n## Blockers\nNone\n\n## Lessons\n- none\n' \
+         -- pbw "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "pbw: exit $rc, want 5 plan-ready ('## Blockers: None' is not a blocker): $(cat "$T/out")"
+! grep -q 'status=blocked' "$T/out" || fail "pbw: 'None' blockers wrongly blocked: $(cat "$T/out")"
+echo "ok: Blockers 'none'/'None' -> not blocked, plan advances to plan-ready"
+
 # ── F2: no committed snapshot / dirty tree -> resumable blocked, not clean ───
 run_pipe -- ncm "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "ncm run1: exit $rc, want 5"
