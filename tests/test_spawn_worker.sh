@@ -291,9 +291,9 @@ for k in ni suhuynh truonglao; do
     || fail "--review $k: no dontAsk permission mode: $(cat "$T/calls")"
   grep -qF -- "--add-dir $T/home/quaqua/runs" "$T/calls" \
     || fail "--review $k: runs dir not a working directory: $(cat "$T/calls")"
-  grep -qF -- "Edit(//$T/home/quaqua/runs/**)" "$T/calls" \
+  grep -qF -- "Edit(//${T#/}/home/quaqua/runs/**)" "$T/calls" \
     || fail "--review $k: runs not writable (no Edit allow rule): $(cat "$T/calls")"
-  grep -qF -- "Edit(//$T/.wt/$k-revread/**)" "$T/calls" \
+  grep -qF -- "Edit(//${T#/}/.wt/$k-revread/**)" "$T/calls" \
     || fail "--review $k: worktree not read-only (no Edit deny rule): $(cat "$T/calls")"
   grep -qF -- '--model claude-opus-5-5' "$T/calls" || fail "--review $k: model changed: $(cat "$T/calls")"
   grep -qF -- "--effort $eff" "$T/calls" || fail "--review $k: effort not $eff: $(cat "$T/calls")"

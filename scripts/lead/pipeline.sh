@@ -2,7 +2,7 @@
 # Usage: pipeline.sh <task> <repo> --brief <file> [--builder sude] [--reviewer quansu]
 #                    [--review auto|always|skip] [--rounds 2] [--base <ref>]
 #        pipeline.sh --resume <task> <repo>
-#   Build -> review -> fix loop (spec-raw/quaqua-slp-slim-lock.md §1-2) on top of
+#   Build -> review -> fix loop on top of
 #   spawn-worker.sh / prompt-worker.sh / cleanup-worker.sh; counts as 2 workers
 #   toward the cap. <task> is a slug ([a-z0-9-]): builder <builder>-<task>, a
 #   fresh reviewer <reviewer>-<task>r<N> each round (spawn-worker.sh --review).
