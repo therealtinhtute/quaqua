@@ -86,17 +86,14 @@ case "${1:-} ${2:-}" in
         printf 'Verdict: clean\n' > "$HOME/quaqua/runs/$w.md" ;;
     esac
     exit 0 ;;
+  "api snapshot")
+    if [[ -n "${GRID_FAIL:-}" ]]; then printf '{"error":{"message":"backend down"}}\n' >&2; exit 1; fi
+    if [[ -n "${GRID_SNAPSHOT:-}" ]]; then cat "$GRID_SNAPSHOT"; else printf '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}\n'; fi
+    exit 0 ;;
   *) exit 0 ;;
 esac
 STUB
 chmod +x "$T/bin/herdr"
-
-cat > "$T/bin/grid-workers.sh" << 'STUB'
-#!/usr/bin/env bash
-[[ -n ${CALLS:-} ]] && echo "grid $*" >> "$CALLS"
-exit 0
-STUB
-chmod +x "$T/bin/grid-workers.sh"
 
 cat > "$T/bin/spawn-worker.sh" << 'STUB'
 #!/usr/bin/env bash
@@ -127,6 +124,10 @@ chmod +x "$T/bin/cleanup-worker.sh"
 
 export PATH="$T/bin:$PATH"
 export QUAQUA_SCRIPT_DIR="$T/bin"
+# the pipeline's grid check is in-process (`herdr api snapshot`): pin the stub
+# so a leaked HERDR_BIN_PATH can never reach the live herdr
+export HERDR_BIN_PATH="$T/bin/herdr"
+unset HERDR_STUB_SNAPSHOT
 
 # ── 1. Pipeline execution: builder + reviewer gridded into GRID_TAB ──────────────
 rc=0
@@ -138,12 +139,26 @@ rc=0
 "$bin" pipeline --resume pgrid "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "resume: exit $rc, want 0: $(cat "$T/err")"
 
-# Check grid calls recorded
-glines=$(grep '^grid ' "$CALLS")
-echo "$glines" | grep -q 'grid --check --tab myrepo-workers --only sude-pgrid' \
-  || fail "builder grid missing: $glines"
-echo "$glines" | grep -q 'grid --check --tab myrepo-workers --only sude-pgrid,suhuynh-pgridr1' \
-  || fail "reviewer+builder grid missing: $glines"
+# The pipeline grids its own workers in-process now (one `herdr api snapshot`
+# per check; the --only/--tab scoping is covered by crates/quaqua/tests/grid.rs
+# and tests/test_spawn_worker.sh). Builder + reviewer + reviewer-cleanup.
+snapcount=$(grep -c '^herdr api snapshot$' "$CALLS" || true)
+[[ "$snapcount" -ge 2 ]] || fail "pipeline grid check missing (want >=2, got $snapcount): $(cat "$CALLS")"
+first_snap=$(grep -n '^herdr api snapshot$' "$CALLS" | head -1 | cut -d: -f1 || true)
+builder_spawn=$(grep -n '^spawn sude-pgrid' "$CALLS" | head -1 | cut -d: -f1 || true)
+[[ -n "$first_snap" && -n "$builder_spawn" && "$builder_spawn" -lt "$first_snap" ]] \
+  || fail "builder grid check not after the spawn: $(cat "$CALLS")"
+! grep -q 'warning: grid check failed' "$T/err" \
+  || fail "converged snapshot must not warn: $(cat "$T/err")"
+echo "ok: builder + reviewer grid checked in-process"
+
+# ── 1b. an unreachable herdr pauses the run before any prompt ────────────────
+rc=0
+GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0 "$bin" pipeline gfail "$T/repo" --brief "$T/brief.md" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 5 ]] || fail "grid failure: exit $rc, want 5: $(cat "$T/err")"
+grep -q 'warning: grid check failed' "$T/err" || fail "grid failure: no warning: $(cat "$T/err")"
+! grep -q 'agent prompt' "$T/calls" || fail "grid failure: prompted anyway: $(cat "$T/calls")"
+echo "ok: unreachable herdr -> grid check warning + pause before any prompt"
 
 # ── 2. Pure grid planner verification: 2 workers placed in workers tab, not anchor tab ─
 # Snapshot representing:

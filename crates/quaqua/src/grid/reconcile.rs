@@ -1,4 +1,4 @@
-use super::apply::{apply_ops, HerdrDriver};
+use super::apply::{apply_ops, CliHerdrDriver, HerdrDriver};
 use super::plan::{is_candidate_worker, is_group_tab, plan_with_deferred};
 use super::types::{Op, Snapshot, Target};
 use std::collections::HashSet;
@@ -218,6 +218,7 @@ pub fn run_reconcile<D: HerdrDriver>(
 
     let total_workers = owner_workers.len();
     if total_workers == 0 {
+        eprintln!("no workers to arrange");
         return Ok(());
     }
 
@@ -386,7 +387,7 @@ pub fn run_reconcile<D: HerdrDriver>(
                     continue;
                 }
 
-                // N1: Fallback logic mirroring grid-workers.sh:441-461
+                // N1: Fallback logic mirroring the legacy arranger (441-461)
                 let (mode, anchor_idx, dir, ratio) = if idx == 0 {
                     ("new-tab", 0, "right", 0.5)
                 } else if n == 2 {
@@ -436,7 +437,7 @@ pub fn run_reconcile<D: HerdrDriver>(
                             },
                         });
                     } else if !present.is_empty() {
-                        // Fallback to present[0] in workers tab (grid-workers.sh:454-456)
+                        // Fallback to present[0] in workers tab (legacy arranger 454-456)
                         repair_ops.push(Op {
                             op: "move".to_string(),
                             pane: w.pane_id.clone(),
@@ -449,7 +450,7 @@ pub fn run_reconcile<D: HerdrDriver>(
                             },
                         });
                     } else {
-                        // Nobody in workers tab yet! Create new tab! (grid-workers.sh:457-460)
+                        // Nobody in workers tab yet! Create new tab! (legacy arranger 457-460)
                         repair_ops.push(Op {
                             op: "move".to_string(),
                             pane: w.pane_id.clone(),
@@ -478,4 +479,22 @@ pub fn run_reconcile<D: HerdrDriver>(
     }
 
     Ok(())
+}
+
+/// In-process grid check: the Rust replacement for the legacy arranger's
+/// `--check` mode. Used by worker spawn/cleanup and by the pipeline before
+/// prompting a worker; the caller owns the GRID_SKIP guard. `tab` is both the
+/// requested tab and the default label.
+pub fn run_grid_check(tab: &str, only: Option<&str>, owner: Option<&str>) -> Result<(), String> {
+    let opts = ReconcileOptions {
+        check: true,
+        repair: false,
+        tab: Some(tab.to_string()),
+        only: only.map(str::to_string),
+        owner: owner.map(str::to_string),
+        dry_run: false,
+        timeout_sec: None,
+    };
+    let mut driver = CliHerdrDriver::new();
+    run_reconcile(&mut driver, &opts, tab, None)
 }

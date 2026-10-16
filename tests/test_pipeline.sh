@@ -86,6 +86,11 @@ case "${1:-} ${2:-}" in
     exit "${FAKE_RC:-0}" ;;
   "pane split") printf '{"result":{"pane":{"pane_id":"%%1"}}}\n' ;;
   "pane wait-output") exit 1 ;;   # no first-run trust dialog
+  "api snapshot")
+    # the pipeline's grid check is in-process: GRID_FAIL fails every check
+    if [ -n "${GRID_FAIL:-}" ]; then printf '{"error":{"message":"backend down"}}\n' >&2; exit 1; fi
+    if [ -n "${GRID_SNAPSHOT:-}" ]; then cat "$GRID_SNAPSHOT"; else printf '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}\n'; fi
+    exit 0 ;;
 esac
 exit 0
 STUB
@@ -288,22 +293,15 @@ grep -q 'worktree add -b quaqua/sude-bas .* quaqua/integ' "$T/calls" \
 echo "ok: --base -> builder worktree starts at quaqua/integ"
 
 # ── grid: the pipeline arranges its own workers into the project tab ────────
-# copied scripts dir so grid-workers.sh can be swapped for a logging stub;
-# run_pipe2 does NOT set GRID_SKIP so the pipeline's own hook is observable.
-# Every grid call must carry --only — a call without it is an inner
-# spawn/cleanup hook leaking (it would sweep foreign workers in the CoS tab).
+# copied scripts dir; run_pipe2 does NOT set GRID_SKIP so the pipeline's own
+# grid check is observable. The check is in-process: one `herdr api snapshot`
+# per check (the inner spawn/cleanup hooks are skipped by GRID_SKIP, so an
+# `agent list`-free extra snapshot would mean a leak).
 mkdir -p "$T/p2/scripts/lead" "$T/p2/scripts/worker"
 cp "$src/lead/pipeline.sh" "$T/p2/scripts/lead/"
 cp -R "$src/lib" "$T/p2/scripts/"
 cp "$src/worker/prompt-worker.sh" "$src/worker/spawn-worker.sh" \
    "$src/worker/cleanup-worker.sh" "$T/p2/scripts/worker/"
-cat > "$T/p2/scripts/worker/grid-workers.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'grid %s\n' "$*" >> "$CALLS"
-if [ -n "${GRID_FAIL_ON:-}" ] && [[ $* == *"$GRID_FAIL_ON"* ]]; then exit 1; fi
-exit "${GRID_FAKE_RC:-0}"
-EOF
-chmod +x "$T/p2/scripts/worker/grid-workers.sh"
 
 run_pipe2() {  # like run_pipe, but against $T/p2/scripts and without GRID_SKIP
   local vars=()
@@ -312,50 +310,69 @@ run_pipe2() {  # like run_pipe, but against $T/p2/scripts and without GRID_SKIP
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" \
+    HERDR_BIN_PATH="$T/bin/herdr" QUAQUA_OWNER=cos \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
     env "${vars[@]}" bash "$T/p2/scripts/lead/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
-glines() { grep '^grid ' "$T/calls" || true; }
+# The pipeline's grid check is in-process now (one `herdr api snapshot` per
+# check); the --only/--tab scoping is covered in crates/quaqua/tests/grid.rs.
+nchecks() { grep -c '^herdr api snapshot$' "$T/calls" || true; }
 
 lineno() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }
 
 run_pipe2 FAKE_NUMSTAT=$'200\t10\tsrc/a.c' FAKE_NAMES=$'src/a.c' \
           -- grd "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "grd run1: exit $rc, want 5: $(cat "$T/err")"
-glines | grep -qx 'grid --check --tab repo-workers --only sude-grd' \
-  || fail "grd run1: builder not gridded into repo-workers: $(glines)"
-[[ $(lineno 'agent start sude-grd') -lt $(lineno '^grid ') ]] \
+[[ "$(nchecks)" -ge 1 ]] || fail "grd run1: no grid check: $(cat "$T/calls")"
+[[ $(lineno 'agent start sude-grd') -lt $(lineno '^herdr api snapshot$') ]] \
   || fail "grd run1: grid ran before the builder spawn: $(cat "$T/calls")"
-! glines | grep -v -- '--only' | grep -q . \
-  || fail "grd run1: unfiltered grid call leaked (inner hook not skipped): $(glines)"
-echo "ok: builder spawn -> grid --check --tab repo-workers --only sude-grd"
+! grep -q 'warning: grid check failed' "$T/err" \
+  || fail "grd run1: converged snapshot must not warn: $(cat "$T/err")"
+echo "ok: builder spawn -> in-process grid check after the spawn, converged"
 
 run_pipe2 FAKE_NUMSTAT=$'200\t10\tsrc/a.c' FAKE_NAMES=$'src/a.c' \
           FAKE_REVIEW_MD=$'ok\nVerdict: clean' \
           -- --resume grd "$T/repo"
 [[ $rc -eq 0 ]] || fail "grd resume: exit $rc: $(cat "$T/err")"
-glines | grep -qx 'grid --check --tab repo-workers --only sude-grd,suhuynh-grdr1' \
-  || fail "grd resume: reviewer spawn not gridded: $(glines)"
-[[ $(glines | grep -cx 'grid --check --tab repo-workers --only sude-grd') -ge 1 ]] \
-  || fail "grd resume: builder-only grid call after reviewer cleanup missing: $(glines)"
-! glines | grep -v -- '--only' | grep -q . \
-  || fail "grd resume: unfiltered grid call leaked: $(glines)"
-echo "ok: reviewer spawn -> --only builder,reviewer; cleanup -> --only builder"
+[[ "$(nchecks)" -ge 2 ]] || fail "grd resume: want >=2 grid checks, got $(nchecks)"
+echo "ok: resume -> in-process grid checks for the build + review phases"
 
 # GRID_TAB overrides the derived <repo-basename>-workers label
 run_pipe2 GRID_TAB=my-tab -- gto "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "gto: exit $rc, want 5: $(cat "$T/err")"
-glines | grep -qx 'grid --check --tab my-tab --only sude-gto' \
-  || fail "gto: GRID_TAB not honoured: $(glines)"
-! glines | grep -v -- '--only' | grep -q . \
-  || fail "gto: unfiltered grid call leaked: $(glines)"
+[[ "$(nchecks)" -ge 1 ]] || fail "gto: no grid check: $(cat "$T/calls")"
 echo "ok: GRID_TAB overrides the workers tab label"
 
+# --tab + --only scope the in-process check: the fixture's only pending move
+# belongs to group "my-tab" and to sude-gto, so GRID_TAB=my-tab picks it up
+# (check fails, GRID_CHECK_TIMEOUT_SEC=0) while the derived repo-workers does not
+cat > "$T/gto-pending.json" <<'JSON'
+{"snapshot":{"workspaces":[{"workspace_id":"w1","label":"repo"}],
+ "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":1},
+         {"tab_id":"w1:t2","workspace_id":"w1","label":"2","pane_count":1}],
+ "panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle",
+           "tokens":{"grid_role":"orchestrator","grid_owner":"cos","grid_ready":"1"}},
+          {"pane_id":"w1:p5","tab_id":"w1:t2","workspace_id":"w1","agent_status":"idle","label":"sude-gtox",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"my-tab","grid_ready":"1"}}],
+ "layouts":[],"agents":[{"name":"sude-gtox","pane_id":"w1:p5","agent_status":"idle"}]}}
+JSON
+run_pipe2 GRID_TAB=my-tab GRID_SNAPSHOT="$T/gto-pending.json" GRID_CHECK_TIMEOUT_SEC=0 \
+          -- gtox "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "gtox: exit $rc, want 5: $(cat "$T/err")"
+grep -q 'warning: grid check failed' "$T/err" \
+  || fail "gtox: pending my-tab move not detected: $(cat "$T/err")"
+run_pipe2 GRID_SNAPSHOT="$T/gto-pending.json" GRID_CHECK_TIMEOUT_SEC=0 \
+          -- gtox2 "$T/repo" --brief "$T/brief.md"
+[[ $rc -eq 5 ]] || fail "gtox2: exit $rc, want 5: $(cat "$T/err")"
+! grep -q 'warning: grid check failed' "$T/err" \
+  || fail "gtox2: the derived tab must not scope the my-tab move in: $(cat "$T/err")"
+echo "ok: --tab + --only scope the in-process grid check"
+
 # a failing grid PAUSES the pipeline before any prompt (F12, MANDATORY rule)
-run_pipe2 GRID_FAKE_RC=1 -- gfx "$T/repo" --brief "$T/brief.md"
+run_pipe2 GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0 -- gfx "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "gfx: exit $rc, want 5 (grid pause): $(cat "$T/err")"
-grep -q 'warning: grid-workers.sh failed' "$T/err" \
+grep -q 'warning: grid check failed' "$T/err" \
   || fail "gfx: no grid-failure warning: $(cat "$T/err")"
 ! grep -q 'agent prompt' "$T/calls" \
   || fail "gfx: worker prompted despite grid failure: $(cat "$T/calls")"
@@ -367,14 +384,27 @@ grep -q 'agent prompt sude-gfx' "$T/calls" \
   || fail "gfx resume: plan prompt not sent after arrange"
 echo "ok: grid failure pauses pre-prompt; resume after arranging continues"
 
-# the reviewer-phase grid failure also pauses before the review prompt
+# the reviewer-phase grid failure also pauses before the review prompt: the
+# pending move belongs to the reviewer (suhuynh-gfrr1), so the builder's
+# --only sude-gfr checks converge and only the reviewer check trips
+cat > "$T/reviewer-pending.json" <<'JSON'
+{"snapshot":{"workspaces":[{"workspace_id":"w1","label":"repo"}],
+ "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":1},
+         {"tab_id":"w1:t2","workspace_id":"w1","label":"2","pane_count":1}],
+ "panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle",
+           "tokens":{"grid_role":"orchestrator","grid_owner":"cos","grid_ready":"1"}},
+          {"pane_id":"w1:p7","tab_id":"w1:t2","workspace_id":"w1","agent_status":"idle","label":"suhuynh-gfrr1",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"repo","grid_ready":"1"}}],
+ "layouts":[],"agents":[{"name":"suhuynh-gfrr1","pane_id":"w1:p7","agent_status":"idle"}]}}
+JSON
 run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
           -- gfr "$T/repo" --brief "$T/brief.md"
 [[ $rc -eq 5 ]] || fail "gfr run1: exit $rc, want 5"
-run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' GRID_FAIL_ON=suhuynh \
+run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
+          GRID_SNAPSHOT="$T/reviewer-pending.json" GRID_CHECK_TIMEOUT_SEC=0 \
           FAKE_REVIEW_MD=$'ok\nVerdict: clean' -- --resume gfr "$T/repo"
 [[ $rc -eq 5 ]] || fail "gfr: exit $rc, want 5 (reviewer-grid pause): $(cat "$T/err")"
-grep -q 'grid-workers.sh failed' "$T/err" || fail "gfr: no grid warning"
+grep -q 'warning: grid check failed' "$T/err" || fail "gfr: no grid warning: $(cat "$T/err")"
 ! grep -q 'agent prompt suhuynh-gfr' "$T/calls" \
   || fail "gfr: reviewer prompted despite grid failure: $(cat "$T/calls")"
 run_pipe2 FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \

@@ -34,19 +34,24 @@ pub fn default_runs_dir() -> PathBuf {
     resolve_default_runs_dir(override_dir.as_deref(), home.as_deref())
 }
 
-pub fn find_grid_script() -> Option<PathBuf> {
+/// Locate an engine script (a `scripts/` shim) by name, in the same order the
+/// grid script was historically found: `QUAQUA_SCRIPT_DIR`, its `../worker`
+/// and parent/`worker` siblings, the binary's own directory, the
+/// `QUAQUA_TEAM_TOML` sibling `scripts/worker`, `$HOME/quaqua/scripts/worker`,
+/// then `scripts/worker` under the cwd. Returns the file only when it exists.
+pub fn find_engine_script(name: &str) -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
         let p = PathBuf::from(&dir);
-        let candidate = p.join("grid-workers.sh");
+        let candidate = p.join(name);
         if candidate.is_file() {
             return Some(candidate);
         }
-        let candidate2 = p.join("../worker/grid-workers.sh");
+        let candidate2 = p.join("../worker").join(name);
         if candidate2.is_file() {
             return Some(candidate2);
         }
         if let Some(parent) = p.parent() {
-            let candidate3 = parent.join("worker/grid-workers.sh");
+            let candidate3 = parent.join("worker").join(name);
             if candidate3.is_file() {
                 return Some(candidate3);
             }
@@ -54,7 +59,7 @@ pub fn find_grid_script() -> Option<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("grid-workers.sh");
+            let candidate = dir.join(name);
             if candidate.is_file() {
                 return Some(candidate);
             }
@@ -62,19 +67,19 @@ pub fn find_grid_script() -> Option<PathBuf> {
     }
     if let Ok(team_path) = std::env::var("QUAQUA_TEAM_TOML") {
         if let Some(parent) = Path::new(&team_path).parent() {
-            let candidate = parent.join("scripts/worker/grid-workers.sh");
+            let candidate = parent.join("scripts/worker").join(name);
             if candidate.is_file() {
                 return Some(candidate);
             }
         }
     }
     if let Ok(home) = std::env::var("HOME") {
-        let candidate = PathBuf::from(home).join("quaqua/scripts/worker/grid-workers.sh");
+        let candidate = PathBuf::from(home).join("quaqua/scripts/worker").join(name);
         if candidate.is_file() {
             return Some(candidate);
         }
     }
-    let candidate = PathBuf::from("scripts/worker/grid-workers.sh");
+    let candidate = PathBuf::from("scripts/worker").join(name);
     if candidate.is_file() {
         return Some(candidate);
     }
@@ -91,25 +96,8 @@ pub fn run_grid_hook(grid_tab: &str) {
         eprintln!("warning: GRID_SKIP=1 ignored outside pipeline.sh/tests (rules/_all/fanout-agent-grid.md)");
     }
 
-    if let Some(script) = find_grid_script() {
-        let res = Command::new("bash")
-            .arg(script)
-            .arg("--check")
-            .arg("--tab")
-            .arg(grid_tab)
-            .status();
-        match res {
-            Ok(st) if !st.success() => {
-                eprintln!(
-                    "warning: grid-workers.sh failed (exit {}); arrange panes manually",
-                    st.code().unwrap_or(1)
-                );
-            }
-            Err(e) => {
-                eprintln!("warning: grid-workers.sh failed: {e}; arrange panes manually");
-            }
-            _ => {}
-        }
+    if let Err(e) = crate::grid::run_grid_check(grid_tab, None, None) {
+        eprintln!("warning: grid check failed ({e}); arrange panes manually");
     }
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sandbox test for cleanup-worker.sh's worktree removal and grid hook. No real
-# herdr/runs touched: temp git repo, fake herdr, and a stub grid-workers.sh
-# next to a copy of the script.
+# herdr/runs touched: temp git repo and a fake herdr (the grid check runs
+# in-process against its `api snapshot`).
 # Usage: tests/test_cleanup_worker.sh   (exit 0 = pass)
 set -euo pipefail
 
@@ -13,14 +13,9 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# ── sandbox: temp worker repo + fake herdr + stub grid ──────────────────────
+# ── sandbox: temp worker repo + fake herdr ──────────────────────────────────
 mkdir -p "$T/quaqua" "$T/bin" "$T/scripts/worker"
 cp "$src/worker/cleanup-worker.sh" "$T/scripts/worker/cleanup-worker.sh"
-cat > "$T/scripts/worker/grid-workers.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'grid%s\n' "${*:+ $*}" >> "$EVENTS"
-exit "${GRID_FAKE_RC:-0}"
-EOF
 
 cat > "$T/bin/herdr" <<'EOF'
 #!/usr/bin/env bash
@@ -37,9 +32,33 @@ if [[ "$1" == agent && "$2" == get ]]; then
   echo '{"result":{"agent":{"pane_id":"pane-1"}}}'
   exit 0
 fi
+# grid check: in-process reconcile reads one snapshot. GRID_FAIL simulates an
+# unreachable herdr; GRID_SNAPSHOT serves a fixture; default = converged.
+if [[ "$1" == api && "$2" == snapshot ]]; then
+  if [[ -n "${GRID_FAIL:-}" ]]; then printf '{"error":{"message":"backend down"}}\n' >&2; exit 1; fi
+  if [[ -n "${GRID_SNAPSHOT:-}" ]]; then cat "$GRID_SNAPSHOT"; else printf '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}\n'; fi
+  exit 0
+fi
 exit 0
 EOF
 chmod +x "$T/bin/herdr"
+# the in-process input grid check shells out to `herdr api snapshot` and scopes
+# by $QUAQUA_OWNER: pin the stub and drop the leaked owner so a live herdr or a
+# foreign owner can never change the outcome
+export HERDR_BIN_PATH="$T/bin/herdr"
+unset HERDR_STUB_SNAPSHOT QUAQUA_OWNER GRID_CHECK_TIMEOUT_SEC
+
+# a pending move for group "coucou": only --tab coucou-workers/--tab coucou scopes it in
+cat > "$T/coucou.json" <<'EOF'
+{"snapshot":{"workspaces":[{"workspace_id":"w1","label":"quaqua"}],
+ "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":1},
+         {"tab_id":"w1:t2","workspace_id":"w1","label":"2","pane_count":1}],
+ "panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle",
+           "tokens":{"grid_role":"orchestrator","grid_owner":"cos","grid_ready":"1"}},
+          {"pane_id":"w1:p5","tab_id":"w1:t2","workspace_id":"w1","agent_status":"idle",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"coucou","grid_ready":"1"}}],
+ "layouts":[],"agents":[]}}
+EOF
 
 git -C "$T/quaqua" init -q
 git -C "$T/quaqua" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
@@ -59,38 +78,43 @@ run_cleanup() {  # run_cleanup <name> [VAR=val...]
     bash "$T/scripts/worker/cleanup-worker.sh" "$name" "$T/quaqua"
 }
 
-# ── 1. cleanup removes the worktree; grid hook runs after the pane close ────
+# ── 1. cleanup removes the worktree; grid check runs after the pane close ───
 worktree "$T/quaqua" zz-clean
 run_cleanup zz-clean >/dev/null || fail "cleanup failed"
 [[ ! -d "$T/.wt/zz-clean" ]] || fail "worktree not removed"
-[[ "$(grep '^grid' "$T/events")" == "grid --check --tab quaqua-workers" ]] || fail "grid hook: not called: $(cat "$T/events")"
-[[ "$(tail -1 "$T/events")" == "grid --check --tab quaqua-workers" ]] || fail "grid hook: not after the pane close: $(cat "$T/events")"
-echo "ok: cleanup -> worktree removed, grid --check --tab <repo>-workers called after the pane is closed"
+grep -q '^herdr api snapshot$' "$T/events" || fail "grid check: not called: $(cat "$T/events")"
+[[ "$(tail -1 "$T/events")" == "herdr api snapshot" ]] || fail "grid check: not after the pane close: $(cat "$T/events")"
+echo "ok: cleanup -> worktree removed, in-process grid check runs after the pane is closed"
 
 # ── 2. GRID_TAB selects the project's 2-4 worker tab ────────────────────────
+# the fixture's pending move belongs to group "coucou": --tab coucou-workers
+# scopes it in (check fails), the derived quaqua-workers scopes it out.
 worktree "$T/quaqua" zz-clean
-run_cleanup zz-clean GRID_TAB=coucou-workers >/dev/null || fail "cleanup failed with GRID_TAB"
-grep -q '^grid --check --tab coucou-workers$' "$T/events" || fail "GRID_TAB: not passed as --tab: $(cat "$T/events")"
-echo "ok: GRID_TAB -> grid-workers.sh --check --tab coucou-workers"
+err=$(run_cleanup zz-clean GRID_TAB=coucou-workers GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_SEC=0 2>&1 >/dev/null) || fail "cleanup failed with GRID_TAB"
+[[ "$err" == *"grid check failed"* ]] || fail "GRID_TAB: pending coucou move not detected: $err"
+worktree "$T/quaqua" zz-clean
+err=$(run_cleanup zz-clean GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_SEC=0 2>&1 >/dev/null) || fail "cleanup failed with the derived tab"
+[[ "$err" != *"grid check failed"* ]] || fail "quaqua-workers must not scope in the coucou move: $err"
+echo "ok: GRID_TAB -> the check is scoped to that tab"
 
 # ── 3. GRID_SKIP=1 disables the grid hook only for pipeline.sh / tests ─────
 worktree "$T/quaqua" zz-clean
 run_cleanup zz-clean QUAQUA_TEST=1 GRID_SKIP=1 >/dev/null || fail "cleanup failed with GRID_SKIP"
-grep -q '^grid' "$T/events" && fail "GRID_SKIP=1: grid called: $(cat "$T/events")"
+grep -q '^herdr api snapshot' "$T/events" && fail "GRID_SKIP=1: grid checked: $(cat "$T/events")"
 worktree "$T/quaqua" zz-clean
 run_cleanup zz-clean PIPELINE_TASK=t GRID_SKIP=1 >/dev/null || fail "cleanup failed with PIPELINE_TASK"
-grep -q '^grid' "$T/events" && fail "pipeline GRID_SKIP=1: grid called: $(cat "$T/events")"
-echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not called"
+grep -q '^herdr api snapshot' "$T/events" && fail "pipeline GRID_SKIP=1: grid checked: $(cat "$T/events")"
+echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not checked"
 worktree "$T/quaqua" zz-clean
 run_cleanup zz-clean GRID_SKIP=1 >/dev/null 2>"$T/err" || fail "cleanup failed with bare GRID_SKIP"
-grep -q '^grid --check --tab quaqua-workers$' "$T/events" || fail "bare GRID_SKIP=1: grid not called: $(cat "$T/events")"
+grep -q '^herdr api snapshot' "$T/events" || fail "bare GRID_SKIP=1: grid not checked: $(cat "$T/events")"
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
-echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid called"
+echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid checked"
 
-# ── 4. a failing grid hook warns but never blocks the cleanup ───────────────
+# ── 4. a failing grid check warns but never blocks the cleanup ──────────────
 worktree "$T/quaqua" zz-clean
-err=$(run_cleanup zz-clean GRID_FAKE_RC=1 2>&1 >/dev/null) || fail "cleanup failed when the grid hook failed"
-[[ "$err" == *"warning: grid-workers.sh failed"* ]] || fail "grid failure: no warning"
+err=$(run_cleanup zz-clean GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0 2>&1 >/dev/null) || fail "cleanup failed when the grid check failed"
+[[ "$err" == *"warning: grid check failed"* ]] || fail "grid failure: no warning"
 [[ ! -d "$T/.wt/zz-clean" ]] || fail "grid failure: worktree not removed"
 echo "ok: grid failure -> warning only, cleanup succeeds"
 
@@ -111,7 +135,7 @@ run_cleanup zz-gone HERDR_GONE=1 QUAQUA_RUNS_DIR="$T/runs" >/dev/null || fail "c
 git -C "$T/quaqua" show-ref -q "refs/heads/quaqua/zz-gone" || fail "gone agent: branch deleted"
 ! grep -q 'pane close' "$T/events" || fail "gone agent: pane close called"
 [[ ! -e "$T/runs/zz-gone.owner" && ! -e "$T/runs/zz-gone.grid" ]] || fail "gone agent: runs metadata left"
-grep -q '^grid --check --tab quaqua-workers$' "$T/events" || fail "gone agent: grid hook not called"
+grep -q '^herdr api snapshot$' "$T/events" || fail "gone agent: grid check not called"
 echo "ok: agent already gone -> worktree removed, branch kept, no pane close"
 
 # ── 7. real failure exits non-zero ──────────────────────────────────────────

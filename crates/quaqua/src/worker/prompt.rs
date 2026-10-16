@@ -503,20 +503,12 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         {
             let grid_tab = std::fs::read_to_string(runs_dir.join(format!("{name}.grid")))
                 .unwrap_or_default();
-            let grid_tab = grid_tab.trim();
-            let grid_script = crate::worker::cleanup::find_grid_script();
-            if let Some(script) = grid_script {
-                let mut cmd = Command::new("bash");
-                cmd.arg(script).arg("--check");
-                if !grid_tab.is_empty() {
-                    cmd.arg("--tab").arg(grid_tab);
-                }
-                cmd.arg("--only").arg(name);
-                if let Ok(st) = cmd.status() {
-                    if !st.success() {
-                        return Err((1, format!("error: grid check failed for {name}; arrange panes manually before prompting\n")));
-                    }
-                }
+            let tab = {
+                let t = grid_tab.trim();
+                if t.is_empty() { "workers" } else { t }
+            };
+            if let Err(e) = crate::grid::run_grid_check(tab, Some(name), None) {
+                return Err((1, format!("error: grid check failed for {name} ({e}); arrange panes manually before prompting\n")));
             }
         }
 
