@@ -122,19 +122,33 @@ integ_conflict_base=$(git -C "$T/repo" rev-parse HEAD)
 
 rc=0
 "$bin" merge --check "true" --repo "$T/repo" myapp feature-conflict >"$T/out" 2>"$T/err" || rc=$?
-[[ $rc -eq 1 ]] || fail "conflict: exit $rc, want 1"
+[[ $rc -eq 4 ]] || fail "conflict: exit $rc, want 4 (rework to Peer, distinct from operational errors)"
 grep -q "merge conflict merging 'feature-conflict' into 'quaqua/myapp-integ' — returning rework to Peer" "$T/err" \
   || fail "conflict: wrong error message: $(cat "$T/err")"
 curr_integ=$(git -C "$T/repo" rev-parse HEAD)
 [[ "$curr_integ" == "$integ_conflict_base" ]] || fail "integ not clean after conflict abort"
-echo "ok: merge conflict -> merge --abort and returns rework to Peer"
+echo "ok: merge conflict -> merge --abort (exit 4, distinct from operational 1, check 2, base 3)"
 
-# ── 4. Happy path: valid branch merged and commit recorded ────────────────────────────────
+# ── 4. Primary checkout never moved & works when integ is checked out in another worktree ───
+# Switch primary checkout to a different branch (e.g. master/main)
+git -C "$T/repo" checkout -q -b "developer-working-branch" "$base_commit"
+
+# Create an external worktree on integ
+mkdir -p "$T/other-wt"
+git -C "$T/repo" worktree add "$T/other-wt" "quaqua/myapp-integ"
+
 rc=0
 "$bin" merge --check "true" --repo "$T/repo" myapp feature-b >"$T/out" 2>"$T/err" || rc=$?
-[[ $rc -eq 0 ]] || fail "happy: exit $rc, want 0: $(cat "$T/err")"
+[[ $rc -eq 0 ]] || fail "happy with integ checked out elsewhere: exit $rc, want 0: $(cat "$T/err")"
 grep -q "merged feature-b into quaqua/myapp-integ" "$T/out" || fail "happy: no merged line: $(cat "$T/out")"
-[[ -f "$T/repo/feature_b.txt" ]] || fail "feature_b.txt not present on integ after merge"
-echo "ok: happy path -> feature-b merged cleanly, check passed, commit recorded"
+
+# Verify primary checkout branch was NEVER moved from developer-working-branch
+primary_branch=$(git -C "$T/repo" rev-parse --abbrev-ref HEAD)
+[[ "$primary_branch" == "developer-working-branch" ]] || fail "primary checkout moved: $primary_branch != developer-working-branch"
+echo "ok: primary checkout never moved ($primary_branch) & merge works when integ is checked out in another worktree"
+
+# Verify commit was made on integ in the other worktree
+[[ -f "$T/other-wt/feature_b.txt" ]] || fail "feature_b.txt not present on integ worktree"
+git -C "$T/repo" worktree remove "$T/other-wt"
 
 echo "PASS"

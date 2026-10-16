@@ -95,6 +95,17 @@ pub fn count_owner_slots<H: HerdrOps>(
             o_workers.push(w.clone());
         }
     }
+    let cfg_opt = crate::config::load_team_config().ok();
+    let pipe_weight = cfg_opt
+        .as_ref()
+        .and_then(|c| c.limits.weights.get("pipeline"))
+        .copied()
+        .unwrap_or(2);
+    let dual_lens_weight = cfg_opt
+        .as_ref()
+        .and_then(|c| c.limits.weights.get("dual-lens"))
+        .copied()
+        .unwrap_or(2);
 
     let mut res_slots: i64 = 0;
     if let Ok(entries) = std::fs::read_dir(runs_dir) {
@@ -162,8 +173,8 @@ pub fn count_owner_slots<H: HerdrOps>(
                             p_cur_live += 1;
                         }
                     }
-                    if p_cur_live < 2 {
-                        res_slots += 2 - p_cur_live;
+                    if p_cur_live < pipe_weight {
+                        res_slots += pipe_weight - p_cur_live;
                     }
                 }
             } else if is_taskforce {
@@ -197,9 +208,13 @@ pub fn count_owner_slots<H: HerdrOps>(
                 }
 
                 let weight = if t_kind == "dual-lens" || file_name.starts_with("dual-lens-") {
-                    2
+                    dual_lens_weight
                 } else {
-                    1
+                    cfg_opt
+                        .as_ref()
+                        .and_then(|c| c.limits.weights.get(&t_kind))
+                        .copied()
+                        .unwrap_or(1)
                 };
 
                 let mut t_alive = false;

@@ -79,7 +79,13 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
     let runs_dir = default_runs_dir();
     let _ = std::fs::create_dir_all(&runs_dir);
 
-    let cfg = crate::config::load_team_config()?;
+    let base_cfg = crate::config::load_team_config()?;
+    let proj_slug = crate::pipeline::resolve_project_slug_from_repo(&targs.repo);
+    let cfg = if let Some(slug) = proj_slug.as_deref() {
+        crate::config::resolve(base_cfg.clone(), Some(slug)).unwrap_or(base_cfg)
+    } else {
+        base_cfg
+    };
     let max_workers = cfg.limits.max_workers_per_orchestrator;
     let weight = cfg
         .limits
@@ -87,7 +93,6 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
         .get(&targs.mode)
         .copied()
         .unwrap_or(if targs.mode == "dual-lens" { 2 } else { 1 });
-
     let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr);
     if slots_used + weight > max_workers {
         return Err((
@@ -236,8 +241,24 @@ fn run_dual_lens(
         args.task, brief
     );
 
-    let p1_res = crate::worker::prompt::prompt_worker(&w1, Some(&prompt1), false, None, git, herdr);
-    let p2_res = crate::worker::prompt::prompt_worker(&w2, Some(&prompt2), false, None, git, herdr);
+    let git1 = git.clone();
+    let herdr1 = herdr.clone();
+    let w1_c = w1.clone();
+    let prompt1_c = prompt1.clone();
+    let handle1 = std::thread::spawn(move || {
+        crate::worker::prompt::prompt_worker(&w1_c, Some(&prompt1_c), false, None, &git1, &herdr1)
+    });
+
+    let git2 = git.clone();
+    let herdr2 = herdr.clone();
+    let w2_c = w2.clone();
+    let prompt2_c = prompt2.clone();
+    let handle2 = std::thread::spawn(move || {
+        crate::worker::prompt::prompt_worker(&w2_c, Some(&prompt2_c), false, None, &git2, &herdr2)
+    });
+
+    let p1_res = handle1.join().map_err(|_| (1, "lens 1 thread failed\n".to_string()))?;
+    let p2_res = handle2.join().map_err(|_| (1, "lens 2 thread failed\n".to_string()))?;
 
     let _ = std::fs::write(
         &state_file,

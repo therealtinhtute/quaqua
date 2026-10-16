@@ -68,6 +68,29 @@ pub fn harness_of_kind<'a>(kind: &str, cfg: &'a crate::config::Config) -> Option
     }
     harness_of(kind)
 }
+pub fn select_default_reviewer(builder: &str, cfg: &crate::config::Config) -> Result<String, (i32, String)> {
+    let bh = harness_of_kind(builder, cfg).ok_or_else(|| (1, format!("unknown builder kind: {builder}\n")))?;
+    let unavailable: Vec<String> = std::env::var("QUAQUA_UNAVAILABLE_REVIEWERS")
+        .map(|s| s.split(',').map(|k| k.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    for cand in &cfg.strategy.default_reviewer {
+        if unavailable.iter().any(|u| u == cand) {
+            continue;
+        }
+        if let Some(rh) = harness_of_kind(cand, cfg) {
+            if bh != rh {
+                if let Some(kind_cfg) = cfg.kinds.get(cand) {
+                    if kind_cfg.can_review {
+                        return Ok(cand.clone());
+                    }
+                }
+            }
+        }
+    }
+    Err((1, "no available reviewer found in strategy.default_reviewer\n".to_string()))
+}
+
 
 pub fn now_sec() -> u64 {
     if let Ok(clock_file) = std::env::var("PROMPT_WORKER_CLOCK_FILE") {
@@ -82,6 +105,48 @@ pub fn now_sec() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+pub fn resolve_project_slug_from_repo(repo: &Path) -> Option<String> {
+    if let Ok(root) = crate::lead::spawn::find_quaqua_root() {
+        let index = root.join("projects/INDEX.md");
+        if index.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&index) {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('|') {
+                        let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
+                        if parts.len() >= 3 && parts[2] != "repo" {
+                            let slug = parts[1];
+                            let r = parts[2];
+                            let p = if let Some(stripped) = r.strip_prefix("~/") {
+                                format!("{}/{}", home, stripped)
+                            } else if r == "~" {
+                                home.clone()
+                            } else {
+                                r.to_string()
+                            };
+                            if let Ok(c_repo) = std::fs::canonicalize(Path::new(&p)) {
+                                if c_repo == repo {
+                                    return Some(slug.to_string());
+                                }
+                            }
+                            if Path::new(&p) == repo {
+                                return Some(slug.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(owner) = std::env::var("PIPELINE_LEAD").or_else(|_| std::env::var("QUAQUA_OWNER")) {
+        if let Some(slug) = owner.strip_suffix("-lead") {
+            return Some(slug.to_string());
+        }
+    }
+    None
+}
+
 
 fn file_mtime(path: &Path) -> u64 {
     path.metadata()
@@ -491,7 +556,13 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
             return Err((1, "brief must carry the Goal:/Hard constraints:/Current design headers (rules/_all/brief.md)\n".to_string()));
         }
 
-        let cfg = load_team_config()?;
+        let base_cfg = load_team_config()?;
+        let proj_slug = resolve_project_slug_from_repo(&repo_path);
+        let cfg = if let Some(slug) = proj_slug.as_deref() {
+            crate::config::resolve(base_cfg.clone(), Some(slug)).unwrap_or(base_cfg)
+        } else {
+            base_cfg
+        };
         let bh = harness_of_kind(&builder, &cfg).ok_or_else(|| (1, format!("unknown builder kind: {builder}\n")))?;
 
         // Reviewer selection
@@ -506,23 +577,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 }
                 r
             }
-            None => {
-                // Sourced from strategy.default_reviewer (first available)
-                let mut chosen: Option<String> = None;
-                for cand in &cfg.strategy.default_reviewer {
-                    if let Some(rh) = harness_of_kind(cand, &cfg) {
-                        if bh != rh {
-                            if let Some(kind_cfg) = cfg.kinds.get(cand) {
-                                if kind_cfg.can_review {
-                                    chosen = Some(cand.clone());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                chosen.ok_or_else(|| (1, "no available reviewer found in strategy.default_reviewer\n".to_string()))?
-            }
+            None => select_default_reviewer(&builder, &cfg)?,
         };
 
         let rh = harness_of_kind(&reviewer, &cfg).unwrap();
@@ -544,9 +599,12 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         let owner = std::env::var("PIPELINE_LEAD")
             .or_else(|_| std::env::var("QUAQUA_OWNER"))
             .unwrap_or_else(|_| "cos".to_string());
+        let max_workers = cfg.limits.max_workers_per_orchestrator;
+        let pipe_weight = cfg.limits.weights.get("pipeline").copied().unwrap_or(2);
+
         let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr);
-        if slots_used + 2 > 4 {
-            eprintln!("error: worker cap exceeded (owner '{owner}' has {slots_used} slots in use; pipeline reserves 2, cap is 4)");
+        if slots_used + pipe_weight > max_workers {
+            eprintln!("error: worker cap exceeded (owner '{owner}' has {slots_used} slots in use; pipeline reserves {pipe_weight}, cap is {max_workers})");
             return Err((2, String::new()));
         }
 

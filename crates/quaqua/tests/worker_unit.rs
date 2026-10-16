@@ -466,7 +466,7 @@ fn test_pipeline_blockers_none_exemption() {
 
 #[test]
 fn test_strategy_default_reviewer_selection() {
-    use quaqua::pipeline::harness_of_kind;
+    use quaqua::pipeline::select_default_reviewer;
 
     let toml_str = r#"
 schema_version = 2
@@ -489,31 +489,41 @@ can_review = true
 "#;
     let cfg: quaqua::config::Config = toml::from_str(toml_str).unwrap();
 
-    // With builder sude (omp), quansu (codex) is selected as first available differing harness
-    let bh = harness_of_kind("sude", &cfg).unwrap();
-    let mut chosen = None;
-    for cand in &cfg.strategy.default_reviewer {
-        if let Some(rh) = harness_of_kind(cand, &cfg) {
-            if bh != rh && cfg.kinds.get(cand).map(|k| k.can_review).unwrap_or(false) {
-                chosen = Some(cand.as_str());
-                break;
-            }
-        }
-    }
-    assert_eq!(chosen, Some("quansu"));
+    // 1. With builder sude (omp), select_default_reviewer selects quansu
+    let sel1 = select_default_reviewer("sude", &cfg).unwrap();
+    assert_eq!(sel1, "quansu");
 
-    // With builder quansu (codex), quansu is skipped and suhuynh (claude) is selected
-    let bh_codex = harness_of_kind("quansu", &cfg).unwrap();
-    let mut chosen_for_codex = None;
-    for cand in &cfg.strategy.default_reviewer {
-        if let Some(rh) = harness_of_kind(cand, &cfg) {
-            if bh_codex != rh && cfg.kinds.get(cand).map(|k| k.can_review).unwrap_or(false) {
-                chosen_for_codex = Some(cand.as_str());
-                break;
-            }
-        }
-    }
-    assert_eq!(chosen_for_codex, Some("suhuynh"));
+    // 2. When quansu is unavailable (via QUAQUA_UNAVAILABLE_REVIEWERS probe), falls back to suhuynh
+    std::env::set_var("QUAQUA_UNAVAILABLE_REVIEWERS", "quansu");
+    let sel_fallback = select_default_reviewer("sude", &cfg).unwrap();
+    std::env::remove_var("QUAQUA_UNAVAILABLE_REVIEWERS");
+    assert_eq!(sel_fallback, "suhuynh");
+
+    // 3. With builder quansu (codex), skips quansu (same harness) and selects suhuynh
+    let sel2 = select_default_reviewer("quansu", &cfg).unwrap();
+    assert_eq!(sel2, "suhuynh");
+}
+
+#[test]
+fn test_pipeline_project_override_cap() {
+    let toml_str = r#"
+schema_version = 2
+[limits]
+max_workers_per_orchestrator = 4
+weights = { pipeline = 2 }
+[projects.zimage]
+max_workers_per_orchestrator = 3
+"#;
+    let base_cfg: quaqua::config::Config = toml::from_str(toml_str).unwrap();
+    let resolved = quaqua::config::resolve(base_cfg.clone(), Some("zimage")).unwrap();
+    assert_eq!(resolved.limits.max_workers_per_orchestrator, 3);
+
+    let pipe_weight = resolved.limits.weights.get("pipeline").copied().unwrap_or(2);
+    let slots_used = 2; // owner has 2 slots in use
+    // For standard project (cap 4): 2 + 2 <= 4 -> ok
+    assert!(slots_used + pipe_weight <= base_cfg.limits.max_workers_per_orchestrator);
+    // For zimage (cap 3): 2 + 2 > 3 -> refused
+    assert!(slots_used + pipe_weight > resolved.limits.max_workers_per_orchestrator);
 }
 
 #[test]
