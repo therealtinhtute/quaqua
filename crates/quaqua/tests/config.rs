@@ -65,6 +65,53 @@ fn config_base_fixture_validates_ok() {
     assert!(out.status.success(), "base fixture rejected: {}", stderr(&out));
 }
 
+/// Review round 2, finding 1: `--project X` must not re-check the other projects
+/// (or the weights) against X's resolved cap.
+#[test]
+fn config_validate_project_does_not_recheck_other_projects() {
+    let f = fixtures_dir().join("two-projects.toml");
+    let f = f.to_string_lossy().into_owned();
+
+    // plain validate and every project selection must pass
+    for args in [
+        vec!["config", "validate", "--file", f.as_str()],
+        vec!["config", "validate", "--file", f.as_str(), "--project", "a"],
+        vec!["config", "validate", "--file", f.as_str(), "--project", "b"],
+        vec!["config", "validate", "--file", f.as_str(), "--project", "c"],
+    ] {
+        let out = run(&args);
+        assert!(
+            out.status.success(),
+            "{args:?} rejected: {}",
+            stderr(&out)
+        );
+    }
+
+    // an unknown project is still an error
+    let ghost = run(&[
+        "config", "validate", "--file", &f, "--project", "ghost",
+    ]);
+    assert!(!ghost.status.success());
+    assert!(stderr(&ghost).contains("unknown project 'ghost'"), "{}", stderr(&ghost));
+}
+
+/// Review round 2, finding 2: an explicit `--models <path>` that does not exist
+/// is an error; only the implicit sibling lookup may be missing.
+#[test]
+fn config_explicit_models_missing_is_error() {
+    let missing = repo_root().join("does-not-exist-models.md");
+    let out = run(&[
+        "config",
+        "validate",
+        "--file",
+        &repo_team(),
+        "--models",
+        &missing.to_string_lossy(),
+    ]);
+    assert!(!out.status.success(), "explicit missing --models was accepted");
+    assert!(stderr(&out).contains("cannot read"), "stderr: {}", stderr(&out));
+}
+
 #[test]
 fn config_get_default_reviewer_is_a_list_one_per_line() {
     let out = run(&[

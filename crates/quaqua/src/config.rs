@@ -323,18 +323,22 @@ pub fn validate(cfg: &Config, models: Option<&BTreeMap<String, ModelsKind>>) -> 
 }
 
 /// Path of the models.md to check drift against: explicit `--models`, else a
-/// sibling of the team.toml. A missing file yields `None` (drift skipped).
+/// sibling of the team.toml. Only the implicit sibling lookup may be missing
+/// (drift skipped); an explicit `--models <path>` that does not exist is an error.
 pub fn load_models(explicit: Option<&Path>, team_file: &Path) -> Result<Option<BTreeMap<String, ModelsKind>>, String> {
-    let path: PathBuf = match explicit {
-        Some(p) => p.to_path_buf(),
-        None => match team_file.parent() {
-            Some(dir) => dir.join("models.md"),
-            None => PathBuf::from("models.md"),
-        },
+    let (path, required): (PathBuf, bool) = match explicit {
+        Some(p) => (p.to_path_buf(), true),
+        None => (
+            match team_file.parent() {
+                Some(dir) => dir.join("models.md"),
+                None => PathBuf::from("models.md"),
+            },
+            false,
+        ),
     };
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok(Some(parse_models_md(&text))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => Ok(None),
         Err(e) => Err(format!("cannot read {}: {e}", path.display())),
     }
 }

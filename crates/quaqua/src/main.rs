@@ -61,12 +61,17 @@ fn do_validate(args: &ConfigArgs) -> Result<(), String> {
     let file = team_file(&args.file)?;
     let cfg = config::load(&file)?;
     let models = config::load_models(args.models.as_deref(), &file)?;
-    // Validate the raw file first: project overrides are checked against the
-    // top-level cap, so a bad override is caught even without --project.
+    // Validate the raw file once. `validate` already bounds every [projects.*]
+    // override (and the weights) against the top-level cap, so a bad override is
+    // caught even without --project.
     config::validate(&cfg, models.as_ref())?;
-    if args.project.is_some() {
-        let resolved = config::resolve(cfg, args.project.as_deref())?;
-        config::validate(&resolved, models.as_ref())?;
+    // Selecting a project only needs it to exist: its override was already
+    // checked against the global baseline above. Re-validating a resolved config
+    // would wrongly re-check the *other* projects against this project's cap.
+    if let Some(slug) = &args.project {
+        if !cfg.projects.contains_key(slug) {
+            return Err(format!("unknown project '{slug}'"));
+        }
     }
     Ok(())
 }

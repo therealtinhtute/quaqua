@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # R1 gate: `quaqua config validate` / `get` on the repo-root team.toml, every
 # invalid fixture rejected with its own error, and the plan's Rule -> key table
-# covers every source rule (33 rows, one per rule).
+# covers every source rule (40 rows, one per rule).
 # Targeted: builds the crate, runs cases against the real binary; nothing is
 # written into the repo. Usage: tests/test_config.sh   (exit 0 = pass)
 set -euo pipefail
@@ -34,6 +34,23 @@ echo "ok: cap 4, zimage override 3"
 [[ "$("$bin" config get kinds.tieude.can_review --file "$root/team.toml")" == "false" ]] \
   || fail "tieude.can_review"
 echo "ok: kinds.<k>.can_review"
+
+# ── --project must not re-check the other projects / weights (review r2 #1) ────
+multi="$root/crates/quaqua/tests/fixtures/two-projects.toml"
+for p in '' a b c; do
+  args=(config validate --file "$multi")
+  [[ -n $p ]] && args+=(--project "$p")
+  "$bin" "${args[@]}" >/dev/null || fail "validate${p:+ --project $p} rejected a valid multi-project file"
+done
+"$bin" config validate --file "$multi" --project ghost >/dev/null 2>&1 \
+  && fail "unknown project accepted"
+echo "ok: validate --project a|b|c (caps 3/2/1) all pass; unknown project rejected"
+
+# ── explicit --models that does not exist is an error (review r2 #2) ──────────
+if "$bin" config validate --file "$root/team.toml" --models "$root/nope-models.md" >/dev/null 2>&1; then
+  fail "explicit missing --models was accepted"
+fi
+echo "ok: explicit --models missing is an error"
 
 # ── invalid fixtures: rejected, each with its own message ─────────────────────
 invalid="$root/crates/quaqua/tests/fixtures/invalid"
