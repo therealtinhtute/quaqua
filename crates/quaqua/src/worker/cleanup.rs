@@ -1,8 +1,8 @@
 //! Worker cleanup logic (`quaqua worker cleanup <name> <repo-path>`).
 //! Reproduces `scripts/worker/cleanup-worker.sh`.
 
-use crate::git::Git;
-use crate::herdr::Herdr;
+use crate::git::GitOps;
+use crate::herdr::HerdrOps;
 use crate::json::parse_json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -91,7 +91,7 @@ pub fn run_grid_hook(grid_tab: &str) {
     }
 }
 
-pub fn cleanup_worker(name: &str, repo_path: &Path, git: &Git, herdr: &Herdr) -> Result<(), (i32, String)> {
+pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git: &G, herdr: &H) -> Result<(), (i32, String)> {
     let repo = match std::fs::canonicalize(repo_path) {
         Ok(p) => p,
         Err(_) => repo_path.to_path_buf(),

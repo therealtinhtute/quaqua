@@ -1,7 +1,29 @@
-//! Git execution helpers. Commands execute the `git` binary found in PATH.
+//! Git execution helpers and GitOps trait.
 
 use std::path::Path;
 use std::process::{Command, Output};
+
+pub trait GitOps {
+    fn run_in(&self, dir: &Path, args: &[&str]) -> std::io::Result<Output>;
+    fn run(&self, args: &[&str]) -> std::io::Result<Output>;
+    fn rev_parse_commit(&self, repo: &Path, base: &str) -> bool;
+    fn worktree_list_porcelain(&self, repo: &Path) -> std::io::Result<Vec<String>>;
+    fn worktree_add(
+        &self,
+        repo: &Path,
+        branch: &str,
+        wt: &Path,
+        base: Option<&str>,
+    ) -> std::io::Result<Output>;
+    fn worktree_remove(&self, repo: &Path, wt: &Path) -> std::io::Result<Output>;
+    fn remote_list(&self, repo: &Path) -> std::io::Result<Vec<String>>;
+    fn is_core_bare(&self, repo: &Path) -> bool;
+    fn has_core_worktree(&self, repo: &Path) -> bool;
+    fn enable_worktree_config(&self, repo: &Path) -> std::io::Result<Output>;
+    fn set_worktree_pushurl_blocked(&self, wt: &Path, remote: &str) -> std::io::Result<()>;
+    fn is_git_dir(&self, cwd: &Path) -> bool;
+    fn diff_and_status(&self, cwd: &Path) -> (String, String);
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Git;
@@ -10,23 +32,22 @@ impl Git {
     pub fn new() -> Self {
         Self
     }
+}
 
-    /// Run `git -C <dir> <args...>` and return standard Output.
-    pub fn run_in<P: AsRef<Path>>(&self, dir: P, args: &[&str]) -> std::io::Result<Output> {
+impl GitOps for Git {
+    fn run_in(&self, dir: &Path, args: &[&str]) -> std::io::Result<Output> {
         Command::new("git")
             .arg("-C")
-            .arg(dir.as_ref())
+            .arg(dir)
             .args(args)
             .output()
     }
 
-    /// Run `git <args...>` without `-C` and return standard Output.
-    pub fn run(&self, args: &[&str]) -> std::io::Result<Output> {
+    fn run(&self, args: &[&str]) -> std::io::Result<Output> {
         Command::new("git").args(args).output()
     }
 
-    /// Check if `<base>` resolves to a commit in `<repo>`.
-    pub fn rev_parse_commit<P: AsRef<Path>>(&self, repo: P, base: &str) -> bool {
+    fn rev_parse_commit(&self, repo: &Path, base: &str) -> bool {
         let commit_ref = format!("{}^{{commit}}", base);
         match self.run_in(
             repo,
@@ -37,8 +58,7 @@ impl Git {
         }
     }
 
-    /// Get list of registered worktrees from `git -C <repo> worktree list --porcelain`.
-    pub fn worktree_list_porcelain<P: AsRef<Path>>(&self, repo: P) -> std::io::Result<Vec<String>> {
+    fn worktree_list_porcelain(&self, repo: &Path) -> std::io::Result<Vec<String>> {
         let out = self.run_in(repo, &["worktree", "list", "--porcelain"])?;
         if !out.status.success() {
             return Err(std::io::Error::new(
@@ -56,41 +76,38 @@ impl Git {
         Ok(list)
     }
 
-    /// Add worktree: `git -C <repo> worktree add -b quaqua/<name> <wt> [<base>]`.
-    pub fn worktree_add<P: AsRef<Path>, Q: AsRef<Path>>(
+    fn worktree_add(
         &self,
-        repo: P,
+        repo: &Path,
         branch: &str,
-        wt: Q,
+        wt: &Path,
         base: Option<&str>,
     ) -> std::io::Result<Output> {
         let mut cmd = Command::new("git");
         cmd.arg("-C")
-            .arg(repo.as_ref())
+            .arg(repo)
             .arg("worktree")
             .arg("add")
             .arg("-b")
             .arg(branch)
-            .arg(wt.as_ref());
+            .arg(wt);
         if let Some(b) = base {
             cmd.arg(b);
         }
         cmd.output()
     }
 
-    /// Remove worktree: `git -C <repo> worktree remove <wt>`.
-    pub fn worktree_remove<P: AsRef<Path>, Q: AsRef<Path>>(&self, repo: P, wt: Q) -> std::io::Result<Output> {
+    fn worktree_remove(&self, repo: &Path, wt: &Path) -> std::io::Result<Output> {
         Command::new("git")
             .arg("-C")
-            .arg(repo.as_ref())
+            .arg(repo)
             .arg("worktree")
             .arg("remove")
-            .arg(wt.as_ref())
+            .arg(wt)
             .output()
     }
 
-    /// Get remote names from `git -C <repo> remote`.
-    pub fn remote_list<P: AsRef<Path>>(&self, repo: P) -> std::io::Result<Vec<String>> {
+    fn remote_list(&self, repo: &Path) -> std::io::Result<Vec<String>> {
         let out = self.run_in(repo, &["remote"])?;
         let text = String::from_utf8_lossy(&out.stdout);
         Ok(text
@@ -101,8 +118,7 @@ impl Git {
             .collect())
     }
 
-    /// Check if common config contains core.bare=true.
-    pub fn is_core_bare<P: AsRef<Path>>(&self, repo: P) -> bool {
+    fn is_core_bare(&self, repo: &Path) -> bool {
         match self.run_in(repo, &["config", "--local", "--bool", "--get", "core.bare"]) {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
@@ -112,8 +128,7 @@ impl Git {
         }
     }
 
-    /// Check if common config list contains `core.worktree=`.
-    pub fn has_core_worktree<P: AsRef<Path>>(&self, repo: P) -> bool {
+    fn has_core_worktree(&self, repo: &Path) -> bool {
         match self.run_in(repo, &["config", "--local", "--list"]) {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -123,19 +138,15 @@ impl Git {
         }
     }
 
-    /// Enable worktreeConfig: `git -C <repo> config extensions.worktreeConfig true`.
-    pub fn enable_worktree_config<P: AsRef<Path>>(&self, repo: P) -> std::io::Result<Output> {
+    fn enable_worktree_config(&self, repo: &Path) -> std::io::Result<Output> {
         self.run_in(repo, &["config", "extensions.worktreeConfig", "true"])
     }
 
-    /// Set worktree-specific pushurl:
-    /// `git -C <wt> config --worktree --replace-all remote.<r>.pushurl ""`
-    /// `git -C <wt> config --worktree --add remote.<r>.pushurl "<msg>"`
-    pub fn set_worktree_pushurl_blocked<P: AsRef<Path>>(&self, wt: P, remote: &str) -> std::io::Result<()> {
+    fn set_worktree_pushurl_blocked(&self, wt: &Path, remote: &str) -> std::io::Result<()> {
         let key = format!("remote.{}.pushurl", remote);
-        let _ = self.run_in(&wt, &["config", "--worktree", "--replace-all", &key, ""])?;
+        let _ = self.run_in(wt, &["config", "--worktree", "--replace-all", &key, ""])?;
         let _ = self.run_in(
-            &wt,
+            wt,
             &[
                 "config",
                 "--worktree",
@@ -147,19 +158,17 @@ impl Git {
         Ok(())
     }
 
-    /// Check if directory is inside a git work tree.
-    pub fn is_git_dir<P: AsRef<Path>>(&self, cwd: P) -> bool {
+    fn is_git_dir(&self, cwd: &Path) -> bool {
         match self.run_in(cwd, &["rev-parse", "--git-dir"]) {
             Ok(out) => out.status.success(),
             Err(_) => false,
         }
     }
 
-    /// Compute status porcelain + diff HEAD stat hash and diffstat summary.
-    pub fn diff_and_status<P: AsRef<Path>>(&self, cwd: P) -> (String, String) {
-        let st_out = self.run_in(&cwd, &["status", "--porcelain=v1"]).ok();
-        let diff_out = self.run_in(&cwd, &["diff", "HEAD", "--stat"]).ok();
-        let short_out = self.run_in(&cwd, &["diff", "HEAD", "--shortstat"]).ok();
+    fn diff_and_status(&self, cwd: &Path) -> (String, String) {
+        let st_out = self.run_in(cwd, &["status", "--porcelain=v1"]).ok();
+        let diff_out = self.run_in(cwd, &["diff", "HEAD", "--stat"]).ok();
+        let short_out = self.run_in(cwd, &["diff", "HEAD", "--shortstat"]).ok();
 
         let st_text = st_out
             .as_ref()

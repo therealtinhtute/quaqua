@@ -3,8 +3,8 @@
 
 use crate::cap::count_owner_slots;
 use crate::config::Config;
-use crate::git::Git;
-use crate::herdr::Herdr;
+use crate::git::GitOps;
+use crate::herdr::HerdrOps;
 use crate::json::parse_json;
 use crate::worker::cleanup::run_grid_hook;
 use std::path::PathBuf;
@@ -125,11 +125,11 @@ fn get_iso_now() -> String {
 }
 
 
-pub fn spawn_worker(
+pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     opts: SpawnOptions,
     cfg: &Config,
-    git: &Git,
-    herdr: &Herdr,
+    git: &G,
+    herdr: &H,
 ) -> Result<(), (i32, String)> {
     let kind_info = cfg.kinds.get(&opts.kind).ok_or_else(|| {
         let line2 = USAGE.lines().next().unwrap_or(USAGE);
@@ -284,9 +284,10 @@ pub fn spawn_worker(
     let rf_str = rf.to_string_lossy().to_string();
     let mut split_envs = Vec::new();
     let oc_env_val;
-    if opts.kind == "tieude" || opts.kind == "detu" {
+    if kind_info.harness == "opencode" {
         oc_env_val = format!(
-            "{{\"model\":\"opencode-go/deepseek-v4.1-flash\",\"instructions\":[\"{}\"]}}",
+            "{{\"model\":\"{}\",\"instructions\":[\"{}\"]}}",
+            kind_info.model,
             rf_str
         );
         split_envs.push(("OPENCODE_CONFIG_CONTENT", oc_env_val.as_str()));
@@ -310,7 +311,7 @@ pub fn spawn_worker(
         return Err((1, "error: herdr pane split returned no pane_id\n".to_string()));
     }
 
-    let spawn_fail = |herdr: &Herdr, pane: &str, code: i32| -> (i32, String) {
+    let spawn_fail = |pane: &str, code: i32| -> (i32, String) {
         let _ = herdr.pane_close(pane);
         (code, String::new())
     };
@@ -323,29 +324,50 @@ pub fn spawn_worker(
     ];
     let rep_res = herdr.pane_report_metadata(&pane_id, &initial_tokens);
     if rep_res.is_err() || !rep_res.unwrap().status.success() {
-        return Err(spawn_fail(herdr, &pane_id, 1));
+        return Err(spawn_fail(&pane_id, 1));
     }
 
-    // Start agent based on kind & harness
-    let start_res = match opts.kind.as_str() {
-        "tieude" | "detu" => {
-            Command::new("herdr")
-                .args(["agent", "start", &opts.name, "--kind", "opencode", "--pane", &pane_id, "--timeout", "60000", "--", "--standalone", "--auto"])
-                .output()
+    // Start agent based on team.toml harness, model, and effort
+    let harness = kind_info.harness.as_str();
+    let model = kind_info.model.as_str();
+    let effort = kind_info.effort.as_deref().unwrap_or("medium");
+
+    let start_res = match harness {
+        "opencode" => {
+            herdr.agent_start(&opts.name, "opencode", &pane_id, 60000, &["--", "--standalone", "--auto"])
         }
-        "sude" => {
-            Command::new("herdr")
-                .args(["agent", "start", &opts.name, "--kind", "omp", "--pane", &pane_id, "--timeout", "60000", "--", "--model", "google-antigravity/gemini-3.8-flash", "--thinking", "high", "--auto-approve", "--append-system-prompt", &rf_str])
-                .output()
+        "omp" => {
+            let omp_effort = kind_info.effort.as_deref().unwrap_or("high");
+            herdr.agent_start(
+                &opts.name,
+                "omp",
+                &pane_id,
+                60000,
+                &[
+                    "--",
+                    "--model",
+                    model,
+                    "--thinking",
+                    omp_effort,
+                    "--auto-approve",
+                    "--append-system-prompt",
+                    &rf_str,
+                ],
+            )
         }
-        "ni" | "suhuynh" | "truonglao" => {
-            let effort = match opts.kind.as_str() {
-                "ni" => "low",
-                "suhuynh" => "medium",
-                _ => "high",
+        "claude" => {
+            let claude_model = if model.starts_with("claude-") {
+                model.to_string()
+            } else {
+                format!("claude-{}", model.replace('.', "-"))
             };
-            let mut cmd = Command::new("herdr");
-            cmd.args(["agent", "start", &opts.name, "--kind", "claude", "--pane", &pane_id, "--timeout", "60000", "--", "--model", "claude-opus-5-5", "--effort", effort]);
+            let mut extra_args: Vec<String> = vec![
+                "--".to_string(),
+                "--model".to_string(),
+                claude_model,
+                "--effort".to_string(),
+                effort.to_string(),
+            ];
             if opts.review {
                 let runs_str = runs_dir.to_string_lossy().to_string();
                 let wt_str = wt.to_string_lossy().to_string();
@@ -355,36 +377,48 @@ pub fn spawn_worker(
                     "{{\"permissions\":{{\"allow\":[\"Edit(//{}/**)\"],\"deny\":[\"Edit(//{}/**)\"]}}}}",
                     runs_clean, wt_clean
                 );
-                cmd.args(["--permission-mode", "dontAsk", "--add-dir", &runs_str, "--settings", &settings]);
+                extra_args.push("--permission-mode".to_string());
+                extra_args.push("dontAsk".to_string());
+                extra_args.push("--add-dir".to_string());
+                extra_args.push(runs_str);
+                extra_args.push("--settings".to_string());
+                extra_args.push(settings);
             }
-            cmd.args(["--append-system-prompt-file", &rf_str]);
-            cmd.output()
+            extra_args.push("--append-system-prompt-file".to_string());
+            extra_args.push(rf_str.clone());
+
+            let extra_slices: Vec<&str> = extra_args.iter().map(String::as_str).collect();
+            herdr.agent_start(&opts.name, "claude", &pane_id, 60000, &extra_slices)
         }
-        "bacdau" | "quansu" => {
-            let (model, effort) = if opts.kind == "bacdau" {
-                ("gpt-6-astra", "medium")
-            } else {
-                ("gpt-6.1-sol", "high")
-            };
-            let mut cmd = Command::new("herdr");
-            cmd.args(["agent", "start", &opts.name, "--kind", "codex", "--pane", &pane_id, "--timeout", "300000", "--"]);
+        "codex" => {
+            let mut extra_args: Vec<String> = vec!["--".to_string()];
+            let runs_str = runs_dir.to_string_lossy().to_string();
             if opts.review {
-                let runs_str = runs_dir.to_string_lossy().to_string();
                 let perm_fs = format!("permissions.quaqua-review.filesystem={{\"{}\"=\"write\"}}", runs_str);
-                cmd.args([
-                    "-a", "never",
-                    "-c", "default_permissions=\"quaqua-review\"",
-                    "-c", "permissions.quaqua-review.extends=\":read-only\"",
-                    "-c", &perm_fs,
-                ]);
+                extra_args.push("-a".to_string());
+                extra_args.push("never".to_string());
+                extra_args.push("-c".to_string());
+                extra_args.push("default_permissions=\"quaqua-review\"".to_string());
+                extra_args.push("-c".to_string());
+                extra_args.push("permissions.quaqua-review.extends=\":read-only\"".to_string());
+                extra_args.push("-c".to_string());
+                extra_args.push(perm_fs);
             } else {
-                let runs_str = runs_dir.to_string_lossy().to_string();
-                cmd.args(["--approve-for-me", "--add-dir", &runs_str]);
+                extra_args.push("--approve-for-me".to_string());
+                extra_args.push("--add-dir".to_string());
+                extra_args.push(runs_str);
             }
             let effort_flag = format!("model_reasoning_effort={effort}");
             let codex_rules = format!("developer_instructions={}", format_json_string(&rules_content));
-            cmd.args(["-m", model, "-c", &effort_flag, "-c", &codex_rules]);
-            let res = cmd.output();
+            extra_args.push("-m".to_string());
+            extra_args.push(model.to_string());
+            extra_args.push("-c".to_string());
+            extra_args.push(effort_flag);
+            extra_args.push("-c".to_string());
+            extra_args.push(codex_rules);
+
+            let extra_slices: Vec<&str> = extra_args.iter().map(String::as_str).collect();
+            let res = herdr.agent_start(&opts.name, "codex", &pane_id, 300000, &extra_slices);
 
             let codex_start_rc = match &res {
                 Ok(out) if out.status.success() => 0,
@@ -401,22 +435,24 @@ pub fn spawn_worker(
             }
             let wait_res = herdr.agent_wait_idle(&opts.name, 300000);
             if wait_res.is_err() || !wait_res.unwrap().status.success() {
-                return Err(spawn_fail(herdr, &pane_id, 1));
+                return Err(spawn_fail(&pane_id, 1));
             }
             res
         }
-        _ => Err(std::io::Error::new(std::io::ErrorKind::Other, "unknown kind")),
+        other => {
+            return Err((1, format!("error: unsupported harness '{other}' for kind '{}'\n", opts.kind)));
+        }
     };
 
-    if opts.kind != "bacdau" && opts.kind != "quansu" {
+    if harness != "codex" {
         if start_res.is_err() || !start_res.unwrap().status.success() {
-            return Err(spawn_fail(herdr, &pane_id, 1));
+            return Err(spawn_fail(&pane_id, 1));
         }
     }
 
     let ready_res = herdr.pane_report_metadata(&pane_id, &["grid_ready=1"]);
     if ready_res.is_err() || !ready_res.unwrap().status.success() {
-        return Err(spawn_fail(herdr, &pane_id, 1));
+        return Err(spawn_fail(&pane_id, 1));
     }
 
     println!("worker={} kind={} pane={} worktree={}", opts.name, opts.kind, pane_id, wt.display());

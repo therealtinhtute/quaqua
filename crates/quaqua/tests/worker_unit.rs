@@ -1,8 +1,11 @@
-use quaqua::cap::{count_owner_slots, is_task_worker_name};
-use quaqua::herdr::Herdr;
-use quaqua::worker::prompt::{brief_budget_sec, brief_headers_ok, resolve_budget_sec};
+use quaqua::cap::{count_owner_slots, is_task_worker_name, matches_pipeline_reviewer};
+use quaqua::config;
+use quaqua::herdr::{Herdr, HerdrOps};
+use quaqua::worker::cleanup::{default_runs_dir, home_quaqua_runs};
+use quaqua::worker::prompt::{brief_budget_sec, brief_headers_ok, resolve_budget_sec, validate_env_budget};
 use quaqua::worker::spawn::parse_spawn_args;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output};
 
 #[test]
 fn test_task_worker_name_validation() {
@@ -37,16 +40,200 @@ fn test_brief_headers() {
 }
 
 #[test]
-fn test_brief_budget_parsing() {
-    let brief = "Goal: x\nHard constraints: none\nCurrent design: direct\nTime budget: 25 min";
-    assert_eq!(brief_budget_sec(brief), Some(1500));
+fn test_brief_budget_regex_matching() {
+    // Happy paths
+    assert_eq!(
+        brief_budget_sec("Time budget: 25 min"),
+        Some(1500)
+    );
+    assert_eq!(
+        brief_budget_sec("Time budget: 10m"),
+        Some(600)
+    );
+    assert_eq!(
+        brief_budget_sec("Time budget: 45 minutes"),
+        Some(2700)
+    );
+    assert_eq!(
+        brief_budget_sec("Time budget: 15 mins"),
+        Some(900)
+    );
+    assert_eq!(
+        brief_budget_sec("time budget: 20 min."),
+        Some(1200)
+    );
 
-    let brief2 = "Goal: x\nHard constraints: none\nCurrent design: direct\nTime budget: 10m";
-    assert_eq!(brief_budget_sec(brief2), Some(600));
+    // Finding 3 edge cases: must NOT match if unit is hours or seconds, even if line contains 'm'
+    assert_eq!(
+        brief_budget_sec("Time budget: 2 hours max"),
+        None
+    );
+    assert_eq!(
+        brief_budget_sec("Time budget: 1800s (team max)"),
+        None
+    );
+    assert_eq!(
+        brief_budget_sec("Time budget: 3 days"),
+        None
+    );
+}
 
-    let brief_none = "Goal: x\nHard constraints: none\nCurrent design: direct";
-    assert_eq!(brief_budget_sec(brief_none), None);
-    assert_eq!(resolve_budget_sec(brief_none), (2700, "default"));
+#[test]
+fn test_env_budget_validation() {
+    // Valid whole seconds
+    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", "120");
+    assert!(validate_env_budget().is_ok());
+
+    // Invalid values
+    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", "abc");
+    assert!(validate_env_budget().is_err());
+
+    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", "12.5");
+    assert!(validate_env_budget().is_err());
+
+    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", "");
+    assert!(validate_env_budget().is_err());
+
+    std::env::remove_var("PROMPT_WORKER_BUDGET_SEC");
+    assert!(validate_env_budget().is_ok());
+}
+
+#[test]
+fn test_pipeline_reviewer_prefix_matching() {
+    // Finding 2: must require digits after -pr or -<task>r
+    assert!(matches_pipeline_reviewer("quansu-pr1", "test"));
+    assert!(matches_pipeline_reviewer("suhuynh-pr24", "test"));
+    assert!(matches_pipeline_reviewer("quansu-testr1", "test"));
+    assert!(matches_pipeline_reviewer("suhuynh-testr3", "test"));
+
+    // Finding 2 bug scenario: 'tieude-prompt' has '-pr' but not followed by digit!
+    assert!(!matches_pipeline_reviewer("tieude-prompt", "test"));
+    assert!(!matches_pipeline_reviewer("tieude-process", "test"));
+    assert!(!matches_pipeline_reviewer("sude-testrun", "test"));
+    assert!(!matches_pipeline_reviewer("sude-testreview", "test"));
+}
+
+struct MockHerdr {
+    agents_json: String,
+}
+
+impl HerdrOps for MockHerdr {
+    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_list(&self) -> std::io::Result<String> {
+        Ok(self.agents_json.clone())
+    }
+    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
+        unimplemented!()
+    }
+    fn agent_read(&self, _name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn agent_start(&self, _name: &str, _kind: &str, _pane: &str, _timeout_ms: u32, _extra_args: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_split(&self, _cwd: &str, _owner: &str, _envs: &[(&str, &str)]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_close(&self, _pane: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_report_metadata(&self, _pane: &str, _tokens: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
+        unimplemented!()
+    }
+    fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_nowait(&self, _name: &str, _prompt: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_wait_background(&self, _name: &str, _prompt: &str, _timeout_ms: u32, _log_file: std::fs::File) -> std::io::Result<Child> {
+        unimplemented!()
+    }
+}
+
+#[test]
+fn test_cap_pipeline_slot_reservation_mock() {
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    // Write owner files: 1 live worker tieude-prompt (not a reviewer!)
+    std::fs::write(temp_dir.join("tieude-prompt.owner"), "cos\n").unwrap();
+
+    // Write pipeline state: finished=0, builder dead, but builder name in live_workers
+    std::fs::write(
+        temp_dir.join("pipeline-feature.state"),
+        "task=feature\nbuilder=sude\nlead=cos\npipeline_pid=99999999\nfinished=0\n",
+    )
+    .unwrap();
+
+    // Agents list has sude-feature (alive builder) + tieude-prompt
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"sude-feature","agent_status":"working"},{"name":"tieude-prompt","agent_status":"working"}]}}"#.to_string(),
+    };
+    std::fs::write(temp_dir.join("sude-feature.owner"), "cos\n").unwrap();
+    std::fs::write(temp_dir.join("sude-feature.pipeline"), "feature\n").unwrap();
+
+    // Total slots: 2 live workers (sude-feature + tieude-prompt)
+    // Pipeline 'feature' has 1 active worker (sude-feature), so it reserves 2 - 1 = 1 slot.
+    // Total should be 2 live + 1 reserved = 3 slots!
+    // Under the old bug, tieude-prompt was counted as a pipeline reviewer for 'feature', reserving 0 slots (giving 2).
+    let count = count_owner_slots(&temp_dir, "cos", None, &mock);
+    assert_eq!(count, 3);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_runs_dir_resolution() {
+    let test_home = PathBuf::from("target/test_home");
+    std::env::set_var("HOME", &test_home);
+    std::env::remove_var("QUAQUA_RUNS_DIR");
+    assert_eq!(home_quaqua_runs(), test_home.join("quaqua/runs"));
+    assert_eq!(default_runs_dir(), test_home.join("quaqua/runs"));
+
+    // QUAQUA_RUNS_DIR overrides default_runs_dir (used by cleanup and cap)
+    let override_dir = PathBuf::from("target/override_runs");
+    std::env::set_var("QUAQUA_RUNS_DIR", &override_dir);
+    assert_eq!(default_runs_dir(), override_dir);
+    // home_quaqua_runs (used by spawn and prompt reports) remains unchanged
+    assert_eq!(home_quaqua_runs(), test_home.join("quaqua/runs"));
+    std::env::remove_var("QUAQUA_RUNS_DIR");
+}
+
+#[test]
+fn test_team_toml_harness_routing() {
+    let team_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../team.toml");
+    let cfg = config::load(&team_path).expect("valid team.toml");
+
+    // tieude/detu are opencode
+    assert_eq!(cfg.kinds["tieude"].harness, "opencode");
+    assert_eq!(cfg.kinds["tieude"].model, "opencode-go/deepseek-v4.1-flash");
+    assert!(!cfg.kinds["tieude"].can_review);
+
+    // sude is omp with antigravity gemini high
+    assert_eq!(cfg.kinds["sude"].harness, "omp");
+    assert_eq!(cfg.kinds["sude"].model, "google-antigravity/gemini-3.8-flash");
+    assert_eq!(cfg.kinds["sude"].effort.as_deref(), Some("high"));
+    assert!(!cfg.kinds["sude"].can_review);
+
+    // ni/suhuynh/truonglao are claude with can_review=true
+    assert_eq!(cfg.kinds["ni"].harness, "claude");
+    assert_eq!(cfg.kinds["ni"].model, "opus-5.5");
+    assert!(cfg.kinds["ni"].can_review);
+
+    // bacdau/quansu are codex with can_review=true
+    assert_eq!(cfg.kinds["bacdau"].harness, "codex");
+    assert!(cfg.kinds["bacdau"].can_review);
+    assert_eq!(cfg.kinds["quansu"].harness, "codex");
+    assert!(cfg.kinds["quansu"].can_review);
 }
 
 #[test]

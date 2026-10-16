@@ -1,9 +1,9 @@
 //! Worker prompt & watchdog logic (`quaqua worker prompt <name> <task>`).
 //! Reproduces `scripts/worker/prompt-worker.sh`.
 
-use crate::git::Git;
+use crate::git::GitOps;
 use crate::hash::md5_hex;
-use crate::herdr::Herdr;
+use crate::herdr::HerdrOps;
 use crate::json::parse_json;
 use crate::worker::cleanup::home_quaqua_runs;
 use std::path::Path;
@@ -278,7 +278,7 @@ pub struct Observation {
     pub watcher_pane: String,
 }
 
-pub fn observe(herdr: &Herdr, git: &Git, name: &str) -> Option<Observation> {
+pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option<Observation> {
     let mut status = "unknown".to_string();
     let mut ctx = "?".to_string();
     let mut last_tool = String::new();
@@ -371,8 +371,8 @@ pub fn observe(herdr: &Herdr, git: &Git, name: &str) -> Option<Observation> {
     }
 
     let mut dh = String::new();
-    if !cwd.is_empty() && git.is_git_dir(&cwd) {
-        let (d_hash, d_stat) = git.diff_and_status(&cwd);
+    if !cwd.is_empty() && git.is_git_dir(Path::new(&cwd)) {
+        let (d_hash, d_stat) = git.diff_and_status(Path::new(&cwd));
         dh = d_hash;
         diffstat = d_stat;
     }
@@ -390,13 +390,13 @@ pub fn observe(herdr: &Herdr, git: &Git, name: &str) -> Option<Observation> {
     })
 }
 
-pub fn prompt_worker(
+pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     name: &str,
     task: Option<&str>,
     resume: bool,
     extend: Option<u64>,
-    git: &Git,
-    herdr: &Herdr,
+    git: &G,
+    herdr: &H,
 ) -> Result<(), (i32, String)> {
     validate_env_budget()?;
 
@@ -504,17 +504,7 @@ pub fn prompt_worker(
         );
         let submit_file = std::fs::File::create(&submit_log).ok();
         if let Some(file) = submit_file {
-            let _ = Command::new("herdr")
-                .arg("agent")
-                .arg("prompt")
-                .arg(name)
-                .arg(&prompt_body)
-                .arg("--wait")
-                .arg("--timeout")
-                .arg("1800000")
-                .stdout(file.try_clone().unwrap())
-                .stderr(file)
-                .spawn();
+            let _ = herdr.agent_prompt_wait_background(name, &prompt_body, 1800000, file);
         }
     }
 

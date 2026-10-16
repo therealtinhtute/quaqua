@@ -1,7 +1,7 @@
 //! Worker cap calculation and enforcement (`quaqua cap`).
 //! Reproduces `scripts/worker/worker-cap.sh` and `count_owner_slots` in `scripts/lib/common.sh`.
 
-use crate::herdr::Herdr;
+use crate::herdr::HerdrOps;
 use crate::json::parse_json;
 use std::path::Path;
 use std::process::Command;
@@ -55,11 +55,11 @@ pub fn matches_pipeline_reviewer(w: &str, task: &str) -> bool {
 }
 
 /// Calculate the number of worker slots used by `owner` (defaults to "cos").
-pub fn count_owner_slots(
+pub fn count_owner_slots<H: HerdrOps>(
     runs_dir: &Path,
     owner: &str,
     exclude_worker: Option<&str>,
-    herdr: &Herdr,
+    herdr: &H,
 ) -> i64 {
     let mut live_workers = Vec::new();
     if let Ok(agent_list_json) = herdr.agent_list() {
