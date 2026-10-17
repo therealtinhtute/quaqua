@@ -82,19 +82,25 @@ pub fn find_engine_script(name: &str) -> Option<PathBuf> {
     None
 }
 
-pub fn run_grid_hook(grid_tab: &str) {
+pub fn run_grid_hook(grid_tab: &str, owner: Option<&str>) -> Result<(), (i32, String)> {
     if std::env::var("GRID_SKIP").as_deref() == Ok("1") {
         let is_pipeline = std::env::var("PIPELINE_TASK").is_ok();
         let is_test = std::env::var("QUAQUA_TEST").as_deref() == Ok("1");
         if is_pipeline || is_test {
-            return;
+            return Ok(());
         }
         eprintln!("warning: GRID_SKIP=1 ignored outside pipeline.sh/tests (rules/_all/fanout-agent-grid.md)");
     }
 
-    if let Err(e) = crate::grid::run_grid_check(grid_tab, None, None) {
-        eprintln!("warning: grid check failed ({e}); arrange panes manually");
+    if let Err(e) = crate::grid::run_grid_repair(grid_tab, owner) {
+        return Err((1, format!("error: grid repair failed: {e}\n")));
     }
+
+    if let Err(e) = crate::grid::run_grid_check(grid_tab, None, owner) {
+        return Err((1, format!("error: grid check failed ({e})\n")));
+    }
+
+    Ok(())
 }
 
 pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git: &G, herdr: &H) -> Result<(), (i32, String)> {
@@ -143,13 +149,31 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
         let _ = herdr.pane_close(&pane);
     }
 
+    let runs_dir = default_runs_dir();
+
+    let owner = std::env::var("QUAQUA_OWNER")
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string(runs_dir.join(format!("{name}.owner")))
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| "cos".to_string());
+
     let repo_name = repo
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("repo");
-    let grid_tab = std::env::var("GRID_TAB").unwrap_or_else(|_| format!("{repo_name}-workers"));
+    let grid_tab = std::env::var("GRID_TAB")
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string(runs_dir.join(format!("{name}.grid")))
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| format!("{repo_name}-workers"));
 
-    run_grid_hook(&grid_tab);
+    run_grid_hook(&grid_tab, Some(&owner))?;
 
     let rm_out = git
         .worktree_remove(&repo, &wt)
@@ -160,12 +184,10 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
         return Err((rm_out.status.code().unwrap_or(1), err_text));
     }
 
-    let runs_dir = default_runs_dir();
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.owner")));
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.grid")));
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.pipeline")));
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.srt.json")));
-
     println!("cleaned {name} (branch quaqua/{name} kept)");
     Ok(())
 }

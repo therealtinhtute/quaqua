@@ -627,7 +627,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let _ = std::fs::write(runs_dir.join(format!("{}.srt.json", opts.name)), srt_json);
 
     println!("worker={} kind={} pane={} worktree={}", opts.name, opts.kind, pane_id, wt.display());
-    run_grid_hook(&grid_tab);
+    run_grid_hook(&grid_tab, Some(&owner))?;
 
     Ok(())
 }

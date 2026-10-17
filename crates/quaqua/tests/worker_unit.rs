@@ -1156,8 +1156,22 @@ fn test_cfg_with_fallback() -> config::Config {
     cfg
 }
 
+struct EnvLockGuard;
+static ENV_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn lock_env() -> EnvLockGuard {
+    while ENV_BUSY.compare_exchange_weak(false, true, std::sync::atomic::Ordering::Acquire, std::sync::atomic::Ordering::Relaxed).is_err() {
+        std::thread::yield_now();
+    }
+    EnvLockGuard
+}
+impl Drop for EnvLockGuard {
+    fn drop(&mut self) {
+        ENV_BUSY.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 #[test]
 fn test_spawn_worker_fallback_scenarios() {
+    let _env_lock = lock_env();
     let temp = std::env::temp_dir().join(format!("quaqua-spawn-fb-{}", std::process::id()));
     let repo_dir = temp.join("repo");
     let runs_dir = temp.join("quaqua/runs");
@@ -1301,6 +1315,113 @@ fn test_spawn_worker_fallback_scenarios() {
 
     std::env::remove_var("QUAQUA_RUNS_DIR");
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_spawn_worker_grid_timeout_fails() {
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-gridfail-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let _env_lock = lock_env();
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    std::env::set_var("GRID_TAB", "quaqua-workers");
+    std::env::set_var("GRID_CHECK_TIMEOUT_SEC", "0");
+    std::env::remove_var("GRID_SKIP");
+
+    let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/herdr-grid/2-workers.json");
+    std::env::set_var("HERDR_STUB_SNAPSHOT", fix.to_str().unwrap());
+
+    let cfg = test_cfg_with_fallback();
+    let git = SpawnTestGit;
+    let herdr = FallbackSpyHerdr {
+        agent_starts: std::cell::RefCell::new(Vec::new()),
+        fail_harness: None,
+    };
+
+    let opts = parse_spawn_args(&[
+        "sude-gridfail".to_string(),
+        "sude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+
+    std::env::remove_var("QUAQUA_RUNS_DIR");
+    std::env::remove_var("QUAQUA_OWNER");
+    std::env::remove_var("GRID_TAB");
+    std::env::remove_var("GRID_CHECK_TIMEOUT_SEC");
+    std::env::remove_var("HERDR_STUB_SNAPSHOT");
+    let _ = std::fs::remove_dir_all(&temp);
+
+    assert!(
+        res.is_err(),
+        "spawn_worker must fail when grid check times out, got: {:?}",
+        res
+    );
+}
+
+#[test]
+fn test_cleanup_worker_grid_timeout_fails() {
+    let temp = std::env::temp_dir().join(format!("quaqua-clean-gridfail-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _env_lock = lock_env();
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    std::env::set_var("GRID_TAB", "quaqua-workers");
+    std::env::set_var("GRID_CHECK_TIMEOUT_SEC", "0");
+    std::env::remove_var("GRID_SKIP");
+
+    let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/herdr-grid/2-workers.json");
+    std::env::set_var("HERDR_STUB_SNAPSHOT", fix.to_str().unwrap());
+
+    let git = SpawnTestGit;
+    struct CleanupTestHerdr;
+    impl HerdrOps for CleanupTestHerdr {
+        fn run(&self, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
+        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
+            Ok((true, r#"{"result":{"agent":{"pane_id":"w1:p2"}}}"#.to_string()))
+        }
+        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
+            Ok(Output { status: std::process::ExitStatus::default(), stdout: vec![], stderr: vec![] })
+        }
+        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool { unimplemented!() }
+        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<Child> { unimplemented!() }
+    }
+    let herdr = CleanupTestHerdr;
+
+    let res = quaqua::worker::cleanup::cleanup_worker("sude-gridfail", &repo_dir, &git, &herdr);
+
+    std::env::remove_var("QUAQUA_RUNS_DIR");
+    std::env::remove_var("QUAQUA_OWNER");
+    std::env::remove_var("GRID_TAB");
+    std::env::remove_var("GRID_CHECK_TIMEOUT_SEC");
+    std::env::remove_var("HERDR_STUB_SNAPSHOT");
+    let _ = std::fs::remove_dir_all(&temp);
+
+    assert!(
+        res.is_err(),
+        "cleanup_worker must fail when grid check times out, got: {:?}",
+        res
+    );
 }
 
 // --- quaqua worker stop ---------------------------------------------------

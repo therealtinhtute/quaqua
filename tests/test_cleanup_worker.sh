@@ -7,6 +7,10 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 src="$(cd "$here/.." && pwd)/scripts"
+root="$(cd "$here/.." && pwd)"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+export QUAQUA_BIN="$bin"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-cleanup-worker.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -39,6 +43,18 @@ if [[ "$1" == api && "$2" == snapshot ]]; then
   if [[ -n "${GRID_SNAPSHOT:-}" ]]; then cat "$GRID_SNAPSHOT"; else printf '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}\n'; fi
   exit 0
 fi
+if [[ "$1" == pane && "$2" == move ]]; then
+  if [[ -n "${GRID_MOVE_FAIL:-}" ]]; then
+    printf '{"result":{"move_result":{"changed":false,"reason":"same_tab"}}}\n'
+  else
+    printf '{"result":{"move_result":{"changed":true,"pane":{"pane_id":"%s","tab_id":"w1:t_workers"}}}}\n' "${3:-%1}"
+  fi
+  exit 0
+fi
+if [[ "$1" == pane && "$2" == rename ]]; then
+  printf '{"result":{}}\n'
+  exit 0
+fi
 exit 0
 EOF
 chmod +x "$T/bin/herdr"
@@ -65,6 +81,7 @@ git -C "$T/quaqua" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
 
 worktree() {  # worktree <repo> <name>; cleanup keeps the branch, so reuse it
   local repo=$1 name=$2 wt="$(dirname "$1")/.wt/$2"
+  [[ -d "$wt" ]] && return 0
   if git -C "$repo" show-ref -q "refs/heads/quaqua/$name"; then
     git -C "$repo" worktree add -q "$wt" "quaqua/$name"
   else
@@ -90,12 +107,12 @@ echo "ok: cleanup -> worktree removed, in-process grid check runs after the pane
 # the fixture's pending move belongs to group "coucou": --tab coucou-workers
 # scopes it in (check fails), the derived quaqua-workers scopes it out.
 worktree "$T/quaqua" zz-clean
-err=$(run_cleanup zz-clean GRID_TAB=coucou-workers GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_SEC=0 2>&1 >/dev/null) || fail "cleanup failed with GRID_TAB"
-[[ "$err" == *"grid check failed"* ]] || fail "GRID_TAB: pending coucou move not detected: $err"
+err=$(run_cleanup zz-clean GRID_TAB=coucou-workers GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_SEC=0 2>&1 >/dev/null) && fail "cleanup should fail on grid check timeout"
+[[ "$err" == *"grid check failed"* || "$err" == *"grid check timed out"* ]] || fail "GRID_TAB: pending coucou move not detected: $err"
 worktree "$T/quaqua" zz-clean
-err=$(run_cleanup zz-clean GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_SEC=0 2>&1 >/dev/null) || fail "cleanup failed with the derived tab"
+err=$(run_cleanup zz-clean GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_SEC=0 2>&1 >/dev/null) || fail "cleanup failed with the derived tab: $err"
 [[ "$err" != *"grid check failed"* ]] || fail "quaqua-workers must not scope in the coucou move: $err"
-echo "ok: GRID_TAB -> the check is scoped to that tab"
+echo "ok: GRID_TAB -> the check is scoped to that tab; timeout exits non-zero"
 
 # ── 3. GRID_SKIP=1 disables the grid hook only for pipeline.sh / tests ─────
 worktree "$T/quaqua" zz-clean
@@ -111,13 +128,11 @@ grep -q '^herdr api snapshot' "$T/events" || fail "bare GRID_SKIP=1: grid not ch
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
 echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid checked"
 
-# ── 4. a failing grid check warns but never blocks the cleanup ──────────────
+# ── 4. a failing grid check blocks cleanup with non-zero exit ───────────────
 worktree "$T/quaqua" zz-clean
-err=$(run_cleanup zz-clean GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0 2>&1 >/dev/null) || fail "cleanup failed when the grid check failed"
-[[ "$err" == *"warning: grid check failed"* ]] || fail "grid failure: no warning"
-[[ ! -d "$T/.wt/zz-clean" ]] || fail "grid failure: worktree not removed"
-echo "ok: grid failure -> warning only, cleanup succeeds"
-
+err=$(run_cleanup zz-clean GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0 2>&1 >/dev/null) && fail "expected non-zero exit when grid check fails"
+[[ "$err" == *"grid repair failed"* || "$err" == *"grid check failed"* ]] || fail "grid failure: wrong error: $err"
+echo "ok: grid failure -> non-zero exit, cleanup fails"
 # ── 5. cleanup drops the worker's runs metadata (.owner/.grid) ──────────────
 mkdir -p "$T/runs"
 worktree "$T/quaqua" zz-clean

@@ -65,6 +65,18 @@ cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
 [ "${1:-} ${2:-}" = "pane split" ] && echo '{"result":{"pane":{"pane_id":"%1"}}}'
+if [ "${1:-} ${2:-}" = "pane move" ]; then
+  if [ -n "${GRID_MOVE_FAIL:-}" ]; then
+    printf '{"result":{"move_result":{"changed":false,"reason":"same_tab"}}}\n'
+  else
+    printf '{"result":{"move_result":{"changed":true,"pane":{"pane_id":"%s","tab_id":"w1:t_workers"}}}}\n' "${3:-%1}"
+  fi
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = "pane rename" ]; then
+  printf '{"result":{}}\n'
+  exit 0
+fi
 # the in-process grid check reads one snapshot: GRID_FAIL simulates an
 # unreachable herdr, GRID_SNAPSHOT serves a fixture, default = converged
 if [ "${1:-} ${2:-}" = "api snapshot" ]; then
@@ -259,24 +271,25 @@ echo "ok: no fallback configured -> start failure errors, no fallback taken"
 # ── grid check: a successful spawn arranges the new worker's pane ───────────
 spawn tieude-gridhook tieude
 [[ $rc -eq 0 ]] || fail "grid check: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/gridcalls")" == "grid check" ]] || fail "grid check: not called: $(cat "$T/gridcalls")"
+grep -q "grid check" "$T/gridcalls" || fail "grid check: not called: $(cat "$T/gridcalls")"
 grep -q "worker=tieude-gridhook" "$T/out" || fail "grid check: no success line"
 [[ "$(cat "$T/home/quaqua/runs/tieude-gridhook.grid")" == repo-workers ]] \
   || fail "grid check: runs/<name>.grid not <repo>-workers"
 echo "ok: grid check -> called after a successful spawn, group recorded"
 
 # GRID_TAB scopes the check: a pending move for group "coucou" only trips the
-# tab that names it (--tab coucou-workers), not the derived repo-workers
+# tab that names it (--tab coucou-workers), not the derived repo-workers.
+# A grid check timeout exits non-zero.
 spawn tieude-gridtab tieude GRID_TAB=coucou-workers GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_SEC=0
-[[ $rc -eq 0 ]] || fail "GRID_TAB: exit $rc, want 0: $(cat "$T/err")"
-grep -q 'warning: grid check failed' "$T/err" || fail "GRID_TAB: pending coucou move not detected: $(cat "$T/err")"
+[[ $rc -ne 0 ]] || fail "GRID_TAB: exit $rc, want non-zero on grid check timeout"
+grep -qE 'grid check failed|grid check timed out' "$T/err" || fail "GRID_TAB: pending coucou move not detected: $(cat "$T/err")"
 [[ "$(cat "$T/home/quaqua/runs/tieude-gridtab.grid")" == coucou-workers ]] \
   || fail "GRID_TAB: runs/<name>.grid not coucou-workers"
 spawn tieude-gridtab2 tieude GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_SEC=0
 [[ $rc -eq 0 ]] || fail "derived tab: exit $rc, want 0: $(cat "$T/err")"
-! grep -q 'warning: grid check failed' "$T/err" \
+! grep -qE 'grid check failed|grid check timed out' "$T/err" \
   || fail "repo-workers must not scope in the coucou move: $(cat "$T/err")"
-echo "ok: GRID_TAB -> the check is scoped to that tab, group recorded"
+echo "ok: GRID_TAB -> the check is scoped to that tab, group recorded; timeout exits non-zero"
 
 spawn tieude-gridskip tieude QUAQUA_TEST=1 GRID_SKIP=1
 [[ $rc -eq 0 ]] || fail "GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"
@@ -287,7 +300,7 @@ echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not checked"
 
 spawn tieude-gridskip tieude GRID_SKIP=1
 [[ $rc -eq 0 ]] || fail "bare GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/gridcalls")" == "grid check" ]] || fail "bare GRID_SKIP=1: grid not checked: $(cat "$T/gridcalls")"
+grep -q "grid check" "$T/gridcalls" || fail "bare GRID_SKIP=1: grid not checked: $(cat "$T/gridcalls")"
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
 echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid checked"
 
@@ -301,10 +314,9 @@ spawn tieude-nomcp tieude
 echo "ok: opencode without project MCP config -> no dialog wait"
 
 spawn tieude-gridfail tieude GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0
-[[ $rc -eq 0 ]] || fail "grid failure: exit $rc, want 0: $(cat "$T/err")"
-grep -q "warning: grid check failed" "$T/err" || fail "grid failure: no warning"
-grep -q "worker=tieude-gridfail" "$T/out" || fail "grid failure: no success line"
-echo "ok: grid failure -> warning only, spawn succeeds"
+[[ $rc -ne 0 ]] || fail "grid failure: exit $rc, want non-zero: $(cat "$T/err")"
+grep -qE "grid repair failed|grid check failed" "$T/err" || fail "grid failure: no error: $(cat "$T/err")"
+echo "ok: grid failure -> non-zero exit, spawn fails"
 
 # ── herdr-grid pane tokens (R5): role/group/owner on split, grid_ready=1 last ─
 spawn tieude-tokens tieude
