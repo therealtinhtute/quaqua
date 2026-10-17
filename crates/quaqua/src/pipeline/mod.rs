@@ -52,9 +52,10 @@ pub const USAGE: &str = "\
 #   900 · _FIX_ 1200 · PIPELINE_MAX_SEC 7200 (work time; time between
 #   invocations does not count) · PIPELINE_REVIEW_LINES 150.
 #   Grid: after each spawn/cleanup the pipeline arranges its whole owner
-#   population into tab GRID_TAB (default <repo-basename>-workers): idle panes
-#   move, working ones are reported 'deferred: <pane> (working)'; GRID_SKIP=1
-#   with QUAQUA_TEST=1 disables (tests).";
+#   population into tab GRID_TAB (default <repo-basename>-workers, or
+#   <slug>-workers for owner <slug>-lead): idle panes move, working ones are
+#   reported 'deferred: <pane> (working)'; GRID_SKIP=1 with QUAQUA_TEST=1
+#   disables (tests).";
 
 pub fn harness_of(kind: &str) -> Option<&'static str> {
     match kind {
@@ -673,11 +674,11 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
     let brief_text = std::fs::read_to_string(&state.brief)
         .map_err(|e| (1, format!("brief file unreadable: {}: {e}\n", state.brief)))?;
 
-    let grid_tab = std::env::var("GRID_TAB").unwrap_or_else(|_| {
-        let bname = repo_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
-        format!("{bname}-workers")
-    });
     let grid_owner = if state.lead.is_empty() { "cos".to_string() } else { state.lead.clone() };
+    let grid_tab = std::env::var("GRID_TAB").unwrap_or_else(|_| {
+        let repo_name = repo_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+        crate::worker::spawn::default_grid_tab(&grid_owner, repo_name)
+    });
     let run_grid_hook = || -> bool {
         if std::env::var("GRID_SKIP").as_deref() == Ok("1") && std::env::var("QUAQUA_TEST").as_deref() == Ok("1") {
             return true;
@@ -775,11 +776,21 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
 
         let report_file = runs_dir.join(format!("{worker}.md"));
         let rc: i32;
+        // Whether this phase's prompt failed before it was sent. `worker
+        // prompt`/`prompt-worker.sh` exit 1 only for a usage/state error raised
+        // before dispatch — the pre-prompt grid check among them; 0 and the
+        // watchdog codes 2–6 all mean the prompt went out. A killed command
+        // (no exit code) counts as sent: assume dispatch rather than duplicate
+        // a live worker's brief.
+        let mut prompt_never_sent = false;
 
         if state.prompted == 0 {
             if report_file.exists() {
                 archive_stale(&report_file, &pfile);
             }
+            // Optimistic marker: the prompt is sent below, so a pipeline killed
+            // mid-prompt resumes that wait instead of re-sending the brief. It
+            // is rolled back when the prompt never went out (below).
             state.prompted = 1;
             state.prompt_ts = now_sec();
             let _ = state.save(&state_file);
@@ -794,7 +805,17 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     .arg(prompt)
                     .env("PROMPT_WORKER_BUDGET_SEC", budget.to_string())
                     .status();
-                rc = res.map(|s| s.code().unwrap_or(1)).unwrap_or(1);
+                match res {
+                    Ok(s) => {
+                        rc = s.code().unwrap_or(1);
+                        prompt_never_sent = s.code() == Some(1);
+                    }
+                    Err(_) => {
+                        // bash never ran, so nothing was sent
+                        rc = 1;
+                        prompt_never_sent = true;
+                    }
+                }
             } else {
                 let _prev_b = std::env::var("PROMPT_WORKER_BUDGET_SEC").ok();
                 std::env::set_var("PROMPT_WORKER_BUDGET_SEC", budget.to_string());
@@ -807,6 +828,15 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 } else {
                     std::env::remove_var("PROMPT_WORKER_BUDGET_SEC");
                 }
+                prompt_never_sent = rc == 1;
+            }
+
+            if prompt_never_sent {
+                // The prompt never left the pipeline: drop the marker so
+                // '--resume' re-sends it instead of waiting for a report no
+                // worker is producing (watchdog exit 3 on an idle worker).
+                state.prompted = 0;
+                let _ = state.save(&state_file);
             }
         } else {
             // Resume
@@ -839,10 +869,17 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         }
 
         if rc != 0 {
-            let b = format!(
-                "{} wait for {worker}: watchdog exit {rc} — fix the cause ('prompt-worker.sh --resume {worker}' keeps a live wait going), then 'pipeline.sh --resume {task} {}'",
-                state.phase, state.repo
-            );
+            let b = if prompt_never_sent {
+                format!(
+                    "{} prompt for {worker} was never sent (prompt-worker exit {rc}) — fix the cause, then 'pipeline.sh --resume {task} {}' re-sends it",
+                    state.phase, state.repo
+                )
+            } else {
+                format!(
+                    "{} wait for {worker}: watchdog exit {rc} — fix the cause ('prompt-worker.sh --resume {worker}' keeps a live wait going), then 'pipeline.sh --resume {task} {}'",
+                    state.phase, state.repo
+                )
+            };
             return finish(state, "blocked", rc, Some(&b));
         }
         Ok(())

@@ -1505,6 +1505,84 @@ fn test_spawn_worker_fallback_scenarios() {
 }
 
 #[test]
+fn test_spawn_worker_default_grid_tab_from_owner() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-tab-{}", std::process::id()));
+    // The repo dir name is deliberately NOT the project slug: a Lead's project
+    // (`quaqua-rs`) spawns into the `quaqua` checkout.
+    let repo_dir = temp.join("quaqua");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::remove_var("GRID_TAB");
+
+    let cfg = test_cfg_with_fallback();
+    let git = SpawnTestGit;
+    let herdr = FallbackSpyHerdr {
+        agent_starts: std::cell::RefCell::new(Vec::new()),
+        fail_harness: None,
+    };
+    let spawn_and_read_tab = |name: &str| -> String {
+        let opts = parse_spawn_args(&[
+            name.to_string(),
+            "sude".to_string(),
+            repo_dir.to_str().unwrap().to_string(),
+        ])
+        .unwrap();
+        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+        assert!(res.is_ok(), "spawn {name} failed: {:?}", res.err());
+        std::fs::read_to_string(runs_dir.join(format!("{name}.grid")))
+            .expect("runs/<name>.grid must be recorded")
+            .trim()
+            .to_string()
+    };
+
+    // A Lead-owned worker gets the project tab from the owner (`<slug>-lead` ->
+    // `<slug>-workers`), never a tab derived from the repo dir name — otherwise
+    // siblings of the same owner split across `quaqua-workers` and
+    // `quaqua-rs-workers` (runs/tieude-testlow.grid vs runs/tieude-spawneff.grid).
+    std::env::set_var("QUAQUA_OWNER", "quaqua-rs-lead");
+    assert_eq!(spawn_and_read_tab("sude-tablead"), "quaqua-rs-workers");
+
+    // The CoS owner is not a project slug: it keeps the repo-derived default.
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    assert_eq!(spawn_and_read_tab("sude-tabcos"), "quaqua-workers");
+
+    // An explicit GRID_TAB still wins over the owner-derived default.
+    std::env::set_var("QUAQUA_OWNER", "quaqua-rs-lead");
+    std::env::set_var("GRID_TAB", "quaqua-rs-workers-2");
+    assert_eq!(spawn_and_read_tab("sude-tabexp"), "quaqua-rs-workers-2");
+    std::env::remove_var("GRID_TAB");
+
+    std::env::remove_var("QUAQUA_RUNS_DIR");
+    std::env::remove_var("QUAQUA_OWNER");
+    std::env::remove_var("GRID_SKIP");
+    std::env::remove_var("QUAQUA_TEST");
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_default_grid_tab_helper() {
+    use quaqua::worker::spawn::default_grid_tab;
+
+    // Lead owners (<slug>-lead) resolve to <slug>-workers
+    assert_eq!(default_grid_tab("quaqua-grid-lead", "myrepo"), "quaqua-grid-workers");
+    assert_eq!(default_grid_tab("quaqua-rs-lead", "quaqua"), "quaqua-rs-workers");
+
+    // Non-lead owners (cos, arbitrary names) resolve to <repo>-workers
+    assert_eq!(default_grid_tab("cos", "myrepo"), "myrepo-workers");
+    assert_eq!(default_grid_tab("", "myrepo"), "myrepo-workers");
+    assert_eq!(default_grid_tab("other", "myrepo"), "myrepo-workers");
+
+    // Edge cases: -lead with empty slug falls back to <repo>-workers
+    assert_eq!(default_grid_tab("-lead", "myrepo"), "myrepo-workers");
+    assert_eq!(default_grid_tab("lead", "myrepo"), "myrepo-workers");
+}
+
+#[test]
 fn test_spawn_worker_grid_timeout_fails() {
     let temp = std::env::temp_dir().join(format!("quaqua-spawn-gridfail-{}", std::process::id()));
     let repo_dir = temp.join("repo");

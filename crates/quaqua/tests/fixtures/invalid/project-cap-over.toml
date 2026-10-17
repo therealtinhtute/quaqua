@@ -19,4 +19,4 @@ can_review = true
 integ_branch = "quaqua/{slug}-integ"
 
 [projects.zimage]
-max_workers_per_orchestrator = 5
+max_workers_per_orchestrator = 9

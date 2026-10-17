@@ -315,6 +315,21 @@ fn claude_trust_dialog_up<H: HerdrOps>(herdr: &H, pane: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Default workers-tab label for a spawn. A project Lead's workers belong to its
+/// project tab — owner `<slug>-lead` → `<slug>-workers`, the exact tab the Lead's
+/// spawn instructions name — not to a tab derived from the repo dir name: one
+/// checkout (`quaqua`) hosts several projects (`quaqua-rs`, `quaqua-grid`), and
+/// a repo-derived label splits one owner's workers across tabs
+/// (runs/tieude-testlow.grid vs runs/tieude-spawneff.grid). Any other owner
+/// (the CoS) keeps the repo-derived label. Explicit GRID_TAB wins before this
+/// is reached.
+pub fn default_grid_tab(owner: &str, repo_name: &str) -> String {
+    match owner.strip_suffix("-lead") {
+        Some(slug) if !slug.is_empty() => format!("{slug}-workers"),
+        _ => format!("{repo_name}-workers"),
+    }
+}
+
 pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     opts: SpawnOptions,
     cfg: &Config,
@@ -476,7 +491,8 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     }
     let _ = std::fs::write(&rf, &rules_content);
 
-    let grid_tab = std::env::var("GRID_TAB").unwrap_or_else(|_| format!("{repo_name}-workers"));
+    let grid_tab =
+        std::env::var("GRID_TAB").unwrap_or_else(|_| default_grid_tab(&owner, repo_name));
     let _ = std::fs::write(runs_dir.join(format!("{}.owner", opts.name)), format!("{owner}\n"));
     let _ = std::fs::write(runs_dir.join(format!("{}.grid", opts.name)), format!("{grid_tab}\n"));
     if let Ok(pt) = std::env::var("PIPELINE_TASK") {
