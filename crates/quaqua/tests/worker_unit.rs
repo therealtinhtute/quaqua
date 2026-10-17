@@ -376,6 +376,96 @@ fn test_cap_pipeline_slot_reservation_mock() {
 }
 
 #[test]
+fn test_cap_pipeline_rust_state_without_task_line() {
+    // A state written by PipelineState::save has no `task=` line for Rust pipelines.
+    // The same 2-slot pipeline must not also count its live builder as a standalone worker.
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-notask-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let owner = "quaqua-intake-lead";
+
+    std::fs::write(temp_dir.join("sude-blockedfix.owner"), format!("{owner}\n")).unwrap();
+    std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!("repo=/repo\nbrief=/b.md\nbuilder=sude\nreviewer=suhuynh\nreview=auto\nrounds=2\nbase=main\nwt=/repo/.wt/sude-blockedfix\nphase=build\nround=0\nfinished=0\nlead=quaqua-intake-lead\nlead_pane=w1:p1\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#.to_string(),
+    };
+
+    // 1 live builder + (2 - 1 already counted) reserved = 2, not 1 + 2 = 3.
+    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    assert_eq!(count, 2);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_cap_pipeline_rust_state_review_round() {
+    // Builder + fresh reviewer of the same pipeline are its 2 slots, not 2 live + 2 reserved.
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-review-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let owner = "quaqua-intake-lead";
+
+    std::fs::write(temp_dir.join("sude-blockedfix.owner"), format!("{owner}\n")).unwrap();
+    std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(temp_dir.join("suhuynh-blockedfixr1.owner"), format!("{owner}\n")).unwrap();
+    std::fs::write(temp_dir.join("suhuynh-blockedfixr1.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!("repo=/repo\nbuilder=sude\nreviewer=suhuynh\nphase=review\nround=1\nfinished=0\nlead=quaqua-intake-lead\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"},{"name":"suhuynh-blockedfixr1","agent_status":"working"}]}}"#.to_string(),
+    };
+
+    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    assert_eq!(count, 2);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_cap_pipeline_state_task_line_wins_over_filename() {
+    // Legacy/shell states carry `task=`; an explicit line is the task, not the file name.
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-taskline-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let owner = "cos";
+
+    std::fs::write(temp_dir.join("sude-other.owner"), "cos\n").unwrap();
+    std::fs::write(temp_dir.join("sude-other.pipeline"), "other\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!("task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"sude-other","agent_status":"working"}]}}"#.to_string(),
+    };
+    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock), 2);
+
+    std::fs::write(temp_dir.join("sude-blockedfix.owner"), "cos\n").unwrap();
+    std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!("task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#.to_string(),
+    };
+    // Not part of pipeline 'other': 1 live + full 2 reservation.
+    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock), 3);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
 fn test_runs_dir_resolution_n5() {
     // N5: no process-global set_var mutations
     let test_home = Path::new("target/test_home");
@@ -397,14 +487,16 @@ fn test_team_toml_harness_routing() {
     let team_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../team.toml");
     let cfg = config::load(&team_path).expect("valid team.toml");
 
-    // tieude/detu are opencode at effort max
+    // tieude is opencode at effort max
     assert_eq!(cfg.kinds["tieude"].harness, "opencode");
     assert_eq!(cfg.kinds["tieude"].model, "opencode-go/deepseek-v4.1-flash");
     assert_eq!(cfg.kinds["tieude"].effort.as_deref(), Some("max"));
     assert!(!cfg.kinds["tieude"].can_review);
-    assert_eq!(cfg.kinds["detu"].harness, "opencode");
-    assert_eq!(cfg.kinds["detu"].effort.as_deref(), Some("max"));
-
+    // detu is omp at effort high (anh iu 2026-10-16, 03ed0a7)
+    assert_eq!(cfg.kinds["detu"].harness, "omp");
+    assert_eq!(cfg.kinds["detu"].model, "google-antigravity/gemini-3.8-flash");
+    assert_eq!(cfg.kinds["detu"].effort.as_deref(), Some("high"));
+    assert!(!cfg.kinds["detu"].can_review);
     // fallback seeds: tieude->detu, detu->tieude, sude->detu; claude kinds none
     assert_eq!(cfg.kinds["tieude"].fallback.as_deref(), Some("detu"));
     assert_eq!(cfg.kinds["detu"].fallback.as_deref(), Some("tieude"));
@@ -559,6 +651,12 @@ fn test_pipeline_blockers_none_exemption() {
     assert!(!has_real_blockers("## Blockers\nnone\n"));
     assert!(!has_real_blockers("## Blockers\n* none\n"));
     assert!(!has_real_blockers("## Blockers\n- None\n"));
+    assert!(!has_real_blockers("## Blockers\n- None…\n"));
+    assert!(!has_real_blockers("## Blockers\n- None.\n"));
+    assert!(!has_real_blockers("## Blockers\n- None...\n"));
+    assert!(!has_real_blockers("## Blockers\nNone…\n"));
+    assert!(!has_real_blockers("## Blockers\nNone.\n"));
+    assert!(!has_real_blockers("## Blockers\n* none…\n"));
     assert!(!has_real_blockers("## Blockers\n\n- none\n\n## Lessons\n- none\n"));
     assert!(!has_real_blockers("Just plan text\n\n## Lessons\n- none\n"));
 
@@ -566,6 +664,22 @@ fn test_pipeline_blockers_none_exemption() {
     assert!(has_real_blockers("## Blockers\n- cannot plan without the spec\n"));
     assert!(has_real_blockers("## Blockers\n- implementation incomplete\n"));
     assert!(has_real_blockers("## Blockers\n- none\n- also a real blocker\n"));
+    assert!(has_real_blockers("## Blockers\n- None of the tests pass\n"));
+}
+
+#[test]
+fn test_pipeline_blocked_keeps_finished_zero() {
+    use quaqua::pipeline::pipeline_finished;
+
+    // A blocked stop stays resumable: finished must not be set.
+    assert!(!pipeline_finished("blocked", 0));
+    assert!(!pipeline_finished("blocked", 3));
+    // Real outcomes stay final.
+    assert!(pipeline_finished("clean", 0));
+    assert!(pipeline_finished("disputed", 0));
+    // Non-zero exits never finish the state, whatever the status says.
+    assert!(!pipeline_finished("plan-ready", 5));
+    assert!(!pipeline_finished("clean", 4));
 }
 
 #[test]
@@ -1187,4 +1301,190 @@ fn test_spawn_worker_fallback_scenarios() {
 
     std::env::remove_var("QUAQUA_RUNS_DIR");
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+// --- quaqua worker stop ---------------------------------------------------
+
+use quaqua::worker::stop::{harness_from_info, parse_stop_args, stop_keys, stop_worker};
+use std::sync::Mutex;
+
+fn agent_get_json(harness: &str) -> String {
+    format!(
+        "{{\"result\":{{\"agent\":{{\"agent\":\"{harness}\",\"name\":\"tieude-x\",\"pane_id\":\"w1:p2\"}}}}}}"
+    )
+}
+
+/// Records the keys stop sends; everything else is unused by stop.
+/// `agent_get` is either an Ok body or an io failure (herdr unreachable).
+struct StopSpy {
+    agent_get: Result<String, String>,
+    sent: Mutex<Vec<(String, String)>>,
+}
+
+impl StopSpy {
+    fn new(agent_json: &str) -> Self {
+        StopSpy {
+            agent_get: Ok(agent_json.to_string()),
+            sent: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// herdr itself cannot be reached (binary missing, socket down).
+    fn new_unreachable(io_message: &str) -> Self {
+        StopSpy {
+            agent_get: Err(io_message.to_string()),
+            sent: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn calls(&self) -> Vec<(String, String)> {
+        self.sent.lock().unwrap().clone()
+    }
+
+    fn ok() -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+impl HerdrOps for StopSpy {
+    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_list(&self) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
+        match &self.agent_get {
+            Ok(body) => Ok((true, body.clone())),
+            Err(message) => Err(std::io::Error::new(std::io::ErrorKind::Other, message.clone())),
+        }
+    }
+    fn agent_read(&self, _name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn agent_start(&self, _name: &str, _kind: &str, _pane: &str, _timeout_ms: u32, _extra_args: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_split(&self, _cwd: &str, _owner: &str, _envs: &[(&str, &str)]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_close(&self, _pane: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_report_metadata(&self, _pane: &str, _tokens: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
+        unimplemented!()
+    }
+    fn pane_read(&self, _pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_send_keys(&self, name: &str, key: &str) -> std::io::Result<Output> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push((name.to_string(), key.to_string()));
+        StopSpy::ok()
+    }
+    fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_nowait(&self, _name: &str, _prompt: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_wait_background(&self, _name: &str, _prompt: &str, _timeout_ms: u32, _log_file: std::fs::File) -> std::io::Result<Child> {
+        unimplemented!()
+    }
+}
+
+#[test]
+fn test_stop_keys_by_harness() {
+    assert_eq!(stop_keys("opencode"), Some(&["esc", "esc"][..]));
+    assert_eq!(stop_keys("omp"), Some(&["esc"][..]));
+    // No verified sequence for claude yet (Lead decision B, 2026-10-17):
+    // esc esc would open Claude Code's message selector, so stop refuses.
+    assert_eq!(stop_keys("claude"), None);
+    assert_eq!(stop_keys("aider"), None);
+    assert_eq!(stop_keys(""), None);
+}
+
+#[test]
+fn test_stop_opencode_sends_esc_twice_in_order() {
+    let spy = StopSpy::new(&agent_get_json("opencode"));
+    stop_worker("tieude-x", &spy).unwrap();
+    assert_eq!(
+        spy.calls(),
+        vec![
+            ("tieude-x".to_string(), "esc".to_string()),
+            ("tieude-x".to_string(), "esc".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn test_stop_omp_sends_esc_once() {
+    let spy = StopSpy::new(&agent_get_json("omp"));
+    stop_worker("sude-x", &spy).unwrap();
+    assert_eq!(spy.calls(), vec![("sude-x".to_string(), "esc".to_string())]);
+}
+
+#[test]
+fn test_stop_unmapped_harness_fails_closed_and_sends_nothing() {
+    for harness in ["claude", "aider"] {
+        let spy = StopSpy::new(&agent_get_json(harness));
+        let err = stop_worker("tieude-x", &spy).unwrap_err();
+        assert_eq!(err.0, 1, "exit code for {harness}");
+        assert!(err.1.contains(harness), "error names harness {harness}: {}", err.1);
+        assert!(err.1.contains("tieude-x"), "error names the worker: {}", err.1);
+        assert!(spy.calls().is_empty(), "no keys for {harness}");
+    }
+}
+
+#[test]
+fn test_stop_missing_agent_fails_closed_and_sends_nothing() {
+    let spy = StopSpy::new(r#"{"error":{"code":"agent_not_found","message":"no such agent"}}"#);
+    let err = stop_worker("tieude-gone", &spy).unwrap_err();
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("tieude-gone"), "{}", err.1);
+    assert!(spy.calls().is_empty());
+}
+
+#[test]
+fn test_stop_harness_from_info_parses_only_a_real_agent() {
+    assert_eq!(harness_from_info(&agent_get_json("opencode")).as_deref(), Some("opencode"));
+    assert_eq!(harness_from_info(&agent_get_json("omp")).as_deref(), Some("omp"));
+    // Agent gone, harness missing/empty, or garbage: no harness, nothing to send.
+    assert_eq!(harness_from_info(r#"{"error":{"code":"agent_not_found"}}"#), None);
+    assert_eq!(harness_from_info(r#"{"result":{"agent":{"agent":""}}}"#), None);
+    assert_eq!(harness_from_info(r#"{"result":{}}"#), None);
+    assert_eq!(harness_from_info("not json"), None);
+}
+
+#[test]
+fn test_stop_unreachable_herdr_is_reported_as_io_not_missing_agent() {
+    let spy = StopSpy::new_unreachable("No such file or directory (os error 2)");
+    let err = stop_worker("tieude-x", &spy).unwrap_err();
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("cannot reach herdr"), "{}", err.1);
+    assert!(err.1.contains("No such file or directory"), "{}", err.1);
+    assert!(!err.1.contains("not running"), "herdr I/O is not a missing agent: {}", err.1);
+    assert!(spy.calls().is_empty());
+}
+
+#[test]
+fn test_stop_requires_exactly_one_valid_name() {
+    assert!(parse_stop_args(&[]).is_err());
+    assert!(parse_stop_args(&["".to_string()]).is_err());
+    assert!(parse_stop_args(&["a".to_string(), "b".to_string()]).is_err());
+    assert!(parse_stop_args(&["Tieude-X".to_string()]).is_err());
+    assert!(parse_stop_args(&["--force".to_string()]).is_err());
+    assert_eq!(parse_stop_args(&["tieude-x".to_string()]).unwrap(), "tieude-x");
 }

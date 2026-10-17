@@ -145,6 +145,17 @@ pub fn count_owner_slots<H: HerdrOps>(
                     }
                 }
 
+                // Rust pipelines never write `task=` (PipelineState::save); the state file
+                // name is derived from the task, so fall back to it instead of reserving
+                // the whole weight on top of the pipeline's own live workers.
+                if p_task.is_empty() {
+                    p_task = file_name
+                        .strip_prefix("pipeline-")
+                        .and_then(|n| n.strip_suffix(".state"))
+                        .unwrap_or("")
+                        .to_string();
+                }
+
                 let p_owner = if p_lead.is_empty() { "cos" } else { &p_lead };
                 if p_owner != owner {
                     continue;

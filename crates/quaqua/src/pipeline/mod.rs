@@ -28,7 +28,9 @@ pub const USAGE: &str = "\
 #   findings' line stops it as blocked. A phase report that declares itself
 #   unfinished ('Outcome: BLOCKED|PARTIAL|INCOMPLETE|FAILED' or a non-empty
 #   '## Blockers' section — e.g. written after the watchdog nudge) never
-#   advances: the pipeline stops blocked with the evidence copied in. After
+#   advances: the pipeline stops blocked with the evidence copied in, and the
+#   state stays resumable ('--resume' continues the same phase) — only a
+#   non-blocked exit 0 marks the run finished. After
 #   BUILD/FIX the branch tip must hold real commits in a clean worktree — the
 #   size gate and the reviewer are bound to that exact SHA; a builder that
 #   intentionally changed nothing says 'Outcome: no changes' (clean, review
@@ -291,6 +293,13 @@ impl PipelineState {
     }
 }
 
+/// Whether a pipeline stop is final: the state is marked `finished` and
+/// `pipeline.sh --resume` refuses it. A blocked stop is deliberately not
+/// final — the cause is fixed from outside, then the phase is resumed.
+pub fn pipeline_finished(final_st: &str, code: i32) -> bool {
+    code == 0 && final_st != "blocked"
+}
+
 pub fn has_real_blockers(content: &str) -> bool {
     let mut in_blockers = false;
     for line in content.lines() {
@@ -307,7 +316,8 @@ pub fn has_real_blockers(content: &str) -> bool {
                 .trim_start_matches('-')
                 .trim_start_matches('*')
                 .trim();
-            if item.eq_ignore_ascii_case("none") {
+            let core = item.trim_end_matches(|c: char| c == '.' || c == '…' || c.is_whitespace());
+            if !core.is_empty() && core.eq_ignore_ascii_case("none") {
                 continue;
             }
             return true;
@@ -694,7 +704,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         }
 
         let mins = state.start_elapsed / 60;
-        if code == 0 {
+        if pipeline_finished(&final_st, code) {
             state.finished = 1;
         }
         let _ = state.save(&state_file);
