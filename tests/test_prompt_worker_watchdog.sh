@@ -67,6 +67,18 @@ case "${1:-} ${2:-}" in
       echo "$n" > "$FAKE_CWD/.diffcnt"
       echo "diff-$n" >> "$FAKE_CWD/changed.txt"
     fi
+    if [ "${FAKE_ADVANCE_COST:-0}" = 1 ] && [ -n "${PROMPT_WORKER_COST_FILE:-}" ]; then
+      cstep=$(cat "$HOME/.coststep" 2>/dev/null || echo 0)
+      cstep=$(( cstep + 1 ))
+      echo "$cstep" > "$HOME/.coststep"
+      if [ "$cstep" -eq 1 ]; then
+        echo "0.85" > "$PROMPT_WORKER_COST_FILE"
+      elif [ "$cstep" -eq 2 ]; then
+        echo "1.15" > "$PROMPT_WORKER_COST_FILE"
+      elif [ "$cstep" -ge 3 ]; then
+        printf 'fake summary\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md"
+      fi
+    fi
     if [ "${FAKE_READ_ERR:-0}" = 1 ] && [[ $* == *recent-unwrapped* ]]; then
       printf '{"error":{"code":"agent_not_idle"}}\n'; exit 1
     fi
@@ -138,6 +150,15 @@ run() {
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
     env "${clock[@]}" "$@" bash "$src/worker/prompt-worker.sh" "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
+}
+run_brief() {
+  local name=$1 btext=$2; shift 2
+  local clock=("${CLK[@]}") a
+  for a in "$@"; do [[ $a == REAL_CLOCK=1 ]] && clock=(); done
+  : > "$T/calls"
+  rc=0
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
+    env "${clock[@]}" "$@" bash "$src/worker/prompt-worker.sh" "$name" "$btext" >"$T/out" 2>"$T/err" || rc=$?
 }
 # resume <name> [--extend <sec>] [VAR=val...] — resume wait; same capture
 # (virtual clock by default, REAL_CLOCK=1 to opt out — see run)
@@ -286,6 +307,37 @@ grep -q 'WATCHDOG auto-extend' "$T/err" \
 grep -qE 'elapsed=[7-9]s ' "$T/err" \
   || fail "sude-diffext: did not wait through extension: $(cat "$T/err")"
 echo "ok: diff progress earns auto-extend (bounded to <= +50% budget) -> exit 4"
+# ── COST BUDGET: crossing 80% then 100% prints each line once ───────────────
+cost_brief='Goal: test cost budget
+Hard constraints: none
+Current design: test
+Cost budget: $1.00
+Time budget: 5 min'
+
+echo "0.50" > "$T/cost"
+run_brief sude-cost "$cost_brief" FAKE_DELAY=0 FAKE_ADVANCE_COST=1 \
+  PROMPT_WORKER_COST_FILE="$T/cost" PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 0 ]] || fail "sude-cost: exit $rc, want 0: $(cat "$T/err")"
+[[ $(grep -c 'WATCHDOG cost 80%' "$T/err") -eq 1 ]] \
+  || fail "sude-cost: cost 80% not printed exactly once: $(cat "$T/err")"
+[[ $(grep -c 'WATCHDOG cost 100%' "$T/err") -eq 1 ]] \
+  || fail "sude-cost: cost 100% not printed exactly once: $(cat "$T/err")"
+[[ -f "$T/home/quaqua/runs/.sude-cost.cost80" ]] \
+  || fail "sude-cost: cost80 sentinel not written"
+[[ -f "$T/home/quaqua/runs/.sude-cost.cost100" ]] \
+  || fail "sude-cost: cost100 sentinel not written"
+echo "ok: cost budget crossing 80% then 100% prints each warning line once, no kill"
+
+# resume does not re-send warnings
+resume sude-cost PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 0 ]] || fail "sude-cost resume: exit $rc, want 0: $(cat "$T/err")"
+[[ $(grep -c 'WATCHDOG cost 80%' "$T/err") -eq 0 ]] \
+  || fail "sude-cost resume: re-sent cost 80%"
+[[ $(grep -c 'WATCHDOG cost 100%' "$T/err") -eq 0 ]] \
+  || fail "sude-cost resume: re-sent cost 100%"
+echo "ok: --resume does not re-send cost budget warnings"
+
 
 # ── D1: --resume without --extend keeps the old fast exit 4 ────────────────
 run sude-noext FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \

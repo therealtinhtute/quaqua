@@ -490,6 +490,34 @@ fn test_cap_pipeline_double_count_repro() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+#[test]
+fn test_cost_budget_parser_and_reader() {
+    use quaqua::worker::prompt::{brief_cost_budget, read_worker_cost};
+
+    let b1 = "Goal: test\nHard constraints: none\nCurrent design: none\nCost budget: $0.001\nTime budget: 5 min";
+    assert_eq!(brief_cost_budget(b1), Some(0.001));
+
+    let b2 = "Goal: test\nCost budget: $2.50\n";
+    assert_eq!(brief_cost_budget(b2), Some(2.5));
+
+    let b3 = "Goal: test\nCost budget: 0.75\n";
+    assert_eq!(brief_cost_budget(b3), Some(0.75));
+
+    let b4 = "Goal: test\nNo cost line";
+    assert_eq!(brief_cost_budget(b4), None);
+
+    // Cost reader via PROMPT_WORKER_COST_FILE fixture
+    let tmp = std::env::temp_dir().join(format!("cost-fixture-{}", std::process::id()));
+    std::fs::write(&tmp, "0.4242\n").unwrap();
+    std::env::set_var("PROMPT_WORKER_COST_FILE", &tmp);
+    let cost = read_worker_cost("tieude-test", "ses_123", "/tmp", "opencode");
+    assert_eq!(cost, Some(0.4242));
+    std::env::remove_var("PROMPT_WORKER_COST_FILE");
+    let _ = std::fs::remove_file(&tmp);
+
+    // Non-opencode without fixture returns None
+    assert_eq!(read_worker_cost("sude-test", "ses_123", "/tmp", "omp"), None);
+}
 
 #[test]
 fn test_runs_dir_resolution_n5() {
