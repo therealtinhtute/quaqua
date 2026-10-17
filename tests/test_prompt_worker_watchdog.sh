@@ -62,6 +62,11 @@ case "${1:-} ${2:-}" in
       "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" "${FAKE_WATCHER_PANE:-%1}" "$hook_json" "$agent_json" ;;
   "agent read")
     gone_now && { printf '{"error":{"code":"agent_not_found"}}\n' >&2; exit 1; }
+    if [ "${FAKE_DIFF_PROGRESS:-0}" = 1 ] && [ -n "${FAKE_CWD:-}" ] && [ -d "$FAKE_CWD/.git" ]; then
+      n=$(cat "$FAKE_CWD/.diffcnt" 2>/dev/null || echo 0); n=$(( n + 1 ))
+      echo "$n" > "$FAKE_CWD/.diffcnt"
+      echo "diff-$n" >> "$FAKE_CWD/changed.txt"
+    fi
     if [ "${FAKE_READ_ERR:-0}" = 1 ] && [[ $* == *recent-unwrapped* ]]; then
       printf '{"error":{"code":"agent_not_idle"}}\n'; exit 1
     fi
@@ -250,13 +255,37 @@ run sude-gracecap FAKE_DELAY=0 FAKE_ROTATE=1 PROMPT_WORKER_POLL_SEC=1 \
 grep -q 'WATCHDOG grace' "$T/err" \
   || fail "sude-gracecap: grace never granted before the cap: $(cat "$T/err")"
 echo "ok: grace clamped by the cap -> exit 2 at the cap"
-# ── (a) progressing agent auto-extends on heartbeat within cap instead of exit 4 ─
+# ── (a) pane churn alone does not earn auto-extend -> exit 4 after grace ─────
 run sude-autoext FAKE_DELAY=0 FAKE_ROTATE=1 PROMPT_WORKER_POLL_SEC=1 \
-  PROMPT_WORKER_HEARTBEAT_SEC=2 PROMPT_WORKER_STALL_SEC=10 \
-  PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_MAX_SEC=7
-[[ $rc -eq 2 ]] || fail "sude-autoext: exit $rc, want 2 (cap): $(cat "$T/err")"
-grep -q 'WATCHDOG auto-extend' "$T/err" || fail "sude-autoext: no auto-extend line: $(cat "$T/err")"
-echo "ok: progressing agent auto-extends within cap until exit 2"
+  PROMPT_WORKER_STALL_SEC=10 PROMPT_WORKER_BUDGET_SEC=4 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-autoext: exit $rc, want 4: $(cat "$T/err")"
+grep -q 'WATCHDOG grace +1s (progressing)' "$T/err" \
+  || fail "sude-autoext: no grace line: $(cat "$T/err")"
+! grep -q 'WATCHDOG auto-extend' "$T/err" \
+  || fail "sude-autoext: pane churn earned auto-extend: $(cat "$T/err")"
+grep -qE 'elapsed=[5-9]s ' "$T/err" \
+  || fail "sude-autoext: exited before grace ran: $(cat "$T/err")"
+echo "ok: pane churn alone does not earn auto-extend -> exit 4 after grace"
+
+# ── (a) worktree diff progress earns bounded auto-extend (<= +50% budget) ────
+mkdir -p "$T/repo"
+git -C "$T/repo" init -q
+echo "initial" > "$T/repo/changed.txt"
+git -C "$T/repo" add changed.txt
+git -C "$T/repo" -c user.email=t@t -c user.name=t commit -qm init
+run sude-diffext FAKE_DELAY=0 FAKE_ROTATE=1 FAKE_DIFF_PROGRESS=1 FAKE_CWD="$T/repo" \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=10 \
+  PROMPT_WORKER_BUDGET_SEC=4 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-diffext: exit $rc, want 4 (bounded at +50%): $(cat "$T/err")"
+grep -q 'WATCHDOG grace +1s (progressing)' "$T/err" \
+  || fail "sude-diffext: no grace line: $(cat "$T/err")"
+grep -q 'WATCHDOG auto-extend' "$T/err" \
+  || fail "sude-diffext: no auto-extend: $(cat "$T/err")"
+[[ -f "$T/home/quaqua/runs/.sude-diffext.autoext" ]] \
+  || fail "sude-diffext: no .autoext sidecar"
+grep -qE 'elapsed=[7-9]s ' "$T/err" \
+  || fail "sude-diffext: did not wait through extension: $(cat "$T/err")"
+echo "ok: diff progress earns auto-extend (bounded to <= +50% budget) -> exit 4"
 
 # ── D1: --resume without --extend keeps the old fast exit 4 ────────────────
 run sude-noext FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
@@ -348,6 +377,16 @@ grep -q 'agent prompt sude-timeout continue' "$T/calls" \
 [[ -f "$T/home/quaqua/runs/.sude-timeout.provider_retry" ]] \
   || fail "sude-timeout: provider_retry sentinel not written"
 echo "ok: opencode provider timeout detected -> in-place resume with continue"
+run sude-no-timeout-working FAKE_DELAY=0 FAKE_STATUS=working \
+  FAKE_PANE='grep "Timed out waiting for response headers" in file' \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=1 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "sude-no-timeout-working: exit $rc, want 3 (stall)"
+! grep -q 'WATCHDOG provider timeout detected' "$T/err" \
+  || fail "sude-no-timeout-working: timeout triggered while working"
+! grep -q 'agent prompt sude-no-timeout-working continue' "$T/calls" \
+  || fail "sude-no-timeout-working: continue prompt sent while working"
+echo "ok: provider timeout ignored when status is working"
+
 
 
 printf '%s\n' 1700000000 > "$T/clock"

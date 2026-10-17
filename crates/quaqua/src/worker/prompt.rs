@@ -237,10 +237,22 @@ fn question_seen(pane_text: &str) -> bool {
     false
 }
 pub fn is_provider_timeout(pane_text: &str) -> bool {
-    let lower = pane_text.to_lowercase();
-    lower.contains("timed out waiting for response headers")
-        || lower.contains("timed out waiting for response data")
-        || lower.contains("provider.transport")
+    let clean_lines: Vec<&str> = pane_text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let tail_count = clean_lines.len().min(5);
+    let tail = &clean_lines[clean_lines.len().saturating_sub(tail_count)..];
+    for line in tail {
+        let lower = line.to_lowercase();
+        if lower.contains("timed out waiting for response headers")
+            || lower.contains("timed out waiting for response data")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 
@@ -319,6 +331,7 @@ pub struct Observation {
     pub diffstat: String,
     pub pane_text: String,
     pub fp: String,
+    pub diff_hash: String,
     pub watcher_pane: String,
     pub hook_active: bool,
     pub harness: String,
@@ -451,6 +464,7 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
         diffstat,
         pane_text,
         fp,
+        diff_hash: dh,
         watcher_pane,
         hook_active,
         harness,
@@ -479,6 +493,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let progress_file = runs_dir.join(format!(".{name}.progress"));
     let srt = runs_dir.join(format!("{name}.srt.json"));
     let provider_retry_file = runs_dir.join(format!(".{name}.provider_retry"));
+    let autoext_file = runs_dir.join(format!(".{name}.autoext"));
 
     let max: u64 = std::env::var("PROMPT_WORKER_MAX_SEC")
         .ok()
@@ -524,6 +539,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
 
     let prev_elapsed: u64;
     let mut budget: u64;
+    let mut autoext_total: u64 = 0;
 
     if resume {
         prev_elapsed = std::fs::read_to_string(&elapsed_file)
@@ -539,6 +555,10 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             let _ = std::fs::write(&budget_file, format!("{budget}\n"));
             eprintln!("WATCHDOG extend +{ext}s (allowance {budget}s, cap {max}s)");
         }
+        autoext_total = std::fs::read_to_string(&autoext_file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
     } else {
         let task_str = task.unwrap_or("");
         prev_elapsed = 0;
@@ -549,6 +569,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         let _ = std::fs::remove_file(&grace_file);
         let _ = std::fs::remove_file(&progress_file);
         let _ = std::fs::remove_file(&provider_retry_file);
+        let _ = std::fs::remove_file(&autoext_file);
+
 
         if out.exists() {
             let stale_path = format!("{}.stale.{}", out.display(), now_sec());
@@ -580,6 +602,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             let _ = herdr.agent_prompt_wait_background(name, &prompt_body, 1800000, file);
         }
     }
+    let mut last_autoext_dh = String::new();
+    let mut initial_dh_recorded = false;
 
     let start = now_sec();
     let rem_max = (max.saturating_sub(prev_elapsed)).max(1);
@@ -667,13 +691,14 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             } else {
                 gone_since = 0;
             }
-            if !provider_retry_file.exists() && is_provider_timeout(&obs.pane_text) {
+            if (st == "idle" || st == "done")
+                && !provider_retry_file.exists()
+                && is_provider_timeout(&obs.pane_text)
+            {
                 let _ = std::fs::write(&provider_retry_file, format!("{now}\n"));
                 let _ = herdr.agent_prompt_nowait(name, "continue");
                 eprintln!("WATCHDOG provider timeout detected | name={name} — re-prompted session with 'continue'");
                 idle_since = 0;
-                change_ts = now;
-                prompt_landed = true;
             }
 
 
@@ -727,6 +752,10 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 }
                 fp_seen = true;
             }
+            if !initial_dh_recorded && !obs.diff_hash.is_empty() {
+                last_autoext_dh = obs.diff_hash.clone();
+                initial_dh_recorded = true;
+            }
 
             if now >= budget_deadline {
                 if !grace_used && last_progress > 0 && now - last_progress <= poll * 2 {
@@ -739,6 +768,24 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                         grace_used = true;
                         let _ = std::fs::write(&grace_file, "");
                         eprintln!("WATCHDOG grace +{grace}s (progressing)");
+                    }
+                }
+                let max_autoext = budget / 2;
+                if autoext_total < max_autoext
+                    && !obs.diff_hash.is_empty()
+                    && obs.diff_hash != last_autoext_dh
+                {
+                    let rem = max_autoext.saturating_sub(autoext_total);
+                    let mut ext = (budget / 4).max(1).min(rem);
+                    if budget_deadline + ext > deadline {
+                        ext = deadline.saturating_sub(budget_deadline);
+                    }
+                    if ext > 0 {
+                        budget_deadline += ext;
+                        autoext_total += ext;
+                        last_autoext_dh = obs.diff_hash.clone();
+                        let _ = std::fs::write(&autoext_file, format!("{autoext_total}\n"));
+                        eprintln!("WATCHDOG auto-extend +{ext}s (diff progressing, cap {max}s, total +{autoext_total}s/+{max_autoext}s)");
                     }
                 }
                 if now >= budget_deadline {
@@ -802,18 +849,6 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             let last_tool = last_obs.as_ref().map(|o| o.last_tool.as_str()).filter(|s| !s.is_empty()).unwrap_or("none");
             let elapsed = now.saturating_sub(start);
             eprintln!("WATCHDOG heartbeat | name={name} elapsed={elapsed}s status={status} ctx={ctx} quiet={quiet}s last={last_tool}");
-            if (now >= budget_deadline.saturating_sub(heartbeat) || now >= budget_deadline)
-                && (quiet < heartbeat || (last_progress > 0 && now.saturating_sub(last_progress) <= poll * 2))
-            {
-                let mut ext = heartbeat.max(1);
-                if budget_deadline + ext > deadline {
-                    ext = deadline.saturating_sub(budget_deadline);
-                }
-                if ext > 0 {
-                    budget_deadline += ext;
-                    eprintln!("WATCHDOG auto-extend +{ext}s (progressing, cap {max}s)");
-                }
-            }
             last_hb = now;
         }
 

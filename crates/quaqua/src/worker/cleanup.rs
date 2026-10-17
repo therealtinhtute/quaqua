@@ -187,6 +187,7 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.pipeline")));
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.srt.json")));
     let _ = std::fs::remove_file(runs_dir.join(format!(".{name}.provider_retry")));
+    let _ = std::fs::remove_file(runs_dir.join(format!(".{name}.autoext")));
     let _ = std::fs::remove_dir_all(runs_dir.join(".opencode-state").join(name));
     println!("cleaned {name} (branch quaqua/{name} kept)");
 
