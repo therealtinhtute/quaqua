@@ -57,6 +57,13 @@ pub struct Tokens {
     pub grid_owner: Option<String>,
     #[serde(default)]
     pub grid_group: Option<String>,
+    /// The workers tab label the pane was spawned into (GRID_TAB). The group
+    /// token groups workers; this names the tab they were told to land in, so
+    /// the planner, the repair and the check can agree on a tab whose label is
+    /// not derivable from the group (e.g. group `quaqua`, tab
+    /// `quaqua-rs-workers`).
+    #[serde(default)]
+    pub grid_tab: Option<String>,
     #[serde(default)]
     pub grid_ready: Option<serde_json::Value>,
     #[serde(default)]

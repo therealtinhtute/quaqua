@@ -32,8 +32,9 @@ pub fn default_runs_dir() -> PathBuf {
 /// Locate an engine script (a `scripts/` shim) by name, in the same order the
 /// grid script was historically found: `QUAQUA_SCRIPT_DIR`, its `../worker`
 /// and parent/`worker` siblings, the binary's own directory, the
-/// `QUAQUA_TEAM_TOML` sibling `scripts/worker`, `$HOME/quaqua/scripts/worker`,
-/// then `scripts/worker` under the cwd. Returns the file only when it exists.
+/// `QUAQUA_TEAM_TOML` sibling `scripts/worker`, the workspace root's
+/// `scripts/worker` (`QUAQUA_HOME`, else `$HOME/quaqua`), then
+/// `scripts/worker` under the cwd. Returns the file only when it exists.
 pub fn find_engine_script(name: &str) -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
         let p = PathBuf::from(&dir);
@@ -68,11 +69,11 @@ pub fn find_engine_script(name: &str) -> Option<PathBuf> {
             }
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        let candidate = PathBuf::from(home).join("quaqua/scripts/worker").join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
+    let candidate = crate::workspace::workspace_root()
+        .join("scripts/worker")
+        .join(name);
+    if candidate.is_file() {
+        return Some(candidate);
     }
     let candidate = PathBuf::from("scripts/worker").join(name);
     if candidate.is_file() {

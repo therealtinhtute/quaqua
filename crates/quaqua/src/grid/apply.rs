@@ -346,11 +346,17 @@ pub fn apply_ops<D: HerdrDriver>(
                     if let Some(lt) = &latest_tab {
                         lt.clone()
                     } else {
-                        // Look for an existing valid workers tab for this group
+                        // Look for an existing valid workers tab for this group,
+                        // by the same acceptance predicate the plan and the
+                        // repair use: the group tab, or the exact label the pane
+                        // was spawned into (`grid_tab`).
                         let anchor_tid = anchor_pane.tab_id.as_deref().unwrap_or("");
+                        let worker_gtab = pane_obj
+                            .tokens
+                            .as_ref()
+                            .and_then(|t| t.grid_tab.as_deref());
                         let is_workers_tab = fresh_snap.tabs.iter().find(|t| t.tab_id == anchor_tid).map(|t| {
-                            let l = t.label.as_deref().unwrap_or("");
-                            super::plan::is_group_tab(worker_group, Some(l))
+                            super::plan::accepts_workers_tab(worker_group, worker_gtab, t.label.as_deref())
                         }).unwrap_or(false);
 
                         if is_workers_tab {
