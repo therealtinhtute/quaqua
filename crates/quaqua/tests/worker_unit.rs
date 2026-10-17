@@ -314,6 +314,96 @@ fn test_cap_pipeline_slot_reservation_mock() {
 }
 
 #[test]
+fn test_cap_pipeline_rust_state_without_task_line() {
+    // A state written by PipelineState::save has no `task=` line for Rust pipelines.
+    // The same 2-slot pipeline must not also count its live builder as a standalone worker.
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-notask-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let owner = "quaqua-intake-lead";
+
+    std::fs::write(temp_dir.join("sude-blockedfix.owner"), format!("{owner}\n")).unwrap();
+    std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!("repo=/repo\nbrief=/b.md\nbuilder=sude\nreviewer=suhuynh\nreview=auto\nrounds=2\nbase=main\nwt=/repo/.wt/sude-blockedfix\nphase=build\nround=0\nfinished=0\nlead=quaqua-intake-lead\nlead_pane=w1:p1\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#.to_string(),
+    };
+
+    // 1 live builder + (2 - 1 already counted) reserved = 2, not 1 + 2 = 3.
+    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    assert_eq!(count, 2);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_cap_pipeline_rust_state_review_round() {
+    // Builder + fresh reviewer of the same pipeline are its 2 slots, not 2 live + 2 reserved.
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-review-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let owner = "quaqua-intake-lead";
+
+    std::fs::write(temp_dir.join("sude-blockedfix.owner"), format!("{owner}\n")).unwrap();
+    std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(temp_dir.join("suhuynh-blockedfixr1.owner"), format!("{owner}\n")).unwrap();
+    std::fs::write(temp_dir.join("suhuynh-blockedfixr1.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!("repo=/repo\nbuilder=sude\nreviewer=suhuynh\nphase=review\nround=1\nfinished=0\nlead=quaqua-intake-lead\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"},{"name":"suhuynh-blockedfixr1","agent_status":"working"}]}}"#.to_string(),
+    };
+
+    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    assert_eq!(count, 2);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_cap_pipeline_state_task_line_wins_over_filename() {
+    // Legacy/shell states carry `task=`; an explicit line is the task, not the file name.
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-taskline-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let owner = "cos";
+
+    std::fs::write(temp_dir.join("sude-other.owner"), "cos\n").unwrap();
+    std::fs::write(temp_dir.join("sude-other.pipeline"), "other\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!("task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"sude-other","agent_status":"working"}]}}"#.to_string(),
+    };
+    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock), 2);
+
+    std::fs::write(temp_dir.join("sude-blockedfix.owner"), "cos\n").unwrap();
+    std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!("task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#.to_string(),
+    };
+    // Not part of pipeline 'other': 1 live + full 2 reservation.
+    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock), 3);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
 fn test_runs_dir_resolution_n5() {
     // N5: no process-global set_var mutations
     let test_home = Path::new("target/test_home");
