@@ -283,6 +283,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     let rf_str = rf.to_string_lossy().to_string();
     let cmd = crate::worker::spawn::build_launch_cmd(
         &launch,
+        &name,
         &rf_str,
         &runs_str,
         &root_str,

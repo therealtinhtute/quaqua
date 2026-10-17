@@ -598,10 +598,10 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     assert_eq!(launch.model, "opencode-go/deepseek-v4.1-flash");
     assert_eq!(launch.effort, "max");
 
-    let cmd = build_launch_cmd(&launch, "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
-    assert_eq!(cmd.split_envs.len(), 1);
+    let cmd = build_launch_cmd(&launch, "quaqua-rs-lead", "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
+    assert_eq!(cmd.split_envs.len(), 2);
     assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
-    assert!(cmd.split_envs[0].1.contains("opencode-go/deepseek-v4.1-flash#max"));
+    assert!(cmd.split_envs[0].1.contains("\"variant\":\"max\""));
     assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
 
     // 2. LEAD_KIND env override switches lead to detu (omp)
@@ -611,7 +611,7 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     assert_eq!(launch_detu.model, "google-antigravity/gemini-3.8-flash");
     assert_eq!(launch_detu.effort, "high");
 
-    let cmd_detu = build_launch_cmd(&launch_detu, "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
+    let cmd_detu = build_launch_cmd(&launch_detu, "quaqua-rs-lead", "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
     assert!(cmd_detu.split_envs.is_empty());
     assert_eq!(cmd_detu.agent_args, vec![
         "--",
@@ -631,7 +631,7 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     assert_eq!(launch_ni.model, "opus-5.5");
     assert_eq!(launch_ni.effort, "low");
 
-    let cmd_ni = build_launch_cmd(&launch_ni, "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
+    let cmd_ni = build_launch_cmd(&launch_ni, "quaqua-rs-lead", "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
     assert!(cmd_ni.split_envs.is_empty());
     assert_eq!(cmd_ni.agent_args, vec![
         "--",
