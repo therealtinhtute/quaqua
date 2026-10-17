@@ -369,12 +369,13 @@ grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_ready=1
   || fail "tokens: bad call order: $(cat "$T/calls")"
 echo "ok: pane tokens -> grid_role=worker/grid_group/grid_owner on split, grid_ready=1 after agent start"
 
-# custom owner via QUAQUA_OWNER
+# custom owner via QUAQUA_OWNER: a `<slug>-lead` owner defaults its grid tab
+# to `<slug>-workers` (the Lead's project tab), not the repo-derived label
 spawn tieude-customowner tieude QUAQUA_OWNER=custom-lead
 [[ $rc -eq 0 ]] || fail "custom owner: exit $rc, want 0: $(cat "$T/err")"
-grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=custom-lead --token grid_tab=repo-workers' "$T/calls" \
-  || fail "custom owner: grid_owner not set to custom-lead: $(cat "$T/calls")"
-echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER"
+grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=custom-lead --token grid_tab=custom-workers' "$T/calls" \
+  || fail "custom owner: tokens not custom-lead/custom-workers: $(cat "$T/calls")"
+echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER, lead owner -> <slug>-workers grid tab"
 
 
 
