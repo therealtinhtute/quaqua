@@ -172,6 +172,39 @@ t0=$(jq -r '.[0].target.label' <<<"$out")
 t4=$(jq -r '.[4].target.label' <<<"$out")
 [[ "$t4" == "quaqua-workers-2" ]] || fail "op 4 not quaqua-workers-2: $out"
 echo "ok: 5 workers -> 4 in quaqua-workers, 1 in quaqua-workers-2"
+
+# -----------------------------------------------------------------------------
+# 6b. 8 workers -> two 2x2 grids (quaqua-workers + quaqua-workers-2)
+# -----------------------------------------------------------------------------
+echo "test 6b: 8 workers (two 2x2 grids)"
+out=$(run_plan "$fixdir/8-workers.json")
+assert_no_legacy_fields "$out"
+len=$(jq 'length' <<<"$out")
+[[ "$len" -eq 8 ]] || fail "expected 8 ops, got: $out"
+[[ $(jq -r '.[0].target.label' <<<"$out") == "quaqua-workers" ]] || fail "op 0 not quaqua-workers: $out"
+[[ $(jq -r '.[4].target.label' <<<"$out") == "quaqua-workers-2" ]] || fail "op 4 not quaqua-workers-2: $out"
+# Check chunk 1 splits: [4, 6, 5, 7] -> build order [0, 2, 1, 3]
+[[ $(jq -r '.[5].target.anchor' <<<"$out") == "w1:p9" && $(jq -r '.[5].target.direction' <<<"$out") == "down" && $(jq -r '.[5].target.tab' <<<"$out") == "@workers-2" ]] || fail "op 5 not p9 down @workers-2: $out"
+[[ $(jq -r '.[6].target.anchor' <<<"$out") == "w1:p9" && $(jq -r '.[6].target.direction' <<<"$out") == "right" && $(jq -r '.[6].target.tab' <<<"$out") == "@workers-2" ]] || fail "op 6 not p9 right @workers-2: $out"
+[[ $(jq -r '.[7].target.anchor' <<<"$out") == "w1:pB" && $(jq -r '.[7].target.direction' <<<"$out") == "right" && $(jq -r '.[7].target.tab' <<<"$out") == "@workers-2" ]] || fail "op 7 not pB right @workers-2: $out"
+echo "ok: 8 workers -> 4 in quaqua-workers (2x2), 4 in quaqua-workers-2 (2x2)"
+
+# -----------------------------------------------------------------------------
+# 6c. 9 workers -> rejected (>8 per group)
+# -----------------------------------------------------------------------------
+echo "test 6c: 9 workers (>8 per group is rejected)"
+err=""
+T9=$(mktemp)
+jq '.snapshot.panes += [{pane_id:"w1:pD",tab_id:"w1:t2",workspace_id:"w1",agent:"pi",agent_status:"idle",tokens:{grid_role:"worker",grid_owner:"cos",grid_group:"quaqua-workers",grid_ready:"1"}}]' "$fixdir/8-workers.json" > "$T9"
+if out=$(run_plan "$T9" 2>&1); then
+  rm -f "$T9"
+  fail "expected rejection (>8 workers in group), but succeeded with: $out"
+else
+  err="$out"
+fi
+rm -f "$T9"
+[[ "$err" == *"too many workers in group quaqua-workers: 9 (max 8)"* ]] || fail "expected 'too many workers in group' error, got: $err"
+echo "ok: 9 workers -> rejected with error"
 # -----------------------------------------------------------------------------
 # 7. two owners in the same group -> planned independently
 # -----------------------------------------------------------------------------

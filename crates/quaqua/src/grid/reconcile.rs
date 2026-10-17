@@ -363,6 +363,10 @@ pub fn run_reconcile<D: HerdrDriver>(
                     4 => vec![0, 2, 1, 3],
                     _ => vec![],
                 };
+                // Pivot: the tab is created by an idle worker, never by a working one.
+                // A deferred anchor must not cancel the runnable panes of its own group
+                // (a working pane is never moved, but the idle ones still are; the
+                // working pane is reported deferred and a later pass moves it).
                 let pivot_idx = chunk_gws
                     .iter()
                     .position(|w| !is_deferred(w.agent_status.as_deref()))
@@ -373,6 +377,9 @@ pub fn run_reconcile<D: HerdrDriver>(
                 }
                 order.insert(0, pivot_idx);
 
+                // A deferred (working) pane must never drain its group: it can neither
+                // create the tab nor anchor an idle pane's split (propagate_deferrals
+                // would cancel that split too).
                 let deferred_ids: HashSet<&str> = chunk_gws
                     .iter()
                     .filter(|w| is_deferred(w.agent_status.as_deref()))
@@ -398,7 +405,7 @@ pub fn run_reconcile<D: HerdrDriver>(
                         if occ.is_empty() {
                             return false;
                         }
-                        occ.iter().all(|p| chunk_gws.iter().any(|gw| gw.pane_id == p.pane_id))
+                        occ.iter().all(|p| gws.iter().any(|gw| gw.pane_id == p.pane_id))
                     })
                     .collect();
 
@@ -508,6 +515,9 @@ pub fn run_reconcile<D: HerdrDriver>(
                             .iter()
                             .find(|p| *p != &w.pane_id)
                             .cloned();
+                        // Never anchor on a deferred (working) pane: it is not in
+                        // the tab yet, and propagate_deferrals would cancel the
+                        // idle pane's split too (n>=3, pivot != gws[0]).
                         if present.contains(want_anchor) && want_anchor != &w.pane_id && !deferred_ids.contains(want_anchor.as_str()) {
                             repair_ops.push(Op {
                                 op: "move".to_string(),

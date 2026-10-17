@@ -269,19 +269,25 @@ pub fn apply_ops<D: HerdrDriver>(
     let mut deferred_panes: HashSet<String> = HashSet::new();
     let mut workers_tab_deferred = false;
     let mut workers_tab_2_deferred = false;
+    let mut new_tab_count = 0;
 
     for op in ops {
         // Finding 3: Propagate deferral to dependent ops
         if op.deferred {
             deferred_panes.insert(op.pane.clone());
-            if let Target::NewTab { label } = &op.target {
-                if label.ends_with("-2") {
-                    workers_tab_2_deferred = true;
-                } else {
+            if matches!(op.target, Target::NewTab { .. }) {
+                if new_tab_count == 0 {
                     workers_tab_deferred = true;
+                } else {
+                    workers_tab_2_deferred = true;
                 }
+                new_tab_count += 1;
             }
             continue;
+        }
+
+        if matches!(op.target, Target::NewTab { .. }) {
+            new_tab_count += 1;
         }
 
         if let Target::Split { tab, anchor, .. } = &op.target {
@@ -459,13 +465,11 @@ pub fn apply_ops<D: HerdrDriver>(
             pane_map.insert(parked, new_id.clone());
         }
 
-        if !res.tab_id.is_empty() {
-            if let Target::NewTab { label } = &op.target {
-                if label.ends_with("-2") {
-                    latest_tab_2 = Some(res.tab_id.clone());
-                } else {
-                    latest_tab = Some(res.tab_id.clone());
-                }
+        if !res.tab_id.is_empty() && matches!(op.target, Target::NewTab { .. }) {
+            if latest_tab.is_none() {
+                latest_tab = Some(res.tab_id.clone());
+            } else {
+                latest_tab_2 = Some(res.tab_id.clone());
             }
         }
     }

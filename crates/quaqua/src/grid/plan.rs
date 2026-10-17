@@ -54,25 +54,21 @@ fn is_status_deferred(status: Option<&str>, deferred_list: &[&str]) -> bool {
     status.map(|s| deferred_list.contains(&s)).unwrap_or(false)
 }
 
-pub fn strip_tab_suffix(label: &str) -> &str {
-    if let Some((base, suffix)) = label.rsplit_once('-') {
-        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-            return base;
-        }
-    }
-    label
-}
-
 pub fn is_group_tab(group: &str, label: Option<&str>) -> bool {
     let l = match label {
         Some(s) if !s.is_empty() => s,
         _ => return false,
     };
-    let base = strip_tab_suffix(l);
-    base == group
-        || base == format!("{group}-workers")
-        || base == group.strip_suffix("-workers").unwrap_or(group)
-        || base == "workers"
+    l == group
+        || l == format!("{group}-workers")
+        || l == group.strip_suffix("-workers").unwrap_or(group)
+        || l == "workers"
+        || l.strip_suffix("-2").map(|base| {
+            base == group
+                || base == format!("{group}-workers")
+                || base == group.strip_suffix("-workers").unwrap_or(group)
+                || base == "workers"
+        }).unwrap_or(false)
 }
 
 /// The one acceptance predicate for a group's workers tab, shared by the
@@ -81,6 +77,12 @@ pub fn is_group_tab(group: &str, label: Option<&str>) -> bool {
 /// the group tab (`is_group_tab`) or exactly the label the group's panes were
 /// spawned into (`grid_tab`, i.e. GRID_TAB — which need not equal the group, e.g.
 /// group `quaqua`, tab `quaqua-rs-workers`).
+///
+/// Widening this in one place is the point: two hand-mirrored widenings (the
+/// planner's `ends_with("-workers")` vs the repair's `== requested`) disagreed on
+/// the first foreign `<X>-workers` tab — the hook adopted it while the repair
+/// moved the panes to its own tab, pulling them in opposite directions, and the
+/// check (which tested only `is_group_tab`) dropped every op and was vacuous.
 pub fn accepts_workers_tab(group: &str, expected: Option<&str>, label: Option<&str>) -> bool {
     if is_group_tab(group, label) {
         return true;
@@ -93,7 +95,7 @@ pub fn accepts_workers_tab(group: &str, expected: Option<&str>, label: Option<&s
             if e == l {
                 return true;
             }
-            strip_tab_suffix(e) == strip_tab_suffix(l)
+            l.strip_suffix("-2") == Some(e) || e.strip_suffix("-2") == Some(l)
         }
         _ => false,
     }
@@ -125,20 +127,29 @@ pub fn accepts_chunk_tab(
         Some(s) if !s.is_empty() => s,
         _ => return false,
     };
+    let base_tab = expected_tab.unwrap_or(group);
+    let chunk_1_label = chunk_tab_label(base_tab, 1);
+    let chunk_1_group_tab = format!("{group}-workers-2");
+
     if chunk_idx == 0 {
-        if strip_tab_suffix(l) != l {
+        if l == chunk_1_label || l == chunk_1_group_tab {
             return false;
         }
         accepts_workers_tab(group, expected_tab, Some(l))
     } else {
-        let want_suffix = format!("-{}", chunk_idx + 1);
-        if !l.ends_with(&want_suffix) {
-            return false;
+        if l == chunk_1_label || l == chunk_1_group_tab {
+            return true;
         }
-        let base_label = &l[..l.len() - want_suffix.len()];
-        let base_expected = expected_tab.map(strip_tab_suffix);
-        accepts_workers_tab(group, base_expected, Some(base_label))
+        if let Some(base_l) = l.strip_suffix("-2") {
+            accepts_workers_tab(group, expected_tab, Some(base_l))
+        } else {
+            false
+        }
     }
+}
+
+pub fn strip_tab_suffix(label: &str) -> &str {
+    label.strip_suffix("-2").unwrap_or(label)
 }
 /// The workers tab label the group's panes were spawned into (GRID_TAB), read
 /// from the pane tokens. `None` for legacy panes that carry no `grid_tab`; such
@@ -306,22 +317,26 @@ pub fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) 
 pub(crate) fn propagate_deferrals(ops: &mut [Op]) {
     let mut deferred_panes: HashSet<String> = HashSet::new();
     let mut deferred_tabs: HashSet<String> = HashSet::new();
+    let mut new_tab_count = 0;
+
     for op in ops.iter_mut() {
         if op.deferred {
             deferred_panes.insert(op.pane.clone());
-            if let Target::NewTab { label } = &op.target {
-                if label.ends_with("-2") {
-                    deferred_tabs.insert("@workers-2".to_string());
-                } else {
+            if matches!(op.target, Target::NewTab { .. }) {
+                if new_tab_count == 0 {
                     deferred_tabs.insert("@workers".to_string());
+                } else {
+                    deferred_tabs.insert("@workers-2".to_string());
                 }
+                new_tab_count += 1;
             }
             continue;
         }
+        if matches!(op.target, Target::NewTab { .. }) {
+            new_tab_count += 1;
+        }
         if let Target::Split { tab, anchor, .. } = &op.target {
-            if deferred_panes.contains(anchor.as_str())
-                || deferred_tabs.contains(tab.as_str())
-            {
+            if deferred_panes.contains(anchor.as_str()) || deferred_tabs.contains(tab.as_str()) {
                 op.deferred = true;
                 deferred_panes.insert(op.pane.clone());
             }
@@ -483,7 +498,7 @@ pub fn plan_with_deferred(
                             if occ.is_empty() {
                                 return false;
                             }
-                            occ.iter().all(|p| chunk_gws.iter().any(|gw| gw.pane_id == p.pane_id))
+                            occ.iter().all(|p| gws.iter().any(|gw| gw.pane_id == p.pane_id))
                         })
                         .collect();
 

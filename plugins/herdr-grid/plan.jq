@@ -59,21 +59,21 @@ def is_candidate_worker:
 def is_working:
   . == "working";
 
-# Strip trailing numeric suffix -\d+ (e.g. quaqua-workers-2 -> quaqua-workers)
-def strip_tab_suffix:
-  if . == null then ""
-  elif test("-[0-9]+$") then sub("-[0-9]+$"; "")
-  else . end;
-
 # Check if a tab label matches a group (exact, with/without -workers suffix, or default "workers")
 def is_group_tab($group; $label):
   if ($label == null or $label == "") then false
   else
-    ($label | strip_tab_suffix) as $base
-    | ($base == $group)
-      or ($base == "\($group)-workers")
-      or ($base == ($group | rtrimstr("-workers")))
-      or ($base == "workers")
+    ($label == $group)
+    or ($label == "\($group)-workers")
+    or ($label == ($group | rtrimstr("-workers")))
+    or ($label == "workers")
+    or (if ($label | endswith("-2")) then
+          ($label | rtrimstr("-2")) as $base
+          | ($base == $group)
+            or ($base == "\($group)-workers")
+            or ($base == ($group | rtrimstr("-workers")))
+            or ($base == "workers")
+        else false end)
   end;
 
 # The one acceptance predicate for a group's workers tab, shared with plan.rs
@@ -82,7 +82,9 @@ def is_group_tab($group; $label):
 def accepts_workers_tab($group; $expected; $label):
   is_group_tab($group; $label)
   or (($expected != null) and ($expected != "")
-      and (($label == $expected) or (($label | strip_tab_suffix) == ($expected | strip_tab_suffix))));
+      and (($label == $expected)
+           or (if ($label | endswith("-2")) then ($label | rtrimstr("-2")) == $expected else false end)
+           or (if ($expected | endswith("-2")) then ($expected | rtrimstr("-2")) == $label else false end)));
 
 def chunk_tab_label($base_tab; $chunk_idx):
   if $chunk_idx == 0 then $base_tab
@@ -94,16 +96,20 @@ def chunk_tab_ref($chunk_idx):
 
 def accepts_chunk_tab($group; $expected; $chunk_idx; $label):
   if ($label == null or $label == "") then false
-  elif $chunk_idx == 0 then
-    (($label | strip_tab_suffix) == $label)
-    and accepts_workers_tab($group; $expected; $label)
   else
-    ("-\($chunk_idx + 1)") as $suf
-    | if ($label | endswith($suf)) then
-        ($label | rtrimstr($suf)) as $base_label
-        | ($expected | if . != null then strip_tab_suffix else null end) as $base_expected
-        | accepts_workers_tab($group; $base_expected; $base_label)
-      else false end
+    ($expected // $group) as $base_tab
+    | chunk_tab_label($base_tab; 1) as $c1_label
+    | "\($group)-workers-2" as $c1_group_tab
+    | if $chunk_idx == 0 then
+        if ($label == $c1_label or $label == $c1_group_tab) then false
+        else accepts_workers_tab($group; $expected; $label) end
+      else
+        if ($label == $c1_label or $label == $c1_group_tab) then true
+        elif ($label | endswith("-2")) then
+          ($label | rtrimstr("-2")) as $base_label
+          | accepts_workers_tab($group; $expected; $base_label)
+        else false end
+      end
   end;
 # Desired cells for n workers in area $a (index 0 = first spawned)
 def cells($n; $a):
@@ -224,22 +230,26 @@ def find_owner_pane($owner; $panes; $agents; $ws):
 # counts an unrunnable op as pending and times out while its anchor works.
 def propagate_deferrals:
   ( reduce .[] as $op
-      ( {ops: [], deferred: [], tab_deferred: []};
+      ( {ops: [], deferred: [], tab_deferred: [], new_tab_count: 0};
         if $op.deferred then
           { ops: (.ops + [$op]),
             deferred: (.deferred + [$op.pane]),
             tab_deferred: (if $op.target.kind == "new_tab" then
-                             if ($op.target.label | endswith("-2")) then (.tab_deferred + ["@workers-2"])
-                             else (.tab_deferred + ["@workers"]) end
-                           else .tab_deferred end) }
+                             if .new_tab_count == 0 then (.tab_deferred + ["@workers"])
+                             else (.tab_deferred + ["@workers-2"]) end
+                           else .tab_deferred end),
+            new_tab_count: (if $op.target.kind == "new_tab" then .new_tab_count + 1 else .new_tab_count end) }
+        elif ($op.target.kind == "new_tab") then
+          { ops: (.ops + [$op]), deferred: .deferred, tab_deferred: .tab_deferred, new_tab_count: (.new_tab_count + 1) }
         elif ($op.target.kind == "split"
               and (((.deferred | index($op.target.anchor)) != null)
                    or ((.tab_deferred | index($op.target.tab)) != null))) then
           { ops: (.ops + [$op + {deferred: true}]),
             deferred: (.deferred + [$op.pane]),
-            tab_deferred: .tab_deferred }
+            tab_deferred: .tab_deferred,
+            new_tab_count: .new_tab_count }
         else
-          { ops: (.ops + [$op]), deferred: .deferred, tab_deferred: .tab_deferred }
+          { ops: (.ops + [$op]), deferred: .deferred, tab_deferred: .tab_deferred, new_tab_count: .new_tab_count }
         end )
     | .ops );
 
@@ -339,7 +349,7 @@ def propagate_deferrals:
                                         | .tab_id as $tid
                                         | [ $panes[] | select(.tab_id == $tid) ] as $occ
                                         | select(($occ | length > 0)
-                                                 and ($occ | all(. as $p | any($chunk_gws[]; .pane_id == $p.pane_id))))
+                                                 and ($occ | all(. as $p | any($gws[]; .pane_id == $p.pane_id))))
                                       ]
                                       | sort_by(if .label == $chunk_label then 0 else 1 end)
                                       | first // null ) as $valid_tab

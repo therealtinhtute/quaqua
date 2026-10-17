@@ -158,35 +158,9 @@ fn test_5_workers_overflows_to_workers_2() {
 
 #[test]
 fn test_8_workers_grid_two_tabs_of_four() {
-    let fix = fixtures_dir().join("5-workers.json");
+    let fix = fixtures_dir().join("8-workers.json");
     let content = fs::read_to_string(fix).unwrap();
-    let mut val: serde_json::Value = serde_json::from_str(&content).unwrap();
-    {
-        let panes = val["snapshot"]["panes"].as_array_mut().unwrap();
-        for c in ["A", "B", "C"] {
-            panes.push(serde_json::json!({
-                "pane_id": format!("w1:p{c}"),
-                "tab_id": "w1:t2",
-                "workspace_id": "w1",
-                "agent": "pi",
-                "agent_status": "idle",
-                "tokens": {
-                    "grid_role": "worker",
-                    "grid_owner": "cos",
-                    "grid_group": "quaqua-workers",
-                    "grid_ready": "1"
-                }
-            }));
-        }
-        let agents = val["snapshot"]["agents"].as_array_mut().unwrap();
-        for c in ["A", "B", "C"] {
-            agents.push(serde_json::json!({
-                "name": format!("worker-{c}"),
-                "pane_id": format!("w1:p{c}"),
-                "agent_status": "idle"
-            }));
-        }
-    }
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap();
     let snap = parse_snapshot_value(&val).unwrap();
     let ops = plan(&snap).unwrap();
     assert_eq!(ops.len(), 8);
@@ -212,26 +186,24 @@ fn test_8_workers_grid_two_tabs_of_four() {
 
 #[test]
 fn test_9_workers_rejected_with_error() {
-    let fix = fixtures_dir().join("5-workers.json");
+    let fix = fixtures_dir().join("8-workers.json");
     let content = fs::read_to_string(fix).unwrap();
     let mut val: serde_json::Value = serde_json::from_str(&content).unwrap();
     {
         let panes = val["snapshot"]["panes"].as_array_mut().unwrap();
-        for c in ["A", "B", "C", "D"] {
-            panes.push(serde_json::json!({
-                "pane_id": format!("w1:p{c}"),
-                "tab_id": "w1:t2",
-                "workspace_id": "w1",
-                "agent": "pi",
-                "agent_status": "idle",
-                "tokens": {
-                    "grid_role": "worker",
-                    "grid_owner": "cos",
-                    "grid_group": "quaqua-workers",
-                    "grid_ready": "1"
-                }
-            }));
-        }
+        panes.push(serde_json::json!({
+            "pane_id": "w1:pD",
+            "tab_id": "w1:t2",
+            "workspace_id": "w1",
+            "agent": "pi",
+            "agent_status": "idle",
+            "tokens": {
+                "grid_role": "worker",
+                "grid_owner": "cos",
+                "grid_group": "quaqua-workers",
+                "grid_ready": "1"
+            }
+        }));
     }
     let snap = parse_snapshot_value(&val).unwrap();
     let err = plan(&snap).unwrap_err();
@@ -1451,4 +1423,87 @@ fn test_reconcile_and_check_converge_for_overflow_workers() {
     check_opts.check = true;
     let check_res = run_reconcile(&mut driver, &check_opts, "quaqua-workers", None);
     assert!(check_res.is_ok(), "check must converge: {:?}", check_res);
+}
+
+#[test]
+fn test_shrink_across_chunks_does_not_duplicate_overflow_tab() {
+    // Finding 2 repro: 6 workers originally laid out as
+    // quaqua-workers = [p6, p7, p8, p9], quaqua-workers-2 = [pA, pB] (after p5 cleanup: 5 workers).
+    // Chunk 0 is [p6, p7, p8, p9], Chunk 1 is [pA].
+    // Tab quaqua-workers-2 (holding p9 and pA) must be recognized as valid
+    // for Chunk 1 without emitting a duplicate NewTab for quaqua-workers-2.
+    let val = serde_json::json!({
+        "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "quaqua" }],
+            "tabs": [
+                { "tab_id": "w1:t1", "workspace_id": "w1", "label": "main", "pane_count": 1 },
+                { "tab_id": "w1:t2", "workspace_id": "w1", "label": "quaqua-workers", "pane_count": 3 },
+                { "tab_id": "w1:t3", "workspace_id": "w1", "label": "quaqua-workers-2", "pane_count": 2 }
+            ],
+            "panes": [
+                { "pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "orchestrator", "grid_owner": "cos", "grid_ready": "1" } },
+                { "pane_id": "w1:p6", "tab_id": "w1:t2", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua-workers", "grid_ready": "1" } },
+                { "pane_id": "w1:p7", "tab_id": "w1:t2", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua-workers", "grid_ready": "1" } },
+                { "pane_id": "w1:p8", "tab_id": "w1:t2", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua-workers", "grid_ready": "1" } },
+                { "pane_id": "w1:p9", "tab_id": "w1:t3", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua-workers", "grid_ready": "1" } },
+                { "pane_id": "w1:pA", "tab_id": "w1:t3", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua-workers", "grid_ready": "1" } }
+            ],
+            "layouts": [
+                {
+                    "tab_id": "w1:t2", "workspace_id": "w1", "area": { "x": 0, "y": 0, "width": 200, "height": 50 },
+                    "panes": [
+                        { "pane_id": "w1:p6", "rect": { "x": 0, "y": 0, "width": 100, "height": 25 } },
+                        { "pane_id": "w1:p7", "rect": { "x": 100, "y": 0, "width": 100, "height": 25 } },
+                        { "pane_id": "w1:p8", "rect": { "x": 0, "y": 25, "width": 200, "height": 25 } }
+                    ]
+                },
+                {
+                    "tab_id": "w1:t3", "workspace_id": "w1", "area": { "x": 0, "y": 0, "width": 200, "height": 50 },
+                    "panes": [
+                        { "pane_id": "w1:p9", "rect": { "x": 0, "y": 0, "width": 100, "height": 50 } },
+                        { "pane_id": "w1:pA", "rect": { "x": 100, "y": 0, "width": 100, "height": 50 } }
+                    ]
+                }
+            ],
+            "agents": []
+        }
+    });
+
+    let snap = parse_snapshot_value(&val).unwrap();
+    let ops = plan(&snap).unwrap();
+    let new_tab_ops: Vec<&quaqua::grid::Op> = ops.iter().filter(|op| matches!(op.target, Target::NewTab { .. })).collect();
+    assert!(new_tab_ops.is_empty(), "must not create a new tab when quaqua-workers-2 exists: {:?}", new_tab_ops);
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].pane, "w1:p9");
+    match &ops[0].target {
+        Target::Split { tab, .. } => assert_eq!(tab, "w1:t2"),
+        _ => panic!("expected split into w1:t2, got: {:?}", ops[0].target),
+    }
+}
+
+#[test]
+fn test_hook_and_apply_deferred_chunk_2() {
+    // Finding 5: test deferral in Chunk 1 NewTab
+    let fix = fixtures_dir().join("5-workers.json");
+    let content = fs::read_to_string(fix).unwrap();
+    let mut val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    // Mark w1:p9 (the Chunk 1 creator) as working
+    val["snapshot"]["panes"][5]["agent_status"] = serde_json::Value::String("working".to_string());
+    let snap = parse_snapshot_value(&val).unwrap();
+
+    let ops = plan(&snap).unwrap();
+    assert_eq!(ops.len(), 5);
+    // Panes 0..3 are runnable (not deferred)
+    assert!(!ops[0].deferred);
+    assert!(!ops[1].deferred);
+    assert!(!ops[2].deferred);
+    assert!(!ops[3].deferred);
+    // Pane 4 (w1:p9) is deferred
+    assert!(ops[4].deferred);
+
+    // apply_ops applies runnable ops (Chunk 0) and skips deferred Chunk 1
+    let mut driver = FakeHerdrDriver::new(snap);
+    let res = quaqua::grid::apply::apply_ops(&mut driver, &ops, None);
+    assert!(res.is_ok(), "apply_ops must succeed: {:?}", res);
+    assert_eq!(driver.executed_moves.len(), 4, "must execute only the 4 runnable ops of chunk 0");
 }

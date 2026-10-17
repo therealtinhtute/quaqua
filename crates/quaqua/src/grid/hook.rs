@@ -310,18 +310,23 @@ pub fn reconcile_step<D: HerdrDriver>(
     let mut deferred_panes: HashSet<String> = HashSet::new();
     let mut workers_tab_deferred = false;
     let mut workers_tab_2_deferred = false;
+    let mut new_tab_count = 0;
     let mut non_deferred: Vec<Op> = Vec::new();
 
     for op in ops {
         if op.deferred {
             deferred_panes.insert(op.pane.clone());
-            if let Target::NewTab { label } = &op.target {
-                if label.ends_with("-2") {
-                    workers_tab_2_deferred = true;
-                } else {
+            if matches!(op.target, Target::NewTab { .. }) {
+                if new_tab_count == 0 {
                     workers_tab_deferred = true;
+                } else {
+                    workers_tab_2_deferred = true;
                 }
+                new_tab_count += 1;
             }
+        } else if matches!(op.target, Target::NewTab { .. }) {
+            new_tab_count += 1;
+            non_deferred.push(op);
         } else if let Target::Split { tab, anchor, .. } = &op.target {
             let tab_def = if tab == "@workers" {
                 workers_tab_deferred
