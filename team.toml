@@ -34,8 +34,9 @@ reports_to = "owner"
 
 [strategy]
 default_kind = "tieude"                   # anh iu, 2026-10-15
+lead_kind = "tieude"
 default_reviewer = ["suhuynh"]           # first available wins (anh iu, 2026-10-16)
-builder_reviewer_differ = "harness"
+builder_reviewer_differ = "kind"
 
 [kinds.tieude]                    # harness · model · effort live here; models.md prose stays prose
 harness = "opencode"
@@ -61,9 +62,9 @@ model = "opus-5.5"
 effort = "low"
 can_review = true
 [kinds.suhuynh]
-harness = "claude"
-model = "opus-5.5"
-effort = "medium"
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+effort = "max"                    # Claude out (anh iu, 2026-10-17): reviewer on opencode
 can_review = true
 [kinds.truonglao]
 harness = "claude"

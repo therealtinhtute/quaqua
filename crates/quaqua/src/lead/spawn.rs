@@ -10,7 +10,7 @@ use std::time::Duration;
 
 pub const USAGE: &str = "\
 # Usage: spawn-lead.sh <slug>
-#   Start the project Lead for <slug> (AGENTS.md '## Roles (SLP)'): a claude
+#   Start the project Lead for <slug> (AGENTS.md '## Roles (SLP)'): an agent
 #   session named <slug>-lead running in the quaqua checkout this script
 #   belongs to (normally ~/quaqua). The Lead is not a worker — no worktree,
 #   no slot in the 4-worker cap, no grid hook: each SLP team gets its own
@@ -29,7 +29,7 @@ pub const USAGE: &str = "\
 #   <slug>-lead would exceed herdr's 32-char agent-name limit; on success
 #   the row's owner column becomes the Lead name (serialized with
 #   cleanup-lead.sh via projects/INDEX.md.lock.d, published by atomic rename).
-#   Env: LEAD_MODEL (default claude-opus-5-5) · LEAD_EFFORT (default low).";
+#   Env: LEAD_KIND (overrides strategy.lead_kind in team.toml).";
 
 pub fn find_quaqua_root() -> Result<PathBuf, (i32, String)> {
     if let Ok(r) = std::env::var("QUAQUA_ROOT") {
@@ -76,6 +76,32 @@ pub fn find_quaqua_root() -> Result<PathBuf, (i32, String)> {
         return Ok(cwd);
     }
     Ok(PathBuf::from("."))
+}
+
+/// Resolve the lead kind and launch settings from config and optional LEAD_KIND override.
+/// On missing or unknown lead_kind, defaults to "tieude".
+pub fn resolve_lead_launch(
+    cfg: &crate::config::Config,
+    env_override: Option<&str>,
+) -> Result<(String, crate::worker::spawn::Launch), (i32, String)> {
+    let candidate = env_override
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| cfg.strategy.lead_kind.clone())
+        .unwrap_or_else(|| "tieude".to_string());
+
+    let kind_name = if cfg.kinds.contains_key(&candidate) {
+        candidate
+    } else {
+        "tieude".to_string()
+    };
+
+    let kind_info = cfg.kinds.get(&kind_name).ok_or_else(|| {
+        (1, format!("error: default lead kind '{kind_name}' not found in team.toml\n"))
+    })?;
+
+    let launch = crate::worker::spawn::resolve_launch(kind_info, &kind_name)?;
+    Ok((kind_name, launch))
 }
 pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     args: &[String],
@@ -246,10 +272,26 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
     let _ = std::fs::write(&rf, rules_content);
 
-    // Herdr workspace create
+    // Load config and resolve lead launch
+    let base_cfg = crate::config::load_team_config()?;
+    let cfg = crate::config::resolve(base_cfg.clone(), Some(slug)).unwrap_or(base_cfg);
+    let lead_env = std::env::var("LEAD_KIND").ok();
+    let (_lead_kind, launch) = resolve_lead_launch(&cfg, lead_env.as_deref())?;
+
     let root_str = root.to_string_lossy().to_string();
+    let runs_str = runs_dir.to_string_lossy().to_string();
+    let rf_str = rf.to_string_lossy().to_string();
+    let cmd = crate::worker::spawn::build_launch_cmd(
+        &launch,
+        &rf_str,
+        &runs_str,
+        &root_str,
+        false,
+    )?;
+
+    // Herdr workspace create
     let owner_env = format!("QUAQUA_OWNER={name}");
-    let ws_out = herdr.run(&[
+    let mut ws_args = vec![
         "workspace",
         "create",
         "--label",
@@ -259,8 +301,17 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         &root_str,
         "--env",
         &owner_env,
-    ]).map_err(|e| (1, format!("herdr workspace create failed: {e}\n")))?;
-
+    ];
+    let split_env_strs: Vec<String> = cmd
+        .split_envs
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    for env_str in &split_env_strs {
+        ws_args.push("--env");
+        ws_args.push(env_str);
+    }
+    let ws_out = herdr.run(&ws_args).map_err(|e| (1, format!("herdr workspace create failed: {e}\n")))?;
     let ws_str = String::from_utf8_lossy(&ws_out.stdout).to_string();
     let ws_json = parse_json(&ws_str).map_err(|e| (1, format!("invalid workspace JSON: {e}\n")))?;
     let pane = ws_json
@@ -292,27 +343,21 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
 
     // Start agent
-    let lead_model = std::env::var("LEAD_MODEL").unwrap_or_else(|_| "claude-opus-5-5".to_string());
-    let lead_effort = std::env::var("LEAD_EFFORT").unwrap_or_else(|_| "low".to_string());
-    let rf_str = rf.to_string_lossy().to_string();
-    let start_out = herdr.run(&[
+    let mut start_args = vec![
         "agent",
         "start",
         &name,
         "--kind",
-        "claude",
+        &launch.harness,
         "--pane",
         pane,
         "--timeout",
         "60000",
-        "--",
-        "--model",
-        &lead_model,
-        "--effort",
-        &lead_effort,
-        "--append-system-prompt-file",
-        &rf_str,
-    ]).map_err(|e| (1, format!("herdr agent start failed: {e}\n")))?;
+    ];
+    for arg in &cmd.agent_args {
+        start_args.push(arg);
+    }
+    let start_out = herdr.run(&start_args).map_err(|e| (1, format!("herdr agent start failed: {e}\n")))?;
     if !start_out.status.success() {
         return Err((1, String::from_utf8_lossy(&start_out.stderr).to_string()));
     }

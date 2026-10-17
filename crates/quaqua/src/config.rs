@@ -155,6 +155,8 @@ pub struct Strategy {
     pub default_reviewer: Vec<String>,
     #[serde(default = "default_differ")]
     pub builder_reviewer_differ: String,
+    #[serde(default)]
+    pub lead_kind: Option<String>,
 }
 
 impl Default for Strategy {
@@ -163,6 +165,7 @@ impl Default for Strategy {
             default_kind: String::new(),
             default_reviewer: Vec::new(),
             builder_reviewer_differ: default_differ(),
+            lead_kind: None,
         }
     }
 }
@@ -483,6 +486,7 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
         ["timers", "grace"] => cfg.timers.grace.to_string(),
         ["timers", "pilot_budget"] => cfg.timers.pilot_budget.clone(),
         ["strategy", "default_kind"] => cfg.strategy.default_kind.clone(),
+        ["strategy", "lead_kind"] => cfg.strategy.lead_kind.clone().unwrap_or_else(|| "tieude".to_string()),
         ["strategy", "default_reviewer"] => cfg.strategy.default_reviewer.join("\n"),
         ["strategy", "builder_reviewer_differ"] => cfg.strategy.builder_reviewer_differ.clone(),
         ["kinds", k, field] => {

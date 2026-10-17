@@ -511,18 +511,95 @@ fn test_team_toml_harness_routing() {
     assert_eq!(cfg.kinds["sude"].effort.as_deref(), Some("high"));
     assert!(!cfg.kinds["sude"].can_review);
 
-    // ni/suhuynh/truonglao are claude with can_review=true
+    // ni is claude with can_review=true
     assert_eq!(cfg.kinds["ni"].harness, "claude");
     assert_eq!(cfg.kinds["ni"].model, "opus-5.5");
     assert!(cfg.kinds["ni"].can_review);
 
-    // suhuynh/truonglao are claude with can_review=true; every kind is opencode/omp/claude
-    assert_eq!(cfg.kinds["suhuynh"].harness, "claude");
+    // suhuynh is opencode with can_review=true (Claude out, anh iu 2026-10-17)
+    assert_eq!(cfg.kinds["suhuynh"].harness, "opencode");
+    assert_eq!(cfg.kinds["suhuynh"].model, "opencode-go/deepseek-v4.1-flash");
+    assert_eq!(cfg.kinds["suhuynh"].effort.as_deref(), Some("max"));
     assert!(cfg.kinds["suhuynh"].can_review);
+
+    // truonglao is claude with can_review=true; every kind is opencode/omp/claude
     assert_eq!(cfg.kinds["truonglao"].harness, "claude");
     assert!(cfg.kinds["truonglao"].can_review);
     assert_eq!(cfg.kinds.len(), 6, "only the six surviving kinds");
     assert!(cfg.kinds.values().all(|k| ["opencode", "omp", "claude"].contains(&k.harness.as_str())));
+
+    // strategy.lead_kind defaults to tieude
+    assert_eq!(cfg.strategy.lead_kind.as_deref(), Some("tieude"));
+}
+
+#[test]
+fn test_lead_launch_uses_strategy_lead_kind_and_override() {
+    let team_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../team.toml");
+    let cfg = config::load(&team_path).expect("valid team.toml");
+
+    // 1. Default lead launch uses strategy.lead_kind ("tieude" on opencode)
+    let (kind, launch) = quaqua::lead::spawn::resolve_lead_launch(&cfg, None).expect("lead launch");
+    assert_eq!(kind, "tieude");
+    assert_eq!(launch.harness, "opencode");
+    assert_eq!(launch.model, "opencode-go/deepseek-v4.1-flash");
+    assert_eq!(launch.effort, "max");
+
+    let cmd = build_launch_cmd(&launch, "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
+    assert_eq!(cmd.split_envs.len(), 1);
+    assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
+    assert!(cmd.split_envs[0].1.contains("opencode-go/deepseek-v4.1-flash#max"));
+    assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
+
+    // 2. LEAD_KIND env override switches lead to detu (omp)
+    let (kind_detu, launch_detu) = quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("detu")).expect("detu lead");
+    assert_eq!(kind_detu, "detu");
+    assert_eq!(launch_detu.harness, "omp");
+    assert_eq!(launch_detu.model, "google-antigravity/gemini-3.8-flash");
+    assert_eq!(launch_detu.effort, "high");
+
+    let cmd_detu = build_launch_cmd(&launch_detu, "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
+    assert!(cmd_detu.split_envs.is_empty());
+    assert_eq!(cmd_detu.agent_args, vec![
+        "--",
+        "--model",
+        "google-antigravity/gemini-3.8-flash",
+        "--thinking",
+        "high",
+        "--auto-approve",
+        "--append-system-prompt",
+        "/runs/test.rules.md",
+    ]);
+
+    // 3. LEAD_KIND env override switches lead to ni (claude)
+    let (kind_ni, launch_ni) = quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("ni")).expect("ni lead");
+    assert_eq!(kind_ni, "ni");
+    assert_eq!(launch_ni.harness, "claude");
+    assert_eq!(launch_ni.model, "opus-5.5");
+    assert_eq!(launch_ni.effort, "low");
+
+    let cmd_ni = build_launch_cmd(&launch_ni, "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
+    assert!(cmd_ni.split_envs.is_empty());
+    assert_eq!(cmd_ni.agent_args, vec![
+        "--",
+        "--model",
+        "claude-opus-5-5",
+        "--effort",
+        "low",
+        "--append-system-prompt-file",
+        "/runs/test.rules.md",
+    ]);
+
+    // 4. Unknown LEAD_KIND falls back to tieude
+    let (kind_fallback, launch_fallback) = quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("nonexistent_kind")).expect("fallback");
+    assert_eq!(kind_fallback, "tieude");
+    assert_eq!(launch_fallback.harness, "opencode");
+
+    // 5. Missing lead_kind in Strategy defaults to tieude
+    let mut cfg_no_lead = cfg.clone();
+    cfg_no_lead.strategy.lead_kind = None;
+    let (kind_default, launch_default) = quaqua::lead::spawn::resolve_lead_launch(&cfg_no_lead, None).expect("default");
+    assert_eq!(kind_default, "tieude");
+    assert_eq!(launch_default.harness, "opencode");
 }
 
 #[test]

@@ -15,7 +15,7 @@ pub const USAGE: &str = "\
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — spawn-lead.sh <slug>-lead)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
-#   --review      ni|suhuynh|truonglao: repo read-only, $HOME/quaqua/runs writable";
+#   --review      any kind with can_review = true: repo read-only, $HOME/quaqua/runs writable";
 
 pub struct SpawnOptions {
     pub base: Option<String>,
@@ -302,7 +302,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
 
     if opts.review && !kind_info.can_review {
         eprintln!(
-            "error: --review is only supported for claude kinds (ni, suhuynh, truonglao), not {}",
+            "error: --review requires a kind with can_review = true in team.toml (ni, suhuynh, truonglao), not {}",
             opts.kind
         );
         return Err((1, format!("{}\n", USAGE)));
