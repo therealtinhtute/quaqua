@@ -571,6 +571,12 @@ fn test_pipeline_blockers_none_exemption() {
     assert!(!has_real_blockers("## Blockers\nnone\n"));
     assert!(!has_real_blockers("## Blockers\n* none\n"));
     assert!(!has_real_blockers("## Blockers\n- None\n"));
+    assert!(!has_real_blockers("## Blockers\n- None…\n"));
+    assert!(!has_real_blockers("## Blockers\n- None.\n"));
+    assert!(!has_real_blockers("## Blockers\n- None...\n"));
+    assert!(!has_real_blockers("## Blockers\nNone…\n"));
+    assert!(!has_real_blockers("## Blockers\nNone.\n"));
+    assert!(!has_real_blockers("## Blockers\n* none…\n"));
     assert!(!has_real_blockers("## Blockers\n\n- none\n\n## Lessons\n- none\n"));
     assert!(!has_real_blockers("Just plan text\n\n## Lessons\n- none\n"));
 
@@ -578,6 +584,22 @@ fn test_pipeline_blockers_none_exemption() {
     assert!(has_real_blockers("## Blockers\n- cannot plan without the spec\n"));
     assert!(has_real_blockers("## Blockers\n- implementation incomplete\n"));
     assert!(has_real_blockers("## Blockers\n- none\n- also a real blocker\n"));
+    assert!(has_real_blockers("## Blockers\n- None of the tests pass\n"));
+}
+
+#[test]
+fn test_pipeline_blocked_keeps_finished_zero() {
+    use quaqua::pipeline::pipeline_finished;
+
+    // A blocked stop stays resumable: finished must not be set.
+    assert!(!pipeline_finished("blocked", 0));
+    assert!(!pipeline_finished("blocked", 3));
+    // Real outcomes stay final.
+    assert!(pipeline_finished("clean", 0));
+    assert!(pipeline_finished("disputed", 0));
+    // Non-zero exits never finish the state, whatever the status says.
+    assert!(!pipeline_finished("plan-ready", 5));
+    assert!(!pipeline_finished("clean", 4));
 }
 
 #[test]
