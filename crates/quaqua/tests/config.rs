@@ -175,6 +175,7 @@ fn config_invalid_fixtures_are_rejected() {
         ("reviewer-cannot-review.toml", "can_review = false"),
         ("missing-effort.toml", "effort is missing"),
         ("bad-effort.toml", "does not take effort 'banana'"),
+        ("bad-opencode-variant.toml", "does not take effort 'medium'"),
         ("fallback-missing.toml", "fallback 'ghost' is not a kind"),
         ("fallback-self.toml", "fallback names itself"),
         ("fallback-cannot-review.toml", "cannot review"),

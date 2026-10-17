@@ -791,13 +791,30 @@ fn test_launch_args_carry_exact_model_and_effort() {
     );
     let cmd = build_launch_cmd(&oc, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
         .unwrap();
-    assert_eq!(cmd.split_envs.len(), 1);
+    assert_eq!(cmd.split_envs.len(), 2);
     assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
     assert_eq!(
         cmd.split_envs[0].1,
-        r#"{"model":"opencode-go/deepseek-v4.1-flash#max","instructions":["/r/x.rules.md"]}"#
+        r#"{"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"max"},"instructions":["/r/x.rules.md"]}"#
+    );
+    assert_eq!(cmd.split_envs[1].0, "XDG_STATE_HOME");
+    assert_eq!(cmd.split_envs[1].1, "~/quaqua/runs/.opencode-state");
+
+    // opencode carries "low" variant as object
+    let oc_low = resolve_launch(
+        &kind("opencode", "opencode-go/deepseek-v4.1-flash", Some("low")),
+        "tieude",
+    )
+    .unwrap();
+    let cmd_low = build_launch_cmd(&oc_low, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+        .unwrap();
+    assert_eq!(
+        cmd_low.split_envs[0].1,
+        r#"{"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"low"},"instructions":["/r/x.rules.md"]}"#
     );
     assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
+    assert_eq!(cmd_low.split_envs[1].0, "XDG_STATE_HOME");
+    assert_eq!(cmd_low.split_envs[1].1, "~/quaqua/runs/.opencode-state");
 
     // omp: `--model` + `--thinking` (`omp --help`).
     let omp = resolve_launch(
@@ -837,6 +854,15 @@ fn test_launch_fails_closed_without_model_or_effort() {
         .unwrap_err()
         .1;
     assert!(e.contains("does not take effort 'banana'"), "{e}");
+
+    // opencode model variant vocabulary is enforced per-model
+    let e = resolve_launch(
+        &kind("opencode", "opencode-go/deepseek-v4.1-flash", Some("medium")),
+        "tieude",
+    )
+    .unwrap_err()
+    .1;
+    assert!(e.contains("does not take effort 'medium'"), "{e}");
 
     // claude's vocabulary is narrower than opencode's
     let e = resolve_launch(&kind("claude", "m", Some("minimal")), "ni")

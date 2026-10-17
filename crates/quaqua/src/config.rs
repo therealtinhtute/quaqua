@@ -199,6 +199,20 @@ pub fn effort_allowed(harness: &str, effort: &str) -> bool {
     }
 }
 
+/// Check if an effort/variant value is allowed for a specific harness and model.
+/// opencode models can restrict variant vocabulary (e.g. deepseek-v4.1-flash takes low, high, max).
+pub fn model_effort_allowed(harness: &str, model: &str, effort: &str) -> bool {
+    if harness != "opencode" {
+        return true;
+    }
+    let model_name = model.split_once('/').map(|(_, m)| m).unwrap_or(model);
+    match model_name {
+        "deepseek-v4.1-flash" => ["low", "high", "max"].contains(&effort),
+        "deepseek-v4.1-pro" => ["high", "max"].contains(&effort),
+        _ => true,
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Taskforce {
@@ -437,6 +451,12 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
                 kind.harness
             ));
         }
+        if !model_effort_allowed(&kind.harness, &kind.model, effort) {
+            return Err(format!(
+                "kind '{name}': harness '{}' model '{}' does not take effort '{effort}'",
+                kind.harness, kind.model
+            ));
+        }
         if let Some(fb) = kind.fallback.as_deref() {
             if fb.trim().is_empty() {
                 return Err(format!("kind '{name}': fallback is empty"));
@@ -647,5 +667,21 @@ workers_tab = "workers"
         c.kinds.get_mut("suhuynh").unwrap().fallback = Some("tieude".to_string());
         let err = validate(&c).unwrap_err();
         assert!(err.contains("cannot review"), "{err}");
+    }
+
+    #[test]
+    fn opencode_model_variant_is_enforced() {
+        let mut c = base();
+        c.kinds.get_mut("tieude").unwrap().model = "opencode-go/deepseek-v4.1-flash".to_string();
+        // medium is a valid opencode variant in general, but deepseek-v4.1-flash only takes low, high, max
+        c.kinds.get_mut("tieude").unwrap().effort = Some("medium".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("does not take effort 'medium'"), "{err}");
+
+        // low and max work
+        c.kinds.get_mut("tieude").unwrap().effort = Some("low".to_string());
+        assert!(validate(&c).is_ok());
+        c.kinds.get_mut("tieude").unwrap().effort = Some("max".to_string());
+        assert!(validate(&c).is_ok());
     }
 }

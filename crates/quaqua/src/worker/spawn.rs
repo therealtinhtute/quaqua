@@ -134,7 +134,9 @@ pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, Stri
         Some(e) if !e.trim().is_empty() => e,
         _ => return Err((1, format!("error: kind '{kind_name}' has no effort in team.toml\n"))),
     };
-    if !crate::config::effort_allowed(&kind.harness, effort) {
+    if !crate::config::effort_allowed(&kind.harness, effort)
+        || !crate::config::model_effort_allowed(&kind.harness, &kind.model, effort)
+    {
         return Err((
             1,
             format!(
@@ -161,8 +163,8 @@ pub struct LaunchCmd {
 /// Build the exact launch command for a resolved kind. opencode has no `--model`
 /// on the interactive TUI (`opencode --help` flags are --standalone/--server/
 /// --auto/--continue/--session/--prompt), so its model+effort travel as the
-/// config `model` value `<model>#<variant>` in the pane env (variant vocabulary =
-/// `ReasoningEffort`; `providerID/modelID#variant` is the documented form).
+/// config `model` object `{"providerID": "...", "model": "...", "variant": "..."}`
+/// in OPENCODE_CONFIG_CONTENT in the pane env.
 /// omp takes `--model`/`--thinking`, claude takes `--model`/`--effort`.
 pub fn build_launch_cmd(
     launch: &Launch,
@@ -175,11 +177,17 @@ pub fn build_launch_cmd(
 
     let agent_args: Vec<String> = match launch.harness.as_str() {
         "opencode" => {
+            let (provider_id, model_id) = match launch.model.split_once('/') {
+                Some((p, m)) => (p, m),
+                None => ("opencode-go", launch.model.as_str()),
+            };
             let cfg = format!(
-                "{{\"model\":\"{}#{}\",\"instructions\":[\"{}\"]}}",
-                launch.model, launch.effort, rules_file
+                "{{\"model\":{{\"providerID\":\"{}\",\"model\":\"{}\",\"variant\":\"{}\"}},\"instructions\":[\"{}\"]}}",
+                provider_id, model_id, launch.effort, rules_file
             );
             split_envs.push(("OPENCODE_CONFIG_CONTENT".to_string(), cfg));
+            let state_dir = format!("{runs_dir}/.opencode-state");
+            split_envs.push(("XDG_STATE_HOME".to_string(), state_dir));
             vec!["--".to_string(), "--standalone".to_string(), "--auto".to_string()]
         }
         "omp" => vec![
