@@ -236,6 +236,13 @@ fn question_seen(pane_text: &str) -> bool {
     }
     false
 }
+pub fn is_provider_timeout(pane_text: &str) -> bool {
+    let lower = pane_text.to_lowercase();
+    lower.contains("timed out waiting for response headers")
+        || lower.contains("timed out waiting for response data")
+        || lower.contains("provider.transport")
+}
+
 
 fn lead_waiting(runs_dir: &Path, name: &str, watcher_pane: &str) -> bool {
     if !name.ends_with("-lead") {
@@ -471,6 +478,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let grace_file = runs_dir.join(format!(".{name}.grace"));
     let progress_file = runs_dir.join(format!(".{name}.progress"));
     let srt = runs_dir.join(format!("{name}.srt.json"));
+    let provider_retry_file = runs_dir.join(format!(".{name}.provider_retry"));
 
     let max: u64 = std::env::var("PROMPT_WORKER_MAX_SEC")
         .ok()
@@ -540,6 +548,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         let _ = std::fs::remove_file(&sentinel);
         let _ = std::fs::remove_file(&grace_file);
         let _ = std::fs::remove_file(&progress_file);
+        let _ = std::fs::remove_file(&provider_retry_file);
 
         if out.exists() {
             let stale_path = format!("{}.stale.{}", out.display(), now_sec());
@@ -658,6 +667,15 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             } else {
                 gone_since = 0;
             }
+            if !provider_retry_file.exists() && is_provider_timeout(&obs.pane_text) {
+                let _ = std::fs::write(&provider_retry_file, format!("{now}\n"));
+                let _ = herdr.agent_prompt_nowait(name, "continue");
+                eprintln!("WATCHDOG provider timeout detected | name={name} — re-prompted session with 'continue'");
+                idle_since = 0;
+                change_ts = now;
+                prompt_landed = true;
+            }
+
 
             if st == "blocked" {
                 return Err(watchdog_exit(5, "agent blocked (question/permission pending)", &Some(obs), change_ts));

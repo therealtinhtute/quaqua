@@ -82,6 +82,9 @@ case "${1:-} ${2:-}" in
       printf '%s\n' "${FAKE_PANE:-some pane text}"
     fi ;;
   "agent prompt")
+    if [ "${FAKE_WRITE_ON_CONTINUE:-0}" = 1 ] && [[ $* == *continue* ]]; then
+      printf 'fake summary\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md"
+    fi
     if [ "${FAKE_DELAY:-0}" != 0 ]; then
       ( sleep "$FAKE_DELAY"; printf 'fake summary\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
     fi
@@ -332,6 +335,20 @@ run sude-omp-hook FAKE_DELAY=0 FAKE_STATUS=idle FAKE_HARNESS=omp FAKE_HOOK=1 \
 grep -q 'elapsed=[1-2]s' "$T/err" \
   || fail "sude-omp-hook: hook state did not exit at IDLE_SEC: $(cat "$T/err")"
 echo "ok: omp with hook authority exits at IDLE_SEC directly"
+# ── (d) opencode provider timeout: in-place resume with 'continue' prompt ───
+run sude-timeout FAKE_DELAY=0 FAKE_STATUS=idle \
+  FAKE_PANE='error: Timed out waiting for response headers' \
+  FAKE_WRITE_ON_CONTINUE=1 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=2 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 0 ]] || fail "sude-timeout: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'WATCHDOG provider timeout detected' "$T/err" \
+  || fail "sude-timeout: no timeout detection notice: $(cat "$T/err")"
+grep -q 'agent prompt sude-timeout continue' "$T/calls" \
+  || fail "sude-timeout: continue prompt not sent: $(cat "$T/calls")"
+[[ -f "$T/home/quaqua/runs/.sude-timeout.provider_retry" ]] \
+  || fail "sude-timeout: provider_retry sentinel not written"
+echo "ok: opencode provider timeout detected -> in-place resume with continue"
+
 
 printf '%s\n' 1700000000 > "$T/clock"
 run sude-landstall FAKE_DELAY=0 FAKE_STATUS=idle FAKE_PANE='empty input box' \
