@@ -464,6 +464,32 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+#[test]
+fn test_cap_pipeline_double_count_repro() {
+    // Repro for Cause (c): pipeline gridown2 has a live builder tieude-gridown2
+    // (e.g. after a fallback or non-default builder) without .pipeline sidecar.
+    // Must count as 2 slots (the pipeline once), not 3 (builder 1 + reserve 2).
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-doublecount-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let owner = "quaqua-rs-lead";
+
+    std::fs::write(temp_dir.join("tieude-gridown2.owner"), format!("{owner}\n")).unwrap();
+    // No tieude-gridown2.pipeline file written
+    std::fs::write(
+        temp_dir.join("pipeline-gridown2.state"),
+        format!("repo=/repo\nbuilder=sude\nphase=build\nround=1\nfinished=0\nlead=quaqua-rs-lead\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"tieude-gridown2","agent_status":"working"}]}}"#.to_string(),
+    };
+
+    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    assert_eq!(count, 2, "a pipeline must count once (2 slots), never double-count to 3");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
 
 #[test]
 fn test_runs_dir_resolution_n5() {
