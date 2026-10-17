@@ -789,7 +789,7 @@ fn test_launch_args_carry_exact_model_and_effort() {
             effort: "max".into(),
         }
     );
-    let cmd = build_launch_cmd(&oc, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+    let cmd = build_launch_cmd(&oc, "tieude-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
         .unwrap();
     assert_eq!(cmd.split_envs.len(), 2);
     assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
@@ -798,7 +798,7 @@ fn test_launch_args_carry_exact_model_and_effort() {
         r#"{"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"max"},"instructions":["/r/x.rules.md"]}"#
     );
     assert_eq!(cmd.split_envs[1].0, "XDG_STATE_HOME");
-    assert_eq!(cmd.split_envs[1].1, "~/quaqua/runs/.opencode-state");
+    assert_eq!(cmd.split_envs[1].1, "~/quaqua/runs/.opencode-state/tieude-test");
 
     // opencode carries "low" variant as object
     let oc_low = resolve_launch(
@@ -806,7 +806,7 @@ fn test_launch_args_carry_exact_model_and_effort() {
         "tieude",
     )
     .unwrap();
-    let cmd_low = build_launch_cmd(&oc_low, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+    let cmd_low = build_launch_cmd(&oc_low, "tieude-low", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
         .unwrap();
     assert_eq!(
         cmd_low.split_envs[0].1,
@@ -814,7 +814,7 @@ fn test_launch_args_carry_exact_model_and_effort() {
     );
     assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
     assert_eq!(cmd_low.split_envs[1].0, "XDG_STATE_HOME");
-    assert_eq!(cmd_low.split_envs[1].1, "~/quaqua/runs/.opencode-state");
+    assert_eq!(cmd_low.split_envs[1].1, "~/quaqua/runs/.opencode-state/tieude-low");
 
     // omp: `--model` + `--thinking` (`omp --help`).
     let omp = resolve_launch(
@@ -822,7 +822,7 @@ fn test_launch_args_carry_exact_model_and_effort() {
         "sude",
     )
     .unwrap();
-    let cmd = build_launch_cmd(&omp, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+    let cmd = build_launch_cmd(&omp, "sude-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
         .unwrap();
     assert!(cmd.split_envs.is_empty(), "omp takes no pane env");
     let joined = cmd.agent_args.join(" ");
@@ -834,7 +834,7 @@ fn test_launch_args_carry_exact_model_and_effort() {
 
     // claude: `--model` (mapped to claude-*) + `--effort` (`claude --help`).
     let cl = resolve_launch(&kind("claude", "opus-5.5", Some("high")), "truonglao").unwrap();
-    let cmd = build_launch_cmd(&cl, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", true)
+    let cmd = build_launch_cmd(&cl, "truonglao-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", true)
         .unwrap();
     let joined = cmd.agent_args.join(" ");
     assert!(joined.contains("--model claude-opus-5-5"), "{joined}");
@@ -863,6 +863,24 @@ fn test_launch_fails_closed_without_model_or_effort() {
     .unwrap_err()
     .1;
     assert!(e.contains("does not take effort 'medium'"), "{e}");
+
+    // openrouter model variant vocabulary is matched on last segment
+    let e = resolve_launch(
+        &kind("opencode", "openrouter/deepseek/deepseek-v4.1-flash", Some("medium")),
+        "tieude",
+    )
+    .unwrap_err()
+    .1;
+    assert!(e.contains("does not take effort 'medium'"), "{e}");
+
+    // unknown opencode model rejected with allowlist error
+    let e = resolve_launch(
+        &kind("opencode", "opencode-go/unknown-model", Some("max")),
+        "tieude",
+    )
+    .unwrap_err()
+    .1;
+    assert!(e.contains("is not in allowlist"), "{e}");
 
     // claude's vocabulary is narrower than opencode's
     let e = resolve_launch(&kind("claude", "m", Some("minimal")), "ni")
@@ -1164,7 +1182,7 @@ fn test_cfg_with_fallback() -> config::Config {
         "detu".to_string(),
         config::Kind {
             harness: "opencode".to_string(),
-            model: "deepseek".to_string(),
+            model: "deepseek-v4.1-flash".to_string(),
             effort: Some("max".to_string()),
             fallback: Some("tieude".to_string()),
             can_review: false,
@@ -1651,4 +1669,56 @@ fn test_stop_requires_exactly_one_valid_name() {
     assert!(parse_stop_args(&["Tieude-X".to_string()]).is_err());
     assert!(parse_stop_args(&["--force".to_string()]).is_err());
     assert_eq!(parse_stop_args(&["tieude-x".to_string()]).unwrap(), "tieude-x");
+}
+
+#[test]
+fn test_cleanup_worker_removes_per_worker_opencode_state() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-clean-state-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    let worker_name = "tieude-cleanup";
+    let wt = temp.join(".wt").join(worker_name);
+    std::fs::create_dir_all(&wt).unwrap();
+
+    let state_dir = runs_dir.join(".opencode-state").join(worker_name);
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(state_dir.join("model.json"), "{}").unwrap();
+    assert!(state_dir.exists());
+
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    struct CleanHerdr;
+    impl HerdrOps for CleanHerdr {
+        fn run(&self, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
+        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
+            Ok((true, r#"{"result":{"agent":{"pane_id":"w1:p2"}}}"#.to_string()))
+        }
+        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
+            Ok(Output { status: std::process::ExitStatus::default(), stdout: vec![], stderr: vec![] })
+        }
+        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool { unimplemented!() }
+        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
+    }
+    let git = SpawnTestGit;
+    let herdr = CleanHerdr;
+    let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
+    assert!(res.is_ok(), "cleanup_worker failed: {:?}", res);
+    assert!(!state_dir.exists(), "per-worker state dir must be removed on cleanup");
+
+    let _ = std::fs::remove_dir_all(&temp);
 }

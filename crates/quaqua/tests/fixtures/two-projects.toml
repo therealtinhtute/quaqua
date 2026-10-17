@@ -14,7 +14,7 @@ default_reviewer = ["suhuynh"]
 
 [kinds.tieude]
 harness = "opencode"
-model = "m"
+model = "opencode-go/deepseek-v4.1-flash"
 effort = "max"
 can_review = false
 

@@ -134,9 +134,7 @@ pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, Stri
         Some(e) if !e.trim().is_empty() => e,
         _ => return Err((1, format!("error: kind '{kind_name}' has no effort in team.toml\n"))),
     };
-    if !crate::config::effort_allowed(&kind.harness, effort)
-        || !crate::config::model_effort_allowed(&kind.harness, &kind.model, effort)
-    {
+    if !crate::config::effort_allowed(&kind.harness, effort) {
         return Err((
             1,
             format!(
@@ -144,6 +142,30 @@ pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, Stri
                 kind.harness
             ),
         ));
+    }
+    if kind.harness == "opencode" {
+        match crate::config::opencode_model_variants(&kind.model) {
+            Some(allowed) => {
+                if !allowed.contains(&effort) {
+                    return Err((
+                        1,
+                        format!(
+                            "error: harness 'opencode' model '{}' does not take effort '{effort}' (kind '{kind_name}')\n",
+                            kind.model
+                        ),
+                    ));
+                }
+            }
+            None => {
+                return Err((
+                    1,
+                    format!(
+                        "error: opencode model '{}' is not in allowlist (fix: add model and variants to config.rs model_effort_allowed) (kind '{kind_name}')\n",
+                        kind.model
+                    ),
+                ));
+            }
+        }
     }
     Ok(Launch {
         harness: kind.harness.clone(),
@@ -168,6 +190,7 @@ pub struct LaunchCmd {
 /// omp takes `--model`/`--thinking`, claude takes `--model`/`--effort`.
 pub fn build_launch_cmd(
     launch: &Launch,
+    name: &str,
     rules_file: &str,
     runs_dir: &str,
     wt: &str,
@@ -186,7 +209,7 @@ pub fn build_launch_cmd(
                 provider_id, model_id, launch.effort, rules_file
             );
             split_envs.push(("OPENCODE_CONFIG_CONTENT".to_string(), cfg));
-            let state_dir = format!("{runs_dir}/.opencode-state");
+            let state_dir = format!("{runs_dir}/.opencode-state/{name}");
             split_envs.push(("XDG_STATE_HOME".to_string(), state_dir));
             vec!["--".to_string(), "--standalone".to_string(), "--auto".to_string()]
         }
@@ -474,7 +497,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let mut idx = 0;
     while idx < attempts.len() {
         let launch = attempts[idx].clone();
-        let cmd = build_launch_cmd(&launch, &rf_str, &runs_str, &wt_str, opts.review)?;
+        let cmd = build_launch_cmd(&launch, &opts.name, &rf_str, &runs_str, &wt_str, opts.review)?;
         let split_envs: Vec<(&str, &str)> = cmd
             .split_envs
             .iter()
