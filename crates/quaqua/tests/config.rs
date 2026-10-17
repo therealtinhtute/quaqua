@@ -49,7 +49,7 @@ fn config_repo_kinds_carry_model_and_effort() {
     let effort = run(&["config", "get", "kinds.tieude.effort", "--file", &repo_team()]);
     assert_eq!(stdout(&effort).trim(), "max");
     let fallback = run(&["config", "get", "kinds.sude.fallback", "--file", &repo_team()]);
-    assert_eq!(stdout(&fallback).trim(), "detu");
+    assert_eq!(stdout(&fallback).trim(), "tieude");
 }
 
 #[test]

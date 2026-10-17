@@ -497,10 +497,10 @@ fn test_team_toml_harness_routing() {
     assert_eq!(cfg.kinds["detu"].model, "google-antigravity/gemini-3.8-flash");
     assert_eq!(cfg.kinds["detu"].effort.as_deref(), Some("high"));
     assert!(!cfg.kinds["detu"].can_review);
-    // fallback seeds: tieude->detu, detu->tieude, sude->detu; claude kinds none
+    // fallback seeds: tieude->detu, detu->tieude, sude->tieude; claude kinds none
     assert_eq!(cfg.kinds["tieude"].fallback.as_deref(), Some("detu"));
     assert_eq!(cfg.kinds["detu"].fallback.as_deref(), Some("tieude"));
-    assert_eq!(cfg.kinds["sude"].fallback.as_deref(), Some("detu"));
+    assert_eq!(cfg.kinds["sude"].fallback.as_deref(), Some("tieude"));
     for k in ["ni", "suhuynh", "truonglao"] {
         assert_eq!(cfg.kinds[k].fallback, None, "{k} must have no fallback");
     }

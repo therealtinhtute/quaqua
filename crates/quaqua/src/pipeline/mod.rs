@@ -58,8 +58,8 @@ pub const USAGE: &str = "\
 
 pub fn harness_of(kind: &str) -> Option<&'static str> {
     match kind {
-        "tieude" | "detu" => Some("opencode"),
-        "sude" => Some("omp"),
+        "tieude" => Some("opencode"),
+        "detu" | "sude" => Some("omp"),
         "ni" | "suhuynh" | "truonglao" => Some("claude"),
         _ => None,
     }

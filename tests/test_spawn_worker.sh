@@ -181,41 +181,41 @@ expect_accept tieude-spawnguard tieude "17 chars"
 expect_accept tieude-abcdefghijklm tieude "20 chars (boundary)"
 expect_accept sude-leadname sude "leadname suffix is not -lead"
 
-# ── tieude/detu: opencode with deepseek-v4.1-flash at effort max in the env ──
+# ── tieude: opencode with deepseek-v4.1-flash at effort max in the env ──
 # (team.toml) — the interactive TUI has no --model, so model+effort travel as
 # `provider/model#variant` in OPENCODE_CONFIG_CONTENT; no omp/gemini
-for k in tieude detu; do
-  spawn "$k-model" "$k"
+spawn "tieude-model" "tieude"
+[[ $rc -eq 0 ]] || fail "tieude: exit $rc, want 0: $(cat "$T/err")"
+grep -qF -- '--kind opencode' "$T/calls" \
+  || fail "tieude: not an opencode start: $(cat "$T/calls")"
+grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":"opencode-go/deepseek-v4.1-flash#max","instructions":' "$T/calls" \
+  || fail "tieude: model+effort not in OPENCODE_CONFIG_CONTENT: $(cat "$T/calls")"
+! grep -q -- '--kind omp' "$T/calls" || fail "tieude: still spawned as omp: $(cat "$T/calls")"
+! grep -q 'gemini' "$T/calls" || fail "tieude: gemini flag leaked: $(cat "$T/calls")"
+echo "ok: tieude -> --kind opencode, model opencode-go/deepseek-v4.1-flash#max"
+
+# ── sude/detu: omp with antigravity gemini-3.8-flash high, worker rules appended ──
+# (team.toml) — omp takes the model, the thinking level and the rules file on
+# the command line (--append-system-prompt reads a file path), not in pane env
+for k in sude detu; do
+  spawn "$k-impl" "$k"
   [[ $rc -eq 0 ]] || fail "$k: exit $rc, want 0: $(cat "$T/err")"
-  grep -qF -- '--kind opencode' "$T/calls" \
-    || fail "$k: not an opencode start: $(cat "$T/calls")"
-  grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":"opencode-go/deepseek-v4.1-flash#max","instructions":' "$T/calls" \
-    || fail "$k: model+effort not in OPENCODE_CONFIG_CONTENT: $(cat "$T/calls")"
-  ! grep -q -- '--kind omp' "$T/calls" || fail "$k: still spawned as omp: $(cat "$T/calls")"
-  ! grep -q 'gemini' "$T/calls" || fail "$k: gemini flag leaked: $(cat "$T/calls")"
-  echo "ok: $k -> --kind opencode, model opencode-go/deepseek-v4.1-flash#max"
+  grep -qF -- '--kind omp' "$T/calls" || fail "$k: not an omp start: $(cat "$T/calls")"
+  grep -qF -- '--model google-antigravity/gemini-3.8-flash' "$T/calls" \
+    || fail "$k: model not google-antigravity/gemini-3.8-flash: $(cat "$T/calls")"
+  grep -qF -- '--thinking high' "$T/calls" || fail "$k: thinking level not high: $(cat "$T/calls")"
+  grep -qF -- '--auto-approve' "$T/calls" \
+    || fail "$k: no --auto-approve (unattended spawn): $(cat "$T/calls")"
+  grep -qF -- "--append-system-prompt $T/home/quaqua/runs/$k-impl.rules.md" "$T/calls" \
+    || fail "$k: worker rules file not appended: $(cat "$T/calls")"
+  ! grep -q -- '--kind opencode' "$T/calls" || fail "$k: still an opencode start: $(cat "$T/calls")"
+  ! grep -q 'OPENCODE_CONFIG_CONTENT' "$T/calls" \
+    || fail "$k: opencode pane env leaked into an omp start: $(cat "$T/calls")"
+  echo "ok: $k -> --kind omp, google-antigravity/gemini-3.8-flash high, rules appended"
 done
 
-# ── sude: omp with antigravity gemini-3.8-flash high, worker rules appended ──
-# (models.md) — omp takes the model, the thinking level and the rules file on
-# the command line (--append-system-prompt reads a file path), not in pane env
-spawn sude-impl sude
-[[ $rc -eq 0 ]] || fail "sude: exit $rc, want 0: $(cat "$T/err")"
-grep -qF -- '--kind omp' "$T/calls" || fail "sude: not an omp start: $(cat "$T/calls")"
-grep -qF -- '--model google-antigravity/gemini-3.8-flash' "$T/calls" \
-  || fail "sude: model not google-antigravity/gemini-3.8-flash: $(cat "$T/calls")"
-grep -qF -- '--thinking high' "$T/calls" || fail "sude: thinking level not high: $(cat "$T/calls")"
-grep -qF -- '--auto-approve' "$T/calls" \
-  || fail "sude: no --auto-approve (unattended spawn): $(cat "$T/calls")"
-grep -qF -- "--append-system-prompt $T/home/quaqua/runs/sude-impl.rules.md" "$T/calls" \
-  || fail "sude: worker rules file not appended: $(cat "$T/calls")"
-! grep -q -- '--kind opencode' "$T/calls" || fail "sude: still an opencode start: $(cat "$T/calls")"
-! grep -q 'OPENCODE_CONFIG_CONTENT' "$T/calls" \
-  || fail "sude: opencode pane env leaked into an omp start: $(cat "$T/calls")"
-echo "ok: sude -> --kind omp, google-antigravity/gemini-3.8-flash high, rules appended"
-
 # ── fallback: a failed agent start takes one hop to the kind's fallback ───────
-# sude (omp) falls back to detu (opencode); the worker name keeps the sude prefix,
+# sude (omp) falls back to tieude (opencode); the worker name keeps the sude prefix,
 # only the harness/model/effort change, and the fallback is a WARN + run metadata.
 spawn sude-fb sude START_FAIL_KIND=omp
 [[ $rc -eq 0 ]] || fail "fallback: exit $rc, want 0: $(cat "$T/err")"
@@ -223,23 +223,23 @@ grep -qF -- '--kind omp' "$T/calls" || fail "fallback: primary omp not tried: $(
 grep -qF -- '--kind opencode' "$T/calls" || fail "fallback: fallback opencode not tried: $(cat "$T/calls")"
 [[ $(grep -c 'herdr agent start' "$T/calls") -eq 2 ]] \
   || fail "fallback: expected exactly 2 starts: $(cat "$T/calls")"
-grep -qF 'WARN: fallback: sude→detu (agent_not_ready)' "$T/err" \
+grep -qF 'WARN: fallback: sude→tieude (agent_not_ready)' "$T/err" \
   || fail "fallback: no WARN with reason: $(cat "$T/err")"
-grep -qF '"fallback":{"from":"sude","to":"detu","reason":"agent_not_ready"}' \
+grep -qF '"fallback":{"from":"sude","to":"tieude","reason":"agent_not_ready"}' \
   "$T/home/quaqua/runs/sude-fb.srt.json" \
   || fail "fallback: not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
-grep -qF '"running_kind":"detu"' "$T/home/quaqua/runs/sude-fb.srt.json" \
-  || fail "fallback: running_kind detu not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
+grep -qF '"running_kind":"tieude"' "$T/home/quaqua/runs/sude-fb.srt.json" \
+  || fail "fallback: running_kind tieude not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
 grep -qF '"harness":"opencode"' "$T/home/quaqua/runs/sude-fb.srt.json" \
   || fail "fallback: harness opencode not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
 grep -qF '"kind":"sude"' "$T/home/quaqua/runs/sude-fb.srt.json" \
   || fail "fallback: original kind sude not preserved in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
 grep -q "worker=sude-fb" "$T/out" || fail "fallback: no success line"
-echo "ok: fallback -> omp failed, opencode (detu) started, WARN + srt fallback recorded"
+echo "ok: fallback -> omp failed, opencode (tieude) started, WARN + srt fallback recorded"
 
-# one hop max: tieude (opencode) falls back to detu (also opencode), which fails
-# the same way -> hard error after exactly two attempts, never a third hop
-spawn tieude-fb2 tieude START_FAIL_KIND=opencode
+# one hop max: tieude (opencode) falls back to detu (omp); when both attempts
+# fail -> hard error after exactly two attempts, never a third hop
+spawn tieude-fb2 tieude START_FAIL=1
 [[ $rc -ne 0 ]] || fail "one-hop: exit $rc, want non-zero: $(cat "$T/err")"
 [[ $(grep -c 'herdr agent start' "$T/calls") -eq 2 ]] \
   || fail "one-hop: expected exactly 2 attempts: $(cat "$T/calls")"
