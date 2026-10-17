@@ -10,11 +10,13 @@ default_reviewer = ["suhuynh"]
 [kinds.tieude]
 harness = "opencode"
 model = "m"
+effort = "max"
 can_review = false
 
 [kinds.suhuynh]
 harness = "claude"
 model = "m"
+effort = "high"
 can_review = true
 
 [merge]

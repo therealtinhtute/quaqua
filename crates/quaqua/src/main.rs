@@ -129,9 +129,6 @@ struct ConfigArgs {
     /// Path to team.toml (default: $QUAQUA_TEAM_TOML, else ./team.toml).
     #[arg(long)]
     file: Option<PathBuf>,
-    /// Path to models.md for the drift check (default: sibling of team.toml).
-    #[arg(long)]
-    models: Option<PathBuf>,
     /// Validate the config as seen by this project (applies its override).
     #[arg(long)]
     project: Option<String>,
@@ -150,11 +147,10 @@ fn team_file(explicit: &Option<PathBuf>) -> Result<PathBuf, String> {
 fn do_validate(args: &ConfigArgs) -> Result<(), String> {
     let file = team_file(&args.file)?;
     let cfg = config::load(&file)?;
-    let models = config::load_models(args.models.as_deref(), &file)?;
     // Validate the raw file once. `validate` already bounds every [projects.*]
     // override (and the weights) against the top-level cap, so a bad override is
     // caught even without --project.
-    config::validate(&cfg, models.as_ref())?;
+    config::validate(&cfg)?;
     // Selecting a project only needs it to exist: its override was already
     // checked against the global baseline above. Re-validating a resolved config
     // would wrongly re-check the *other* projects against this project's cap.

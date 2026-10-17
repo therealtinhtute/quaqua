@@ -4,10 +4,9 @@
 //! Resolution order is project override -> defaults, then validate. A validation
 //! failure is rejected with one clear message (first failure wins).
 
-use crate::models::{parse_models_md, ModelsKind};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub const SCHEMA_VERSION: u32 = 2;
 /// AGENTS.md `## Rules`: "Max 4 task workers per orchestrator".
@@ -179,8 +178,25 @@ pub struct Kind {
     pub model: String,
     #[serde(default)]
     pub effort: Option<String>,
+    /// Optional one-hop fallback kind, taken only when the agent fails to start.
+    #[serde(default)]
+    pub fallback: Option<String>,
     #[serde(default)]
     pub can_review: bool,
+}
+
+/// The effort values a harness accepts. opencode effort is a model *variant*
+/// (`opencode --help` lists no `--model`; the interactive TUI reads the model
+/// from config as `provider/model#variant`, and the variant vocabulary is the
+/// `ReasoningEffort` set). omp's is `omp --help` `--thinking`. claude's is
+/// `claude --help` `--effort <level> (low, medium, high, xhigh, max)`.
+pub fn effort_allowed(harness: &str, effort: &str) -> bool {
+    match harness {
+        "opencode" => ["none", "minimal", "low", "medium", "high", "xhigh", "max"].contains(&effort),
+        "omp" => ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"].contains(&effort),
+        "claude" => ["low", "medium", "high", "xhigh", "max"].contains(&effort),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -282,10 +298,9 @@ pub fn resolve(mut cfg: Config, project: Option<&str>) -> Result<Config, String>
     Ok(cfg)
 }
 
-/// Validate the resolved config. `models` is the models.md routing table when the
-/// file is available; `None` skips the model-drift rule (a project repo may not
-/// ship models.md).
-pub fn validate(cfg: &Config, models: Option<&BTreeMap<String, ModelsKind>>) -> Result<(), String> {
+/// Validate the resolved config. team.toml is the only source of
+/// harness/model/effort, so every kind is checked here; models.md is prose.
+pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.schema_version != SCHEMA_VERSION {
         return Err(format!(
             "unsupported schema_version {} (want {SCHEMA_VERSION})",
@@ -400,55 +415,42 @@ pub fn validate(cfg: &Config, models: Option<&BTreeMap<String, ModelsKind>>) -> 
         ));
     }
 
-    if let Some(models) = models {
-        for (name, kind) in &cfg.kinds {
-            match models.get(name) {
-                None => return Err(format!("kind '{name}' drift: absent from models.md")),
-                Some(m) => {
-                    let got = (kind.harness.as_str(), kind.model.as_str(), kind.effort.as_deref());
-                    let want = (m.harness.as_str(), m.model.as_str(), m.effort.as_deref());
-                    if got != want {
-                        return Err(format!(
-                            "kind '{name}' drift: team.toml {}/{}/{} != models.md {}/{}/{}",
-                            got.0, got.1, got.2.unwrap_or("-"),
-                            want.0, want.1, want.2.unwrap_or("-"),
-                        ));
-                    }
-                }
-            }
+    // team.toml is the only source of harness/model/effort: fail closed on a kind
+    // that cannot launch, or on a fallback that names a missing kind or itself.
+    for (name, kind) in &cfg.kinds {
+        if !["opencode", "omp", "claude"].contains(&kind.harness.as_str()) {
+            return Err(format!(
+                "kind '{name}': unsupported harness '{}'",
+                kind.harness
+            ));
         }
-        // Reverse: every models.md kind must have a [kinds.*] table too.
-        for name in models.keys() {
-            if !cfg.kinds.contains_key(name) {
-                return Err(format!(
-                    "kind '{name}' drift: in models.md but absent from team.toml"
-                ));
+        if kind.model.trim().is_empty() {
+            return Err(format!("kind '{name}': model is empty"));
+        }
+        let effort = match kind.effort.as_deref() {
+            Some(e) if !e.trim().is_empty() => e,
+            _ => return Err(format!("kind '{name}': effort is missing")),
+        };
+        if !effort_allowed(&kind.harness, effort) {
+            return Err(format!(
+                "kind '{name}': harness '{}' does not take effort '{effort}'",
+                kind.harness
+            ));
+        }
+        if let Some(fb) = kind.fallback.as_deref() {
+            if fb.trim().is_empty() {
+                return Err(format!("kind '{name}': fallback is empty"));
+            }
+            if fb == name {
+                return Err(format!("kind '{name}': fallback names itself"));
+            }
+            if !cfg.kinds.contains_key(fb) {
+                return Err(format!("kind '{name}': fallback '{fb}' is not a kind"));
             }
         }
     }
 
     Ok(())
-}
-
-/// Path of the models.md to check drift against: explicit `--models`, else a
-/// sibling of the team.toml. Only the implicit sibling lookup may be missing
-/// (drift skipped); an explicit `--models <path>` that does not exist is an error.
-pub fn load_models(explicit: Option<&Path>, team_file: &Path) -> Result<Option<BTreeMap<String, ModelsKind>>, String> {
-    let (path, required): (PathBuf, bool) = match explicit {
-        Some(p) => (p.to_path_buf(), true),
-        None => (
-            match team_file.parent() {
-                Some(dir) => dir.join("models.md"),
-                None => PathBuf::from("models.md"),
-            },
-            false,
-        ),
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(Some(parse_models_md(&text))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => Ok(None),
-        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
-    }
 }
 
 /// Resolve one dotted key to its printable value. Arrays print one item per line.
@@ -484,6 +486,7 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
                 "harness" => kind.harness.clone(),
                 "model" => kind.model.clone(),
                 "effort" => kind.effort.clone().ok_or_else(|| format!("key '{key}' is unset"))?,
+                "fallback" => kind.fallback.clone().ok_or_else(|| format!("key '{key}' is unset"))?,
                 "can_review" => kind.can_review.to_string(),
                 _ => return Err(unknown()),
             }
@@ -548,6 +551,8 @@ builder_reviewer_differ = "harness"
 [kinds.tieude]
 harness = "opencode"
 model = "m"
+effort = "max"
+fallback = "suhuynh"
 can_review = false
 [kinds.suhuynh]
 harness = "claude"
@@ -565,20 +570,69 @@ workers_tab = "workers"
 
     #[test]
     fn valid_base_passes() {
-        assert!(validate(&base(), None).is_ok());
+        assert!(validate(&base()).is_ok());
     }
 
     #[test]
     fn cap_over_is_rejected() {
         let mut c = base();
         c.limits.max_workers_per_orchestrator = 5;
-        assert!(validate(&c, None).unwrap_err().contains("over the cap"));
+        assert!(validate(&c).unwrap_err().contains("over the cap"));
     }
 
     #[test]
     fn get_array_prints_lines() {
         assert_eq!(get(&base(), "kinds.suhuynh.effort", None).unwrap(), "high");
+        assert_eq!(get(&base(), "kinds.tieude.fallback", None).unwrap(), "suhuynh");
         assert!(get(&base(), "strategy.default_reviewer", None).unwrap().contains("suhuynh"));
         assert!(get(&base(), "nope.nope", None).is_err());
+    }
+
+    #[test]
+    fn missing_effort_is_rejected() {
+        let mut c = base();
+        c.kinds.get_mut("tieude").unwrap().effort = None;
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("effort is missing"), "{err}");
+    }
+
+    #[test]
+    fn empty_model_is_rejected() {
+        let mut c = base();
+        c.kinds.get_mut("tieude").unwrap().model = "  ".to_string();
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("model is empty"), "{err}");
+    }
+
+    #[test]
+    fn unsupported_effort_is_rejected() {
+        let mut c = base();
+        c.kinds.get_mut("tieude").unwrap().effort = Some("banana".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("does not take effort 'banana'"), "{err}");
+    }
+
+    #[test]
+    fn claude_effort_vocabulary_is_enforced() {
+        // opencode's "none" is not a claude effort value.
+        let mut c = base();
+        c.kinds.get_mut("suhuynh").unwrap().effort = Some("none".to_string());
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn fallback_to_missing_kind_is_rejected() {
+        let mut c = base();
+        c.kinds.get_mut("tieude").unwrap().fallback = Some("ghost".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("fallback 'ghost' is not a kind"), "{err}");
+    }
+
+    #[test]
+    fn fallback_to_self_is_rejected() {
+        let mut c = base();
+        c.kinds.get_mut("tieude").unwrap().fallback = Some("tieude".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("fallback names itself"), "{err}");
     }
 }

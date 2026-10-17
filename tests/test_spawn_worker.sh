@@ -16,6 +16,10 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 src="$(cd "$here/.." && pwd)/scripts"
+root="$(cd "$here/.." && pwd)"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+export QUAQUA_BIN="$bin"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-spawn-worker.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -82,12 +86,25 @@ if [ "${1:-} ${2:-}" = "pane wait-output" ]; then
   n=$(cat "$f" 2>/dev/null || echo 0); [ "${n:-0}" -gt 0 ] || exit 1
   echo $((n - 1)) > "$f"
 fi
-# START_FAIL=1: `agent start` reports the startup-blocked error a slow (or
-# dialog-held) start hits — herdr prints it on stdout and exits non-zero
-if [ "${1:-} ${2:-}" = "agent start" ] && [ -n "${START_FAIL:-}" ]; then
-  echo '{"error":{"code":"agent_not_ready","message":"agent is blocked during startup and is not ready for prompts"}}'
-  exit 1
+# START_FAIL=1 (any kind) or START_FAIL_KIND=<kind>: `agent start` reports the
+# startup-blocked error a slow (or dialog-held) start hits — herdr prints it on
+# stdout and exits non-zero. START_FAIL_KIND fails only that --kind, so a
+# fallback to a different harness can be exercised.
+if [ "${1:-} ${2:-}" = "agent start" ]; then
+  fail_kind=0
+  if [ -n "${START_FAIL_KIND:-}" ]; then
+    case " $* " in *" --kind $START_FAIL_KIND "*) fail_kind=1 ;; esac
+  elif [ -n "${START_FAIL:-}" ]; then
+    fail_kind=1
+  fi
+  if [ "$fail_kind" = 1 ]; then
+    echo '{"error":{"code":"agent_not_ready","message":"agent is blocked during startup and is not ready for prompts"}}'
+    exit 1
+  fi
 fi
+# WAIT_IDLE_FAIL=1: `agent wait ... --until idle` fails, so a claude start that
+# herdr could not confirm is a hard failure (no fallback configured -> error)
+if [ "${1:-} ${2:-}" = "agent wait" ] && [ -n "${WAIT_IDLE_FAIL:-}" ]; then exit 1; fi
 # grid check: the in-process reconcile reads one snapshot. GRID_FAIL simulates
 # an unreachable herdr; GRID_SNAPSHOT serves a fixture; default = converged.
 if [ "${1:-} ${2:-}" = "api snapshot" ]; then
@@ -164,18 +181,19 @@ expect_accept tieude-spawnguard tieude "17 chars"
 expect_accept tieude-abcdefghijklm tieude "20 chars (boundary)"
 expect_accept sude-leadname sude "leadname suffix is not -lead"
 
-# ── tieude/detu: opencode with deepseek-v4.1-flash in the pane env ──────────
-# (models.md) — the model travels in OPENCODE_CONFIG_CONTENT; no omp/gemini
+# ── tieude/detu: opencode with deepseek-v4.1-flash at effort max in the env ──
+# (team.toml) — the interactive TUI has no --model, so model+effort travel as
+# `provider/model#variant` in OPENCODE_CONFIG_CONTENT; no omp/gemini
 for k in tieude detu; do
   spawn "$k-model" "$k"
   [[ $rc -eq 0 ]] || fail "$k: exit $rc, want 0: $(cat "$T/err")"
   grep -qF -- '--kind opencode' "$T/calls" \
     || fail "$k: not an opencode start: $(cat "$T/calls")"
-  grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":"opencode-go/deepseek-v4.1-flash","instructions":' "$T/calls" \
-    || fail "$k: model not in OPENCODE_CONFIG_CONTENT: $(cat "$T/calls")"
+  grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":"opencode-go/deepseek-v4.1-flash#max","instructions":' "$T/calls" \
+    || fail "$k: model+effort not in OPENCODE_CONFIG_CONTENT: $(cat "$T/calls")"
   ! grep -q -- '--kind omp' "$T/calls" || fail "$k: still spawned as omp: $(cat "$T/calls")"
   ! grep -q 'gemini' "$T/calls" || fail "$k: gemini flag leaked: $(cat "$T/calls")"
-  echo "ok: $k -> --kind opencode, model opencode-go/deepseek-v4.1-flash"
+  echo "ok: $k -> --kind opencode, model opencode-go/deepseek-v4.1-flash#max"
 done
 
 # ── sude: omp with antigravity gemini-3.8-flash high, worker rules appended ──
@@ -195,6 +213,42 @@ grep -qF -- "--append-system-prompt $T/home/quaqua/runs/sude-impl.rules.md" "$T/
 ! grep -q 'OPENCODE_CONFIG_CONTENT' "$T/calls" \
   || fail "sude: opencode pane env leaked into an omp start: $(cat "$T/calls")"
 echo "ok: sude -> --kind omp, google-antigravity/gemini-3.8-flash high, rules appended"
+
+# ── fallback: a failed agent start takes one hop to the kind's fallback ───────
+# sude (omp) falls back to detu (opencode); the worker name keeps the sude prefix,
+# only the harness/model/effort change, and the fallback is a WARN + run metadata.
+spawn sude-fb sude START_FAIL_KIND=omp
+[[ $rc -eq 0 ]] || fail "fallback: exit $rc, want 0: $(cat "$T/err")"
+grep -qF -- '--kind omp' "$T/calls" || fail "fallback: primary omp not tried: $(cat "$T/calls")"
+grep -qF -- '--kind opencode' "$T/calls" || fail "fallback: fallback opencode not tried: $(cat "$T/calls")"
+[[ $(grep -c 'herdr agent start' "$T/calls") -eq 2 ]] \
+  || fail "fallback: expected exactly 2 starts: $(cat "$T/calls")"
+grep -qF 'WARN: fallback: sude→detu (agent_not_ready)' "$T/err" \
+  || fail "fallback: no WARN with reason: $(cat "$T/err")"
+grep -qF '"fallback":{"from":"sude","to":"detu","reason":"agent_not_ready"}' \
+  "$T/home/quaqua/runs/sude-fb.srt.json" \
+  || fail "fallback: not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
+grep -q "worker=sude-fb" "$T/out" || fail "fallback: no success line"
+echo "ok: fallback -> omp failed, opencode (detu) started, WARN + srt fallback recorded"
+
+# one hop max: tieude (opencode) falls back to detu (also opencode), which fails
+# the same way -> hard error after exactly two attempts, never a third hop
+spawn tieude-fb2 tieude START_FAIL_KIND=opencode
+[[ $rc -ne 0 ]] || fail "one-hop: exit $rc, want non-zero: $(cat "$T/err")"
+[[ $(grep -c 'herdr agent start' "$T/calls") -eq 2 ]] \
+  || fail "one-hop: expected exactly 2 attempts: $(cat "$T/calls")"
+grep -qF 'WARN: fallback: tieude→detu (agent_not_ready)' "$T/err" \
+  || fail "one-hop: no fallback WARN: $(cat "$T/err")"
+echo "ok: one-hop -> fallback start failure errors, no third attempt"
+
+# a kind with no fallback fails closed on a start failure (ni = claude): herdr
+# cannot confirm the start and idle-wait also fails -> error, nothing taken
+spawn ni-nofb ni START_FAIL_KIND=claude WAIT_IDLE_FAIL=1
+[[ $rc -ne 0 ]] || fail "no-fallback: exit $rc, want non-zero: $(cat "$T/err")"
+! grep -q 'WARN: fallback' "$T/err" || fail "no-fallback: fell back anyway: $(cat "$T/err")"
+[[ $(grep -c 'herdr agent start' "$T/calls") -eq 1 ]] \
+  || fail "no-fallback: expected 1 attempt: $(cat "$T/calls")"
+echo "ok: no fallback configured -> start failure errors, no fallback taken"
 
 # ── grid check: a successful spawn arranges the new worker's pane ───────────
 spawn tieude-gridhook tieude

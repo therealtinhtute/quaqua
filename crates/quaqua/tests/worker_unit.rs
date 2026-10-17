@@ -3,8 +3,14 @@ use quaqua::config;
 use quaqua::git::GitOps;
 use quaqua::herdr::HerdrOps;
 use quaqua::worker::cleanup::{resolve_default_runs_dir, resolve_home_quaqua_runs};
-use quaqua::worker::prompt::{brief_budget_sec, brief_headers_ok, resolve_budget_sec, validate_env_budget_val};
-use quaqua::worker::spawn::parse_spawn_args;
+use quaqua::worker::prompt::{
+    brief_budget_sec, brief_headers_ok, fallback_header_line, prepend_header, resolve_budget_sec,
+    validate_env_budget_val,
+};
+use quaqua::worker::spawn::{
+    build_launch_cmd, fallback_kind, parse_spawn_args, resolve_launch, start_failure_reason,
+    Launch,
+};
 use quaqua::workspace::resolve_workspace_root;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
@@ -267,6 +273,7 @@ fn test_unknown_harness_rejected_before_split_n4() {
         harness: "unsupported_harness".to_string(),
         model: "m".to_string(),
         effort: None,
+        fallback: None,
         can_review: false,
     });
 
@@ -279,6 +286,60 @@ fn test_unknown_harness_rejected_before_split_n4() {
     let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &dummy_git, &spy);
     assert!(res.is_err());
     // N4: pane_split must NEVER have been called!
+    assert!(!spy.split_called.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_missing_effort_rejected_before_split() {
+    let spy = SpyHerdr {
+        split_called: AtomicBool::new(false),
+    };
+    let dummy_git = DummyGit;
+
+    let mut cfg = config::Config::default();
+    cfg.kinds.insert("tieude".to_string(), config::Kind {
+        harness: "opencode".to_string(),
+        model: "m".to_string(),
+        effort: None,
+        fallback: None,
+        can_review: false,
+    });
+
+    let opts = parse_spawn_args(&[
+        "tieude-task1".to_string(),
+        "tieude".to_string(),
+        "/repo".to_string(),
+    ]).unwrap();
+
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &dummy_git, &spy);
+    assert!(res.is_err());
+    assert!(!spy.split_called.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_unsupported_effort_rejected_before_split() {
+    let spy = SpyHerdr {
+        split_called: AtomicBool::new(false),
+    };
+    let dummy_git = DummyGit;
+
+    let mut cfg = config::Config::default();
+    cfg.kinds.insert("tieude".to_string(), config::Kind {
+        harness: "opencode".to_string(),
+        model: "m".to_string(),
+        effort: Some("banana".to_string()),
+        fallback: None,
+        can_review: false,
+    });
+
+    let opts = parse_spawn_args(&[
+        "tieude-task1".to_string(),
+        "tieude".to_string(),
+        "/repo".to_string(),
+    ]).unwrap();
+
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &dummy_git, &spy);
+    assert!(res.is_err());
     assert!(!spy.split_called.load(Ordering::SeqCst));
 }
 
@@ -336,10 +397,21 @@ fn test_team_toml_harness_routing() {
     let team_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../team.toml");
     let cfg = config::load(&team_path).expect("valid team.toml");
 
-    // tieude/detu are opencode
+    // tieude/detu are opencode at effort max
     assert_eq!(cfg.kinds["tieude"].harness, "opencode");
     assert_eq!(cfg.kinds["tieude"].model, "opencode-go/deepseek-v4.1-flash");
+    assert_eq!(cfg.kinds["tieude"].effort.as_deref(), Some("max"));
     assert!(!cfg.kinds["tieude"].can_review);
+    assert_eq!(cfg.kinds["detu"].harness, "opencode");
+    assert_eq!(cfg.kinds["detu"].effort.as_deref(), Some("max"));
+
+    // fallback seeds: tieude->detu, detu->tieude, sude->detu; claude kinds none
+    assert_eq!(cfg.kinds["tieude"].fallback.as_deref(), Some("detu"));
+    assert_eq!(cfg.kinds["detu"].fallback.as_deref(), Some("tieude"));
+    assert_eq!(cfg.kinds["sude"].fallback.as_deref(), Some("detu"));
+    for k in ["ni", "suhuynh", "truonglao"] {
+        assert_eq!(cfg.kinds[k].fallback, None, "{k} must have no fallback");
+    }
 
     // sude is omp with antigravity gemini high
     assert_eq!(cfg.kinds["sude"].harness, "omp");
@@ -573,4 +645,502 @@ fn test_claude_review_mode_verification() {
     let opts = parse_spawn_args(&args).unwrap();
     assert!(opts.review);
     assert_eq!(opts.kind, "suhuynh");
+}
+
+fn kind(harness: &str, model: &str, effort: Option<&str>) -> config::Kind {
+    config::Kind {
+        harness: harness.to_string(),
+        model: model.to_string(),
+        effort: effort.map(str::to_string),
+        fallback: None,
+        can_review: false,
+    }
+}
+
+#[test]
+fn test_launch_args_carry_exact_model_and_effort() {
+    // opencode: model+effort travel as `provider/model#variant` in the pane env —
+    // the interactive TUI lists no --model flag (`opencode --help`), only
+    // --standalone/--server/--auto/--continue/--session/--prompt.
+    let oc = resolve_launch(
+        &kind("opencode", "opencode-go/deepseek-v4.1-flash", Some("max")),
+        "tieude",
+    )
+    .unwrap();
+    assert_eq!(
+        oc,
+        Launch {
+            harness: "opencode".into(),
+            model: "opencode-go/deepseek-v4.1-flash".into(),
+            effort: "max".into(),
+        }
+    );
+    let cmd = build_launch_cmd(&oc, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+        .unwrap();
+    assert_eq!(cmd.split_envs.len(), 1);
+    assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
+    assert_eq!(
+        cmd.split_envs[0].1,
+        r#"{"model":"opencode-go/deepseek-v4.1-flash#max","instructions":["/r/x.rules.md"]}"#
+    );
+    assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
+
+    // omp: `--model` + `--thinking` (`omp --help`).
+    let omp = resolve_launch(
+        &kind("omp", "google-antigravity/gemini-3.8-flash", Some("high")),
+        "sude",
+    )
+    .unwrap();
+    let cmd = build_launch_cmd(&omp, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+        .unwrap();
+    assert!(cmd.split_envs.is_empty(), "omp takes no pane env");
+    let joined = cmd.agent_args.join(" ");
+    assert!(
+        joined.contains("--model google-antigravity/gemini-3.8-flash"),
+        "{joined}"
+    );
+    assert!(joined.contains("--thinking high"), "{joined}");
+
+    // claude: `--model` (mapped to claude-*) + `--effort` (`claude --help`).
+    let cl = resolve_launch(&kind("claude", "opus-5.5", Some("high")), "truonglao").unwrap();
+    let cmd = build_launch_cmd(&cl, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", true)
+        .unwrap();
+    let joined = cmd.agent_args.join(" ");
+    assert!(joined.contains("--model claude-opus-5-5"), "{joined}");
+    assert!(joined.contains("--effort high"), "{joined}");
+    // review keeps its read-only boundary
+    assert!(joined.contains("--permission-mode dontAsk"), "{joined}");
+}
+
+#[test]
+fn test_launch_fails_closed_without_model_or_effort() {
+    let e = resolve_launch(&kind("opencode", "m", None), "tieude")
+        .unwrap_err()
+        .1;
+    assert!(e.contains("no effort in team.toml"), "{e}");
+
+    let e = resolve_launch(&kind("opencode", "m", Some("banana")), "tieude")
+        .unwrap_err()
+        .1;
+    assert!(e.contains("does not take effort 'banana'"), "{e}");
+
+    // claude's vocabulary is narrower than opencode's
+    let e = resolve_launch(&kind("claude", "m", Some("minimal")), "ni")
+        .unwrap_err()
+        .1;
+    assert!(e.contains("does not take effort 'minimal'"), "{e}");
+
+    let e = resolve_launch(&kind("opencode", "  ", Some("max")), "tieude")
+        .unwrap_err()
+        .1;
+    assert!(e.contains("has no model"), "{e}");
+
+    let e = resolve_launch(&kind("weird", "m", Some("max")), "x")
+        .unwrap_err()
+        .1;
+    assert!(e.contains("unsupported harness"), "{e}");
+}
+
+#[test]
+fn test_fallback_header_line_and_stamping() {
+    let srt = r#"{"name":"x","kind":"sude","fallback":{"from":"sude","to":"detu","reason":"agent_not_ready"}}"#;
+    assert_eq!(
+        fallback_header_line(srt).as_deref(),
+        Some("fallback: sude→detu (agent_not_ready)")
+    );
+    // no fallback in the metadata -> no header
+    assert_eq!(fallback_header_line(r#"{"name":"x","kind":"tieude"}"#), None);
+    // malformed / incomplete -> no header (never a panic)
+    assert_eq!(fallback_header_line("not json"), None);
+    assert_eq!(fallback_header_line(r#"{"fallback":{"from":"sude"}}"#), None);
+
+    let report = "# sude-x — report\n\n## Lessons\n- none\n";
+    let stamped = prepend_header(report, "fallback: sude→detu (agent_not_ready)").unwrap();
+    assert!(stamped.starts_with("fallback: sude→detu (agent_not_ready)\n# sude-x"));
+    // idempotent: already present -> None (no rewrite)
+    assert_eq!(prepend_header(&stamped, "fallback: sude→detu (agent_not_ready)"), None);
+}
+
+#[test]
+fn test_start_failure_reason_reads_herdr_error_code() {
+    fn out(stdout: &str) -> Output {
+        Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+    assert_eq!(
+        start_failure_reason(&out(
+            r#"{"error":{"code":"agent_not_ready","message":"blocked during startup"}}"#
+        )),
+        "agent_not_ready"
+    );
+    assert_eq!(
+        start_failure_reason(&out(r#"{"error":{"code":"quota_exceeded"}}"#)),
+        "quota_exceeded"
+    );
+    assert_eq!(start_failure_reason(&out("plain text, not json")), "start-failed");
+}
+
+#[test]
+fn test_fallback_kind_resolution() {
+    let mut cfg = config::Config::default();
+    cfg.kinds.insert(
+        "tieude".to_string(),
+        config::Kind {
+            harness: "opencode".to_string(),
+            model: "m".to_string(),
+            effort: Some("max".to_string()),
+            fallback: Some("detu".to_string()),
+            can_review: false,
+        },
+    );
+    cfg.kinds.insert(
+        "detu".to_string(),
+        config::Kind {
+            harness: "opencode".to_string(),
+            model: "m".to_string(),
+            effort: Some("max".to_string()),
+            fallback: None,
+            can_review: false,
+        },
+    );
+
+    // Valid fallback resolves to detu
+    let (fb_name, fb_kind) = fallback_kind(&cfg, &cfg.kinds["tieude"], "tieude")
+        .unwrap()
+        .unwrap();
+    assert_eq!(fb_name, "detu");
+    assert_eq!(fb_kind.harness, "opencode");
+
+    // No fallback returns Ok(None)
+    assert!(fallback_kind(&cfg, &cfg.kinds["detu"], "detu").unwrap().is_none());
+
+    // Fallback naming a missing kind returns Err
+    let mut bad_kind = cfg.kinds["tieude"].clone();
+    bad_kind.fallback = Some("ghost".to_string());
+    let err = fallback_kind(&cfg, &bad_kind, "tieude").unwrap_err().1;
+    assert!(err.contains("fallback 'ghost' is not a kind"), "{err}");
+}
+
+struct SpawnTestGit;
+impl GitOps for SpawnTestGit {
+    fn run_in(&self, _dir: &Path, _args: &[&str]) -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
+        self.run_in(Path::new("."), _args)
+    }
+    fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool {
+        true
+    }
+    fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn worktree_add(
+        &self,
+        _repo: &Path,
+        _branch: &str,
+        wt: &Path,
+        _base: Option<&str>,
+    ) -> std::io::Result<Output> {
+        let _ = std::fs::create_dir_all(wt);
+        self.run_in(_repo, &[])
+    }
+    fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
+        false
+    }
+    fn worktree_add_existing(&self, _repo: &Path, _branch: &str, _wt: &Path) -> std::io::Result<Output> {
+        self.run_in(_repo, &[])
+    }
+    fn worktree_remove(&self, _repo: &Path, _wt: &Path) -> std::io::Result<Output> {
+        self.run_in(_repo, &[])
+    }
+    fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn is_core_bare(&self, _repo: &Path) -> bool {
+        false
+    }
+    fn has_core_worktree(&self, _repo: &Path) -> bool {
+        false
+    }
+    fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<Output> {
+        self.run_in(_repo, &[])
+    }
+    fn set_worktree_pushurl_blocked(&self, _wt: &Path, _remote: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn is_git_dir(&self, _cwd: &Path) -> bool {
+        true
+    }
+    fn diff_and_status(&self, _cwd: &Path) -> (String, String) {
+        ("dh".to_string(), "clean".to_string())
+    }
+}
+
+struct FallbackSpyHerdr {
+    agent_starts: std::cell::RefCell<Vec<(String, String)>>,
+    fail_harness: Option<String>,
+}
+
+impl HerdrOps for FallbackSpyHerdr {
+    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: b"{\"snapshot\":{\"workspaces\":[],\"tabs\":[],\"panes\":[],\"layouts\":[],\"agents\":[]}}".to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+    fn agent_list(&self) -> std::io::Result<String> {
+        Ok(r#"{"result":{"agents":[]}}"#.to_string())
+    }
+    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
+        Ok((false, String::new()))
+    }
+    fn agent_read(&self, _name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        Ok(String::new())
+    }
+    fn agent_start(
+        &self,
+        name: &str,
+        kind: &str,
+        _pane: &str,
+        _timeout_ms: u32,
+        _extra_args: &[&str],
+    ) -> std::io::Result<Output> {
+        self.agent_starts
+            .borrow_mut()
+            .push((name.to_string(), kind.to_string()));
+        let should_fail = match &self.fail_harness {
+            Some(fh) => fh == "*" || fh == kind,
+            None => false,
+        };
+        if should_fail {
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
+                stdout: b"{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"blocked during startup\"}}".to_vec(),
+                stderr: Vec::new(),
+            })
+        } else {
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    fn pane_split(
+        &self,
+        _cwd: &str,
+        _owner: &str,
+        _envs: &[(&str, &str)],
+    ) -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: b"{\"result\":{\"pane\":{\"pane_id\":\"%1\"}}}".to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+    fn pane_close(&self, _pane: &str) -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+    fn pane_report_metadata(&self, _pane: &str, _tokens: &[&str]) -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+    fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
+        false
+    }
+    fn pane_read(&self, _pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        Ok(String::new())
+    }
+    fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+    fn agent_send_keys(&self, _name: &str, _key: &str) -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+    fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+    fn agent_prompt_nowait(&self, _name: &str, _prompt: &str) -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+    fn agent_prompt_wait_background(
+        &self,
+        _name: &str,
+        _prompt: &str,
+        _timeout_ms: u32,
+        _log_file: std::fs::File,
+    ) -> std::io::Result<Child> {
+        unimplemented!()
+    }
+}
+
+fn test_cfg_with_fallback() -> config::Config {
+    let mut cfg = config::Config::default();
+    cfg.kinds.insert(
+        "sude".to_string(),
+        config::Kind {
+            harness: "omp".to_string(),
+            model: "gemini".to_string(),
+            effort: Some("high".to_string()),
+            fallback: Some("detu".to_string()),
+            can_review: false,
+        },
+    );
+    cfg.kinds.insert(
+        "detu".to_string(),
+        config::Kind {
+            harness: "opencode".to_string(),
+            model: "deepseek".to_string(),
+            effort: Some("max".to_string()),
+            fallback: Some("tieude".to_string()),
+            can_review: false,
+        },
+    );
+    cfg.kinds.insert(
+        "ni".to_string(),
+        config::Kind {
+            harness: "claude".to_string(),
+            model: "opus".to_string(),
+            effort: Some("low".to_string()),
+            fallback: None,
+            can_review: true,
+        },
+    );
+    cfg
+}
+
+#[test]
+fn test_spawn_worker_fallback_scenarios() {
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-fb-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+
+    // Scenario 1: Primary start fails (omp), falls back to detu (opencode), srt.json recorded
+    {
+        let cfg = test_cfg_with_fallback();
+        let git = SpawnTestGit;
+        let herdr = FallbackSpyHerdr {
+            agent_starts: std::cell::RefCell::new(Vec::new()),
+            fail_harness: Some("omp".to_string()),
+        };
+
+        let opts = parse_spawn_args(&[
+            "sude-fbtest".to_string(),
+            "sude".to_string(),
+            repo_dir.to_str().unwrap().to_string(),
+        ])
+        .unwrap();
+
+        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+        assert!(
+            res.is_ok(),
+            "spawn should succeed with fallback: {:?}",
+            res.err()
+        );
+
+        let starts = herdr.agent_starts.borrow().clone();
+        assert_eq!(starts.len(), 2, "expected exactly 2 starts (primary, fallback)");
+        assert_eq!(starts[0], ("sude-fbtest".to_string(), "omp".to_string()));
+        assert_eq!(
+            starts[1],
+            ("sude-fbtest".to_string(), "opencode".to_string())
+        );
+
+        let srt_path = runs_dir.join("sude-fbtest.srt.json");
+        assert!(srt_path.is_file(), "srt.json must be written");
+        let srt_content = std::fs::read_to_string(&srt_path).unwrap();
+        assert!(
+            srt_content.contains(r#""fallback":{"from":"sude","to":"detu","reason":"agent_not_ready"}"#),
+            "{srt_content}"
+        );
+    }
+
+    // Scenario 2: One hop limit — both primary and fallback fail -> error after 2 starts
+    {
+        let cfg = test_cfg_with_fallback();
+        let git = SpawnTestGit;
+        let herdr = FallbackSpyHerdr {
+            agent_starts: std::cell::RefCell::new(Vec::new()),
+            fail_harness: Some("*".to_string()),
+        };
+
+        let opts = parse_spawn_args(&[
+            "sude-onehop".to_string(),
+            "sude".to_string(),
+            repo_dir.to_str().unwrap().to_string(),
+        ])
+        .unwrap();
+
+        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+        assert!(res.is_err(), "must error when fallback fails");
+
+        let starts = herdr.agent_starts.borrow().clone();
+        assert_eq!(starts.len(), 2, "expected exactly 2 starts (one hop max)");
+    }
+
+    // Scenario 3: Fallback naming missing kind -> error
+    {
+        let mut cfg = test_cfg_with_fallback();
+        cfg.kinds.get_mut("sude").unwrap().fallback = Some("ghost".to_string());
+        let git = SpawnTestGit;
+        let herdr = FallbackSpyHerdr {
+            agent_starts: std::cell::RefCell::new(Vec::new()),
+            fail_harness: Some("omp".to_string()),
+        };
+
+        let opts = parse_spawn_args(&[
+            "sude-fbmiss".to_string(),
+            "sude".to_string(),
+            repo_dir.to_str().unwrap().to_string(),
+        ])
+        .unwrap();
+
+        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+        assert!(res.is_err(), "must error when fallback kind is missing");
+
+        let starts = herdr.agent_starts.borrow().clone();
+        assert_eq!(
+            starts.len(),
+            1,
+            "only primary attempted before bad fallback error"
+        );
+    }
+
+    std::env::remove_var("QUAQUA_RUNS_DIR");
+    let _ = std::fs::remove_dir_all(&temp);
 }

@@ -5,7 +5,6 @@ use crate::git::GitOps;
 use crate::herdr::HerdrOps;
 use crate::json::parse_json;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub fn resolve_home_quaqua_runs(home: Option<&Path>) -> PathBuf {
     crate::workspace::resolve_workspace_root(None, home).join("runs")

@@ -1,5 +1,4 @@
-# invalid: team.toml omits a kind that models.md still lists (reverse drift).
-# Run with --models pointing at the repo models.md.
+# invalid: an effort value the kind's harness does not accept.
 schema_version = 2
 
 [strategy]
@@ -9,6 +8,7 @@ default_reviewer = ["suhuynh"]
 [kinds.tieude]
 harness = "opencode"
 model = "opencode-go/deepseek-v4.1-flash"
+effort = "banana"
 can_review = false
 
 [kinds.suhuynh]

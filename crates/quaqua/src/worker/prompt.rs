@@ -150,6 +150,29 @@ pub fn nap(sec: u64) {
     }
 }
 
+/// The `fallback: <from>→<to> (<reason>)` header line a fallback spawn recorded
+/// in the run metadata (`runs/<name>.srt.json`), if any.
+pub fn fallback_header_line(srt_json: &str) -> Option<String> {
+    let j = parse_json(srt_json).ok()?;
+    let fb = j.get("fallback")?;
+    let from = fb.get_str("from").unwrap_or("");
+    let to = fb.get_str("to").unwrap_or("");
+    let reason = fb.get_str("reason").unwrap_or("start-failed");
+    if from.is_empty() || to.is_empty() {
+        return None;
+    }
+    Some(format!("fallback: {from}→{to} ({reason})"))
+}
+
+/// Prepend a header line to a report unless it is already present. Returns
+/// `None` when the line is already there (idempotent stamping).
+pub fn prepend_header(report: &str, line: &str) -> Option<String> {
+    if report.lines().any(|l| l == line) {
+        return None;
+    }
+    Some(format!("{line}\n{report}"))
+}
+
 pub fn do_check_brief(task: &str) -> Result<(), (i32, String)> {
     validate_env_budget()?;
     if !brief_headers_ok(task) {
@@ -738,6 +761,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
 
     // Validate report shape
     let mut expect_verdict = false;
+    let mut fallback_line: Option<String> = None;
     if srt.is_file() {
         if let Ok(c) = std::fs::read_to_string(&srt) {
             if let Ok(j) = parse_json(&c) {
@@ -745,6 +769,9 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                     expect_verdict = true;
                 }
             }
+            // A fallback spawn recorded from/to/reason in the run metadata;
+            // stamp it as the report header line once the report lands.
+            fallback_line = fallback_header_line(&c);
         }
     }
 
@@ -760,6 +787,18 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         let has_lessons = report_content.lines().any(|l| l.starts_with("## Lessons"));
         if !has_lessons {
             return Err(malformed_report("'## Lessons' section"));
+        }
+    }
+
+    // spawn must never create runs/<name>.md (its existence is the completion
+    // signal), so the `fallback:` header is stamped here, after the report is
+    // validated. Idempotent; atomic tmp+rename.
+    if let Some(line) = fallback_line {
+        if let Some(stamped) = prepend_header(&report_content, &line) {
+            let tmp = runs_dir.join(format!(".{name}.tmp"));
+            if std::fs::write(&tmp, stamped).is_ok() {
+                let _ = std::fs::rename(&tmp, &out);
+            }
         }
     }
 

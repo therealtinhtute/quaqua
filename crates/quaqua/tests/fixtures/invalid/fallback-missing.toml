@@ -1,5 +1,4 @@
-# invalid: kinds.tieude.model differs from the models.md routing cell.
-# Run with --models pointing at the repo models.md so the drift rule is active.
+# invalid: a fallback naming a kind that does not exist.
 schema_version = 2
 
 [strategy]
@@ -8,7 +7,9 @@ default_reviewer = ["suhuynh"]
 
 [kinds.tieude]
 harness = "opencode"
-model = "opencode-go/ghost"
+model = "opencode-go/deepseek-v4.1-flash"
+effort = "max"
+fallback = "ghost"
 can_review = false
 
 [kinds.suhuynh]

@@ -11,6 +11,10 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 src="$(cd "$here/.." && pwd)/scripts"
+root="$(cd "$here/.." && pwd)"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+export QUAQUA_BIN="$bin"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-pipeline.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -632,8 +636,10 @@ case "${1:-} ${2:-}" in
     fi
     exit "${FAKE_RC:-0}" ;;
   "agent start")
-    if [ "$3" = "${FAKE_FAIL_START:-}" ] && [ ! -f "$T/failed-$3" ]; then
-      : > "$T/failed-$3"; exit 1
+    n=$(cat "$T/failed-$3" 2>/dev/null || echo 0)
+    limit=${FAKE_FAIL_LIMIT:-2}
+    if [ "$3" = "${FAKE_FAIL_START:-}" ] && [ "$n" -lt "$limit" ]; then
+      echo $((n + 1)) > "$T/failed-$3"; exit 1
     fi ;;
   "agent wait")
     if [ "$3" = "${FAKE_FAIL_WAIT:-}" ] && [ ! -f "$T/failedw-$3" ]; then

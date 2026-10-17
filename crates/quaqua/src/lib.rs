@@ -5,7 +5,6 @@ pub mod config;
 pub mod workspace;
 pub mod gate;
 pub mod init;
-pub mod models;
 pub mod hash;
 pub mod git;
 pub mod herdr;
