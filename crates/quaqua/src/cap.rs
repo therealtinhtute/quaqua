@@ -82,7 +82,6 @@ pub fn count_owner_slots<H: HerdrOps>(
         }
     }
 
-    let mut o_live: i64 = 0;
     let mut o_workers = Vec::new();
     for w in &live_workers {
         let owner_file = runs_dir.join(format!("{w}.owner"));
@@ -91,7 +90,6 @@ pub fn count_owner_slots<H: HerdrOps>(
             .unwrap_or_default();
         let w_owner = if w_owner.is_empty() { "cos" } else { &w_owner };
         if w_owner == owner {
-            o_live += 1;
             o_workers.push(w.clone());
         }
     }
@@ -107,7 +105,8 @@ pub fn count_owner_slots<H: HerdrOps>(
         .copied()
         .unwrap_or(2);
 
-    let mut res_slots: i64 = 0;
+    let mut total_managed_slots: i64 = 0;
+    let mut covered_workers: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(entries) = std::fs::read_dir(runs_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -165,7 +164,11 @@ pub fn count_owner_slots<H: HerdrOps>(
                 let mut p_alive = false;
                 if !p_pid.is_empty() && is_pid_alive(&p_pid) {
                     p_alive = true;
-                } else if live_workers.iter().any(|a| a == &p_bname) {
+                } else if live_workers.iter().any(|a| {
+                    a == &p_bname
+                        || (!p_task.is_empty() && a.ends_with(&format!("-{p_task}")))
+                        || matches_pipeline_reviewer(a, &p_task)
+                }) {
                     p_alive = true;
                 }
 
@@ -177,16 +180,15 @@ pub fn count_owner_slots<H: HerdrOps>(
                             .map(|s| s.trim().to_string())
                             .unwrap_or_default();
                         let is_reviewer = matches_pipeline_reviewer(w, &p_task);
-                        if (!p_task.is_empty() && w_pipe == p_task)
+                        if (!p_task.is_empty() && (w_pipe == p_task || w.ends_with(&format!("-{p_task}"))))
                             || w == &p_bname
                             || is_reviewer
                         {
                             p_cur_live += 1;
+                            covered_workers.insert(w.clone());
                         }
                     }
-                    if p_cur_live < pipe_weight {
-                        res_slots += pipe_weight - p_cur_live;
-                    }
+                    total_managed_slots += p_cur_live.max(pipe_weight);
                 }
             } else if is_taskforce {
                 let mut t_lead = String::new();
@@ -262,14 +264,17 @@ pub fn count_owner_slots<H: HerdrOps>(
                                 || w.ends_with(&format!("-{t_task}dl2")))
                         {
                             t_cur_live += 1;
+                            covered_workers.insert(w.clone());
                         }
                     }
-                    if t_cur_live < weight {
-                        res_slots += weight - t_cur_live;
-                    }
+                    total_managed_slots += t_cur_live.max(weight);
                 }
             }
         }
     }
-    o_live + res_slots
+    let standalone_slots = o_workers
+        .iter()
+        .filter(|w| !covered_workers.contains(*w))
+        .count() as i64;
+    standalone_slots + total_managed_slots
 }
