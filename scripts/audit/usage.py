@@ -88,41 +88,72 @@ def get_token():
     return best
 
 
-def http_json(url, token, ua, attempts=4):
+class SourceUnavailable(Exception):
+    """A single data source failed after retries; the report continues without it."""
+
+    def __init__(self, source, reason):
+        super().__init__("%s unavailable: %s" % (source, reason))
+        self.source = source
+        self.reason = reason
+
+
+def http_json(url, token, ua, attempts=10):
+    """GET url, parse JSON; retry 5xx/429/network/bad-JSON with capped backoff.
+
+    Raises SourceUnavailable (never a bare exception) once retries are exhausted.
+    """
     last = "unknown error"
     for i in range(attempts):
-        req = urllib.request.Request(
-            url, headers={"Authorization": "Bearer " + token, "User-Agent": ua}
-        )
         try:
+            req = urllib.request.Request(
+                url, headers={"Authorization": "Bearer " + token, "User-Agent": ua}
+            )
             with urllib.request.urlopen(req, timeout=60) as r:
-                return json.loads(r.read())
+                body = r.read()
+            try:
+                return json.loads(body)
+            except ValueError:
+                last = "bad JSON"
         except urllib.error.HTTPError as e:
-            if e.code < 500:
-                raise RuntimeError("HTTP %s for %s" % (e.code, url)) from None
+            if e.code < 500 and e.code != 429:
+                raise SourceUnavailable(url, "HTTP %s" % e.code) from None
             last = "HTTP %s" % e.code
         except urllib.error.URLError as e:
             last = "network error: %s" % e.reason
         if i < attempts - 1:
-            time.sleep(1.0 + i)
-    raise RuntimeError("%s for %s" % (last, url))
+            time.sleep(min(2 ** i, 4))
+    raise SourceUnavailable(url, last)
 
 
 def fetch_request_logs(token, ua, cutoff_ms, until_ms):
-    """Page console request-logs backwards until rows older than cutoff_ms."""
-    rows, cursor = [], None
+    """Page console request-logs backwards until rows older than cutoff_ms.
+
+    Returns (rows, partial_reason): the first page failing raises; a failure
+    after some pages returns what was collected plus the failure reason.
+    """
+    rows, cursor, pages = [], None, 0
     for _ in range(200):  # safety
         q = {"limit": str(PAGE_LIMIT), "category": "inference", "until": str(until_ms)}
         if cursor:
             q["cursor"] = cursor
         url = CONSOLE_BASE + "/api/request-logs?" + urllib.parse.urlencode(q)
-        d = http_json(url, token, ua)
+        try:
+            d = http_json(url, token, ua)
+        except SourceUnavailable as e:
+            if not rows:
+                raise
+            return _dedupe(rows), "stopped after %d page(s): %s" % (pages, e.reason)
+        pages += 1
         items = d.get("items") or []
         rows.extend(items)
         cursor = d.get("nextCursor")
         oldest = min((i.get("startedAt") or 0) for i in items) if items else None
         if not items or not cursor or oldest is None or oldest < cutoff_ms:
             break
+    return _dedupe(rows), None
+
+
+def _dedupe(rows):
     seen, out = set(), []
     for r in rows:
         if r.get("id") not in seen:
@@ -136,7 +167,13 @@ def fetch_meter(token, ua):
 
 
 def fixture_logs(dirpath):
-    d = json.load(open(os.path.join(dirpath, "request_logs.json")))
+    path = os.path.join(dirpath, "request_logs.json")
+    try:
+        d = json.load(open(path))
+    except OSError:
+        raise SourceUnavailable("request-logs fixture", "missing %s" % path)
+    except ValueError:
+        raise SourceUnavailable("request-logs fixture", "bad JSON in %s" % path)
     rows = []
     for page in d.get("pages") or []:
         rows.extend(page.get("items") or [])
@@ -144,7 +181,13 @@ def fixture_logs(dirpath):
 
 
 def fixture_meter(dirpath):
-    return json.load(open(os.path.join(dirpath, "meter.json")))
+    path = os.path.join(dirpath, "meter.json")
+    try:
+        return json.load(open(path))
+    except OSError:
+        raise SourceUnavailable("meter fixture", "missing %s" % path)
+    except ValueError:
+        raise SourceUnavailable("meter fixture", "bad JSON in %s" % path)
 
 
 # ---------------------------------------------------------------- local db
@@ -331,10 +374,17 @@ def build_report(args):
     offline = bool(args.fixture_dir)
     local_ver = args.local_version
     notes, warn = [], False
+    logs_error, logs_partial, meter_error = None, None, None
 
     if offline:
-        raw_rows = fixture_logs(args.fixture_dir)
-        meter_raw = fixture_meter(args.fixture_dir)
+        try:
+            raw_rows = fixture_logs(args.fixture_dir)
+        except SourceUnavailable as e:
+            raw_rows, logs_error = [], e.reason
+        try:
+            meter_raw = fixture_meter(args.fixture_dir)
+        except SourceUnavailable as e:
+            meter_raw, meter_error = None, e.reason
         db_path = args.db or os.path.join(args.fixture_dir, "opencode.db")
         repo = args.repo or args.fixture_dir
     else:
@@ -342,8 +392,14 @@ def build_report(args):
         if local_ver is None:
             local_ver = local_version()
         ua = "opencode/%s" % local_ver if local_ver else "opencode"
-        raw_rows = fetch_request_logs(token, ua, cutoff_ms, anchor_ms)
-        meter_raw = fetch_meter(token, ua)
+        try:
+            raw_rows, logs_partial = fetch_request_logs(token, ua, cutoff_ms, anchor_ms)
+        except SourceUnavailable as e:
+            raw_rows, logs_error = [], e.reason
+        try:
+            meter_raw = fetch_meter(token, ua)
+        except SourceUnavailable as e:
+            meter_raw, meter_error = None, e.reason
         db_path = os.path.expanduser(args.db or DB_DEFAULT)
         repo = os.path.expanduser(args.repo or REPO_DEFAULT)
 
@@ -543,6 +599,13 @@ def build_report(args):
     for t in tasks.values():
         add_tokens(total_tokens, t["tokens"])
 
+    if logs_error:
+        notes.append("request-logs UNAVAILABLE: %s — report has no request data" % logs_error)
+    elif logs_partial:
+        notes.append("request-logs partial: %s" % logs_partial)
+    if meter_error:
+        notes.append("meter unavailable: %s" % meter_error)
+
     return {
         "generated": datetime.datetime.now(tz=datetime.timezone.utc).astimezone(VN_TZ).isoformat(),
         "offline": offline,
@@ -570,7 +633,12 @@ def build_report(args):
         "split": split_pct,
         "waste": waste,
         "meter": meter,
+        "meterUnavailable": meter_error,
+        "requestLogsError": logs_error,
+        "requestLogsPartial": logs_partial,
         "notes": notes,
+        # exit code: non-zero only when request-logs are missing entirely
+        "exit_code": 2 if logs_error else 0,
     }
 
 
@@ -596,6 +664,12 @@ def render_text(rep):
         rep["local_version"] or "?", t["requests"], t["cost"],
         kfmt(t["tokens"]["input"]), kfmt(t["tokens"]["output"]),
         kfmt(t["tokens"]["reasoning"]), kfmt(t["tokens"]["cache_read"])))
+    if rep.get("requestLogsError"):
+        L.append("[UNAVAILABLE] request-logs: %s — no request data in this report" % rep["requestLogsError"])
+    elif rep.get("requestLogsPartial"):
+        L.append("[PARTIAL] request-logs: %s" % rep["requestLogsPartial"])
+    if rep.get("meterUnavailable"):
+        L.append("[UNAVAILABLE] meter: %s" % rep["meterUnavailable"])
     if rep["warn_other_machine"]:
         L.append("[WARN] requests seen with a UA version different from local %s — possibly another machine:" % rep["local_version"])
         for m in rep["machines"]:
@@ -658,6 +732,8 @@ def render_text(rep):
 
     L.append("")
     L.append("== Meter (Go, /inference/go/v1/usage) ==")
+    if rep.get("meterUnavailable"):
+        L.append("unavailable: %s" % rep["meterUnavailable"])
     for win in ("rolling", "weekly", "monthly"):
         m = rep["meter"].get(win)
         if not m:
@@ -702,7 +778,7 @@ def main(argv=None):
         print(json.dumps(rep, indent=1, default=str))
     else:
         print(render_text(rep))
-    return 0
+    return rep.get("exit_code", 0)
 
 
 if __name__ == "__main__":

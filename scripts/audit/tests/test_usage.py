@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(HERE), "usage.py")
@@ -155,6 +156,104 @@ class UsageAuditTest(unittest.TestCase):
         text = run_script("--days", "3").stdout
         rep = json.loads(run_script("--days", "3", "--json").stdout)
         self.assertIn("$%.4f" % rep["totals"]["cost"], text)
+
+    def test_meter_unavailable_keeps_report(self):
+        tmp = tempfile.mkdtemp(prefix="usage-audit-metermiss-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        make_fixture_dir(tmp)
+        with open(os.path.join(tmp, "meter.json"), "w") as f:
+            f.write("not json {{{")
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "--fixture-dir", tmp, "--local-version", "2.0.32",
+             "--until", str(UNTIL_MS), "--days", "3", "--json"],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rep = json.loads(r.stdout)
+        self.assertIn("bad JSON", rep["meterUnavailable"])
+        self.assertEqual(rep["totals"]["cost"], 0.4)  # totals intact
+        txt = subprocess.run(
+            [sys.executable, SCRIPT, "--fixture-dir", tmp, "--local-version", "2.0.32",
+             "--until", str(UNTIL_MS), "--days", "3"],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(txt.returncode, 0)
+        self.assertIn("$0.4000", txt.stdout)
+        self.assertIn("unavailable: bad JSON", txt.stdout)
+
+    def test_logs_missing_exits_nonzero_but_renders(self):
+        tmp = tempfile.mkdtemp(prefix="usage-audit-logmiss-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        make_fixture_dir(tmp)
+        os.remove(os.path.join(tmp, "request_logs.json"))
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "--fixture-dir", tmp, "--local-version", "2.0.32",
+             "--until", str(UNTIL_MS), "--days", "3"],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("[UNAVAILABLE] request-logs", r.stdout)
+        self.assertIn("== Meter", r.stdout)  # the rest of the report still renders
+
+    def test_http_json_retries_with_capped_backoff(self):
+        import importlib.util
+        import urllib.error
+        module_path = os.path.join(os.path.dirname(HERE), "usage.py")
+        spec = importlib.util.spec_from_file_location("usage_mod", module_path)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+
+        calls = {"urlopen": 0, "sleep": []}
+
+        def fake_503(req, timeout=None):
+            calls["urlopen"] += 1
+            raise urllib.error.HTTPError(req.full_url, 503, "ServiceUnavailable", {}, None)
+
+        with unittest.mock.patch.object(m.urllib.request, "urlopen", fake_503), \
+             unittest.mock.patch.object(m.time, "sleep", lambda s: calls["sleep"].append(s)):
+            with self.assertRaises(m.SourceUnavailable) as ctx:
+                m.http_json("https://example.test/x", "tok", "ua", attempts=5)
+        self.assertIn("HTTP 503", str(ctx.exception))
+        self.assertEqual(calls["urlopen"], 5)
+        self.assertEqual(calls["sleep"], [1, 2, 4, 4])  # capped at 4s
+
+        # non-JSON body retries too, then reports bad JSON
+        calls["urlopen"] = 0
+        calls["sleep"] = []
+
+        class FakeResp(object):
+            def read(self):
+                return b"<html>503 Service Unavailable</html>"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_bad_json(req, timeout=None):
+            calls["urlopen"] += 1
+            return FakeResp()
+
+        with unittest.mock.patch.object(m.urllib.request, "urlopen", fake_bad_json), \
+             unittest.mock.patch.object(m.time, "sleep", lambda s: calls["sleep"].append(s)):
+            with self.assertRaises(m.SourceUnavailable) as ctx:
+                m.http_json("https://example.test/x", "tok", "ua", attempts=3)
+        self.assertIn("bad JSON", str(ctx.exception))
+        self.assertEqual(calls["urlopen"], 3)
+
+        # 4xx fails fast: one attempt, no sleep
+        calls["urlopen"] = 0
+        calls["sleep"] = []
+
+        def fake_404(req, timeout=None):
+            calls["urlopen"] += 1
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+        with unittest.mock.patch.object(m.urllib.request, "urlopen", fake_404), \
+             unittest.mock.patch.object(m.time, "sleep", lambda s: calls["sleep"].append(s)):
+            with self.assertRaises(m.SourceUnavailable) as ctx:
+                m.http_json("https://example.test/x", "tok", "ua", attempts=5)
+        self.assertIn("HTTP 404", str(ctx.exception))
+        self.assertEqual(calls["urlopen"], 1)
+        self.assertEqual(calls["sleep"], [])
 
 
 if __name__ == "__main__":
