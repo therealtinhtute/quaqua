@@ -1167,6 +1167,13 @@ fn lock_env() -> EnvLockGuard {
 }
 impl Drop for EnvLockGuard {
     fn drop(&mut self) {
+        std::env::remove_var("QUAQUA_RUNS_DIR");
+        std::env::remove_var("QUAQUA_OWNER");
+        std::env::remove_var("GRID_TAB");
+        std::env::remove_var("GRID_CHECK_TIMEOUT_SEC");
+        std::env::remove_var("HERDR_STUB_SNAPSHOT");
+        std::env::remove_var("GRID_SKIP");
+        std::env::remove_var("QUAQUA_TEST");
         ENV_BUSY.store(false, std::sync::atomic::Ordering::Release);
     }
 }
@@ -1179,6 +1186,8 @@ fn test_spawn_worker_fallback_scenarios() {
     let _ = std::fs::create_dir_all(&repo_dir);
     let _ = std::fs::create_dir_all(&runs_dir);
     std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
 
     // Scenario 1: Primary start fails (omp), falls back to detu (opencode), srt.json recorded
     {
@@ -1315,6 +1324,8 @@ fn test_spawn_worker_fallback_scenarios() {
     }
 
     std::env::remove_var("QUAQUA_RUNS_DIR");
+    std::env::remove_var("QUAQUA_TEST");
+    std::env::remove_var("GRID_SKIP");
     let _ = std::fs::remove_dir_all(&temp);
 }
 
@@ -1414,18 +1425,20 @@ fn test_cleanup_worker_grid_timeout_fails() {
 
     let res = quaqua::worker::cleanup::cleanup_worker("sude-gridfail", &repo_dir, &git, &herdr);
 
-    let err = res.expect_err("cleanup_worker must fail when grid check times out");
-    assert_eq!(err.0, 1);
-    assert!(err.1.contains("grid"), "error must mention grid: {}", err.1);
-    assert!(!wt.exists(), "worktree must be removed even when grid check fails");
-    assert!(!owner_file.exists(), "metadata must be removed even when grid check fails");
-
+    let wt_exists = wt.exists();
+    let owner_file_exists = owner_file.exists();
     std::env::remove_var("QUAQUA_RUNS_DIR");
     std::env::remove_var("QUAQUA_OWNER");
     std::env::remove_var("GRID_TAB");
     std::env::remove_var("GRID_CHECK_TIMEOUT_SEC");
     std::env::remove_var("HERDR_STUB_SNAPSHOT");
     let _ = std::fs::remove_dir_all(&temp);
+
+    let err = res.expect_err("cleanup_worker must fail when grid check times out");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("grid"), "error must mention grid: {}", err.1);
+    assert!(!wt_exists, "worktree must be removed even when grid check fails");
+    assert!(!owner_file_exists, "metadata must be removed even when grid check fails");
 }
 
 // --- quaqua worker stop ---------------------------------------------------
