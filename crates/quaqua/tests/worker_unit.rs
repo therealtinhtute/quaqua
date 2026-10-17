@@ -683,7 +683,7 @@ fn test_claude_review_mode_verification() {
 
 // --- quaqua worker stop ---------------------------------------------------
 
-use quaqua::worker::stop::{parse_stop_args, stop_keys, stop_worker};
+use quaqua::worker::stop::{harness_from_info, parse_stop_args, stop_keys, stop_worker};
 use std::sync::Mutex;
 
 fn agent_get_json(harness: &str) -> String {
@@ -693,15 +693,24 @@ fn agent_get_json(harness: &str) -> String {
 }
 
 /// Records the keys stop sends; everything else is unused by stop.
+/// `agent_get` is either an Ok body or an io failure (herdr unreachable).
 struct StopSpy {
-    agent_json: String,
+    agent_get: Result<String, String>,
     sent: Mutex<Vec<(String, String)>>,
 }
 
 impl StopSpy {
     fn new(agent_json: &str) -> Self {
         StopSpy {
-            agent_json: agent_json.to_string(),
+            agent_get: Ok(agent_json.to_string()),
+            sent: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// herdr itself cannot be reached (binary missing, socket down).
+    fn new_unreachable(io_message: &str) -> Self {
+        StopSpy {
+            agent_get: Err(io_message.to_string()),
             sent: Mutex::new(Vec::new()),
         }
     }
@@ -727,7 +736,10 @@ impl HerdrOps for StopSpy {
         unimplemented!()
     }
     fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
-        Ok((true, self.agent_json.clone()))
+        match &self.agent_get {
+            Ok(body) => Ok((true, body.clone())),
+            Err(message) => Err(std::io::Error::new(std::io::ErrorKind::Other, message.clone())),
+        }
     }
     fn agent_read(&self, _name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
         unimplemented!()
@@ -820,6 +832,28 @@ fn test_stop_missing_agent_fails_closed_and_sends_nothing() {
     let err = stop_worker("tieude-gone", &spy).unwrap_err();
     assert_eq!(err.0, 1);
     assert!(err.1.contains("tieude-gone"), "{}", err.1);
+    assert!(spy.calls().is_empty());
+}
+
+#[test]
+fn test_stop_harness_from_info_parses_only_a_real_agent() {
+    assert_eq!(harness_from_info(&agent_get_json("opencode")).as_deref(), Some("opencode"));
+    assert_eq!(harness_from_info(&agent_get_json("omp")).as_deref(), Some("omp"));
+    // Agent gone, harness missing/empty, or garbage: no harness, nothing to send.
+    assert_eq!(harness_from_info(r#"{"error":{"code":"agent_not_found"}}"#), None);
+    assert_eq!(harness_from_info(r#"{"result":{"agent":{"agent":""}}}"#), None);
+    assert_eq!(harness_from_info(r#"{"result":{}}"#), None);
+    assert_eq!(harness_from_info("not json"), None);
+}
+
+#[test]
+fn test_stop_unreachable_herdr_is_reported_as_io_not_missing_agent() {
+    let spy = StopSpy::new_unreachable("No such file or directory (os error 2)");
+    let err = stop_worker("tieude-x", &spy).unwrap_err();
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("cannot reach herdr"), "{}", err.1);
+    assert!(err.1.contains("No such file or directory"), "{}", err.1);
+    assert!(!err.1.contains("not running"), "herdr I/O is not a missing agent: {}", err.1);
     assert!(spy.calls().is_empty());
 }
 

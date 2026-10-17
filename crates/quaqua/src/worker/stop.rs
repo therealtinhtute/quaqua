@@ -2,8 +2,8 @@
 //!
 //! Interrupts a busy worker by sending the key sequence its harness needs —
 //! never `ctrl+c` (it kills opencode). The sequence is per harness and closed:
-//! a harness with no verified sequence is refused, nothing is sent
-//! (`rules/_all/worker-interrupt.md`).
+//! a harness with no verified sequence is refused, nothing is sent.
+//! No rule path is cited: the esc rule is not committed to the repo yet.
 
 use crate::herdr::HerdrOps;
 use crate::json::parse_json;
@@ -25,11 +25,12 @@ pub fn stop_keys(harness: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// Harness of a live agent, from `herdr agent get <name>` (`result.agent.agent`).
-/// `None` when the agent is gone, unknown, or herdr does not answer.
-pub fn agent_harness<H: HerdrOps>(herdr: &H, name: &str) -> Option<String> {
-    let (_ok, body) = herdr.agent_get(name).ok()?;
-    let json = parse_json(&body).ok()?;
+/// Harness of a live agent, parsed from `herdr agent get` output
+/// (`result.agent.agent`). `None` when the reply is an error (agent gone) or
+/// does not carry a harness — herdr I/O failures are reported by the caller,
+/// not folded into this.
+pub fn harness_from_info(body: &str) -> Option<String> {
+    let json = parse_json(body).ok()?;
     let harness = json.get("result")?.get("agent")?.get_str("agent")?;
     if harness.is_empty() {
         None
@@ -57,7 +58,14 @@ pub fn parse_stop_args(args: &[String]) -> Result<String, (i32, String)> {
 }
 
 pub fn stop_worker<H: HerdrOps>(name: &str, herdr: &H) -> Result<(), (i32, String)> {
-    let harness = agent_harness(herdr, name).ok_or_else(|| {
+    let (_ok, body) = herdr.agent_get(name).map_err(|e| {
+        (
+            1,
+            format!("error: cannot reach herdr to inspect agent {name}: {e} — nothing was sent\n"),
+        )
+    })?;
+
+    let harness = harness_from_info(&body).ok_or_else(|| {
         (
             1,
             format!("error: agent '{name}' is not running or unknown to herdr — nothing was sent\n"),
@@ -68,7 +76,7 @@ pub fn stop_worker<H: HerdrOps>(name: &str, herdr: &H) -> Result<(), (i32, Strin
         (
             1,
             format!(
-                "error: no verified stop sequence for harness '{harness}' (agent {name}) — nothing was sent (rules/_all/worker-interrupt.md)\n"
+                "error: no verified stop sequence for harness '{harness}' (agent {name}) — nothing was sent\n"
             ),
         )
     })?;
