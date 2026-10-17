@@ -96,6 +96,107 @@ pub fn brief_budget_sec(text: &str) -> Option<u64> {
     }
     None
 }
+pub fn brief_cost_budget(text: &str) -> Option<f64> {
+    for line in text.lines() {
+        let lower = line.to_lowercase();
+        if let Some(idx) = lower.find("cost budget:") {
+            let rest = line[idx + 12..].trim();
+            let num_str = rest.strip_prefix('$').unwrap_or(rest).trim();
+            let num_part: String = num_str
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            if let Ok(val) = num_part.parse::<f64>() {
+                if val > 0.0 {
+                    return Some(val);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn resolve_cost_budget(task: &str) -> Option<f64> {
+    if let Ok(env_val) = std::env::var("PROMPT_WORKER_COST_BUDGET") {
+        let trimmed = env_val.trim();
+        let num_str = trimmed.strip_prefix('$').unwrap_or(trimmed).trim();
+        if let Ok(val) = num_str.parse::<f64>() {
+            if val > 0.0 {
+                return Some(val);
+            }
+        }
+    }
+    brief_cost_budget(task)
+}
+
+pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) -> Option<f64> {
+    if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
+        if let Ok(content) = std::fs::read_to_string(&cost_file) {
+            if let Ok(val) = content.trim().parse::<f64>() {
+                return Some(val);
+            }
+        }
+        return None;
+    }
+
+    if harness != "opencode" && !name.starts_with("tieude-") {
+        return None;
+    }
+
+    if !session_id.is_empty() {
+        let mut cmd = Command::new("opencode");
+        cmd.args(["api", "GET", &format!("/api/session/{session_id}")]);
+
+        let state_dir = default_runs_dir().join(".opencode-state").join(name);
+        if state_dir.is_dir() {
+            cmd.env("XDG_STATE_HOME", &state_dir);
+        }
+        if let Ok(out) = cmd.output() {
+            if out.status.success() {
+                if let Ok(json_str) = std::str::from_utf8(&out.stdout) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Some(c) = v.get("data").and_then(|d| d.get("cost")).and_then(|c| c.as_f64()) {
+                            return Some(c);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut db_candidates = Vec::new();
+    let state_db = default_runs_dir().join(".opencode-state").join(name).join("opencode").join("opencode.db");
+    if state_db.is_file() {
+        db_candidates.push(state_db);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let home_db = std::path::PathBuf::from(home).join(".local/share/opencode/opencode.db");
+        if home_db.is_file() {
+            db_candidates.push(home_db);
+        }
+    }
+
+    for db_path in db_candidates {
+        let uri = format!("file:{}?mode=ro", db_path.display());
+        let query = if !cwd.is_empty() {
+            format!("SELECT cost FROM session_v2 WHERE directory = '{cwd}' ORDER BY time_updated DESC LIMIT 1;")
+        } else if !session_id.is_empty() {
+            format!("SELECT cost FROM session_v2 WHERE id = '{session_id}' LIMIT 1;")
+        } else {
+            continue;
+        };
+        if let Ok(out) = Command::new("sqlite3").arg(&uri).arg(&query).output() {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if let Ok(c) = text.trim().parse::<f64>() {
+                    return Some(c);
+                }
+            }
+        }
+    }
+
+    None
+}
 
 pub fn validate_env_budget_val(val: Option<&str>) -> Result<(), (i32, String)> {
     if let Some(v) = val {
@@ -236,6 +337,25 @@ fn question_seen(pane_text: &str) -> bool {
     }
     false
 }
+pub fn is_provider_timeout(pane_text: &str) -> bool {
+    let clean_lines: Vec<&str> = pane_text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let tail_count = clean_lines.len().min(5);
+    let tail = &clean_lines[clean_lines.len().saturating_sub(tail_count)..];
+    for line in tail {
+        let lower = line.to_lowercase();
+        if lower.contains("timed out waiting for response headers")
+            || lower.contains("timed out waiting for response data")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 
 fn lead_waiting(runs_dir: &Path, name: &str, watcher_pane: &str) -> bool {
     if !name.ends_with("-lead") {
@@ -312,7 +432,12 @@ pub struct Observation {
     pub diffstat: String,
     pub pane_text: String,
     pub fp: String,
+    pub diff_hash: String,
     pub watcher_pane: String,
+    pub hook_active: bool,
+    pub harness: String,
+    pub session_id: String,
+    pub cwd: String,
 }
 
 pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option<Observation> {
@@ -322,13 +447,20 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
     let mut diffstat = String::new();
     let mut watcher_pane = String::new();
     let mut cwd = String::new();
-
+    let mut hook_active = false;
+    let mut harness = String::new();
+    let mut session_id = String::new();
     let (_ok, get_info) = herdr.agent_get(name).unwrap_or((false, String::new()));
     if let Ok(json) = parse_json(&get_info) {
         if let Some(agent) = json.get("result").and_then(|r| r.get("agent")) {
             status = agent.get_str("agent_status").unwrap_or("unknown").to_string();
             cwd = agent.get_str("cwd").unwrap_or("").to_string();
             watcher_pane = agent.get_str("pane_id").unwrap_or("").to_string();
+            hook_active = agent.get_bool("screen_detection_skipped").unwrap_or(false);
+            harness = agent.get_str("agent").unwrap_or("").to_string();
+            if let Some(session) = agent.get("agent_session") {
+                session_id = session.get_str("value").unwrap_or("").to_string();
+            }
         } else if let Some(err) = json.get("error") {
             if err.get_str("code") == Some("agent_not_found") {
                 status = "gone".to_string();
@@ -337,6 +469,22 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
     }
     if status == "unknown" && get_info.contains("agent_not_found") {
         status = "gone".to_string();
+    }
+    if harness.is_empty() {
+        if let Ok(c) = std::fs::read_to_string(default_runs_dir().join(format!("{name}.srt.json"))) {
+            if let Ok(j) = parse_json(&c) {
+                if let Some(h) = j.get_str("running_harness").or_else(|| j.get_str("harness")) {
+                    harness = h.to_string();
+                }
+            }
+        }
+        if harness.is_empty() {
+            if name.starts_with("tieude-") {
+                harness = "opencode".to_string();
+            } else if name.starts_with("sude-") || name.starts_with("detu-") {
+                harness = "omp".to_string();
+            }
+        }
     }
 
     let mut pane_text = herdr
@@ -423,7 +571,12 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
         diffstat,
         pane_text,
         fp,
+        diff_hash: dh,
         watcher_pane,
+        hook_active,
+        harness,
+        session_id,
+        cwd,
     })
 }
 
@@ -448,6 +601,13 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let grace_file = runs_dir.join(format!(".{name}.grace"));
     let progress_file = runs_dir.join(format!(".{name}.progress"));
     let srt = runs_dir.join(format!("{name}.srt.json"));
+    let provider_retry_file = runs_dir.join(format!(".{name}.provider_retry"));
+    let autoext_file = runs_dir.join(format!(".{name}.autoext"));
+    let cost80_sentinel = runs_dir.join(format!(".{name}.cost80"));
+    let cost100_sentinel = runs_dir.join(format!(".{name}.cost100"));
+    let cost_budget: Option<f64> = resolve_cost_budget(task.unwrap_or(""));
+    let mut cost80_warned = cost80_sentinel.exists();
+    let mut cost100_warned = cost100_sentinel.exists();
 
     let max: u64 = std::env::var("PROMPT_WORKER_MAX_SEC")
         .ok()
@@ -466,6 +626,10 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(120);
+    let idle_fallback_sec: u64 = std::env::var("PROMPT_WORKER_IDLE_FALLBACK_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300.max(idle_sec));
     let gone_sec: u64 = std::env::var("PROMPT_WORKER_AGENT_GONE_SEC")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -489,6 +653,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
 
     let prev_elapsed: u64;
     let mut budget: u64;
+    let mut autoext_total: u64 = 0;
 
     if resume {
         prev_elapsed = std::fs::read_to_string(&elapsed_file)
@@ -504,6 +669,10 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             let _ = std::fs::write(&budget_file, format!("{budget}\n"));
             eprintln!("WATCHDOG extend +{ext}s (allowance {budget}s, cap {max}s)");
         }
+        autoext_total = std::fs::read_to_string(&autoext_file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
     } else {
         let task_str = task.unwrap_or("");
         prev_elapsed = 0;
@@ -513,6 +682,11 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         let _ = std::fs::remove_file(&sentinel);
         let _ = std::fs::remove_file(&grace_file);
         let _ = std::fs::remove_file(&progress_file);
+        let _ = std::fs::remove_file(&provider_retry_file);
+        let _ = std::fs::remove_file(&autoext_file);
+        let _ = std::fs::remove_file(&cost80_sentinel);
+        let _ = std::fs::remove_file(&cost100_sentinel);
+
 
         if out.exists() {
             let stale_path = format!("{}.stale.{}", out.display(), now_sec());
@@ -544,6 +718,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             let _ = herdr.agent_prompt_wait_background(name, &prompt_body, 1800000, file);
         }
     }
+    let mut last_autoext_dh = String::new();
+    let mut initial_dh_recorded = false;
 
     let start = now_sec();
     let rem_max = (max.saturating_sub(prev_elapsed)).max(1);
@@ -620,6 +796,23 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         if let Some(obs) = observe(herdr, git, name) {
             let st = obs.status.clone();
             let is_waiting = lead_waiting(&runs_dir, name, &obs.watcher_pane);
+            if let Some(budget_val) = cost_budget {
+                if !cost100_warned || !cost80_warned {
+                    if let Some(current_cost) = read_worker_cost(name, &obs.session_id, &obs.cwd, &obs.harness) {
+                        if !cost80_warned && current_cost >= budget_val * 0.8 {
+                            let _ = std::fs::write(&cost80_sentinel, format!("{current_cost}\n"));
+                            cost80_warned = true;
+                            eprintln!("WATCHDOG cost 80% | name={name} cost=${current_cost:.4} budget=${budget_val:.4}");
+                        }
+                        if !cost100_warned && current_cost >= budget_val {
+                            let _ = std::fs::write(&cost100_sentinel, format!("{current_cost}\n"));
+                            cost100_warned = true;
+                            eprintln!("WATCHDOG cost 100% | name={name} cost=${current_cost:.4} budget=${budget_val:.4}");
+                        }
+                    }
+                }
+            }
+
 
             if st == "gone" || (st == "unknown" && obs.pane_text.is_empty()) {
                 if gone_since == 0 {
@@ -631,6 +824,16 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             } else {
                 gone_since = 0;
             }
+            if (st == "idle" || st == "done")
+                && !provider_retry_file.exists()
+                && is_provider_timeout(&obs.pane_text)
+            {
+                let _ = std::fs::write(&provider_retry_file, format!("{now}\n"));
+                let _ = herdr.agent_prompt_nowait(name, "continue");
+                eprintln!("WATCHDOG provider timeout detected | name={name} — re-prompted session with 'continue'");
+                idle_since = 0;
+            }
+
 
             if st == "blocked" {
                 return Err(watchdog_exit(5, "agent blocked (question/permission pending)", &Some(obs), change_ts));
@@ -682,6 +885,10 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 }
                 fp_seen = true;
             }
+            if !initial_dh_recorded && !obs.diff_hash.is_empty() {
+                last_autoext_dh = obs.diff_hash.clone();
+                initial_dh_recorded = true;
+            }
 
             if now >= budget_deadline {
                 if !grace_used && last_progress > 0 && now - last_progress <= poll * 2 {
@@ -696,6 +903,24 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                         eprintln!("WATCHDOG grace +{grace}s (progressing)");
                     }
                 }
+                let max_autoext = budget / 2;
+                if autoext_total < max_autoext
+                    && !obs.diff_hash.is_empty()
+                    && obs.diff_hash != last_autoext_dh
+                {
+                    let rem = max_autoext.saturating_sub(autoext_total);
+                    let mut ext = (budget / 4).max(1).min(rem);
+                    if budget_deadline + ext > deadline {
+                        ext = deadline.saturating_sub(budget_deadline);
+                    }
+                    if ext > 0 {
+                        budget_deadline += ext;
+                        autoext_total += ext;
+                        last_autoext_dh = obs.diff_hash.clone();
+                        let _ = std::fs::write(&autoext_file, format!("{autoext_total}\n"));
+                        eprintln!("WATCHDOG auto-extend +{ext}s (diff progressing, cap {max}s, total +{autoext_total}s/+{max_autoext}s)");
+                    }
+                }
                 if now >= budget_deadline {
                     return Err(watchdog_exit(4, &format!("time budget {budget}s exceeded"), &Some(obs), change_ts));
                 }
@@ -707,7 +932,12 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 if idle_since == 0 {
                     idle_since = now;
                 }
-                if now - idle_since >= idle_sec {
+                let effective_idle = if !obs.hook_active && (obs.harness == "opencode" || obs.harness == "omp") {
+                    idle_fallback_sec
+                } else {
+                    idle_sec
+                };
+                if now - idle_since >= effective_idle {
                     return Err(watchdog_exit(3, &format!("agent {st} for {}s without run file", now - idle_since), &Some(obs), change_ts));
                 }
             } else {

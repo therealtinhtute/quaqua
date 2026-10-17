@@ -203,7 +203,7 @@ spawn "tieude-model" "tieude"
 [[ $rc -eq 0 ]] || fail "tieude: exit $rc, want 0: $(cat "$T/err")"
 grep -qF -- '--kind opencode' "$T/calls" \
   || fail "tieude: not an opencode start: $(cat "$T/calls")"
-grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":"opencode-go/deepseek-v4.1-flash#max","instructions":' "$T/calls" \
+grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"max"},"instructions":' "$T/calls" \
   || fail "tieude: model+effort not in OPENCODE_CONFIG_CONTENT: $(cat "$T/calls")"
 ! grep -q -- '--kind omp' "$T/calls" || fail "tieude: still spawned as omp: $(cat "$T/calls")"
 ! grep -q 'gemini' "$T/calls" || fail "tieude: gemini flag leaked: $(cat "$T/calls")"

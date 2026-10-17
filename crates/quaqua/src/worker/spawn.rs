@@ -143,6 +143,30 @@ pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, Stri
             ),
         ));
     }
+    if kind.harness == "opencode" {
+        match crate::config::opencode_model_variants(&kind.model) {
+            Some(allowed) => {
+                if !allowed.contains(&effort) {
+                    return Err((
+                        1,
+                        format!(
+                            "error: harness 'opencode' model '{}' does not take effort '{effort}' (kind '{kind_name}')\n",
+                            kind.model
+                        ),
+                    ));
+                }
+            }
+            None => {
+                return Err((
+                    1,
+                    format!(
+                        "error: opencode model '{}' is not in allowlist (fix: add model and variants to config.rs model_effort_allowed) (kind '{kind_name}')\n",
+                        kind.model
+                    ),
+                ));
+            }
+        }
+    }
     Ok(Launch {
         harness: kind.harness.clone(),
         model: kind.model.clone(),
@@ -161,11 +185,12 @@ pub struct LaunchCmd {
 /// Build the exact launch command for a resolved kind. opencode has no `--model`
 /// on the interactive TUI (`opencode --help` flags are --standalone/--server/
 /// --auto/--continue/--session/--prompt), so its model+effort travel as the
-/// config `model` value `<model>#<variant>` in the pane env (variant vocabulary =
-/// `ReasoningEffort`; `providerID/modelID#variant` is the documented form).
+/// config `model` object `{"providerID": "...", "model": "...", "variant": "..."}`
+/// in OPENCODE_CONFIG_CONTENT in the pane env.
 /// omp takes `--model`/`--thinking`, claude takes `--model`/`--effort`.
 pub fn build_launch_cmd(
     launch: &Launch,
+    name: &str,
     rules_file: &str,
     runs_dir: &str,
     wt: &str,
@@ -175,11 +200,17 @@ pub fn build_launch_cmd(
 
     let agent_args: Vec<String> = match launch.harness.as_str() {
         "opencode" => {
+            let (provider_id, model_id) = match launch.model.split_once('/') {
+                Some((p, m)) => (p, m),
+                None => ("opencode-go", launch.model.as_str()),
+            };
             let cfg = format!(
-                "{{\"model\":\"{}#{}\",\"instructions\":[\"{}\"]}}",
-                launch.model, launch.effort, rules_file
+                "{{\"model\":{{\"providerID\":\"{}\",\"model\":\"{}\",\"variant\":\"{}\"}},\"instructions\":[\"{}\"]}}",
+                provider_id, model_id, launch.effort, rules_file
             );
             split_envs.push(("OPENCODE_CONFIG_CONTENT".to_string(), cfg));
+            let state_dir = format!("{runs_dir}/.opencode-state/{name}");
+            split_envs.push(("XDG_STATE_HOME".to_string(), state_dir));
             vec!["--".to_string(), "--standalone".to_string(), "--auto".to_string()]
         }
         "omp" => vec![
@@ -466,7 +497,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let mut idx = 0;
     while idx < attempts.len() {
         let launch = attempts[idx].clone();
-        let cmd = build_launch_cmd(&launch, &rf_str, &runs_str, &wt_str, opts.review)?;
+        let cmd = build_launch_cmd(&launch, &opts.name, &rf_str, &runs_str, &wt_str, opts.review)?;
         let split_envs: Vec<(&str, &str)> = cmd
             .split_envs
             .iter()

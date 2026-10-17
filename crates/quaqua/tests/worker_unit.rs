@@ -464,6 +464,60 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+#[test]
+fn test_cap_pipeline_double_count_repro() {
+    // Repro for Cause (c): pipeline gridown2 has a live builder tieude-gridown2
+    // (e.g. after a fallback or non-default builder) without .pipeline sidecar.
+    // Must count as 2 slots (the pipeline once), not 3 (builder 1 + reserve 2).
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-doublecount-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let owner = "quaqua-rs-lead";
+
+    std::fs::write(temp_dir.join("tieude-gridown2.owner"), format!("{owner}\n")).unwrap();
+    // No tieude-gridown2.pipeline file written
+    std::fs::write(
+        temp_dir.join("pipeline-gridown2.state"),
+        format!("repo=/repo\nbuilder=sude\nphase=build\nround=1\nfinished=0\nlead=quaqua-rs-lead\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"tieude-gridown2","agent_status":"working"}]}}"#.to_string(),
+    };
+
+    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    assert_eq!(count, 2, "a pipeline must count once (2 slots), never double-count to 3");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+#[test]
+fn test_cost_budget_parser_and_reader() {
+    use quaqua::worker::prompt::{brief_cost_budget, read_worker_cost};
+
+    let b1 = "Goal: test\nHard constraints: none\nCurrent design: none\nCost budget: $0.001\nTime budget: 5 min";
+    assert_eq!(brief_cost_budget(b1), Some(0.001));
+
+    let b2 = "Goal: test\nCost budget: $2.50\n";
+    assert_eq!(brief_cost_budget(b2), Some(2.5));
+
+    let b3 = "Goal: test\nCost budget: 0.75\n";
+    assert_eq!(brief_cost_budget(b3), Some(0.75));
+
+    let b4 = "Goal: test\nNo cost line";
+    assert_eq!(brief_cost_budget(b4), None);
+
+    // Cost reader via PROMPT_WORKER_COST_FILE fixture
+    let tmp = std::env::temp_dir().join(format!("cost-fixture-{}", std::process::id()));
+    std::fs::write(&tmp, "0.4242\n").unwrap();
+    std::env::set_var("PROMPT_WORKER_COST_FILE", &tmp);
+    let cost = read_worker_cost("tieude-test", "ses_123", "/tmp", "opencode");
+    assert_eq!(cost, Some(0.4242));
+    std::env::remove_var("PROMPT_WORKER_COST_FILE");
+    let _ = std::fs::remove_file(&tmp);
+
+    // Non-opencode without fixture returns None
+    assert_eq!(read_worker_cost("sude-test", "ses_123", "/tmp", "omp"), None);
+}
 
 #[test]
 fn test_runs_dir_resolution_n5() {
@@ -866,15 +920,32 @@ fn test_launch_args_carry_exact_model_and_effort() {
             effort: "max".into(),
         }
     );
-    let cmd = build_launch_cmd(&oc, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+    let cmd = build_launch_cmd(&oc, "tieude-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
         .unwrap();
-    assert_eq!(cmd.split_envs.len(), 1);
+    assert_eq!(cmd.split_envs.len(), 2);
     assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
     assert_eq!(
         cmd.split_envs[0].1,
-        r#"{"model":"opencode-go/deepseek-v4.1-flash#max","instructions":["/r/x.rules.md"]}"#
+        r#"{"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"max"},"instructions":["/r/x.rules.md"]}"#
+    );
+    assert_eq!(cmd.split_envs[1].0, "XDG_STATE_HOME");
+    assert_eq!(cmd.split_envs[1].1, "~/quaqua/runs/.opencode-state/tieude-test");
+
+    // opencode carries "low" variant as object
+    let oc_low = resolve_launch(
+        &kind("opencode", "opencode-go/deepseek-v4.1-flash", Some("low")),
+        "tieude",
+    )
+    .unwrap();
+    let cmd_low = build_launch_cmd(&oc_low, "tieude-low", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+        .unwrap();
+    assert_eq!(
+        cmd_low.split_envs[0].1,
+        r#"{"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"low"},"instructions":["/r/x.rules.md"]}"#
     );
     assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
+    assert_eq!(cmd_low.split_envs[1].0, "XDG_STATE_HOME");
+    assert_eq!(cmd_low.split_envs[1].1, "~/quaqua/runs/.opencode-state/tieude-low");
 
     // omp: `--model` + `--thinking` (`omp --help`).
     let omp = resolve_launch(
@@ -882,7 +953,7 @@ fn test_launch_args_carry_exact_model_and_effort() {
         "sude",
     )
     .unwrap();
-    let cmd = build_launch_cmd(&omp, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+    let cmd = build_launch_cmd(&omp, "sude-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
         .unwrap();
     assert!(cmd.split_envs.is_empty(), "omp takes no pane env");
     let joined = cmd.agent_args.join(" ");
@@ -894,7 +965,7 @@ fn test_launch_args_carry_exact_model_and_effort() {
 
     // claude: `--model` (mapped to claude-*) + `--effort` (`claude --help`).
     let cl = resolve_launch(&kind("claude", "opus-5.5", Some("high")), "truonglao").unwrap();
-    let cmd = build_launch_cmd(&cl, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", true)
+    let cmd = build_launch_cmd(&cl, "truonglao-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", true)
         .unwrap();
     let joined = cmd.agent_args.join(" ");
     assert!(joined.contains("--model claude-opus-5-5"), "{joined}");
@@ -914,6 +985,33 @@ fn test_launch_fails_closed_without_model_or_effort() {
         .unwrap_err()
         .1;
     assert!(e.contains("does not take effort 'banana'"), "{e}");
+
+    // opencode model variant vocabulary is enforced per-model
+    let e = resolve_launch(
+        &kind("opencode", "opencode-go/deepseek-v4.1-flash", Some("medium")),
+        "tieude",
+    )
+    .unwrap_err()
+    .1;
+    assert!(e.contains("does not take effort 'medium'"), "{e}");
+
+    // openrouter model variant vocabulary is matched on last segment
+    let e = resolve_launch(
+        &kind("opencode", "openrouter/deepseek/deepseek-v4.1-flash", Some("medium")),
+        "tieude",
+    )
+    .unwrap_err()
+    .1;
+    assert!(e.contains("does not take effort 'medium'"), "{e}");
+
+    // unknown opencode model rejected with allowlist error
+    let e = resolve_launch(
+        &kind("opencode", "opencode-go/unknown-model", Some("max")),
+        "tieude",
+    )
+    .unwrap_err()
+    .1;
+    assert!(e.contains("is not in allowlist"), "{e}");
 
     // claude's vocabulary is narrower than opencode's
     let e = resolve_launch(&kind("claude", "m", Some("minimal")), "ni")
@@ -1215,7 +1313,7 @@ fn test_cfg_with_fallback() -> config::Config {
         "detu".to_string(),
         config::Kind {
             harness: "opencode".to_string(),
-            model: "deepseek".to_string(),
+            model: "deepseek-v4.1-flash".to_string(),
             effort: Some("max".to_string()),
             fallback: Some("tieude".to_string()),
             can_review: false,
@@ -1702,4 +1800,56 @@ fn test_stop_requires_exactly_one_valid_name() {
     assert!(parse_stop_args(&["Tieude-X".to_string()]).is_err());
     assert!(parse_stop_args(&["--force".to_string()]).is_err());
     assert_eq!(parse_stop_args(&["tieude-x".to_string()]).unwrap(), "tieude-x");
+}
+
+#[test]
+fn test_cleanup_worker_removes_per_worker_opencode_state() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-clean-state-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    let worker_name = "tieude-cleanup";
+    let wt = temp.join(".wt").join(worker_name);
+    std::fs::create_dir_all(&wt).unwrap();
+
+    let state_dir = runs_dir.join(".opencode-state").join(worker_name);
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(state_dir.join("model.json"), "{}").unwrap();
+    assert!(state_dir.exists());
+
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    struct CleanHerdr;
+    impl HerdrOps for CleanHerdr {
+        fn run(&self, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
+        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
+            Ok((true, r#"{"result":{"agent":{"pane_id":"w1:p2"}}}"#.to_string()))
+        }
+        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
+            Ok(Output { status: std::process::ExitStatus::default(), stdout: vec![], stderr: vec![] })
+        }
+        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool { unimplemented!() }
+        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
+    }
+    let git = SpawnTestGit;
+    let herdr = CleanHerdr;
+    let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
+    assert!(res.is_ok(), "cleanup_worker failed: {:?}", res);
+    assert!(!state_dir.exists(), "per-worker state dir must be removed on cleanup");
+
+    let _ = std::fs::remove_dir_all(&temp);
 }

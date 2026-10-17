@@ -16,7 +16,12 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$(cd "$here/.." && pwd)/scripts"
+root="$(cd "$here/.." && pwd)"
+src="$root/scripts"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+export QUAQUA_BIN="$bin"
+export PATH="$root/target/debug:$PATH"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-prompt-watchdog.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -49,10 +54,31 @@ case "${1:-} ${2:-}" in
     if gone_now; then
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3" >&2; exit 1
     fi
-    printf '{"result":{"agent":{"agent_status":"%s","cwd":"%s","pane_id":"%s"}}}\n' \
-      "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" "${FAKE_WATCHER_PANE:-%1}" ;;
+    hook_json=""
+    [ "${FAKE_HOOK:-0}" = 1 ] && hook_json=',"screen_detection_skipped":true'
+    agent_json=""
+    [ -n "${FAKE_HARNESS:-}" ] && agent_json=",\"agent\":\"$FAKE_HARNESS\""
+    printf '{"result":{"agent":{"agent_status":"%s","cwd":"%s","pane_id":"%s"%s%s}}}\n' \
+      "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" "${FAKE_WATCHER_PANE:-%1}" "$hook_json" "$agent_json" ;;
   "agent read")
     gone_now && { printf '{"error":{"code":"agent_not_found"}}\n' >&2; exit 1; }
+    if [ "${FAKE_DIFF_PROGRESS:-0}" = 1 ] && [ -n "${FAKE_CWD:-}" ] && [ -d "$FAKE_CWD/.git" ]; then
+      n=$(cat "$FAKE_CWD/.diffcnt" 2>/dev/null || echo 0); n=$(( n + 1 ))
+      echo "$n" > "$FAKE_CWD/.diffcnt"
+      echo "diff-$n" >> "$FAKE_CWD/changed.txt"
+    fi
+    if [ "${FAKE_ADVANCE_COST:-0}" = 1 ] && [ -n "${PROMPT_WORKER_COST_FILE:-}" ]; then
+      cstep=$(cat "$HOME/.coststep" 2>/dev/null || echo 0)
+      cstep=$(( cstep + 1 ))
+      echo "$cstep" > "$HOME/.coststep"
+      if [ "$cstep" -eq 1 ]; then
+        echo "0.85" > "$PROMPT_WORKER_COST_FILE"
+      elif [ "$cstep" -eq 2 ]; then
+        echo "1.15" > "$PROMPT_WORKER_COST_FILE"
+      elif [ "$cstep" -ge 3 ]; then
+        printf 'fake summary\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md"
+      fi
+    fi
     if [ "${FAKE_READ_ERR:-0}" = 1 ] && [[ $* == *recent-unwrapped* ]]; then
       printf '{"error":{"code":"agent_not_idle"}}\n'; exit 1
     fi
@@ -73,6 +99,9 @@ case "${1:-} ${2:-}" in
       printf '%s\n' "${FAKE_PANE:-some pane text}"
     fi ;;
   "agent prompt")
+    if [ "${FAKE_WRITE_ON_CONTINUE:-0}" = 1 ] && [[ $* == *continue* ]]; then
+      printf 'fake summary\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md"
+    fi
     if [ "${FAKE_DELAY:-0}" != 0 ]; then
       ( sleep "$FAKE_DELAY"; printf 'fake summary\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$FAKE_NAME.md" ) &
     fi
@@ -121,6 +150,15 @@ run() {
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
     env "${clock[@]}" "$@" bash "$src/worker/prompt-worker.sh" "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
+}
+run_brief() {
+  local name=$1 btext=$2; shift 2
+  local clock=("${CLK[@]}") a
+  for a in "$@"; do [[ $a == REAL_CLOCK=1 ]] && clock=(); done
+  : > "$T/calls"
+  rc=0
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
+    env "${clock[@]}" "$@" bash "$src/worker/prompt-worker.sh" "$name" "$btext" >"$T/out" 2>"$T/err" || rc=$?
 }
 # resume <name> [--extend <sec>] [VAR=val...] — resume wait; same capture
 # (virtual clock by default, REAL_CLOCK=1 to opt out — see run)
@@ -238,6 +276,68 @@ run sude-gracecap FAKE_DELAY=0 FAKE_ROTATE=1 PROMPT_WORKER_POLL_SEC=1 \
 grep -q 'WATCHDOG grace' "$T/err" \
   || fail "sude-gracecap: grace never granted before the cap: $(cat "$T/err")"
 echo "ok: grace clamped by the cap -> exit 2 at the cap"
+# ── (a) pane churn alone does not earn auto-extend -> exit 4 after grace ─────
+run sude-autoext FAKE_DELAY=0 FAKE_ROTATE=1 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=10 PROMPT_WORKER_BUDGET_SEC=4 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-autoext: exit $rc, want 4: $(cat "$T/err")"
+grep -q 'WATCHDOG grace +1s (progressing)' "$T/err" \
+  || fail "sude-autoext: no grace line: $(cat "$T/err")"
+! grep -q 'WATCHDOG auto-extend' "$T/err" \
+  || fail "sude-autoext: pane churn earned auto-extend: $(cat "$T/err")"
+grep -qE 'elapsed=[5-9]s ' "$T/err" \
+  || fail "sude-autoext: exited before grace ran: $(cat "$T/err")"
+echo "ok: pane churn alone does not earn auto-extend -> exit 4 after grace"
+
+# ── (a) worktree diff progress earns bounded auto-extend (<= +50% budget) ────
+mkdir -p "$T/repo"
+git -C "$T/repo" init -q
+echo "initial" > "$T/repo/changed.txt"
+git -C "$T/repo" add changed.txt
+git -C "$T/repo" -c user.email=t@t -c user.name=t commit -qm init
+run sude-diffext FAKE_DELAY=0 FAKE_ROTATE=1 FAKE_DIFF_PROGRESS=1 FAKE_CWD="$T/repo" \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=10 \
+  PROMPT_WORKER_BUDGET_SEC=4 PROMPT_WORKER_MAX_SEC=60
+[[ $rc -eq 4 ]] || fail "sude-diffext: exit $rc, want 4 (bounded at +50%): $(cat "$T/err")"
+grep -q 'WATCHDOG grace +1s (progressing)' "$T/err" \
+  || fail "sude-diffext: no grace line: $(cat "$T/err")"
+grep -q 'WATCHDOG auto-extend' "$T/err" \
+  || fail "sude-diffext: no auto-extend: $(cat "$T/err")"
+[[ -f "$T/home/quaqua/runs/.sude-diffext.autoext" ]] \
+  || fail "sude-diffext: no .autoext sidecar"
+grep -qE 'elapsed=[7-9]s ' "$T/err" \
+  || fail "sude-diffext: did not wait through extension: $(cat "$T/err")"
+echo "ok: diff progress earns auto-extend (bounded to <= +50% budget) -> exit 4"
+# ── COST BUDGET: crossing 80% then 100% prints each line once ───────────────
+cost_brief='Goal: test cost budget
+Hard constraints: none
+Current design: test
+Cost budget: $1.00
+Time budget: 5 min'
+
+echo "0.50" > "$T/cost"
+run_brief sude-cost "$cost_brief" FAKE_DELAY=0 FAKE_ADVANCE_COST=1 \
+  PROMPT_WORKER_COST_FILE="$T/cost" PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 0 ]] || fail "sude-cost: exit $rc, want 0: $(cat "$T/err")"
+[[ $(grep -c 'WATCHDOG cost 80%' "$T/err") -eq 1 ]] \
+  || fail "sude-cost: cost 80% not printed exactly once: $(cat "$T/err")"
+[[ $(grep -c 'WATCHDOG cost 100%' "$T/err") -eq 1 ]] \
+  || fail "sude-cost: cost 100% not printed exactly once: $(cat "$T/err")"
+[[ -f "$T/home/quaqua/runs/.sude-cost.cost80" ]] \
+  || fail "sude-cost: cost80 sentinel not written"
+[[ -f "$T/home/quaqua/runs/.sude-cost.cost100" ]] \
+  || fail "sude-cost: cost100 sentinel not written"
+echo "ok: cost budget crossing 80% then 100% prints each warning line once, no kill"
+
+# resume does not re-send warnings
+resume sude-cost PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 0 ]] || fail "sude-cost resume: exit $rc, want 0: $(cat "$T/err")"
+[[ $(grep -c 'WATCHDOG cost 80%' "$T/err") -eq 0 ]] \
+  || fail "sude-cost resume: re-sent cost 80%"
+[[ $(grep -c 'WATCHDOG cost 100%' "$T/err") -eq 0 ]] \
+  || fail "sude-cost resume: re-sent cost 100%"
+echo "ok: --resume does not re-send cost budget warnings"
+
 
 # ── D1: --resume without --extend keeps the old fast exit 4 ────────────────
 run sude-noext FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
@@ -300,6 +400,47 @@ echo "ok: agent idle without run file -> exit 3"
 # (or be lost), and the old watchdog just polled with status=idle until the
 # 120s idle path. LAND_SEC is the post-prompt window to confirm the prompt
 # landed; the recovery is one `agent send-keys <name> enter`.
+# ── (b) omp/opencode pane-idle fallback gets longer grace than hook state ───
+run sude-omp-fallback FAKE_DELAY=0 FAKE_STATUS=idle FAKE_HARNESS=omp \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_IDLE_FALLBACK_SEC=3 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "sude-omp-fallback: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'elapsed=[3-9]s' "$T/err" \
+  || fail "sude-omp-fallback: exited before fallback grace (elapsed < 3s): $(cat "$T/err")"
+echo "ok: omp pane-idle fallback outlasts IDLE_SEC to IDLE_FALLBACK_SEC"
+
+run sude-omp-hook FAKE_DELAY=0 FAKE_STATUS=idle FAKE_HARNESS=omp FAKE_HOOK=1 \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_IDLE_FALLBACK_SEC=5 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "sude-omp-hook: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'elapsed=[1-2]s' "$T/err" \
+  || fail "sude-omp-hook: hook state did not exit at IDLE_SEC: $(cat "$T/err")"
+echo "ok: omp with hook authority exits at IDLE_SEC directly"
+# ── (d) opencode provider timeout: in-place resume with 'continue' prompt ───
+run sude-timeout FAKE_DELAY=0 FAKE_STATUS=idle \
+  FAKE_PANE='error: Timed out waiting for response headers' \
+  FAKE_WRITE_ON_CONTINUE=1 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=2 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 0 ]] || fail "sude-timeout: exit $rc, want 0: $(cat "$T/err")"
+grep -q 'WATCHDOG provider timeout detected' "$T/err" \
+  || fail "sude-timeout: no timeout detection notice: $(cat "$T/err")"
+grep -q 'agent prompt sude-timeout continue' "$T/calls" \
+  || fail "sude-timeout: continue prompt not sent: $(cat "$T/calls")"
+[[ -f "$T/home/quaqua/runs/.sude-timeout.provider_retry" ]] \
+  || fail "sude-timeout: provider_retry sentinel not written"
+echo "ok: opencode provider timeout detected -> in-place resume with continue"
+run sude-no-timeout-working FAKE_DELAY=0 FAKE_STATUS=working \
+  FAKE_PANE='grep "Timed out waiting for response headers" in file' \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=1 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "sude-no-timeout-working: exit $rc, want 3 (stall)"
+! grep -q 'WATCHDOG provider timeout detected' "$T/err" \
+  || fail "sude-no-timeout-working: timeout triggered while working"
+! grep -q 'agent prompt sude-no-timeout-working continue' "$T/calls" \
+  || fail "sude-no-timeout-working: continue prompt sent while working"
+echo "ok: provider timeout ignored when status is working"
+
+
+
 printf '%s\n' 1700000000 > "$T/clock"
 run sude-landstall FAKE_DELAY=0 FAKE_STATUS=idle FAKE_PANE='empty input box' \
   PROMPT_WORKER_LAND_SEC=2 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=9999 \
