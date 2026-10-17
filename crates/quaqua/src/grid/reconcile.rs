@@ -119,8 +119,27 @@ pub fn filter_ops_for_check<'a>(
             // from the group token (group `quaqua`, tab `quaqua-rs-workers`):
             // every op was dropped, so `--check` returned Ok on any layout.
             if let Some(tab) = tab_filter {
-                if !tab.is_empty() && !accepts_workers_tab(pgroup, pgtab, Some(tab)) {
-                    return false;
+                if !tab.is_empty() {
+                    if !accepts_workers_tab(pgroup, pgtab, Some(tab)) {
+                        return false;
+                    }
+                    let base = pgtab.unwrap_or(pgroup);
+                    let is_chunk_1_filter = tab == super::plan::chunk_tab_label(base, 1) || tab == format!("{pgroup}-workers-2");
+                    if is_chunk_1_filter {
+                        let op_matches = match &op.target {
+                            Target::NewTab { label } => label == tab,
+                            Target::Split { tab: target_tab, .. } => {
+                                if target_tab == "@workers-2" {
+                                    true
+                                } else {
+                                    snapshot.tabs.iter().any(|t| t.tab_id == *target_tab && t.label.as_deref() == Some(tab))
+                                }
+                            }
+                        };
+                        if !op_matches {
+                            return false;
+                        }
+                    }
                 }
             }
 
@@ -276,39 +295,9 @@ pub fn run_reconcile<D: HerdrDriver>(
         if n == 0 {
             continue;
         }
-        if n > 4 {
-            return Err(format!("too many workers in group {group}: {n} (max 4)"));
+        if n > 8 {
+            return Err(format!("too many workers in group {group}: {n} (max 8)"));
         }
-
-        // Pivot: the tab is created by an idle worker, never by a working one.
-        // A deferred anchor must not cancel the runnable panes of its own group
-        // (a working pane is never moved, but the idle ones still are; the
-        // working pane is reported deferred and a later pass moves it).
-        let build_orders = match n {
-            1 => vec![0],
-            2 => vec![0, 1],
-            3 => vec![0, 2, 1],
-            4 => vec![0, 2, 1, 3],
-            _ => vec![],
-        };
-        let pivot_idx = gws
-            .iter()
-            .position(|w| !is_deferred(w.agent_status.as_deref()))
-            .unwrap_or(0);
-        let mut order = build_orders.clone();
-        if let Some(p) = order.iter().position(|i| *i == pivot_idx) {
-            order.remove(p);
-        }
-        order.insert(0, pivot_idx);
-
-        // A deferred (working) pane must never drain its group: it can neither
-        // create the tab nor anchor an idle pane's split (propagate_deferrals
-        // would cancel that split too).
-        let deferred_ids: HashSet<&str> = gws
-            .iter()
-            .filter(|w| is_deferred(w.agent_status.as_deref()))
-            .map(|w| w.pane_id.as_str())
-            .collect();
 
         // Determine movable workers under --only for this group
         for w in &gws {
@@ -357,109 +346,198 @@ pub fn run_reconcile<D: HerdrDriver>(
             // `grid_tab` token, so a repair without `--tab` still reuses the tab
             // the panes were spawned into instead of creating a second one.
             let expected_tab = requested.clone().or_else(|| group_expected_tab(&gws));
-            let mut matching_tabs: Vec<&super::types::Tab> = snap
-                .tabs
-                .iter()
-                .filter(|t| {
-                    let ws_ok = t.workspace_id.as_deref() == Some(owner_ws) || owner_ws.is_empty();
-                    let anchor_ok = anchor_tab.map(|at| t.tab_id != at).unwrap_or(true);
-                    let group_ok =
-                        accepts_workers_tab(group, expected_tab.as_deref(), t.label.as_deref());
-                    if !(ws_ok && anchor_ok && group_ok) {
-                        return false;
-                    }
-                    let occ: Vec<&super::types::Pane> = snap
-                        .panes
-                        .iter()
-                        .filter(|p| p.tab_id.as_deref() == Some(&t.tab_id))
-                        .collect();
-                    if occ.is_empty() {
-                        return false;
-                    }
-                    occ.iter().all(|p| gws.iter().any(|gw| gw.pane_id == p.pane_id))
-                })
-                .collect();
+            let base_tab = expected_tab.clone().unwrap_or_else(|| group.clone());
 
-            matching_tabs.sort_by_key(|t| {
-                let l = t.label.as_deref().unwrap_or("");
-                let exact = l == group
-                    || l == format!("{group}-workers")
-                    || l == group.strip_suffix("-workers").unwrap_or(group);
-                if exact { 0 } else { 1 }
-            });
-
-            let valid_tab = matching_tabs.first().copied();
-
-            let mut present: Vec<String> = if let Some(vt) = valid_tab {
-                snap.panes
-                    .iter()
-                    .filter(|p| p.tab_id.as_deref() == Some(&vt.tab_id))
-                    .map(|p| p.pane_id.clone())
-                    .collect()
+            let chunks: Vec<&[&super::types::Pane]> = if n <= 4 {
+                vec![&gws[..]]
             } else {
-                Vec::new()
+                vec![&gws[..4], &gws[4..]]
             };
 
-            let target_tab_ref = valid_tab
-                .map(|t| t.tab_id.clone())
-                .unwrap_or_else(|| "@workers".to_string());
+            for (chunk_idx, chunk_gws) in chunks.into_iter().enumerate() {
+                let m = chunk_gws.len();
+                if m == 0 {
+                    continue;
+                }
 
-            for (pos, idx) in order.iter().copied().enumerate() {
-                let w = gws[idx];
-                let is_movable = movable_workers.iter().any(|(p, _)| p.pane_id == w.pane_id);
+                let chunk_label = super::plan::chunk_tab_label(&base_tab, chunk_idx);
+                let chunk_ref = super::plan::chunk_tab_ref(chunk_idx);
 
-                if !is_movable {
-                    // Unlisted worker: if it is already in valid_tab, track in present
-                    if valid_tab.map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id)).unwrap_or(false) {
+                let build_orders = match m {
+                    1 => vec![0],
+                    2 => vec![0, 1],
+                    3 => vec![0, 2, 1],
+                    4 => vec![0, 2, 1, 3],
+                    _ => vec![],
+                };
+                // Pivot: the tab is created by an idle worker, never by a working one.
+                // A deferred anchor must not cancel the runnable panes of its own group
+                // (a working pane is never moved, but the idle ones still are; the
+                // working pane is reported deferred and a later pass moves it).
+                let pivot_idx = chunk_gws
+                    .iter()
+                    .position(|w| !is_deferred(w.agent_status.as_deref()))
+                    .unwrap_or(0);
+                let mut order = build_orders.clone();
+                if let Some(p) = order.iter().position(|i| *i == pivot_idx) {
+                    order.remove(p);
+                }
+                order.insert(0, pivot_idx);
+
+                // A deferred (working) pane must never drain its group: it can neither
+                // create the tab nor anchor an idle pane's split (propagate_deferrals
+                // would cancel that split too).
+                let deferred_ids: HashSet<&str> = chunk_gws
+                    .iter()
+                    .filter(|w| is_deferred(w.agent_status.as_deref()))
+                    .map(|w| w.pane_id.as_str())
+                    .collect();
+
+                let mut matching_tabs: Vec<&super::types::Tab> = snap
+                    .tabs
+                    .iter()
+                    .filter(|t| {
+                        let ws_ok = t.workspace_id.as_deref() == Some(owner_ws) || owner_ws.is_empty();
+                        let anchor_ok = anchor_tab.map(|at| t.tab_id != at).unwrap_or(true);
+                        let group_ok =
+                            super::plan::accepts_chunk_tab(group, expected_tab.as_deref(), chunk_idx, t.label.as_deref());
+                        if !(ws_ok && anchor_ok && group_ok) {
+                            return false;
+                        }
+                        let occ: Vec<&super::types::Pane> = snap
+                            .panes
+                            .iter()
+                            .filter(|p| p.tab_id.as_deref() == Some(&t.tab_id))
+                            .collect();
+                        if occ.is_empty() {
+                            return false;
+                        }
+                        occ.iter().all(|p| gws.iter().any(|gw| gw.pane_id == p.pane_id))
+                    })
+                    .collect();
+
+                matching_tabs.sort_by_key(|t| {
+                    let l = t.label.as_deref().unwrap_or("");
+                    let exact = l == chunk_label;
+                    if exact { 0 } else { 1 }
+                });
+
+                let valid_tab = matching_tabs.first().copied();
+
+                let mut present: Vec<String> = if let Some(vt) = valid_tab {
+                    snap.panes
+                        .iter()
+                        .filter(|p| p.tab_id.as_deref() == Some(&vt.tab_id))
+                        .map(|p| p.pane_id.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                let target_tab_ref = valid_tab
+                    .map(|t| t.tab_id.clone())
+                    .unwrap_or_else(|| chunk_ref.clone());
+
+                for (pos, idx) in order.iter().copied().enumerate() {
+                    let w = chunk_gws[idx];
+                    let is_movable = movable_workers.iter().any(|(p, _)| p.pane_id == w.pane_id);
+
+                    if !is_movable {
+                        if valid_tab.map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id)).unwrap_or(false) {
+                            if !present.contains(&w.pane_id) {
+                                present.push(w.pane_id.clone());
+                            }
+                        }
+                        continue;
+                    }
+
+                    let in_place = valid_tab.map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id)).unwrap_or(false)
+                        && (present.contains(&w.pane_id) || present.len() == m);
+
+                    if in_place {
                         if !present.contains(&w.pane_id) {
                             present.push(w.pane_id.clone());
                         }
+                        continue;
                     }
-                    continue;
-                }
 
-                let in_place = valid_tab.map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id)).unwrap_or(false)
-                    && (present.contains(&w.pane_id) || present.len() == n);
-
-                if in_place {
-                    if !present.contains(&w.pane_id) {
-                        present.push(w.pane_id.clone());
-                    }
-                    continue;
-                }
-
-                // N1: Fallback logic mirroring the legacy arranger (441-461).
-                // `pos` decides who creates the tab (always the idle pivot);
-                // `idx` keeps the per-worker geometry table unchanged.
-                let (mode, anchor_idx, dir, ratio) = if pos == 0 {
-                    ("new-tab", 0, "right", 0.5)
-                } else if n == 2 {
-                    ("split", 0, "right", 0.5)
-                } else if n == 3 {
-                    if idx == 2 { ("split", 0, "down", 0.5) } else { ("split", 0, "right", 0.5) }
-                } else {
-                    if idx == 2 { ("split", 0, "down", 0.5) }
-                    else if idx == 1 { ("split", 0, "right", 0.5) }
-                    else { ("split", 2, "right", 0.5) }
-                };
-
-                if mode == "new-tab" {
-                    if present.is_empty() && valid_tab.is_none() {
-                        repair_ops.push(Op {
-                            op: "move".to_string(),
-                            pane: w.pane_id.clone(),
-                            deferred: is_deferred(w.agent_status.as_deref()),
-                            target: Target::NewTab {
-                                label: expected_tab.clone().unwrap_or_else(|| group.clone()),
-                            },
-                        });
+                    let (mode, anchor_idx, dir, ratio) = if pos == 0 {
+                        ("new-tab", 0, "right", 0.5)
+                    } else if m == 2 {
+                        ("split", 0, "right", 0.5)
+                    } else if m == 3 {
+                        if idx == 2 { ("split", 0, "down", 0.5) } else { ("split", 0, "right", 0.5) }
                     } else {
-                        let anchor_target = present
+                        if idx == 2 { ("split", 0, "down", 0.5) }
+                        else if idx == 1 { ("split", 0, "right", 0.5) }
+                        else { ("split", 2, "right", 0.5) }
+                    };
+
+                    if mode == "new-tab" {
+                        if present.is_empty() && valid_tab.is_none() {
+                            repair_ops.push(Op {
+                                op: "move".to_string(),
+                                pane: w.pane_id.clone(),
+                                deferred: is_deferred(w.agent_status.as_deref()),
+                                target: Target::NewTab {
+                                    label: chunk_label.clone(),
+                                },
+                            });
+                        } else {
+                            let anchor_target = present
+                                .iter()
+                                .find(|p| *p != &w.pane_id && !deferred_ids.contains(p.as_str()))
+                                .or_else(|| present.iter().find(|p| *p != &w.pane_id))
+                                .cloned();
+                            if let Some(anchor) = anchor_target {
+                                 repair_ops.push(Op {
+                                     op: "move".to_string(),
+                                     pane: w.pane_id.clone(),
+                                     deferred: is_deferred(w.agent_status.as_deref()),
+                                     target: Target::Split {
+                                         tab: target_tab_ref.clone(),
+                                         anchor,
+                                         direction: "right".to_string(),
+                                         ratio: 0.5,
+                                     },
+                                 });
+                            } else {
+                                repair_ops.push(Op {
+                                    op: "move".to_string(),
+                                    pane: w.pane_id.clone(),
+                                    deferred: is_deferred(w.agent_status.as_deref()),
+                                    target: Target::NewTab {
+                                        label: chunk_label.clone(),
+                                    },
+                                });
+                            }
+                        }
+                    } else {
+                        let want_anchor = &chunk_gws[anchor_idx].pane_id;
+                        let idle_in_tab = present
                             .iter()
                             .find(|p| *p != &w.pane_id && !deferred_ids.contains(p.as_str()))
-                            .or_else(|| present.iter().find(|p| *p != &w.pane_id))
                             .cloned();
-                        if let Some(anchor) = anchor_target {
+                        let any_in_tab = present
+                            .iter()
+                            .find(|p| *p != &w.pane_id)
+                            .cloned();
+                        // Never anchor on a deferred (working) pane: it is not in
+                        // the tab yet, and propagate_deferrals would cancel the
+                        // idle pane's split too (n>=3, pivot != gws[0]).
+                        if present.contains(want_anchor) && want_anchor != &w.pane_id && !deferred_ids.contains(want_anchor.as_str()) {
+                            repair_ops.push(Op {
+                                op: "move".to_string(),
+                                pane: w.pane_id.clone(),
+                                deferred: is_deferred(w.agent_status.as_deref()),
+                                target: Target::Split {
+                                    tab: target_tab_ref.clone(),
+                                    anchor: want_anchor.clone(),
+                                    direction: dir.to_string(),
+                                    ratio,
+                                },
+                            });
+                        } else if let Some(anchor) = idle_in_tab {
                             repair_ops.push(Op {
                                 op: "move".to_string(),
                                 pane: w.pane_id.clone(),
@@ -467,8 +545,20 @@ pub fn run_reconcile<D: HerdrDriver>(
                                 target: Target::Split {
                                     tab: target_tab_ref.clone(),
                                     anchor,
-                                    direction: "right".to_string(),
-                                    ratio: 0.5,
+                                    direction: dir.to_string(),
+                                    ratio,
+                                },
+                            });
+                        } else if let Some(anchor) = any_in_tab {
+                            repair_ops.push(Op {
+                                op: "move".to_string(),
+                                pane: w.pane_id.clone(),
+                                deferred: is_deferred(w.agent_status.as_deref()),
+                                target: Target::Split {
+                                    tab: target_tab_ref.clone(),
+                                    anchor,
+                                    direction: dir.to_string(),
+                                    ratio,
                                 },
                             });
                         } else {
@@ -477,75 +567,13 @@ pub fn run_reconcile<D: HerdrDriver>(
                                 pane: w.pane_id.clone(),
                                 deferred: is_deferred(w.agent_status.as_deref()),
                                 target: Target::NewTab {
-                                    label: expected_tab.clone().unwrap_or_else(|| group.clone()),
+                                    label: chunk_label.clone(),
                                 },
                             });
                         }
                     }
-                } else {
-                    let want_anchor = &gws[anchor_idx].pane_id;
-                    // Never anchor on a deferred (working) pane: it is not in
-                    // the tab yet, and propagate_deferrals would cancel the
-                    // idle pane's split too (n>=3, pivot != gws[0]).
-                    let idle_in_tab = present
-                        .iter()
-                        .find(|p| *p != &w.pane_id && !deferred_ids.contains(p.as_str()))
-                        .cloned();
-                    let any_in_tab = present
-                        .iter()
-                        .find(|p| *p != &w.pane_id)
-                        .cloned();
-                    if present.contains(want_anchor) && want_anchor != &w.pane_id && !deferred_ids.contains(want_anchor.as_str()) {
-                        repair_ops.push(Op {
-                            op: "move".to_string(),
-                            pane: w.pane_id.clone(),
-                            deferred: is_deferred(w.agent_status.as_deref()),
-                            target: Target::Split {
-                                tab: target_tab_ref.clone(),
-                                anchor: want_anchor.clone(),
-                                direction: dir.to_string(),
-                                ratio,
-                            },
-                        });
-                    } else if let Some(anchor) = idle_in_tab {
-                        // Fallback to the pivot in the workers tab (legacy arranger 454-456)
-                        repair_ops.push(Op {
-                            op: "move".to_string(),
-                            pane: w.pane_id.clone(),
-                            deferred: is_deferred(w.agent_status.as_deref()),
-                            target: Target::Split {
-                                tab: target_tab_ref.clone(),
-                                anchor,
-                                direction: dir.to_string(),
-                                ratio,
-                            },
-                        });
-                    } else if let Some(anchor) = any_in_tab {
-                        // Fallback to any pane already in the workers tab even if working
-                        repair_ops.push(Op {
-                            op: "move".to_string(),
-                            pane: w.pane_id.clone(),
-                            deferred: is_deferred(w.agent_status.as_deref()),
-                            target: Target::Split {
-                                tab: target_tab_ref.clone(),
-                                anchor,
-                                direction: dir.to_string(),
-                                ratio,
-                            },
-                        });
-                    } else {
-                        // Nobody in workers tab yet! Create new tab! (legacy arranger 457-460)
-                        repair_ops.push(Op {
-                            op: "move".to_string(),
-                            pane: w.pane_id.clone(),
-                            deferred: is_deferred(w.agent_status.as_deref()),
-                            target: Target::NewTab {
-                                label: expected_tab.clone().unwrap_or_else(|| group.clone()),
-                            },
-                        });
-                    }
+                    present.push(w.pane_id.clone());
                 }
-                present.push(w.pane_id.clone());
             }
         }
     }
@@ -553,7 +581,7 @@ pub fn run_reconcile<D: HerdrDriver>(
     // The planned flags must equal what apply_ops will really do: a split whose
     // anchor is deferred cannot run either, and reporting it as runnable would
     // hide the reason a repair moved fewer panes than it planned.
-    super::plan::propagate_deferrals(&mut repair_ops);
+    super::plan::propagate_deferrals(&mut repair_ops, &snap.panes);
 
     if opts.dry_run {
         let serialized = serde_json::to_string(&repair_ops).map_err(|e| e.to_string())?;
