@@ -313,6 +313,8 @@ pub struct Observation {
     pub pane_text: String,
     pub fp: String,
     pub watcher_pane: String,
+    pub hook_active: bool,
+    pub harness: String,
 }
 
 pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option<Observation> {
@@ -322,13 +324,16 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
     let mut diffstat = String::new();
     let mut watcher_pane = String::new();
     let mut cwd = String::new();
-
+    let mut hook_active = false;
+    let mut harness = String::new();
     let (_ok, get_info) = herdr.agent_get(name).unwrap_or((false, String::new()));
     if let Ok(json) = parse_json(&get_info) {
         if let Some(agent) = json.get("result").and_then(|r| r.get("agent")) {
             status = agent.get_str("agent_status").unwrap_or("unknown").to_string();
             cwd = agent.get_str("cwd").unwrap_or("").to_string();
             watcher_pane = agent.get_str("pane_id").unwrap_or("").to_string();
+            hook_active = agent.get_bool("screen_detection_skipped").unwrap_or(false);
+            harness = agent.get_str("agent").unwrap_or("").to_string();
         } else if let Some(err) = json.get("error") {
             if err.get_str("code") == Some("agent_not_found") {
                 status = "gone".to_string();
@@ -337,6 +342,22 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
     }
     if status == "unknown" && get_info.contains("agent_not_found") {
         status = "gone".to_string();
+    }
+    if harness.is_empty() {
+        if let Ok(c) = std::fs::read_to_string(default_runs_dir().join(format!("{name}.srt.json"))) {
+            if let Ok(j) = parse_json(&c) {
+                if let Some(h) = j.get_str("running_harness").or_else(|| j.get_str("harness")) {
+                    harness = h.to_string();
+                }
+            }
+        }
+        if harness.is_empty() {
+            if name.starts_with("tieude-") {
+                harness = "opencode".to_string();
+            } else if name.starts_with("sude-") || name.starts_with("detu-") {
+                harness = "omp".to_string();
+            }
+        }
     }
 
     let mut pane_text = herdr
@@ -424,6 +445,8 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
         pane_text,
         fp,
         watcher_pane,
+        hook_active,
+        harness,
     })
 }
 
@@ -466,6 +489,10 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(120);
+    let idle_fallback_sec: u64 = std::env::var("PROMPT_WORKER_IDLE_FALLBACK_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300.max(idle_sec));
     let gone_sec: u64 = std::env::var("PROMPT_WORKER_AGENT_GONE_SEC")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -707,7 +734,12 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 if idle_since == 0 {
                     idle_since = now;
                 }
-                if now - idle_since >= idle_sec {
+                let effective_idle = if !obs.hook_active && (obs.harness == "opencode" || obs.harness == "omp") {
+                    idle_fallback_sec
+                } else {
+                    idle_sec
+                };
+                if now - idle_since >= effective_idle {
                     return Err(watchdog_exit(3, &format!("agent {st} for {}s without run file", now - idle_since), &Some(obs), change_ts));
                 }
             } else {

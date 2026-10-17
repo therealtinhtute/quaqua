@@ -54,8 +54,12 @@ case "${1:-} ${2:-}" in
     if gone_now; then
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3" >&2; exit 1
     fi
-    printf '{"result":{"agent":{"agent_status":"%s","cwd":"%s","pane_id":"%s"}}}\n' \
-      "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" "${FAKE_WATCHER_PANE:-%1}" ;;
+    hook_json=""
+    [ "${FAKE_HOOK:-0}" = 1 ] && hook_json=',"screen_detection_skipped":true'
+    agent_json=""
+    [ -n "${FAKE_HARNESS:-}" ] && agent_json=",\"agent\":\"$FAKE_HARNESS\""
+    printf '{"result":{"agent":{"agent_status":"%s","cwd":"%s","pane_id":"%s"%s%s}}}\n' \
+      "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" "${FAKE_WATCHER_PANE:-%1}" "$hook_json" "$agent_json" ;;
   "agent read")
     gone_now && { printf '{"error":{"code":"agent_not_found"}}\n' >&2; exit 1; }
     if [ "${FAKE_READ_ERR:-0}" = 1 ] && [[ $* == *recent-unwrapped* ]]; then
@@ -312,6 +316,23 @@ echo "ok: agent idle without run file -> exit 3"
 # (or be lost), and the old watchdog just polled with status=idle until the
 # 120s idle path. LAND_SEC is the post-prompt window to confirm the prompt
 # landed; the recovery is one `agent send-keys <name> enter`.
+# ── (b) omp/opencode pane-idle fallback gets longer grace than hook state ───
+run sude-omp-fallback FAKE_DELAY=0 FAKE_STATUS=idle FAKE_HARNESS=omp \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_IDLE_FALLBACK_SEC=3 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "sude-omp-fallback: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'elapsed=[3-9]s' "$T/err" \
+  || fail "sude-omp-fallback: exited before fallback grace (elapsed < 3s): $(cat "$T/err")"
+echo "ok: omp pane-idle fallback outlasts IDLE_SEC to IDLE_FALLBACK_SEC"
+
+run sude-omp-hook FAKE_DELAY=0 FAKE_STATUS=idle FAKE_HARNESS=omp FAKE_HOOK=1 \
+  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=1 PROMPT_WORKER_IDLE_FALLBACK_SEC=5 \
+  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 3 ]] || fail "sude-omp-hook: exit $rc, want 3: $(cat "$T/err")"
+grep -q 'elapsed=[1-2]s' "$T/err" \
+  || fail "sude-omp-hook: hook state did not exit at IDLE_SEC: $(cat "$T/err")"
+echo "ok: omp with hook authority exits at IDLE_SEC directly"
+
 printf '%s\n' 1700000000 > "$T/clock"
 run sude-landstall FAKE_DELAY=0 FAKE_STATUS=idle FAKE_PANE='empty input box' \
   PROMPT_WORKER_LAND_SEC=2 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=9999 \
