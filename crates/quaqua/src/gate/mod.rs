@@ -8,7 +8,7 @@ pub mod tokenizer;
 
 pub use policy::{check, check_segments, Verdict};
 
-const BLOCK_MESSAGE: &str = "blocked: spawn/move panes and workspaces only via scripts/ (spawn-worker.sh, spawn-lead.sh, grid-workers.sh, cleanup-worker.sh, cleanup-lead.sh) — rules/_all/fanout-agent-grid.md";
+const BLOCK_MESSAGE: &str = "blocked: spawn/move panes and workspaces only via scripts/ (spawn-worker.sh, spawn-lead.sh, cleanup-worker.sh, cleanup-lead.sh) or `quaqua grid reconcile` — rules/_all/fanout-agent-grid.md";
 
 /// Entry point for `quaqua gate`: read the Claude Code hook JSON on stdin,
 /// check `.tool_input.command`, print the block message to stderr and return

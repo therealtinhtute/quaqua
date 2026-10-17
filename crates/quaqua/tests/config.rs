@@ -18,10 +18,6 @@ fn repo_team() -> String {
     repo_root().join("team.toml").to_string_lossy().into_owned()
 }
 
-fn repo_models() -> String {
-    repo_root().join("models.md").to_string_lossy().into_owned()
-}
-
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_quaqua"))
         .args(args)
@@ -45,17 +41,15 @@ fn config_repo_team_toml_validates_ok() {
 }
 
 #[test]
-fn config_repo_kinds_validate_against_models_md() {
-    // The real drift check: every [kinds.*] must equal its models.md routing cell.
-    let out = run(&[
-        "config",
-        "validate",
-        "--file",
-        &repo_team(),
-        "--models",
-        &repo_models(),
-    ]);
-    assert!(out.status.success(), "drift check failed: {}", stderr(&out));
+fn config_repo_kinds_carry_model_and_effort() {
+    // team.toml is the only source of harness/model/effort: the repo config must
+    // validate on its own (no models.md drift check anymore).
+    let out = run(&["config", "validate", "--file", &repo_team()]);
+    assert!(out.status.success(), "validate failed: {}", stderr(&out));
+    let effort = run(&["config", "get", "kinds.tieude.effort", "--file", &repo_team()]);
+    assert_eq!(stdout(&effort).trim(), "max");
+    let fallback = run(&["config", "get", "kinds.sude.fallback", "--file", &repo_team()]);
+    assert_eq!(stdout(&fallback).trim(), "tieude");
 }
 
 #[test]
@@ -93,23 +87,6 @@ fn config_validate_project_does_not_recheck_other_projects() {
     ]);
     assert!(!ghost.status.success());
     assert!(stderr(&ghost).contains("unknown project 'ghost'"), "{}", stderr(&ghost));
-}
-
-/// Review round 2, finding 2: an explicit `--models <path>` that does not exist
-/// is an error; only the implicit sibling lookup may be missing.
-#[test]
-fn config_explicit_models_missing_is_error() {
-    let missing = repo_root().join("does-not-exist-models.md");
-    let out = run(&[
-        "config",
-        "validate",
-        "--file",
-        &repo_team(),
-        "--models",
-        &missing.to_string_lossy(),
-    ]);
-    assert!(!out.status.success(), "explicit missing --models was accepted");
-    assert!(stderr(&out).contains("cannot read"), "stderr: {}", stderr(&out));
 }
 
 #[test]
@@ -184,43 +161,39 @@ fn config_get_unknown_project_fails_clearly() {
 }
 
 /// Each invalid fixture is rejected, exits non-zero, and the message names the
-/// rule that fired. The `models` argument is passed only for the drift fixture.
+/// rule that fired.
 #[test]
 fn config_invalid_fixtures_are_rejected() {
-    let cases: &[(&str, &str, bool)] = &[
-        ("cap-over.toml", "over the cap", false),
-        ("bad-weights.toml", "exceeds cap", false),
-        ("project-cap-over.toml", "exceeds global cap", false),
-        ("unknown-kind.toml", "unknown kind 'ghost'", false),
-        ("unknown-class.toml", "unknown role-class 'ghostrole'", false),
-        ("unknown-role.toml", "unknown role 'ghost'", false),
-        ("same-harness.toml", "share harness", false),
-        ("reviewer-cannot-review.toml", "can_review = false", false),
-        ("model-drift.toml", "drift", true),
-        ("missing-kind.toml", "absent from team.toml", true),
-        ("bad-schema.toml", "unsupported schema_version", false),
-        ("integ-branch.toml", "{slug}", false),
-        ("differ-policy.toml", "unknown differ policy", false),
-        ("typo-key.toml", "unknown field `can_reveiw`", false),
-        ("typo-section.toml", "unknown field `project`", false),
-        ("empty-reviewer.toml", "default_reviewer is empty", false),
-        ("project-cap-zero.toml", "is below 1", false),
-        ("bad-timer-duration.toml", "timers.budget_default", false),
-        ("bad-timer-nudge.toml", "timers.nudge_at", false),
-        ("bad-timer-grace.toml", "timers.grace", false),
+    let cases: &[(&str, &str)] = &[
+        ("cap-over.toml", "over the cap"),
+        ("bad-weights.toml", "exceeds cap"),
+        ("project-cap-over.toml", "exceeds global cap"),
+        ("unknown-kind.toml", "unknown kind 'ghost'"),
+        ("unknown-class.toml", "unknown role-class 'ghostrole'"),
+        ("unknown-role.toml", "unknown role 'ghost'"),
+        ("same-harness.toml", "share harness"),
+        ("reviewer-cannot-review.toml", "can_review = false"),
+        ("missing-effort.toml", "effort is missing"),
+        ("bad-effort.toml", "does not take effort 'banana'"),
+        ("fallback-missing.toml", "fallback 'ghost' is not a kind"),
+        ("fallback-self.toml", "fallback names itself"),
+        ("fallback-cannot-review.toml", "cannot review"),
+        ("bad-schema.toml", "unsupported schema_version"),
+        ("integ-branch.toml", "{slug}"),
+        ("differ-policy.toml", "unknown differ policy"),
+        ("typo-key.toml", "unknown field `can_reveiw`"),
+        ("typo-section.toml", "unknown field `project`"),
+        ("empty-reviewer.toml", "default_reviewer is empty"),
+        ("project-cap-zero.toml", "is below 1"),
+        ("bad-timer-duration.toml", "timers.budget_default"),
+        ("bad-timer-nudge.toml", "timers.nudge_at"),
+        ("bad-timer-grace.toml", "timers.grace"),
     ];
 
-    for (name, needle, needs_models) in cases {
+    for (name, needle) in cases {
         let path = fixtures_dir().join("invalid").join(name);
         let path_s = path.to_string_lossy().into_owned();
-        let mut args = vec!["config", "validate", "--file", path_s.as_str()];
-        let models_s;
-        if *needs_models {
-            models_s = repo_models();
-            args.push("--models");
-            args.push(&models_s);
-        }
-        let out = run(&args);
+        let out = run(&["config", "validate", "--file", path_s.as_str()]);
         let err = stderr(&out);
         assert!(
             !out.status.success(),

@@ -9,6 +9,7 @@ use quaqua::herdr::Herdr;
 use quaqua::worker::cleanup::{cleanup_worker, default_runs_dir};
 use quaqua::worker::prompt::{do_check_brief, prompt_worker, USAGE as PROMPT_USAGE};
 use quaqua::worker::spawn::{parse_spawn_args, spawn_worker};
+use quaqua::worker::stop::{parse_stop_args, stop_worker};
 use std::path::{Path, PathBuf};
 
 const CLEANUP_USAGE: &str = "\
@@ -32,7 +33,7 @@ enum Command {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
-    /// Worker operations: spawn, prompt, cleanup.
+    /// Worker operations: spawn, prompt, cleanup, stop.
     Worker {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -129,9 +130,6 @@ struct ConfigArgs {
     /// Path to team.toml (default: $QUAQUA_TEAM_TOML, else ./team.toml).
     #[arg(long)]
     file: Option<PathBuf>,
-    /// Path to models.md for the drift check (default: sibling of team.toml).
-    #[arg(long)]
-    models: Option<PathBuf>,
     /// Validate the config as seen by this project (applies its override).
     #[arg(long)]
     project: Option<String>,
@@ -150,11 +148,10 @@ fn team_file(explicit: &Option<PathBuf>) -> Result<PathBuf, String> {
 fn do_validate(args: &ConfigArgs) -> Result<(), String> {
     let file = team_file(&args.file)?;
     let cfg = config::load(&file)?;
-    let models = config::load_models(args.models.as_deref(), &file)?;
     // Validate the raw file once. `validate` already bounds every [projects.*]
     // override (and the weights) against the top-level cap, so a bad override is
     // caught even without --project.
-    config::validate(&cfg, models.as_ref())?;
+    config::validate(&cfg)?;
     // Selecting a project only needs it to exist: its override was already
     // checked against the global baseline above. Re-validating a resolved config
     // would wrongly re-check the *other* projects against this project's cap.
@@ -179,11 +176,9 @@ fn load_spawn_config() -> Result<quaqua::config::Config, (i32, String)> {
     if Path::new("team.toml").is_file() {
         return config::load(Path::new("team.toml")).map_err(|e| (1, format!("error: {e}\n")));
     }
-    if let Ok(home) = std::env::var("HOME") {
-        let home_team = PathBuf::from(home).join("quaqua/team.toml");
-        if home_team.is_file() {
-            return config::load(&home_team).map_err(|e| (1, format!("error: {e}\n")));
-        }
+    let home_team = quaqua::workspace::workspace_root().join("team.toml");
+    if home_team.is_file() {
+        return config::load(&home_team).map_err(|e| (1, format!("error: {e}\n")));
     }
     const DEFAULT_TOML: &str = include_str!("../../../team.toml");
     toml::from_str(DEFAULT_TOML).map_err(|e| (1, format!("error: failed to parse default team.toml: {e}\n")))
@@ -191,7 +186,7 @@ fn load_spawn_config() -> Result<quaqua::config::Config, (i32, String)> {
 
 fn handle_worker(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, String)> {
     if args.is_empty() {
-        return Err((1, "error: worker subcommand required (spawn, prompt, cleanup)\n".to_string()));
+        return Err((1, "error: worker subcommand required (spawn, prompt, cleanup, stop)\n".to_string()));
     }
     match args[0].as_str() {
         "spawn" => {
@@ -272,6 +267,11 @@ fn handle_worker(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, 
             cleanup_worker(name, repo, git, herdr)?;
             Ok(())
         }
+        "stop" => {
+            let name = parse_stop_args(&args[1..])?;
+            stop_worker(&name, herdr)?;
+            Ok(())
+        }
         other => {
             Err((1, format!("error: unknown worker subcommand '{other}'\n")))
         }
@@ -343,6 +343,9 @@ fn do_grid_reconcile(
 
     if check && repair {
         return Err("cannot specify both --check and --repair".to_string());
+    }
+    if tab.as_deref() == Some("") {
+        return Err("--tab requires a non-empty label".to_string());
     }
 
     let opts = quaqua::grid::ReconcileOptions {

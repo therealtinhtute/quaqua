@@ -5,14 +5,9 @@ use crate::git::GitOps;
 use crate::herdr::HerdrOps;
 use crate::json::parse_json;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub fn resolve_home_quaqua_runs(home: Option<&Path>) -> PathBuf {
-    if let Some(h) = home {
-        h.join("quaqua/runs")
-    } else {
-        PathBuf::from("runs")
-    }
+    crate::workspace::resolve_workspace_root(None, home).join("runs")
 }
 
 pub fn resolve_default_runs_dir(override_runs: Option<&Path>, home: Option<&Path>) -> PathBuf {
@@ -24,29 +19,35 @@ pub fn resolve_default_runs_dir(override_runs: Option<&Path>, home: Option<&Path
 }
 
 pub fn home_quaqua_runs() -> PathBuf {
-    let home = std::env::var("HOME").ok().map(PathBuf::from);
-    resolve_home_quaqua_runs(home.as_deref())
+    crate::workspace::workspace_root().join("runs")
 }
 
 pub fn default_runs_dir() -> PathBuf {
-    let override_dir = std::env::var("QUAQUA_RUNS_DIR").ok().map(PathBuf::from);
-    let home = std::env::var("HOME").ok().map(PathBuf::from);
-    resolve_default_runs_dir(override_dir.as_deref(), home.as_deref())
+    if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
+        return PathBuf::from(dir);
+    }
+    home_quaqua_runs()
 }
 
-pub fn find_grid_script() -> Option<PathBuf> {
+/// Locate an engine script (a `scripts/` shim) by name, in the same order the
+/// grid script was historically found: `QUAQUA_SCRIPT_DIR`, its `../worker`
+/// and parent/`worker` siblings, the binary's own directory, the
+/// `QUAQUA_TEAM_TOML` sibling `scripts/worker`, the workspace root's
+/// `scripts/worker` (`QUAQUA_HOME`, else `$HOME/quaqua`), then
+/// `scripts/worker` under the cwd. Returns the file only when it exists.
+pub fn find_engine_script(name: &str) -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
         let p = PathBuf::from(&dir);
-        let candidate = p.join("grid-workers.sh");
+        let candidate = p.join(name);
         if candidate.is_file() {
             return Some(candidate);
         }
-        let candidate2 = p.join("../worker/grid-workers.sh");
+        let candidate2 = p.join("../worker").join(name);
         if candidate2.is_file() {
             return Some(candidate2);
         }
         if let Some(parent) = p.parent() {
-            let candidate3 = parent.join("worker/grid-workers.sh");
+            let candidate3 = parent.join("worker").join(name);
             if candidate3.is_file() {
                 return Some(candidate3);
             }
@@ -54,7 +55,7 @@ pub fn find_grid_script() -> Option<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("grid-workers.sh");
+            let candidate = dir.join(name);
             if candidate.is_file() {
                 return Some(candidate);
             }
@@ -62,55 +63,44 @@ pub fn find_grid_script() -> Option<PathBuf> {
     }
     if let Ok(team_path) = std::env::var("QUAQUA_TEAM_TOML") {
         if let Some(parent) = Path::new(&team_path).parent() {
-            let candidate = parent.join("scripts/worker/grid-workers.sh");
+            let candidate = parent.join("scripts/worker").join(name);
             if candidate.is_file() {
                 return Some(candidate);
             }
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        let candidate = PathBuf::from(home).join("quaqua/scripts/worker/grid-workers.sh");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
+    let candidate = crate::workspace::workspace_root()
+        .join("scripts/worker")
+        .join(name);
+    if candidate.is_file() {
+        return Some(candidate);
     }
-    let candidate = PathBuf::from("scripts/worker/grid-workers.sh");
+    let candidate = PathBuf::from("scripts/worker").join(name);
     if candidate.is_file() {
         return Some(candidate);
     }
     None
 }
 
-pub fn run_grid_hook(grid_tab: &str) {
+pub fn run_grid_hook(grid_tab: &str, owner: Option<&str>) -> Result<(), (i32, String)> {
     if std::env::var("GRID_SKIP").as_deref() == Ok("1") {
         let is_pipeline = std::env::var("PIPELINE_TASK").is_ok();
         let is_test = std::env::var("QUAQUA_TEST").as_deref() == Ok("1");
         if is_pipeline || is_test {
-            return;
+            return Ok(());
         }
         eprintln!("warning: GRID_SKIP=1 ignored outside pipeline.sh/tests (rules/_all/fanout-agent-grid.md)");
     }
 
-    if let Some(script) = find_grid_script() {
-        let res = Command::new("bash")
-            .arg(script)
-            .arg("--check")
-            .arg("--tab")
-            .arg(grid_tab)
-            .status();
-        match res {
-            Ok(st) if !st.success() => {
-                eprintln!(
-                    "warning: grid-workers.sh failed (exit {}); arrange panes manually",
-                    st.code().unwrap_or(1)
-                );
-            }
-            Err(e) => {
-                eprintln!("warning: grid-workers.sh failed: {e}; arrange panes manually");
-            }
-            _ => {}
-        }
+    if let Err(e) = crate::grid::run_grid_repair(grid_tab, owner) {
+        return Err((1, format!("error: grid repair failed: {e}\n")));
     }
+
+    if let Err(e) = crate::grid::run_grid_check(grid_tab, None, owner) {
+        return Err((1, format!("error: grid check failed ({e})\n")));
+    }
+
+    Ok(())
 }
 
 pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git: &G, herdr: &H) -> Result<(), (i32, String)> {
@@ -159,13 +149,29 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
         let _ = herdr.pane_close(&pane);
     }
 
+    let runs_dir = default_runs_dir();
+
+    let owner = std::env::var("QUAQUA_OWNER")
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string(runs_dir.join(format!("{name}.owner")))
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| "cos".to_string());
+
     let repo_name = repo
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("repo");
-    let grid_tab = std::env::var("GRID_TAB").unwrap_or_else(|_| format!("{repo_name}-workers"));
-
-    run_grid_hook(&grid_tab);
+    let grid_tab = std::env::var("GRID_TAB")
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string(runs_dir.join(format!("{name}.grid")))
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| format!("{repo_name}-workers"));
 
     let rm_out = git
         .worktree_remove(&repo, &wt)
@@ -176,12 +182,12 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
         return Err((rm_out.status.code().unwrap_or(1), err_text));
     }
 
-    let runs_dir = default_runs_dir();
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.owner")));
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.grid")));
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.pipeline")));
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.srt.json")));
-
     println!("cleaned {name} (branch quaqua/{name} kept)");
+
+    run_grid_hook(&grid_tab, Some(&owner))?;
     Ok(())
 }

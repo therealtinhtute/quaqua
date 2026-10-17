@@ -5,9 +5,10 @@
 # reuses a branch kept by cleanup, the --review read-only mode for the claude
 # kinds (including the narrow claude Bash allows for `cargo test` and the
 # atomic report `mv`), the claude workspace-trust dialog the spawn answers
-# before sending a brief, and its best-effort grid hook.
-# git+herdr are stubbed on PATH; the grid hook is stubbed next to a copy of the
-# script. Bad names must exit 1 before either is called; good names proceed.
+# before sending a brief, and its best-effort grid check.
+# git+herdr are stubbed on PATH (the in-process grid check drives the herdr
+# stub's `api snapshot`). Bad names must exit 1 before either is called; good
+# names proceed.
 # The accented case runs under C and, when installed, a collating UTF-8 locale.
 # No real worktree, home, or herdr touched.
 # Usage: tests/test_spawn_worker.sh   (exit 0 = pass)
@@ -15,22 +16,21 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 src="$(cd "$here/.." && pwd)/scripts"
+root="$(cd "$here/.." && pwd)"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+export QUAQUA_BIN="$bin"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-spawn-worker.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-unset HERDR_PANE_ID
+unset HERDR_PANE_ID HERDR_STUB_SNAPSHOT
 
 # ── sandbox: stub git/herdr that log every call, temp HOME, dummy repo ───────
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/scripts/worker"
 cp "$src/worker/spawn-worker.sh" "$T/scripts/worker/spawn-worker.sh"
 cp -R "$src/lib" "$T/scripts/"
-cat > "$T/scripts/worker/grid-workers.sh" <<'STUB'
-#!/usr/bin/env bash
-printf 'grid%s\n' "${*:+ $*}" >> "$GRID_CALLS"
-exit "${GRID_FAKE_RC:-0}"
-STUB
 cat > "$T/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
@@ -65,6 +65,29 @@ cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
 [ "${1:-} ${2:-}" = "pane split" ] && echo '{"result":{"pane":{"pane_id":"%1"}}}'
+if [ "${1:-} ${2:-}" = "pane move" ]; then
+  if [ -n "${GRID_AFTER_MOVE_SNAPSHOT:-}" ] && [ -f "$GRID_AFTER_MOVE_SNAPSHOT" ]; then
+    cp "$GRID_AFTER_MOVE_SNAPSHOT" "$GRID_SNAPSHOT"
+  fi
+  if [ -n "${GRID_MOVE_FAIL:-}" ]; then
+    printf '{"result":{"move_result":{"changed":false,"reason":"same_tab"}}}\n'
+  else
+    printf '{"result":{"move_result":{"changed":true,"pane":{"pane_id":"%s","tab_id":"w1:t_workers"}}}}\n' "${3:-%1}"
+  fi
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = "pane rename" ]; then
+  printf '{"result":{}}\n'
+  exit 0
+fi
+# the in-process grid check reads one snapshot: GRID_FAIL simulates an
+# unreachable herdr, GRID_SNAPSHOT serves a fixture, default = converged
+if [ "${1:-} ${2:-}" = "api snapshot" ]; then
+  [ -n "${GRID_CALLS:-}" ] && echo "grid check" >> "$GRID_CALLS"
+  if [ -n "${GRID_FAIL:-}" ]; then printf '{"error":{"message":"backend down"}}\n' >&2; exit 1; fi
+  if [ -n "${GRID_SNAPSHOT:-}" ]; then cat "$GRID_SNAPSHOT"; else printf '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}\n'; fi
+  exit 0
+fi
 # PANE_TEXT is what `pane read` shows (the trust-dialog clear check greps it)
 [ "${1:-} ${2:-}" = "pane read" ] && { printf '%s\n' "${PANE_TEXT:-}"; exit 0; }
 # CLAUDE_DIALOG = claude workspace-trust dialogs left to show (--match trust)
@@ -78,22 +101,54 @@ if [ "${1:-} ${2:-}" = "pane wait-output" ]; then
   n=$(cat "$f" 2>/dev/null || echo 0); [ "${n:-0}" -gt 0 ] || exit 1
   echo $((n - 1)) > "$f"
 fi
-# START_FAIL=1: `agent start` reports the startup-blocked error a slow (or
-# dialog-held) start hits — herdr prints it on stdout and exits non-zero
-if [ "${1:-} ${2:-}" = "agent start" ] && [ -n "${START_FAIL:-}" ]; then
-  echo '{"error":{"code":"agent_not_ready","message":"agent is blocked during startup and is not ready for prompts"}}'
-  exit 1
+# START_FAIL=1 (any kind) or START_FAIL_KIND=<kind>: `agent start` reports the
+# startup-blocked error a slow (or dialog-held) start hits — herdr prints it on
+# stdout and exits non-zero. START_FAIL_KIND fails only that --kind, so a
+# fallback to a different harness can be exercised.
+if [ "${1:-} ${2:-}" = "agent start" ]; then
+  fail_kind=0
+  if [ -n "${START_FAIL_KIND:-}" ]; then
+    case " $* " in *" --kind $START_FAIL_KIND "*) fail_kind=1 ;; esac
+  elif [ -n "${START_FAIL:-}" ]; then
+    fail_kind=1
+  fi
+  if [ "$fail_kind" = 1 ]; then
+    echo '{"error":{"code":"agent_not_ready","message":"agent is blocked during startup and is not ready for prompts"}}'
+    exit 1
+  fi
+fi
+# WAIT_IDLE_FAIL=1: `agent wait ... --until idle` fails, so a claude start that
+# herdr could not confirm is a hard failure (no fallback configured -> error)
+if [ "${1:-} ${2:-}" = "agent wait" ] && [ -n "${WAIT_IDLE_FAIL:-}" ]; then exit 1; fi
+# grid check: the in-process reconcile reads one snapshot. GRID_FAIL simulates
+# an unreachable herdr; GRID_SNAPSHOT serves a fixture; default = converged.
+if [ "${1:-} ${2:-}" = "api snapshot" ]; then
+  if [ -n "${GRID_FAIL:-}" ]; then printf '{"error":{"message":"backend down"}}\n' >&2; exit 1; fi
+  if [ -n "${GRID_SNAPSHOT:-}" ]; then cat "$GRID_SNAPSHOT"; else printf '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}\n'; fi
+  exit 0
 fi
 exit 0
 STUB
 chmod +x "$T/bin/git" "$T/bin/herdr"
+
+# a pending move for group "coucou": only --tab coucou-workers scopes it in
+cat > "$T/coucou.json" <<'EOF'
+{"snapshot":{"workspaces":[{"workspace_id":"w1","label":"repo"}],
+ "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":1},
+         {"tab_id":"w1:t2","workspace_id":"w1","label":"2","pane_count":1}],
+ "panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle",
+           "tokens":{"grid_role":"orchestrator","grid_owner":"cos","grid_ready":"1"}},
+          {"pane_id":"w1:p5","tab_id":"w1:t2","workspace_id":"w1","agent_status":"idle",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"coucou","grid_ready":"1"}}],
+ "layouts":[],"agents":[]}}
+EOF
 
 spawn() {  # spawn <name> <kind> [VAR=val...]; script opts via array $spawn_args.
   # Sets rc, $T/out, $T/err, $T/calls, $T/gridcalls
   local name=$1 kind=$2; shift 2
   : > "$T/calls"; : > "$T/gridcalls"
   rc=0
-  CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" LC_ALL="${SPAWN_LC_ALL:-C}" QUAQUA_OWNER=cos \
+  CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" LC_ALL="${SPAWN_LC_ALL:-C}" QUAQUA_OWNER=cos \
     env "$@" bash "$T/scripts/worker/spawn-worker.sh" ${spawn_args+"${spawn_args[@]}"} "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
@@ -141,67 +196,151 @@ expect_accept tieude-spawnguard tieude "17 chars"
 expect_accept tieude-abcdefghijklm tieude "20 chars (boundary)"
 expect_accept sude-leadname sude "leadname suffix is not -lead"
 
-# ── tieude/detu: opencode with deepseek-v4.1-flash in the pane env ──────────
-# (models.md) — the model travels in OPENCODE_CONFIG_CONTENT; no omp/gemini
-for k in tieude detu; do
-  spawn "$k-model" "$k"
+# ── tieude: opencode with deepseek-v4.1-flash at effort max in the env ──
+# (team.toml) — the interactive TUI has no --model, so model+effort travel as
+# `provider/model#variant` in OPENCODE_CONFIG_CONTENT; no omp/gemini
+spawn "tieude-model" "tieude"
+[[ $rc -eq 0 ]] || fail "tieude: exit $rc, want 0: $(cat "$T/err")"
+grep -qF -- '--kind opencode' "$T/calls" \
+  || fail "tieude: not an opencode start: $(cat "$T/calls")"
+grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":"opencode-go/deepseek-v4.1-flash#max","instructions":' "$T/calls" \
+  || fail "tieude: model+effort not in OPENCODE_CONFIG_CONTENT: $(cat "$T/calls")"
+! grep -q -- '--kind omp' "$T/calls" || fail "tieude: still spawned as omp: $(cat "$T/calls")"
+! grep -q 'gemini' "$T/calls" || fail "tieude: gemini flag leaked: $(cat "$T/calls")"
+echo "ok: tieude -> --kind opencode, model opencode-go/deepseek-v4.1-flash#max"
+
+# ── sude/detu: omp with antigravity gemini-3.8-flash high, worker rules appended ──
+# (team.toml) — omp takes the model, the thinking level and the rules file on
+# the command line (--append-system-prompt reads a file path), not in pane env
+for k in sude detu; do
+  spawn "$k-impl" "$k"
   [[ $rc -eq 0 ]] || fail "$k: exit $rc, want 0: $(cat "$T/err")"
-  grep -qF -- '--kind opencode' "$T/calls" \
-    || fail "$k: not an opencode start: $(cat "$T/calls")"
-  grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":"opencode-go/deepseek-v4.1-flash","instructions":' "$T/calls" \
-    || fail "$k: model not in OPENCODE_CONFIG_CONTENT: $(cat "$T/calls")"
-  ! grep -q -- '--kind omp' "$T/calls" || fail "$k: still spawned as omp: $(cat "$T/calls")"
-  ! grep -q 'gemini' "$T/calls" || fail "$k: gemini flag leaked: $(cat "$T/calls")"
-  echo "ok: $k -> --kind opencode, model opencode-go/deepseek-v4.1-flash"
+  grep -qF -- '--kind omp' "$T/calls" || fail "$k: not an omp start: $(cat "$T/calls")"
+  grep -qF -- '--model google-antigravity/gemini-3.8-flash' "$T/calls" \
+    || fail "$k: model not google-antigravity/gemini-3.8-flash: $(cat "$T/calls")"
+  grep -qF -- '--thinking high' "$T/calls" || fail "$k: thinking level not high: $(cat "$T/calls")"
+  grep -qF -- '--auto-approve' "$T/calls" \
+    || fail "$k: no --auto-approve (unattended spawn): $(cat "$T/calls")"
+  grep -qF -- "--append-system-prompt $T/home/quaqua/runs/$k-impl.rules.md" "$T/calls" \
+    || fail "$k: worker rules file not appended: $(cat "$T/calls")"
+  ! grep -q -- '--kind opencode' "$T/calls" || fail "$k: still an opencode start: $(cat "$T/calls")"
+  ! grep -q 'OPENCODE_CONFIG_CONTENT' "$T/calls" \
+    || fail "$k: opencode pane env leaked into an omp start: $(cat "$T/calls")"
+  echo "ok: $k -> --kind omp, google-antigravity/gemini-3.8-flash high, rules appended"
 done
 
-# ── sude: omp with antigravity gemini-3.8-flash high, worker rules appended ──
-# (models.md) — omp takes the model, the thinking level and the rules file on
-# the command line (--append-system-prompt reads a file path), not in pane env
-spawn sude-impl sude
-[[ $rc -eq 0 ]] || fail "sude: exit $rc, want 0: $(cat "$T/err")"
-grep -qF -- '--kind omp' "$T/calls" || fail "sude: not an omp start: $(cat "$T/calls")"
-grep -qF -- '--model google-antigravity/gemini-3.8-flash' "$T/calls" \
-  || fail "sude: model not google-antigravity/gemini-3.8-flash: $(cat "$T/calls")"
-grep -qF -- '--thinking high' "$T/calls" || fail "sude: thinking level not high: $(cat "$T/calls")"
-grep -qF -- '--auto-approve' "$T/calls" \
-  || fail "sude: no --auto-approve (unattended spawn): $(cat "$T/calls")"
-grep -qF -- "--append-system-prompt $T/home/quaqua/runs/sude-impl.rules.md" "$T/calls" \
-  || fail "sude: worker rules file not appended: $(cat "$T/calls")"
-! grep -q -- '--kind opencode' "$T/calls" || fail "sude: still an opencode start: $(cat "$T/calls")"
-! grep -q 'OPENCODE_CONFIG_CONTENT' "$T/calls" \
-  || fail "sude: opencode pane env leaked into an omp start: $(cat "$T/calls")"
-echo "ok: sude -> --kind omp, google-antigravity/gemini-3.8-flash high, rules appended"
+# ── fallback: a failed agent start takes one hop to the kind's fallback ───────
+# sude (omp) falls back to tieude (opencode); the worker name keeps the sude prefix,
+# only the harness/model/effort change, and the fallback is a WARN + run metadata.
+spawn sude-fb sude START_FAIL_KIND=omp
+[[ $rc -eq 0 ]] || fail "fallback: exit $rc, want 0: $(cat "$T/err")"
+grep -qF -- '--kind omp' "$T/calls" || fail "fallback: primary omp not tried: $(cat "$T/calls")"
+grep -qF -- '--kind opencode' "$T/calls" || fail "fallback: fallback opencode not tried: $(cat "$T/calls")"
+[[ $(grep -c 'herdr agent start' "$T/calls") -eq 2 ]] \
+  || fail "fallback: expected exactly 2 starts: $(cat "$T/calls")"
+grep -qF 'WARN: fallback: sude→tieude (agent_not_ready)' "$T/err" \
+  || fail "fallback: no WARN with reason: $(cat "$T/err")"
+grep -qF '"fallback":{"from":"sude","to":"tieude","reason":"agent_not_ready"}' \
+  "$T/home/quaqua/runs/sude-fb.srt.json" \
+  || fail "fallback: not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
+grep -qF '"running_kind":"tieude"' "$T/home/quaqua/runs/sude-fb.srt.json" \
+  || fail "fallback: running_kind tieude not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
+grep -qF '"harness":"opencode"' "$T/home/quaqua/runs/sude-fb.srt.json" \
+  || fail "fallback: harness opencode not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
+grep -qF '"kind":"sude"' "$T/home/quaqua/runs/sude-fb.srt.json" \
+  || fail "fallback: original kind sude not preserved in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
+grep -q "worker=sude-fb" "$T/out" || fail "fallback: no success line"
+echo "ok: fallback -> omp failed, opencode (tieude) started, WARN + srt fallback recorded"
 
-# ── grid hook: a successful spawn arranges the new worker's pane ─────────────
+# one hop max: tieude (opencode) falls back to detu (omp); when both attempts
+# fail -> hard error after exactly two attempts, never a third hop
+spawn tieude-fb2 tieude START_FAIL=1
+[[ $rc -ne 0 ]] || fail "one-hop: exit $rc, want non-zero: $(cat "$T/err")"
+[[ $(grep -c 'herdr agent start' "$T/calls") -eq 2 ]] \
+  || fail "one-hop: expected exactly 2 attempts: $(cat "$T/calls")"
+grep -qF 'WARN: fallback: tieude→detu (agent_not_ready)' "$T/err" \
+  || fail "one-hop: no fallback WARN: $(cat "$T/err")"
+echo "ok: one-hop -> fallback start failure errors, no third attempt"
+
+# a kind with no fallback fails closed on a start failure (ni = claude): herdr
+# cannot confirm the start and idle-wait also fails -> error, nothing taken
+spawn ni-nofb ni START_FAIL_KIND=claude WAIT_IDLE_FAIL=1
+[[ $rc -ne 0 ]] || fail "no-fallback: exit $rc, want non-zero: $(cat "$T/err")"
+! grep -q 'WARN: fallback' "$T/err" || fail "no-fallback: fell back anyway: $(cat "$T/err")"
+[[ $(grep -c 'herdr agent start' "$T/calls") -eq 1 ]] \
+  || fail "no-fallback: expected 1 attempt: $(cat "$T/calls")"
+echo "ok: no fallback configured -> start failure errors, no fallback taken"
+
+# ── grid check: a successful spawn arranges the new worker's pane ───────────
 spawn tieude-gridhook tieude
-[[ $rc -eq 0 ]] || fail "grid hook: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/gridcalls")" == "grid --check --tab repo-workers" ]] || fail "grid hook: not called: $(cat "$T/gridcalls")"
-grep -q "worker=tieude-gridhook" "$T/out" || fail "grid hook: no success line"
+[[ $rc -eq 0 ]] || fail "grid check: exit $rc, want 0: $(cat "$T/err")"
+grep -q "grid check" "$T/gridcalls" || fail "grid check: not called: $(cat "$T/gridcalls")"
+grep -q "worker=tieude-gridhook" "$T/out" || fail "grid check: no success line"
 [[ "$(cat "$T/home/quaqua/runs/tieude-gridhook.grid")" == repo-workers ]] \
-  || fail "grid hook: runs/<name>.grid not <repo>-workers"
-echo "ok: grid hook -> called after a successful spawn, group recorded"
+  || fail "grid check: runs/<name>.grid not <repo>-workers"
+echo "ok: grid check -> called after a successful spawn, group recorded"
 
-spawn tieude-gridtab tieude GRID_TAB=coucou-workers
-[[ $rc -eq 0 ]] || fail "GRID_TAB: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/gridcalls")" == "grid --check --tab coucou-workers" ]] \
-  || fail "GRID_TAB: not passed as --tab: $(cat "$T/gridcalls")"
+# GRID_TAB scopes the check: a pending move for group "coucou" only trips the
+# tab that names it (--tab coucou-workers), not the derived repo-workers.
+# A grid check timeout exits non-zero.
+spawn tieude-gridtab tieude GRID_TAB=coucou-workers GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_SEC=0
+[[ $rc -ne 0 ]] || fail "GRID_TAB: exit $rc, want non-zero on grid check timeout"
+grep -qE 'grid check failed|grid check timed out' "$T/err" || fail "GRID_TAB: pending coucou move not detected: $(cat "$T/err")"
 [[ "$(cat "$T/home/quaqua/runs/tieude-gridtab.grid")" == coucou-workers ]] \
   || fail "GRID_TAB: runs/<name>.grid not coucou-workers"
-echo "ok: GRID_TAB -> grid-workers.sh --check --tab coucou-workers, group recorded"
+spawn tieude-gridtab2 tieude GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_SEC=0
+[[ $rc -eq 0 ]] || fail "derived tab: exit $rc, want 0: $(cat "$T/err")"
+! grep -qE 'grid check failed|grid check timed out' "$T/err" \
+  || fail "repo-workers must not scope in the coucou move: $(cat "$T/err")"
+echo "ok: GRID_TAB -> the check is scoped to that tab, group recorded; timeout exits non-zero"
+
+# ── 2 unarranged workers + GRID_TAB -> both arranged into GRID_TAB with no manual reconcile
+cat > "$T/unarranged2.json" <<'EOF'
+{"snapshot":{"workspaces":[{"workspace_id":"w1","label":"repo"}],
+ "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":3}],
+ "panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle",
+           "tokens":{"grid_role":"orchestrator","grid_owner":"cos","grid_ready":"1"}},
+          {"pane_id":"w1:p5","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle","label":"tieude-w1",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"myrepo","grid_ready":"1"}},
+          {"pane_id":"w1:p6","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle","label":"tieude-w2",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"myrepo","grid_ready":"1"}}],
+ "layouts":[],"agents":[{"name":"tieude-w1","pane_id":"w1:p5","agent_status":"idle"},
+                        {"name":"tieude-w2","pane_id":"w1:p6","agent_status":"idle"}]}}
+EOF
+cat > "$T/converged2.json" <<'EOF'
+{"snapshot":{"workspaces":[{"workspace_id":"w1","label":"repo"}],
+ "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":1},
+         {"tab_id":"w1:t_workers","workspace_id":"w1","label":"myrepo-workers","pane_count":2}],
+ "panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle",
+           "tokens":{"grid_role":"orchestrator","grid_owner":"cos","grid_ready":"1"}},
+          {"pane_id":"w1:p5","tab_id":"w1:t_workers","workspace_id":"w1","agent_status":"idle","label":"tieude-w1",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"myrepo","grid_tab":"myrepo-workers","grid_ready":"1"}},
+          {"pane_id":"w1:p6","tab_id":"w1:t_workers","workspace_id":"w1","agent_status":"idle","label":"tieude-w2",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"myrepo","grid_tab":"myrepo-workers","grid_ready":"1"}}],
+ "layouts":[],"agents":[{"name":"tieude-w1","pane_id":"w1:p5","agent_status":"idle"},
+                        {"name":"tieude-w2","pane_id":"w1:p6","agent_status":"idle"}]}}
+EOF
+cp "$T/unarranged2.json" "$T/snap_live.json"
+spawn tieude-twoarr tieude GRID_TAB=myrepo-workers GRID_SNAPSHOT="$T/snap_live.json" GRID_AFTER_MOVE_SNAPSHOT="$T/converged2.json"
+[[ $rc -eq 0 ]] || fail "2 unarranged workers spawn: exit $rc, want 0: $(cat "$T/err")"
+grep -qF 'herdr pane move w1:p5 --new-tab --label myrepo-workers --no-focus' "$T/calls" \
+  || fail "worker 1 not moved to new tab: $(cat "$T/calls")"
+grep -qF 'herdr pane move w1:p6 --tab w1:t_workers --split right --target-pane w1:p5 --ratio 0.5 --no-focus' "$T/calls" \
+  || fail "worker 2 not split into workers tab: $(cat "$T/calls")"
+echo "ok: 2 unarranged workers + GRID_TAB -> both arranged into GRID_TAB with no manual reconcile"
 
 spawn tieude-gridskip tieude QUAQUA_TEST=1 GRID_SKIP=1
 [[ $rc -eq 0 ]] || fail "GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"
-[[ ! -s "$T/gridcalls" ]] || fail "GRID_SKIP=1: grid called: $(cat "$T/gridcalls")"
+[[ ! -s "$T/gridcalls" ]] || fail "GRID_SKIP=1: grid checked: $(cat "$T/gridcalls")"
 spawn tieude-gridskip tieude PIPELINE_TASK=t GRID_SKIP=1
-[[ ! -s "$T/gridcalls" ]] || fail "pipeline GRID_SKIP=1: grid called: $(cat "$T/gridcalls")"
-echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not called"
+[[ ! -s "$T/gridcalls" ]] || fail "pipeline GRID_SKIP=1: grid checked: $(cat "$T/gridcalls")"
+echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not checked"
 
 spawn tieude-gridskip tieude GRID_SKIP=1
 [[ $rc -eq 0 ]] || fail "bare GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/gridcalls")" == "grid --check --tab repo-workers" ]] || fail "bare GRID_SKIP=1: grid not called: $(cat "$T/gridcalls")"
+grep -q "grid check" "$T/gridcalls" || fail "bare GRID_SKIP=1: grid not checked: $(cat "$T/gridcalls")"
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
-echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid called"
+echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid checked"
 
 # ── opencode + project MCP config: no startup dialog wait needed ─────────────
 spawn tieude-mcp tieude MKMCP=1
@@ -212,16 +351,15 @@ spawn tieude-nomcp tieude
 ! grep -q 'wait-output' "$T/calls" || fail "no .mcp.json: dialog wait ran"
 echo "ok: opencode without project MCP config -> no dialog wait"
 
-spawn tieude-gridfail tieude GRID_FAKE_RC=1
-[[ $rc -eq 0 ]] || fail "grid failure: exit $rc, want 0: $(cat "$T/err")"
-grep -q "warning: grid-workers.sh failed" "$T/err" || fail "grid failure: no warning"
-grep -q "worker=tieude-gridfail" "$T/out" || fail "grid failure: no success line"
-echo "ok: grid failure -> warning only, spawn succeeds"
+spawn tieude-gridfail tieude GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0
+[[ $rc -ne 0 ]] || fail "grid failure: exit $rc, want non-zero: $(cat "$T/err")"
+grep -qE "grid repair failed|grid check failed" "$T/err" || fail "grid failure: no error: $(cat "$T/err")"
+echo "ok: grid failure -> non-zero exit, spawn fails"
 
 # ── herdr-grid pane tokens (R5): role/group/owner on split, grid_ready=1 last ─
 spawn tieude-tokens tieude
 [[ $rc -eq 0 ]] || fail "tokens: exit $rc, want 0: $(cat "$T/err")"
-grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=cos' "$T/calls" \
+grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=cos --token grid_tab=repo-workers' "$T/calls" \
   || fail "tokens: initial tokens missing: $(cat "$T/calls")"
 grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_ready=1' "$T/calls" \
   || fail "tokens: grid_ready=1 missing: $(cat "$T/calls")"
@@ -234,7 +372,7 @@ echo "ok: pane tokens -> grid_role=worker/grid_group/grid_owner on split, grid_r
 # custom owner via QUAQUA_OWNER
 spawn tieude-customowner tieude QUAQUA_OWNER=custom-lead
 [[ $rc -eq 0 ]] || fail "custom owner: exit $rc, want 0: $(cat "$T/err")"
-grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=custom-lead' "$T/calls" \
+grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=custom-lead --token grid_tab=repo-workers' "$T/calls" \
   || fail "custom owner: grid_owner not set to custom-lead: $(cat "$T/calls")"
 echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER"
 

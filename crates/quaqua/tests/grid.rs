@@ -7,6 +7,57 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Reconcile options for an owner-wide repair (`grid reconcile --owner X --tab T`).
+fn repair_opts(owner: &str, tab: &str) -> ReconcileOptions {
+    ReconcileOptions {
+        check: false,
+        repair: true,
+        tab: Some(tab.to_string()),
+        only: None,
+        owner: Some(owner.to_string()),
+        dry_run: false,
+        timeout_sec: None,
+    }
+}
+
+/// The pane id the driver now uses for the worker labelled `label`.
+fn pane_id_by_label(driver: &FakeHerdrDriver, label: &str) -> String {
+    driver
+        .current_snapshot
+        .panes
+        .iter()
+        .find(|p| p.label.as_deref() == Some(label))
+        .map(|p| p.pane_id.clone())
+        .unwrap_or_else(|| panic!("no pane labelled {label}"))
+}
+
+fn idle_the_working_panes(driver: &mut FakeHerdrDriver) {
+    for p in &mut driver.current_snapshot.panes {
+        if p.agent_status.as_deref() == Some("working") {
+            p.agent_status = Some("idle".to_string());
+        }
+    }
+}
+
+fn tab_labelled(driver: &FakeHerdrDriver, label: &str) -> Option<String> {
+    driver
+        .current_snapshot
+        .tabs
+        .iter()
+        .find(|t| t.label.as_deref() == Some(label))
+        .map(|t| t.tab_id.clone())
+}
+
+fn panes_in(driver: &FakeHerdrDriver, tab_id: &str) -> Vec<String> {
+    driver
+        .current_snapshot
+        .panes
+        .iter()
+        .filter(|p| p.tab_id.as_deref() == Some(tab_id))
+        .map(|p| p.pane_id.clone())
+        .collect()
+}
+
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/herdr-grid")
 }
@@ -1006,4 +1057,281 @@ fn test_check_converges_when_dependent_split_follows_deferred_anchor() {
         run_reconcile(&mut driver, &opts, "workers", None).is_ok(),
         "check must converge while the anchor is still working"
     );
+}
+
+#[test]
+fn test_repair_pivots_new_tab_on_idle_worker_and_defers_working() {
+    // The group's first op used to be the new_tab, owned by the working pane:
+    // apply_ops deferred it and propagated the deferral to the whole group, so
+    // `grid reconcile --owner cos --tab quaqua-rs-workers` exited 0 having moved
+    // nothing (and created a tab labelled with the group token, not --tab).
+    // The repair must pivot the tab on the idle worker and report the working one.
+    let snap = load_edge_fixture("deferred-anchor-dependent-split");
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = repair_opts("cos", "quaqua-rs-workers");
+
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+    assert_eq!(driver.executed_moves.len(), 1, "one runnable move: {:?}", driver.executed_moves);
+    let (moved, target) = &driver.executed_moves[0];
+    assert_eq!(moved, "w1:p6", "the idle worker creates the tab");
+    match target {
+        Target::NewTab { label } => assert_eq!(label, "quaqua-rs-workers"),
+        other => panic!("expected NewTab labelled with --tab, got {other:?}"),
+    }
+    assert!(
+        driver.current_snapshot.panes.iter().any(|p| p.pane_id == "w1:p5" && p.agent_status.as_deref() == Some("working")),
+        "the working worker must not move"
+    );
+
+    // Once the working worker idles, a second repair pass completes the group.
+    idle_the_working_panes(&mut driver);
+    driver.executed_moves.clear();
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+    assert_eq!(driver.executed_moves.len(), 1, "second pass moves the now-idle worker");
+    let (moved2, target2) = &driver.executed_moves[0];
+    assert_eq!(moved2, "w1:p5");
+    let workers_tab = tab_labelled(&driver, "quaqua-rs-workers").expect("tab labelled --tab");
+    match target2 {
+        Target::Split { tab, anchor, .. } => {
+            assert_eq!(tab, &workers_tab, "the second pass reuses the tab it named");
+            assert_eq!(anchor, &pane_id_by_label(&driver, "sude-1"));
+        }
+        other => panic!("expected a split into the workers tab, got {other:?}"),
+    }
+
+    // Converged: nothing left to plan or move.
+    driver.executed_moves.clear();
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+    assert!(driver.executed_moves.is_empty(), "converged repair: {:?}", driver.executed_moves);
+}
+
+#[test]
+fn test_two_pipelines_same_owner_land_in_grid_tab() {
+    // Two pipelines of one owner (a Lead) spawn builders into the Lead's tab.
+    // The repair must put the owner's workers in the tab labelled GRID_TAB and
+    // never in the Lead's tab: the idle builder goes now, the working one is
+    // reported deferred and follows as soon as it idles.
+    let snap = load_edge_fixture("two-pipelines-lead-tab");
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = repair_opts("quaqua-rs-lead", "quaqua-rs-workers");
+
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+    assert_eq!(driver.executed_moves.len(), 1, "only the idle builder moves: {:?}", driver.executed_moves);
+    let (moved, target) = &driver.executed_moves[0];
+    assert_eq!(moved, "w1:p6");
+    match target {
+        Target::NewTab { label } => assert_eq!(label, "quaqua-rs-workers"),
+        other => panic!("expected NewTab labelled GRID_TAB, got {other:?}"),
+    }
+    for (_, t) in &driver.executed_moves {
+        match t {
+            Target::Split { tab, .. } => assert_ne!(tab, "w1:t1", "never into the Lead's tab"),
+            Target::NewTab { label } => assert_ne!(label, "lead-tab"),
+        }
+    }
+    assert_eq!(panes_in(&driver, "w1:t1").len(), 2, "lead + the working builder so far");
+
+    // The working builder B idles (its prompt finished) -> the next pass moves it.
+    idle_the_working_panes(&mut driver);
+    driver.executed_moves.clear();
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+    assert_eq!(driver.executed_moves.len(), 1, "second pass moves the now-idle builder");
+    assert_eq!(driver.executed_moves[0].0, "w1:p5");
+    match &driver.executed_moves[0].1 {
+        Target::Split { tab, anchor, .. } => {
+            assert_ne!(tab, "w1:t1", "never into the Lead's tab");
+            assert_eq!(anchor, &pane_id_by_label(&driver, "sude-pagetwo"));
+        }
+        other => panic!("expected a split into the workers tab, got {other:?}"),
+    }
+
+    // Both builders in the tab labelled GRID_TAB; the Lead alone in its own tab.
+    let workers_tab = tab_labelled(&driver, "quaqua-rs-workers").expect("tab labelled GRID_TAB");
+    let workers_in_tab = panes_in(&driver, &workers_tab);
+    assert_eq!(workers_in_tab.len(), 2, "both builders in GRID_TAB: {workers_in_tab:?}");
+    assert_eq!(panes_in(&driver, "w1:t1"), vec!["w1:p1".to_string()], "Lead stays alone");
+
+    driver.executed_moves.clear();
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+    assert!(driver.executed_moves.is_empty(), "converged repair: {:?}", driver.executed_moves);
+}
+
+#[test]
+fn test_repair_keeps_idle_panes_movable_when_the_first_worker_is_deferred() {
+    // n>=3 with the first worker working: the pivot creates the tab, and the
+    // remaining *idle* workers must still move — they used to anchor on the
+    // working worker, so propagate_deferrals cancelled them as well.
+    let mut snap = load_edge_fixture("3-workers");
+    for p in &mut snap.panes {
+        if p.pane_id == "w1:p5" {
+            p.agent_status = Some("working".to_string());
+        }
+    }
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = repair_opts("cos", "quaqua-rs-workers");
+
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+    let moved: Vec<&str> = driver.executed_moves.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(moved, vec!["w1:p6", "w1:p7"], "both idle panes move: {:?}", driver.executed_moves);
+    assert!(matches!(&driver.executed_moves[0].1, Target::NewTab { label } if label == "quaqua-rs-workers"));
+    match &driver.executed_moves[1].1 {
+        Target::Split { anchor, .. } => {
+            assert_eq!(anchor, &pane_id_by_label(&driver, "sude-1"), "anchored on the idle pivot");
+        }
+        other => panic!("expected a split into the workers tab, got {other:?}"),
+    }
+    assert!(
+        driver.current_snapshot.panes.iter().any(|p| p.pane_id == "w1:p5" && p.agent_status.as_deref() == Some("working")),
+        "the working pane stays where it is"
+    );
+}
+
+#[test]
+fn test_plan_accepts_the_tab_the_repair_made() {
+    // The reviewer's rule: a converged-check and the repair it guards must share
+    // one acceptance predicate. The repair labels the tab with `--tab`
+    // (`quaqua-rs-workers`) while the workers' group token is `quaqua`, so the
+    // planner used to plan a *new* tab and the hook moved the panes back out.
+    for fixture in ["deferred-anchor-dependent-split", "two-pipelines-lead-tab"] {
+        let mut driver = FakeHerdrDriver::new(load_edge_fixture(fixture));
+        let opts = repair_opts(if fixture == "two-pipelines-lead-tab" { "quaqua-rs-lead" } else { "cos" }, "quaqua-rs-workers");
+
+        // converge: one pass moves the idle worker, a second the working one
+        run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+        idle_the_working_panes(&mut driver);
+        run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+
+        let ops = plan(&driver.current_snapshot).unwrap();
+        assert!(
+            ops.is_empty(),
+            "{fixture}: the planner must accept the repair's tab, got {ops:?}"
+        );
+        assert!(
+            tab_labelled(&driver, "quaqua-rs-workers").is_some(),
+            "{fixture}: the workers tab is labelled --tab"
+        );
+    }
+}
+
+#[test]
+fn test_plan_and_repair_agree_on_a_foreign_workers_tab() {
+    // Finding 1: a foreign `<X>-workers` tab (`mono-workers`) holds only this
+    // group's panes while the group's own spawn-labelled tab
+    // (`quaqua-rs-workers`) holds the rest. The planner used to widen on
+    // `ends_with("-workers")` and adopt the foreign tab (first in snapshot
+    // order) while the repair only accepted its own `--tab` label: hook and
+    // repair pulled the panes in opposite directions. Both now share
+    // `accepts_workers_tab`, so both choose the tab the panes were spawned into.
+    let snap = load_edge_fixture("foreign-workers-tab");
+    let ops = plan(&snap).expect("plan must succeed");
+    assert_eq!(ops.len(), 1, "only the pane outside the spawn tab moves: {ops:?}");
+    assert_eq!(ops[0].pane, "w1:p5");
+    match &ops[0].target {
+        Target::Split { tab, .. } => {
+            assert_eq!(tab, "w1:t3", "planner must target the spawn-labelled tab, never mono-workers");
+        }
+        other => panic!("expected a split into the workers tab, got {other:?}"),
+    }
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = repair_opts("cos", "quaqua-rs-workers");
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+    assert_eq!(driver.executed_moves.len(), 1, "repair moves only w1:p5: {:?}", driver.executed_moves);
+    let (moved, target) = &driver.executed_moves[0];
+    assert_eq!(moved, "w1:p5");
+    match target {
+        Target::Split { tab, .. } => {
+            assert_eq!(tab, "w1:t3", "repair must choose the same tab as the planner");
+        }
+        other => panic!("expected a split into the workers tab, got {other:?}"),
+    }
+    assert!(
+        panes_in(&driver, "w1:t2").is_empty(),
+        "the foreign mono-workers tab must never be adopted: {:?}",
+        panes_in(&driver, "w1:t2")
+    );
+}
+
+#[test]
+fn test_check_is_not_vacuous_when_grid_tab_differs_from_group() {
+    // Finding 2: with GRID_TAB (`quaqua-rs-workers`) != the group token
+    // (`quaqua`), the check dropped every op (`is_group_tab` false) and returned
+    // Ok on any layout. The shared predicate accepts the pane's spawn label, so
+    // an unarranged layout must report pending ops.
+    let snap = load_edge_fixture("grid-tab-unarranged");
+    let ops = plan(&snap).expect("plan must succeed");
+    assert_eq!(ops.len(), 2);
+    assert!(
+        matches!(&ops[0].target, Target::NewTab { label } if label == "quaqua-rs-workers"),
+        "the new tab must carry the spawn label, got {:?}",
+        ops[0].target
+    );
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = ReconcileOptions {
+        check: true,
+        repair: false,
+        tab: Some("quaqua-rs-workers".to_string()),
+        only: None,
+        owner: Some("cos".to_string()),
+        dry_run: true,
+        timeout_sec: Some(0),
+    };
+    let res = run_reconcile(&mut driver, &opts, "workers", None);
+    assert!(res.is_err(), "check must not be vacuous when GRID_TAB != group");
+    assert!(
+        res.unwrap_err().contains("pending ops"),
+        "the check must report the pending ops"
+    );
+}
+
+#[test]
+fn test_check_converges_after_repair_when_grid_tab_differs_from_group() {
+    // The same predicate that finds the pending ops must accept the tab the
+    // repair makes, or the pre-prompt check never converges on that layout.
+    let snap = load_edge_fixture("grid-tab-unarranged");
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = repair_opts("cos", "quaqua-rs-workers");
+    run_reconcile(&mut driver, &opts, "workers", None).unwrap();
+
+    let check = ReconcileOptions {
+        check: true,
+        repair: false,
+        tab: Some("quaqua-rs-workers".to_string()),
+        only: None,
+        owner: Some("cos".to_string()),
+        dry_run: true,
+        timeout_sec: Some(0),
+    };
+    assert!(
+        run_reconcile(&mut driver, &check, "workers", None).is_ok(),
+        "check must converge on the repaired layout"
+    );
+}
+
+#[test]
+fn test_repair_anchors_on_working_pane_in_workers_tab_without_self_anchor() {
+    // Defect 3: when the only pane in the workers tab is busy (working),
+    // an unarranged worker being moved into the workers tab must anchor on
+    // that pane (w1:p5) and NEVER anchor on itself (w1:p6).
+    let fix = fixtures_dir().join("busy-worker-in-tab.json");
+    let content = fs::read_to_string(fix).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let snap = parse_snapshot_value(&val).unwrap();
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = repair_opts("quaqua-rs-lead", "quaqua-workers");
+
+    let res = run_reconcile(&mut driver, &opts, "workers", None);
+    assert!(res.is_ok(), "repair must succeed: {:?}", res);
+    assert_eq!(driver.executed_moves.len(), 1);
+    let (pane, target) = &driver.executed_moves[0];
+    assert_eq!(pane, "w1:p6");
+    match target {
+        Target::Split { tab, anchor, .. } => {
+            assert_eq!(tab, "w1:t2");
+            assert_eq!(anchor, "w1:p5", "anchor must be the pane in tab, not itself");
+        }
+        _ => panic!("expected split target, got: {:?}", target),
+    }
 }

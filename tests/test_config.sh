@@ -35,6 +35,15 @@ echo "ok: cap 4, zimage override 3"
   || fail "tieude.can_review"
 echo "ok: kinds.<k>.can_review"
 
+# team.toml is the only source of effort/fallback: tieude=max, sude falls back to tieude.
+[[ "$("$bin" config get kinds.tieude.effort --file "$root/team.toml")" == "max" ]] \
+  || fail "tieude.effort"
+[[ "$("$bin" config get kinds.detu.effort --file "$root/team.toml")" == "high" ]] \
+  || fail "detu.effort"
+[[ "$("$bin" config get kinds.sude.fallback --file "$root/team.toml")" == "tieude" ]] \
+  || fail "sude.fallback"
+echo "ok: kinds.<k>.effort / .fallback"
+
 # ── --project must not re-check the other projects / weights (review r2 #1) ────
 multi="$root/crates/quaqua/tests/fixtures/two-projects.toml"
 for p in '' a b c; do
@@ -46,15 +55,9 @@ done
   && fail "unknown project accepted"
 echo "ok: validate --project a|b|c (caps 3/2/1) all pass; unknown project rejected"
 
-# ── explicit --models that does not exist is an error (review r2 #2) ──────────
-if "$bin" config validate --file "$root/team.toml" --models "$root/nope-models.md" >/dev/null 2>&1; then
-  fail "explicit missing --models was accepted"
-fi
-echo "ok: explicit --models missing is an error"
-
 # ── invalid fixtures: rejected, each with its own message ─────────────────────
 invalid="$root/crates/quaqua/tests/fixtures/invalid"
-check_reject() { # <fixture> <needle> [--models]
+check_reject() { # <fixture> <needle>
   local f=$1 needle=$2; shift 2
   local err rc=0
   err=$("$bin" config validate --file "$invalid/$f" "$@" 2>&1 >/dev/null) || rc=$?
@@ -71,8 +74,11 @@ check_reject unknown-class.toml           "unknown role-class 'ghostrole'"
 check_reject unknown-role.toml            "unknown role 'ghost'"
 check_reject same-harness.toml            "share harness"
 check_reject reviewer-cannot-review.toml  "can_review = false"
-check_reject model-drift.toml             "drift" --models "$root/models.md"
-check_reject missing-kind.toml            "absent from team.toml" --models "$root/models.md"
+check_reject missing-effort.toml          "effort is missing"
+check_reject bad-effort.toml              "does not take effort 'banana'"
+check_reject fallback-missing.toml        "fallback 'ghost' is not a kind"
+check_reject fallback-self.toml           "fallback names itself"
+check_reject fallback-cannot-review.toml "cannot review"
 check_reject bad-schema.toml              "unsupported schema_version"
 check_reject integ-branch.toml            "{slug}"
 check_reject differ-policy.toml           "unknown differ policy"

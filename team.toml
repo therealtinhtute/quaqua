@@ -1,6 +1,9 @@
 # quaqua team.toml — single source of truth for roles, limits, timers, kinds.
 # Rust migration plan R1: docs/research/herdr-grid-rust-migration-plan.md § `team.toml`.
-# [kinds.*] harness/model/effort values are copied verbatim from models.md — never changed.
+# [kinds.*] harness/model/effort/fallback are the single source of truth for a
+# spawn — models.md prose is descriptive only and is not checked.
+# effort is required for every kind and must be a value its harness accepts.
+# fallback = "<kind>" is optional: taken once, only when agent start fails.
 schema_version = 2
 
 [limits]
@@ -34,18 +37,23 @@ default_kind = "tieude"                   # anh iu, 2026-10-15
 default_reviewer = ["suhuynh"]           # first available wins (anh iu, 2026-10-16)
 builder_reviewer_differ = "harness"
 
-[kinds.tieude]                    # harness · model · effort move here from models.md; prose stays there
+[kinds.tieude]                    # harness · model · effort live here; models.md prose stays prose
 harness = "opencode"
 model = "opencode-go/deepseek-v4.1-flash"
+effort = "max"                    # opencode variant (provider/model#variant)
+fallback = "detu"                 # one hop, only if agent start fails
 can_review = false                # true for ni, suhuynh, truonglao (claude read-only flags)
 [kinds.detu]
-harness = "opencode"
-model = "opencode-go/deepseek-v4.1-flash"
+harness = "omp"
+model = "google-antigravity/gemini-3.8-flash"
+effort = "high"                   # anh iu, 2026-10-16
+fallback = "tieude"
 can_review = false
 [kinds.sude]
 harness = "omp"
 model = "google-antigravity/gemini-3.8-flash"
 effort = "high"
+fallback = "tieude"
 can_review = false
 [kinds.ni]
 harness = "claude"
