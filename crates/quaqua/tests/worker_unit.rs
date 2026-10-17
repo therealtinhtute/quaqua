@@ -680,3 +680,155 @@ fn test_claude_review_mode_verification() {
     assert!(opts.review);
     assert_eq!(opts.kind, "suhuynh");
 }
+
+// --- quaqua worker stop ---------------------------------------------------
+
+use quaqua::worker::stop::{parse_stop_args, stop_keys, stop_worker};
+use std::sync::Mutex;
+
+fn agent_get_json(harness: &str) -> String {
+    format!(
+        "{{\"result\":{{\"agent\":{{\"agent\":\"{harness}\",\"name\":\"tieude-x\",\"pane_id\":\"w1:p2\"}}}}}}"
+    )
+}
+
+/// Records the keys stop sends; everything else is unused by stop.
+struct StopSpy {
+    agent_json: String,
+    sent: Mutex<Vec<(String, String)>>,
+}
+
+impl StopSpy {
+    fn new(agent_json: &str) -> Self {
+        StopSpy {
+            agent_json: agent_json.to_string(),
+            sent: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn calls(&self) -> Vec<(String, String)> {
+        self.sent.lock().unwrap().clone()
+    }
+
+    fn ok() -> std::io::Result<Output> {
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+impl HerdrOps for StopSpy {
+    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_list(&self) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
+        Ok((true, self.agent_json.clone()))
+    }
+    fn agent_read(&self, _name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn agent_start(&self, _name: &str, _kind: &str, _pane: &str, _timeout_ms: u32, _extra_args: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_split(&self, _cwd: &str, _owner: &str, _envs: &[(&str, &str)]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_close(&self, _pane: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_report_metadata(&self, _pane: &str, _tokens: &[&str]) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
+        unimplemented!()
+    }
+    fn pane_read(&self, _pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_send_keys(&self, name: &str, key: &str) -> std::io::Result<Output> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push((name.to_string(), key.to_string()));
+        StopSpy::ok()
+    }
+    fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_nowait(&self, _name: &str, _prompt: &str) -> std::io::Result<Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_wait_background(&self, _name: &str, _prompt: &str, _timeout_ms: u32, _log_file: std::fs::File) -> std::io::Result<Child> {
+        unimplemented!()
+    }
+}
+
+#[test]
+fn test_stop_keys_by_harness() {
+    assert_eq!(stop_keys("opencode"), Some(&["esc", "esc"][..]));
+    assert_eq!(stop_keys("omp"), Some(&["esc"][..]));
+    // No verified sequence for claude yet (Lead decision B, 2026-10-17):
+    // esc esc would open Claude Code's message selector, so stop refuses.
+    assert_eq!(stop_keys("claude"), None);
+    assert_eq!(stop_keys("aider"), None);
+    assert_eq!(stop_keys(""), None);
+}
+
+#[test]
+fn test_stop_opencode_sends_esc_twice_in_order() {
+    let spy = StopSpy::new(&agent_get_json("opencode"));
+    stop_worker("tieude-x", &spy).unwrap();
+    assert_eq!(
+        spy.calls(),
+        vec![
+            ("tieude-x".to_string(), "esc".to_string()),
+            ("tieude-x".to_string(), "esc".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn test_stop_omp_sends_esc_once() {
+    let spy = StopSpy::new(&agent_get_json("omp"));
+    stop_worker("sude-x", &spy).unwrap();
+    assert_eq!(spy.calls(), vec![("sude-x".to_string(), "esc".to_string())]);
+}
+
+#[test]
+fn test_stop_unmapped_harness_fails_closed_and_sends_nothing() {
+    for harness in ["claude", "aider"] {
+        let spy = StopSpy::new(&agent_get_json(harness));
+        let err = stop_worker("tieude-x", &spy).unwrap_err();
+        assert_eq!(err.0, 1, "exit code for {harness}");
+        assert!(err.1.contains(harness), "error names harness {harness}: {}", err.1);
+        assert!(err.1.contains("tieude-x"), "error names the worker: {}", err.1);
+        assert!(spy.calls().is_empty(), "no keys for {harness}");
+    }
+}
+
+#[test]
+fn test_stop_missing_agent_fails_closed_and_sends_nothing() {
+    let spy = StopSpy::new(r#"{"error":{"code":"agent_not_found","message":"no such agent"}}"#);
+    let err = stop_worker("tieude-gone", &spy).unwrap_err();
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("tieude-gone"), "{}", err.1);
+    assert!(spy.calls().is_empty());
+}
+
+#[test]
+fn test_stop_requires_exactly_one_valid_name() {
+    assert!(parse_stop_args(&[]).is_err());
+    assert!(parse_stop_args(&["".to_string()]).is_err());
+    assert!(parse_stop_args(&["a".to_string(), "b".to_string()]).is_err());
+    assert!(parse_stop_args(&["Tieude-X".to_string()]).is_err());
+    assert!(parse_stop_args(&["--force".to_string()]).is_err());
+    assert_eq!(parse_stop_args(&["tieude-x".to_string()]).unwrap(), "tieude-x");
+}
