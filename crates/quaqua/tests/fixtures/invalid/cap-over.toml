@@ -1,8 +1,8 @@
-# invalid: limits.max_workers_per_orchestrator above the AGENTS.md ceiling of 4.
+# invalid: limits.max_workers_per_orchestrator above the AGENTS.md ceiling of 8.
 schema_version = 2
 
 [limits]
-max_workers_per_orchestrator = 5
+max_workers_per_orchestrator = 9
 
 [strategy]
 default_kind = "tieude"

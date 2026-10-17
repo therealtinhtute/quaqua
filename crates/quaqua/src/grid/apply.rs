@@ -263,23 +263,36 @@ pub fn apply_ops<D: HerdrDriver>(
 ) -> Result<HashMap<String, String>, String> {
     let mut pane_map: HashMap<String, String> = HashMap::new();
     let mut latest_tab: Option<String> = None;
+    let mut latest_tab_2: Option<String> = None;
     let mut scratch_counter = 0;
 
     let mut deferred_panes: HashSet<String> = HashSet::new();
     let mut workers_tab_deferred = false;
+    let mut workers_tab_2_deferred = false;
 
     for op in ops {
         // Finding 3: Propagate deferral to dependent ops
         if op.deferred {
             deferred_panes.insert(op.pane.clone());
-            if matches!(op.target, Target::NewTab { .. }) {
-                workers_tab_deferred = true;
+            if let Target::NewTab { label } = &op.target {
+                if label.ends_with("-2") {
+                    workers_tab_2_deferred = true;
+                } else {
+                    workers_tab_deferred = true;
+                }
             }
             continue;
         }
 
         if let Target::Split { tab, anchor, .. } = &op.target {
-            if deferred_panes.contains(anchor) || (tab == "@workers" && workers_tab_deferred) {
+            let tab_def = if tab == "@workers" {
+                workers_tab_deferred
+            } else if tab == "@workers-2" {
+                workers_tab_2_deferred
+            } else {
+                false
+            };
+            if deferred_panes.contains(anchor) || tab_def {
                 deferred_panes.insert(op.pane.clone());
                 continue;
             }
@@ -342,9 +355,18 @@ pub fn apply_ops<D: HerdrDriver>(
                     .ok_or_else(|| format!("apply: anchor {actual_anchor} missing from snapshot"))?;
 
                 // Finding 5 & N1: Resolve @workers to the workers tab, NEVER the orchestrator tab
-                let actual_tab = if tab == "@workers" {
-                    if let Some(lt) = &latest_tab {
-                        lt.clone()
+                let actual_tab = if tab == "@workers" || tab.starts_with("@workers-") {
+                    let mut resolved = None;
+                    if tab == "@workers-2" {
+                        if let Some(lt2) = &latest_tab_2 {
+                            resolved = Some(lt2.clone());
+                        }
+                    } else if let Some(lt) = &latest_tab {
+                        resolved = Some(lt.clone());
+                    }
+
+                    if let Some(r) = resolved {
+                        r
                     } else {
                         // Look for an existing valid workers tab for this group,
                         // by the same acceptance predicate the plan and the
@@ -362,7 +384,7 @@ pub fn apply_ops<D: HerdrDriver>(
                         if is_workers_tab {
                             anchor_tid.to_string()
                         } else {
-                            return Err(format!("apply: cannot resolve @workers tab for group {worker_group}"));
+                            return Err(format!("apply: cannot resolve {tab} tab for group {worker_group}"));
                         }
                     }
                 } else {
@@ -437,8 +459,14 @@ pub fn apply_ops<D: HerdrDriver>(
             pane_map.insert(parked, new_id.clone());
         }
 
-        if !res.tab_id.is_empty() && matches!(op.target, Target::NewTab { .. }) {
-            latest_tab = Some(res.tab_id);
+        if !res.tab_id.is_empty() {
+            if let Target::NewTab { label } = &op.target {
+                if label.ends_with("-2") {
+                    latest_tab_2 = Some(res.tab_id.clone());
+                } else {
+                    latest_tab = Some(res.tab_id.clone());
+                }
+            }
         }
     }
 

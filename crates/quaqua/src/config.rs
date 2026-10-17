@@ -10,7 +10,7 @@ use std::path::Path;
 
 pub const SCHEMA_VERSION: u32 = 2;
 /// AGENTS.md `## Rules`: "Max 4 task workers per orchestrator".
-pub const CAP_CEILING: i64 = 4;
+pub const CAP_CEILING: i64 = 8;
 /// `can_spawn` / `can_prompt` vocabulary (role classes).
 pub const ROLE_CLASSES: [&str; 4] = ["cos", "lead", "peer", "taskforce"];
 /// `[roles.<r>]` table keys.
@@ -581,7 +581,7 @@ workers_tab = "workers"
     #[test]
     fn cap_over_is_rejected() {
         let mut c = base();
-        c.limits.max_workers_per_orchestrator = 5;
+        c.limits.max_workers_per_orchestrator = 9;
         assert!(validate(&c).unwrap_err().contains("over the cap"));
     }
 

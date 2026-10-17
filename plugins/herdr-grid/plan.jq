@@ -59,14 +59,21 @@ def is_candidate_worker:
 def is_working:
   . == "working";
 
+# Strip trailing numeric suffix -\d+ (e.g. quaqua-workers-2 -> quaqua-workers)
+def strip_tab_suffix:
+  if . == null then ""
+  elif test("-[0-9]+$") then sub("-[0-9]+$"; "")
+  else . end;
+
 # Check if a tab label matches a group (exact, with/without -workers suffix, or default "workers")
 def is_group_tab($group; $label):
   if ($label == null or $label == "") then false
   else
-    ($label == $group)
-    or ($label == "\($group)-workers")
-    or ($label == ($group | rtrimstr("-workers")))
-    or ($label == "workers")
+    ($label | strip_tab_suffix) as $base
+    | ($base == $group)
+      or ($base == "\($group)-workers")
+      or ($base == ($group | rtrimstr("-workers")))
+      or ($base == "workers")
   end;
 
 # The one acceptance predicate for a group's workers tab, shared with plan.rs
@@ -74,8 +81,30 @@ def is_group_tab($group; $label):
 # panes were spawned into (GRID_TAB, carried on the pane as `grid_tab`).
 def accepts_workers_tab($group; $expected; $label):
   is_group_tab($group; $label)
-  or (($expected != null) and ($expected != "") and ($label == $expected));
+  or (($expected != null) and ($expected != "")
+      and (($label == $expected) or (($label | strip_tab_suffix) == ($expected | strip_tab_suffix))));
 
+def chunk_tab_label($base_tab; $chunk_idx):
+  if $chunk_idx == 0 then $base_tab
+  else "\($base_tab)-\($chunk_idx + 1)" end;
+
+def chunk_tab_ref($chunk_idx):
+  if $chunk_idx == 0 then "@workers"
+  else "@workers-\($chunk_idx + 1)" end;
+
+def accepts_chunk_tab($group; $expected; $chunk_idx; $label):
+  if ($label == null or $label == "") then false
+  elif $chunk_idx == 0 then
+    (($label | strip_tab_suffix) == $label)
+    and accepts_workers_tab($group; $expected; $label)
+  else
+    ("-\($chunk_idx + 1)") as $suf
+    | if ($label | endswith($suf)) then
+        ($label | rtrimstr($suf)) as $base_label
+        | ($expected | if . != null then strip_tab_suffix else null end) as $base_expected
+        | accepts_workers_tab($group; $base_expected; $base_label)
+      else false end
+  end;
 # Desired cells for n workers in area $a (index 0 = first spawned)
 def cells($n; $a):
   ($a.x // 0) as $x | ($a.y // 0) as $y | ($a.width // 200) as $w | ($a.height // 50) as $h
@@ -195,14 +224,17 @@ def find_owner_pane($owner; $panes; $agents; $ws):
 # counts an unrunnable op as pending and times out while its anchor works.
 def propagate_deferrals:
   ( reduce .[] as $op
-      ( {ops: [], deferred: [], tab_deferred: false};
+      ( {ops: [], deferred: [], tab_deferred: []};
         if $op.deferred then
           { ops: (.ops + [$op]),
             deferred: (.deferred + [$op.pane]),
-            tab_deferred: (if $op.target.kind == "new_tab" then true else .tab_deferred end) }
+            tab_deferred: (if $op.target.kind == "new_tab" then
+                             if ($op.target.label | endswith("-2")) then (.tab_deferred + ["@workers-2"])
+                             else (.tab_deferred + ["@workers"]) end
+                           else .tab_deferred end) }
         elif ($op.target.kind == "split"
               and (((.deferred | index($op.target.anchor)) != null)
-                   or ($op.target.tab == "@workers" and .tab_deferred))) then
+                   or ((.tab_deferred | index($op.target.tab)) != null))) then
           { ops: (.ops + [$op + {deferred: true}]),
             deferred: (.deferred + [$op.pane]),
             tab_deferred: .tab_deferred }
@@ -287,117 +319,109 @@ def propagate_deferrals:
                         # into (GRID_TAB); null for legacy panes with no token.
                         | ([ $gws[] | (.tokens.grid_tab // "") | select(. != "") ] | first // null) as $expected
 
-                        | if $n > 4 then
-                            error("too many workers in group \($group): \($n) (max 4)")
+                        | if $n > 8 then
+                            error("too many workers in group \($group): \($n) (max 8)")
                           else
-                            # Search for an existing valid workers tab for this group
-                            ( [ $tabs[]
-                                | select((.workspace_id == $owner_ws or $owner_ws == "")
-                                         and ($anchor_tab == null or .tab_id != $anchor_tab)
-                                         # the one acceptance predicate shared with
-                                         # plan.rs/reconcile.rs: the group tab, or
-                                         # the exact spawn label; still gated by the
-                                         # occupancy test below (one project per tab)
-                                         and accepts_workers_tab($group; $expected; .label))
-                                | .tab_id as $tid
-                                | [ $panes[] | select(.tab_id == $tid) ] as $occ
-                                | select(($occ | length > 0)
-                                         and ($occ | all(. as $p | any($gws[]; .pane_id == $p.pane_id))))
-                              ]
-                              | sort_by(if (.label == $group or .label == "\($group)-workers" or .label == ($group | rtrimstr("-workers"))) then 0 else 1 end)
-                              | first // null ) as $valid_tab
-
-                            | if $valid_tab != null then
-                                $valid_tab.tab_id as $wt_id
-                                | ($layout_by_tab[$wt_id] // null) as $wt_layout
-                                | ($wt_layout.area // {x:0, y:0, width:200, height:50}) as $wt_area
-                                | ( ($gws | all(.tab_id == $wt_id))
-                                    and ([ $panes[] | select(.tab_id == $wt_id) ] | length == $n) ) as $all_present
-
-                                | ( if $all_present then
-                                      if $n == 1 then
-                                        ([ $wt_layout.panes[] | select(.pane_id == $gws[0].pane_id) | .rect ] | first // null) as $r0
-                                        | rect_near($r0; $wt_area)
-                                      else
-                                        cells($n; $wt_area) as $req_cells
-                                        | [ range(0; $n) ] | all(
-                                            . as $i
-                                            | ([ $wt_layout.panes[] | select(.pane_id == $gws[$i].pane_id) | .rect ] | first // null) as $ri
-                                            | rect_near($ri; $req_cells[$i])
-                                          )
-                                      end
-                                    else false end ) as $in_place
-
-                                | if $in_place then
-                                    .
-                                  else
-                                    # Existing tab exists but needs placement/completion
-                                    ( [ $gws[] | select(.tab_id == $wt_id) ] | length ) as $in_tab_count
-                                    | if ($in_tab_count > 0 and $gws[0].tab_id == $wt_id) then
-                                        # Worker 0 is already in the tab; place remaining workers
-                                        . + [
-                                          build_order($n)[] as $i
-                                          | select($i > 0 and $gws[$i].tab_id != $wt_id)
-                                          | {
+                            ($expected // $group) as $base_tab
+                            | (if $n <= 4 then [[0, $gws]]
+                               else [[0, $gws[0:4]], [1, $gws[4:$n]]] end) as $chunks
+                            | reduce $chunks[] as $c
+                                ( .;
+                                  $c[0] as $chunk_idx
+                                  | $c[1] as $chunk_gws
+                                  | ($chunk_gws | length) as $m
+                                  | chunk_tab_label($base_tab; $chunk_idx) as $chunk_label
+                                  | chunk_tab_ref($chunk_idx) as $tab_ref
+                                  | ( [ $tabs[]
+                                        | select((.workspace_id == $owner_ws or $owner_ws == "")
+                                                 and ($anchor_tab == null or .tab_id != $anchor_tab)
+                                                 and accepts_chunk_tab($group; $expected; $chunk_idx; .label))
+                                        | .tab_id as $tid
+                                        | [ $panes[] | select(.tab_id == $tid) ] as $occ
+                                        | select(($occ | length > 0)
+                                                 and ($occ | all(. as $p | any($chunk_gws[]; .pane_id == $p.pane_id))))
+                                      ]
+                                      | sort_by(if .label == $chunk_label then 0 else 1 end)
+                                      | first // null ) as $valid_tab
+                                  | if $valid_tab != null then
+                                      $valid_tab.tab_id as $wt_id
+                                      | ($layout_by_tab[$wt_id] // null) as $wt_layout
+                                      | ($wt_layout.area // {x:0, y:0, width:200, height:50}) as $wt_area
+                                      | ( ($chunk_gws | all(.tab_id == $wt_id))
+                                          and ([ $panes[] | select(.tab_id == $wt_id) ] | length == $m) ) as $all_present
+                                      | ( if $all_present then
+                                            if $m == 1 then
+                                              ([ $wt_layout.panes[] | select(.pane_id == $chunk_gws[0].pane_id) | .rect ] | first // null) as $r0
+                                              | rect_near($r0; $wt_area)
+                                            else
+                                              cells($m; $wt_area) as $req_cells
+                                              | [ range(0; $m) ] | all(
+                                                  . as $i
+                                                  | ([ $wt_layout.panes[] | select(.pane_id == $chunk_gws[$i].pane_id) | .rect ] | first // null) as $ri
+                                                  | rect_near($ri; $req_cells[$i])
+                                                )
+                                            end
+                                          else false end ) as $in_place
+                                      | if $in_place then
+                                          .
+                                        else
+                                          ( [ $chunk_gws[] | select(.tab_id == $wt_id) ] | length ) as $in_tab_count
+                                          | if ($in_tab_count > 0 and $chunk_gws[0].tab_id == $wt_id) then
+                                              . + [
+                                                build_order($m)[] as $i
+                                                | select($i > 0 and $chunk_gws[$i].tab_id != $wt_id)
+                                                | {
+                                                    op: "move",
+                                                    pane: $chunk_gws[$i].pane_id,
+                                                    deferred: ($chunk_gws[$i].agent_status | is_working),
+                                                    target: split_target($m; $i; $chunk_gws; $wt_id)
+                                                  }
+                                              ]
+                                            else
+                                              ( [ $chunk_gws[] | select(.tab_id == $wt_id) ]
+                                                | first | .pane_id ) as $anchor_in_tab
+                                              | . + [
+                                                build_order($m)[] as $i
+                                                | select($chunk_gws[$i].tab_id != $wt_id)
+                                                | {
+                                                    op: "move",
+                                                    pane: $chunk_gws[$i].pane_id,
+                                                    deferred: ($chunk_gws[$i].agent_status | is_working),
+                                                    target: {
+                                                      kind: "split",
+                                                      tab: $wt_id,
+                                                      anchor: ($anchor_in_tab // $chunk_gws[0].pane_id),
+                                                      direction: "right",
+                                                      ratio: 0.5
+                                                    }
+                                                  }
+                                              ]
+                                            end
+                                        end
+                                    else
+                                      . + [
+                                        build_order($m)[] as $i
+                                        | if $i == 0 then
+                                            {
                                               op: "move",
-                                              pane: $gws[$i].pane_id,
-                                              deferred: ($gws[$i].agent_status | is_working),
-                                              target: split_target($n; $i; $gws; $wt_id)
-                                            }
-                                        ]
-                                      else
-                                        # The workers tab exists but does not
-                                        # hold the first-spawned worker: place
-                                        # the missing workers into it instead of
-                                        # creating a second tab.
-                                        ( [ $gws[] | select(.tab_id == $wt_id) ]
-                                          | first | .pane_id ) as $anchor_in_tab
-                                        | . + [
-                                          build_order($n)[] as $i
-                                          | select($gws[$i].tab_id != $wt_id)
-                                          | {
-                                              op: "move",
-                                              pane: $gws[$i].pane_id,
-                                              deferred: ($gws[$i].agent_status | is_working),
+                                              pane: $chunk_gws[0].pane_id,
+                                              deferred: ($chunk_gws[0].agent_status | is_working),
                                               target: {
-                                                kind: "split",
-                                                tab: $wt_id,
-                                                anchor: $anchor_in_tab,
-                                                direction: "right",
-                                                ratio: 0.5
+                                                kind: "new_tab",
+                                                label: $chunk_label
                                               }
                                             }
-                                        ]
-                                      end
-                                  end
-                              else
-                                # No valid workers tab exists -> create new tab and
-                                # split. Label it with the pane's spawn label when
-                                # it has one ($expected), so the hook and the repair
-                                # create the same tab instead of fighting over
-                                # group vs --tab.
-                                . + [
-                                  build_order($n)[] as $i
-                                  | if $i == 0 then
-                                      {
-                                        op: "move",
-                                        pane: $gws[0].pane_id,
-                                        deferred: ($gws[0].agent_status | is_working),
-                                        target: {
-                                          kind: "new_tab",
-                                          label: ($expected // $group)
-                                        }
-                                      }
-                                    else
-                                      {
-                                        op: "move",
-                                        pane: $gws[$i].pane_id,
-                                        deferred: ($gws[$i].agent_status | is_working),
-                                        target: split_target($n; $i; $gws; "@workers")
-                                      }
+                                          else
+                                            {
+                                              op: "move",
+                                              pane: $chunk_gws[$i].pane_id,
+                                              deferred: ($chunk_gws[$i].agent_status | is_working),
+                                              target: split_target($m; $i; $chunk_gws; $tab_ref)
+                                            }
+                                          end
+                                      ]
                                     end
-                                ]
-                              end
+                                )
                           end
                       )
                 end

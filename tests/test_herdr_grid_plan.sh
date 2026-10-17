@@ -160,18 +160,18 @@ p3=$(jq -r '.[3].pane' <<<"$out")
 echo "ok: 4 workers -> build order [0, 2, 1, 3] (2x2 grid)"
 
 # -----------------------------------------------------------------------------
-# 6. 5 workers -> rejected (>4 per group)
+# 6. 5 workers -> 4 in quaqua-workers, 1 in quaqua-workers-2
 # -----------------------------------------------------------------------------
-echo "test 6: 5 workers (>4 per group is rejected)"
-err=""
-if out=$(run_plan "$fixdir/5-workers.json" 2>&1); then
-  fail "expected rejection (>4 workers in group), but succeeded with: $out"
-else
-  err="$out"
-fi
-[[ "$err" == *"too many workers in group"* ]] || fail "expected 'too many workers in group' error, got: $err"
-echo "ok: 5 workers -> rejected with error"
-
+echo "test 6: 5 workers (overflows to quaqua-workers-2)"
+out=$(run_plan "$fixdir/5-workers.json")
+assert_no_legacy_fields "$out"
+len=$(jq 'length' <<<"$out")
+[[ "$len" -eq 5 ]] || fail "expected 5 ops, got: $out"
+t0=$(jq -r '.[0].target.label' <<<"$out")
+[[ "$t0" == "quaqua-workers" ]] || fail "op 0 not quaqua-workers: $out"
+t4=$(jq -r '.[4].target.label' <<<"$out")
+[[ "$t4" == "quaqua-workers-2" ]] || fail "op 4 not quaqua-workers-2: $out"
+echo "ok: 5 workers -> 4 in quaqua-workers, 1 in quaqua-workers-2"
 # -----------------------------------------------------------------------------
 # 7. two owners in the same group -> planned independently
 # -----------------------------------------------------------------------------

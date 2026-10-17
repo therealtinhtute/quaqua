@@ -309,16 +309,28 @@ pub fn reconcile_step<D: HerdrDriver>(
     // Live mode: filter non-deferred ops and dependent ops
     let mut deferred_panes: HashSet<String> = HashSet::new();
     let mut workers_tab_deferred = false;
+    let mut workers_tab_2_deferred = false;
     let mut non_deferred: Vec<Op> = Vec::new();
 
     for op in ops {
         if op.deferred {
             deferred_panes.insert(op.pane.clone());
-            if matches!(op.target, Target::NewTab { .. }) {
-                workers_tab_deferred = true;
+            if let Target::NewTab { label } = &op.target {
+                if label.ends_with("-2") {
+                    workers_tab_2_deferred = true;
+                } else {
+                    workers_tab_deferred = true;
+                }
             }
         } else if let Target::Split { tab, anchor, .. } = &op.target {
-            if deferred_panes.contains(anchor.as_str()) || (tab == "@workers" && workers_tab_deferred) {
+            let tab_def = if tab == "@workers" {
+                workers_tab_deferred
+            } else if tab == "@workers-2" {
+                workers_tab_2_deferred
+            } else {
+                false
+            };
+            if deferred_panes.contains(anchor.as_str()) || tab_def {
                 deferred_panes.insert(op.pane.clone());
             } else {
                 non_deferred.push(op);

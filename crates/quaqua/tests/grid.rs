@@ -135,14 +135,108 @@ fn test_2_workers_lands_in_grid_tab_never_orchestrator_tab() {
 }
 
 #[test]
-fn test_5_workers_rejected_with_error() {
+fn test_5_workers_overflows_to_workers_2() {
     let fix = fixtures_dir().join("5-workers.json");
     let content = fs::read_to_string(fix).unwrap();
     let val: serde_json::Value = serde_json::from_str(&content).unwrap();
     let snap = parse_snapshot_value(&val).unwrap();
+    let ops = plan(&snap).unwrap();
+    assert_eq!(ops.len(), 5);
+    // First 4 workers land in quaqua-workers (2x2 grid)
+    assert_eq!(ops[0].pane, "w1:p5");
+    assert_eq!(ops[0].target, Target::NewTab { label: "quaqua-workers".to_string() });
+    assert_eq!(ops[1].pane, "w1:p7");
+    assert_eq!(ops[1].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "down".to_string(), ratio: 0.5 });
+    assert_eq!(ops[2].pane, "w1:p6");
+    assert_eq!(ops[2].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[3].pane, "w1:p8");
+    assert_eq!(ops[3].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p7".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    // 5th worker overflows into quaqua-workers-2
+    assert_eq!(ops[4].pane, "w1:p9");
+    assert_eq!(ops[4].target, Target::NewTab { label: "quaqua-workers-2".to_string() });
+}
+
+#[test]
+fn test_8_workers_grid_two_tabs_of_four() {
+    let fix = fixtures_dir().join("5-workers.json");
+    let content = fs::read_to_string(fix).unwrap();
+    let mut val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    {
+        let panes = val["snapshot"]["panes"].as_array_mut().unwrap();
+        for c in ["A", "B", "C"] {
+            panes.push(serde_json::json!({
+                "pane_id": format!("w1:p{c}"),
+                "tab_id": "w1:t2",
+                "workspace_id": "w1",
+                "agent": "pi",
+                "agent_status": "idle",
+                "tokens": {
+                    "grid_role": "worker",
+                    "grid_owner": "cos",
+                    "grid_group": "quaqua-workers",
+                    "grid_ready": "1"
+                }
+            }));
+        }
+        let agents = val["snapshot"]["agents"].as_array_mut().unwrap();
+        for c in ["A", "B", "C"] {
+            agents.push(serde_json::json!({
+                "name": format!("worker-{c}"),
+                "pane_id": format!("w1:p{c}"),
+                "agent_status": "idle"
+            }));
+        }
+    }
+    let snap = parse_snapshot_value(&val).unwrap();
+    let ops = plan(&snap).unwrap();
+    assert_eq!(ops.len(), 8);
+    // Chunk 0: 4 workers in quaqua-workers (2x2 grid, build order [0, 2, 1, 3])
+    assert_eq!(ops[0].pane, "w1:p5");
+    assert_eq!(ops[0].target, Target::NewTab { label: "quaqua-workers".to_string() });
+    assert_eq!(ops[1].pane, "w1:p7");
+    assert_eq!(ops[1].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "down".to_string(), ratio: 0.5 });
+    assert_eq!(ops[2].pane, "w1:p6");
+    assert_eq!(ops[2].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[3].pane, "w1:p8");
+    assert_eq!(ops[3].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p7".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    // Chunk 1: 4 workers in quaqua-workers-2 (2x2 grid, build order [0, 2, 1, 3])
+    assert_eq!(ops[4].pane, "w1:p9");
+    assert_eq!(ops[4].target, Target::NewTab { label: "quaqua-workers-2".to_string() });
+    assert_eq!(ops[5].pane, "w1:pB");
+    assert_eq!(ops[5].target, Target::Split { tab: "@workers-2".to_string(), anchor: "w1:p9".to_string(), direction: "down".to_string(), ratio: 0.5 });
+    assert_eq!(ops[6].pane, "w1:pA");
+    assert_eq!(ops[6].target, Target::Split { tab: "@workers-2".to_string(), anchor: "w1:p9".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[7].pane, "w1:pC");
+    assert_eq!(ops[7].target, Target::Split { tab: "@workers-2".to_string(), anchor: "w1:pB".to_string(), direction: "right".to_string(), ratio: 0.5 });
+}
+
+#[test]
+fn test_9_workers_rejected_with_error() {
+    let fix = fixtures_dir().join("5-workers.json");
+    let content = fs::read_to_string(fix).unwrap();
+    let mut val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    {
+        let panes = val["snapshot"]["panes"].as_array_mut().unwrap();
+        for c in ["A", "B", "C", "D"] {
+            panes.push(serde_json::json!({
+                "pane_id": format!("w1:p{c}"),
+                "tab_id": "w1:t2",
+                "workspace_id": "w1",
+                "agent": "pi",
+                "agent_status": "idle",
+                "tokens": {
+                    "grid_role": "worker",
+                    "grid_owner": "cos",
+                    "grid_group": "quaqua-workers",
+                    "grid_ready": "1"
+                }
+            }));
+        }
+    }
+    let snap = parse_snapshot_value(&val).unwrap();
     let err = plan(&snap).unwrap_err();
     assert!(
-        err.contains("too many workers in group"),
+        err.contains("too many workers in group quaqua-workers: 9 (max 8)"),
         "unexpected error message: {err}"
     );
 }
@@ -1334,4 +1428,27 @@ fn test_repair_anchors_on_working_pane_in_workers_tab_without_self_anchor() {
         }
         _ => panic!("expected split target, got: {:?}", target),
     }
+}
+
+#[test]
+fn test_reconcile_and_check_converge_for_overflow_workers() {
+    let fix = fixtures_dir().join("5-workers.json");
+    let content = fs::read_to_string(fix).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let snap = parse_snapshot_value(&val).unwrap();
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = repair_opts("cos", "quaqua-workers");
+
+    // Repair creates quaqua-workers (4 panes) and quaqua-workers-2 (1 pane)
+    let res = run_reconcile(&mut driver, &opts, "quaqua-workers", None);
+    assert!(res.is_ok(), "repair must succeed: {:?}", res);
+    assert_eq!(driver.executed_moves.len(), 5);
+
+    // Check immediately converges with 0 pending ops
+    let mut check_opts = opts.clone();
+    check_opts.repair = false;
+    check_opts.check = true;
+    let check_res = run_reconcile(&mut driver, &check_opts, "quaqua-workers", None);
+    assert!(check_res.is_ok(), "check must converge: {:?}", check_res);
 }
