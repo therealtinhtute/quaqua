@@ -1390,6 +1390,24 @@ fn test_spawn_worker_default_grid_tab_from_owner() {
 }
 
 #[test]
+fn test_default_grid_tab_helper() {
+    use quaqua::worker::spawn::default_grid_tab;
+
+    // Lead owners (<slug>-lead) resolve to <slug>-workers
+    assert_eq!(default_grid_tab("quaqua-grid-lead", "myrepo"), "quaqua-grid-workers");
+    assert_eq!(default_grid_tab("quaqua-rs-lead", "quaqua"), "quaqua-rs-workers");
+
+    // Non-lead owners (cos, arbitrary names) resolve to <repo>-workers
+    assert_eq!(default_grid_tab("cos", "myrepo"), "myrepo-workers");
+    assert_eq!(default_grid_tab("", "myrepo"), "myrepo-workers");
+    assert_eq!(default_grid_tab("other", "myrepo"), "myrepo-workers");
+
+    // Edge cases: -lead with empty slug falls back to <repo>-workers
+    assert_eq!(default_grid_tab("-lead", "myrepo"), "myrepo-workers");
+    assert_eq!(default_grid_tab("lead", "myrepo"), "myrepo-workers");
+}
+
+#[test]
 fn test_spawn_worker_grid_timeout_fails() {
     let temp = std::env::temp_dir().join(format!("quaqua-spawn-gridfail-{}", std::process::id()));
     let repo_dir = temp.join("repo");

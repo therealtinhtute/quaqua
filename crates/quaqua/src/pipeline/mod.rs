@@ -52,9 +52,10 @@ pub const USAGE: &str = "\
 #   900 · _FIX_ 1200 · PIPELINE_MAX_SEC 7200 (work time; time between
 #   invocations does not count) · PIPELINE_REVIEW_LINES 150.
 #   Grid: after each spawn/cleanup the pipeline arranges its whole owner
-#   population into tab GRID_TAB (default <repo-basename>-workers): idle panes
-#   move, working ones are reported 'deferred: <pane> (working)'; GRID_SKIP=1
-#   with QUAQUA_TEST=1 disables (tests).";
+#   population into tab GRID_TAB (default <repo-basename>-workers, or
+#   <slug>-workers for owner <slug>-lead): idle panes move, working ones are
+#   reported 'deferred: <pane> (working)'; GRID_SKIP=1 with QUAQUA_TEST=1
+#   disables (tests).";
 
 pub fn harness_of(kind: &str) -> Option<&'static str> {
     match kind {
@@ -671,11 +672,17 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
     let brief_text = std::fs::read_to_string(&state.brief)
         .map_err(|e| (1, format!("brief file unreadable: {}: {e}\n", state.brief)))?;
 
+    let grid_owner = if !state.lead.is_empty() {
+        state.lead.clone()
+    } else {
+        std::env::var("PIPELINE_LEAD")
+            .or_else(|_| std::env::var("QUAQUA_OWNER"))
+            .unwrap_or_else(|_| "cos".to_string())
+    };
     let grid_tab = std::env::var("GRID_TAB").unwrap_or_else(|_| {
-        let bname = repo_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
-        format!("{bname}-workers")
+        let repo_name = repo_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+        crate::worker::spawn::default_grid_tab(&grid_owner, repo_name)
     });
-    let grid_owner = if state.lead.is_empty() { "cos".to_string() } else { state.lead.clone() };
     let run_grid_hook = || -> bool {
         if std::env::var("GRID_SKIP").as_deref() == Ok("1") && std::env::var("QUAQUA_TEST").as_deref() == Ok("1") {
             return true;

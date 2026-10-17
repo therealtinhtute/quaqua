@@ -88,6 +88,26 @@ impl Fixture {
         );
         fs::write(self.runs.join(format!("pipeline-{task}.state")), state).unwrap();
     }
+    fn write_spawn_state(&self, task: &str, lead: &str) {
+        let state = format!(
+            "repo={}\nbrief={}\nbuilder=sude\nreviewer=suhuynh\nreview=always\nrounds=2\n\
+             base=\nwt={}/.wt/sude-{task}\nbase_sha=\nhead_sha=\nplanfile=\ncommit=\n\
+             phase=spawn\nround=0\nprompted=0\nprompt_ts=0\nrounds_run=0\nreview_run=skip\n\
+             review_changed=false\nlast_findings=0\nfinished=0\nstart_elapsed=0\n\
+             builder_spawned=1\nreviewer_spawned=0\nlead={lead}\nlead_pane=\npipeline_pid=0\n",
+            self.repo_arg(),
+            self.brief.display(),
+            self.root.display(),
+        );
+        fs::write(self.runs.join(format!("pipeline-{task}.state")), state).unwrap();
+        fs::write(self.runs.join(format!("pipeline-{task}.md")), format!("# pipeline {task}\n")).unwrap();
+        let wt = self.root.join(format!(".wt/sude-{task}"));
+        fs::create_dir_all(&wt).unwrap();
+        let _ = Command::new("git").args(["init", "-q"]).current_dir(&self.repo).status();
+        let _ = Command::new("git").args(["init", "-q"]).current_dir(&wt).status();
+        let _ = Command::new("git").args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init", "--allow-empty"]).current_dir(&wt).status();
+    }
+
 
     fn state_field(&self, task: &str, key: &str) -> String {
         let content = fs::read_to_string(self.runs.join(format!("pipeline-{task}.state"))).unwrap();
@@ -169,6 +189,44 @@ impl Fixture {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
     }
+    fn fake_herdr_grid(&self, owner: &str) -> PathBuf {
+        let calls = self.calls.display();
+        let snapshot_json = format!(
+            r#"{{"snapshot":{{"workspaces":[{{"workspace_id":"ws1","label":"q"}}],
+ "tabs":[{{"tab_id":"t1","workspace_id":"ws1","label":"lead-tab","pane_count":3}}],
+ "panes":[
+   {{"pane_id":"%lead","tab_id":"t1","workspace_id":"ws1","agent_status":"idle",
+    "tokens":{{"grid_role":"lead","grid_owner":"{owner}","grid_ready":"1"}}}},
+   {{"pane_id":"%a","tab_id":"t1","workspace_id":"ws1","agent_status":"working",
+    "tokens":{{"grid_role":"worker","grid_owner":"{owner}","grid_group":"repo","grid_ready":"1"}}}},
+   {{"pane_id":"%b","tab_id":"t1","workspace_id":"ws1","agent_status":"idle",
+    "tokens":{{"grid_role":"worker","grid_owner":"{owner}","grid_group":"repo","grid_ready":"1"}}}}
+ ],
+ "layouts":[{{"tab_id":"t1","workspace_id":"ws1","area":{{"x":0,"y":0,"width":200,"height":50}},
+             "panes":[{{"pane_id":"%lead"}},{{"pane_id":"%a"}},{{"pane_id":"%b"}}]}}],
+ "agents":[{{"name":"{owner}","pane_id":"%lead","agent_status":"idle"}}]}}}}"#
+        );
+        let script = format!(
+            "#!/usr/bin/env bash\n\
+             printf '%s\\n' \"$*\" >> {calls}\n\
+             if [[ \"${{1:-}} ${{2:-}}\" == 'api snapshot' ]]; then\n\
+             \x20 cat << 'EOF'\n\
+{snapshot_json}\n\
+EOF\n\
+             \x20 exit 0\n\
+             fi\n\
+             if [[ \"${{1:-}} ${{2:-}}\" == 'pane move' ]]; then\n\
+             \x20 echo '{{\"result\":{{\"changed\":true,\"pane\":{{\"pane_id\":\"%b\",\"tab_id\":\"t2\"}}}}}}'\n\
+             \x20 exit 0\n\
+             fi\n\
+             exit 0\n"
+        );
+        let path = self.bin.join("herdr");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
 
     /// The pipeline under test (the built binary) in a clean environment: only
     /// the temp home/runs and, when asked, the fake shim/bin dirs are
@@ -316,5 +374,88 @@ fn pipeline_watchdog_exit_keeps_a_dispatched_prompt_marked_sent() {
     assert!(
         f.state_field("pfx3", "prompt_ts") != "0",
         "the recorded prompt time must survive too",
+    );
+}
+
+#[test]
+fn pipeline_grid_hook_uses_lead_default_tab() {
+    let f = Fixture::new("leadtab");
+    f.write_spawn_state("pfx4", "quaqua-grid-lead");
+    let herdr = f.fake_herdr_grid("quaqua-grid-lead");
+    f.fake_prompt_worker();
+
+    let mut cmd = f.pipeline();
+    cmd.env("HERDR_BIN_PATH", &herdr)
+        .env("GRID_CHECK_TIMEOUT_SEC", "0")
+        .env("QUAQUA_SCRIPT_DIR", &f.scripts);
+    let out = cmd
+        .args(["--resume", "pfx4", &f.repo_arg()])
+        .output()
+        .expect("failed to spawn the quaqua binary");
+
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "pipeline should pause at plan-ready (rc 5): stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let calls = f.calls();
+    assert!(
+        calls.iter().any(|c| c.contains("pane move %b --new-tab --label quaqua-grid-workers --no-focus")),
+        "expected grid hook to arrange workers into Lead's tab 'quaqua-grid-workers', but calls were: {:?}",
+        calls,
+    );
+}
+
+#[test]
+fn pipeline_grid_hook_explicit_grid_tab_wins() {
+    let f = Fixture::new("exptab");
+    f.write_spawn_state("pfx5", "quaqua-grid-lead");
+    let herdr = f.fake_herdr_grid("quaqua-grid-lead");
+    f.fake_prompt_worker();
+
+    let mut cmd = f.pipeline();
+    cmd.env("HERDR_BIN_PATH", &herdr)
+        .env("GRID_CHECK_TIMEOUT_SEC", "0")
+        .env("GRID_TAB", "custom-tab")
+        .env("QUAQUA_SCRIPT_DIR", &f.scripts);
+    let out = cmd
+        .args(["--resume", "pfx5", &f.repo_arg()])
+        .output()
+        .expect("failed to spawn the quaqua binary");
+
+    assert_eq!(out.status.code(), Some(5));
+    let calls = f.calls();
+    assert!(
+        calls.iter().any(|c| c.contains("pane move %b --new-tab --label custom-tab --no-focus")),
+        "explicit GRID_TAB must override lead default tab: {:?}",
+        calls,
+    );
+}
+
+#[test]
+fn pipeline_grid_hook_cos_uses_repo_default_tab() {
+    let f = Fixture::new("costab");
+    f.write_spawn_state("pfx6", "cos");
+    let herdr = f.fake_herdr_grid("cos");
+    f.fake_prompt_worker();
+
+    let mut cmd = f.pipeline();
+    cmd.env("HERDR_BIN_PATH", &herdr)
+        .env("GRID_CHECK_TIMEOUT_SEC", "0")
+        .env("QUAQUA_SCRIPT_DIR", &f.scripts);
+    let out = cmd
+        .args(["--resume", "pfx6", &f.repo_arg()])
+        .output()
+        .expect("failed to spawn the quaqua binary");
+
+    assert_eq!(out.status.code(), Some(5));
+    let calls = f.calls();
+    assert!(
+        calls.iter().any(|c| c.contains("pane move %b --new-tab --label repo-workers --no-focus")),
+        "cos owner must retain repo default tab: {:?}",
+        calls,
     );
 }

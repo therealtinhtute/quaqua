@@ -292,7 +292,7 @@ fn claude_trust_dialog_up<H: HerdrOps>(herdr: &H, pane: &str) -> bool {
 /// (runs/tieude-testlow.grid vs runs/tieude-spawneff.grid). Any other owner
 /// (the CoS) keeps the repo-derived label. Explicit GRID_TAB wins before this
 /// is reached.
-fn default_grid_tab(owner: &str, repo_name: &str) -> String {
+pub fn default_grid_tab(owner: &str, repo_name: &str) -> String {
     match owner.strip_suffix("-lead") {
         Some(slug) if !slug.is_empty() => format!("{slug}-workers"),
         _ => format!("{repo_name}-workers"),
