@@ -7,15 +7,15 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 src="$(cd "$here/.." && pwd)/scripts"
-root="$(cd "$here/.." && pwd)"
-bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
-[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
-export QUAQUA_BIN="$bin"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-cleanup-worker.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+root="$(cd "$here/.." && pwd)"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+export QUAQUA_BIN="$bin"
 
 # ── sandbox: temp worker repo + fake herdr ──────────────────────────────────
 mkdir -p "$T/quaqua" "$T/bin" "$T/scripts/worker"
@@ -132,6 +132,7 @@ echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid checked"
 worktree "$T/quaqua" zz-clean
 err=$(run_cleanup zz-clean GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0 2>&1 >/dev/null) && fail "expected non-zero exit when grid check fails"
 [[ "$err" == *"grid repair failed"* || "$err" == *"grid check failed"* ]] || fail "grid failure: wrong error: $err"
+[[ ! -d "$T/.wt/zz-clean" ]] || fail "grid failure: worktree not removed"
 echo "ok: grid failure -> non-zero exit, cleanup fails"
 # ── 5. cleanup drops the worker's runs metadata (.owner/.grid) ──────────────
 mkdir -p "$T/runs"

@@ -173,8 +173,6 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
         })
         .unwrap_or_else(|| format!("{repo_name}-workers"));
 
-    run_grid_hook(&grid_tab, Some(&owner))?;
-
     let rm_out = git
         .worktree_remove(&repo, &wt)
         .map_err(|e| (1, format!("error: worktree remove failed: {e}")))?;
@@ -189,5 +187,7 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.pipeline")));
     let _ = std::fs::remove_file(runs_dir.join(format!("{name}.srt.json")));
     println!("cleaned {name} (branch quaqua/{name} kept)");
+
+    run_grid_hook(&grid_tab, Some(&owner))?;
     Ok(())
 }

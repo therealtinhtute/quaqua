@@ -972,7 +972,8 @@ impl GitOps for SpawnTestGit {
     fn worktree_add_existing(&self, _repo: &Path, _branch: &str, _wt: &Path) -> std::io::Result<Output> {
         self.run_in(_repo, &[])
     }
-    fn worktree_remove(&self, _repo: &Path, _wt: &Path) -> std::io::Result<Output> {
+    fn worktree_remove(&self, _repo: &Path, wt: &Path) -> std::io::Result<Output> {
+        let _ = std::fs::remove_dir_all(wt);
         self.run_in(_repo, &[])
     }
     fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
@@ -1358,11 +1359,10 @@ fn test_spawn_worker_grid_timeout_fails() {
     std::env::remove_var("HERDR_STUB_SNAPSHOT");
     let _ = std::fs::remove_dir_all(&temp);
 
-    assert!(
-        res.is_err(),
-        "spawn_worker must fail when grid check times out, got: {:?}",
-        res
-    );
+    let err = res.expect_err("spawn_worker must fail when grid check times out");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("grid"), "error must mention grid: {}", err.1);
+    assert!(err.1.contains("sude-gridfail"), "error must name the live worker: {}", err.1);
 }
 
 #[test]
@@ -1373,6 +1373,10 @@ fn test_cleanup_worker_grid_timeout_fails() {
     let _env_lock = lock_env();
     let _ = std::fs::create_dir_all(&repo_dir);
     let _ = std::fs::create_dir_all(&runs_dir);
+    let wt = temp.join(".wt/sude-gridfail");
+    let _ = std::fs::create_dir_all(&wt);
+    let owner_file = runs_dir.join("sude-gridfail.owner");
+    let _ = std::fs::write(&owner_file, "cos\n");
     std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
     std::env::set_var("QUAQUA_OWNER", "cos");
     std::env::set_var("GRID_TAB", "quaqua-workers");
@@ -1410,18 +1414,18 @@ fn test_cleanup_worker_grid_timeout_fails() {
 
     let res = quaqua::worker::cleanup::cleanup_worker("sude-gridfail", &repo_dir, &git, &herdr);
 
+    let err = res.expect_err("cleanup_worker must fail when grid check times out");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("grid"), "error must mention grid: {}", err.1);
+    assert!(!wt.exists(), "worktree must be removed even when grid check fails");
+    assert!(!owner_file.exists(), "metadata must be removed even when grid check fails");
+
     std::env::remove_var("QUAQUA_RUNS_DIR");
     std::env::remove_var("QUAQUA_OWNER");
     std::env::remove_var("GRID_TAB");
     std::env::remove_var("GRID_CHECK_TIMEOUT_SEC");
     std::env::remove_var("HERDR_STUB_SNAPSHOT");
     let _ = std::fs::remove_dir_all(&temp);
-
-    assert!(
-        res.is_err(),
-        "cleanup_worker must fail when grid check times out, got: {:?}",
-        res
-    );
 }
 
 // --- quaqua worker stop ---------------------------------------------------

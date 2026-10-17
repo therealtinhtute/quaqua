@@ -456,20 +456,31 @@ pub fn run_reconcile<D: HerdrDriver>(
                     } else {
                         let anchor_target = present
                             .iter()
-                            .find(|p| !deferred_ids.contains(p.as_str()))
-                            .cloned()
-                            .unwrap_or_else(|| w.pane_id.clone());
-                        repair_ops.push(Op {
-                            op: "move".to_string(),
-                            pane: w.pane_id.clone(),
-                            deferred: is_deferred(w.agent_status.as_deref()),
-                            target: Target::Split {
-                                tab: target_tab_ref.clone(),
-                                anchor: anchor_target,
-                                direction: "right".to_string(),
-                                ratio: 0.5,
-                            },
-                        });
+                            .find(|p| *p != &w.pane_id && !deferred_ids.contains(p.as_str()))
+                            .or_else(|| present.iter().find(|p| *p != &w.pane_id))
+                            .cloned();
+                        if let Some(anchor) = anchor_target {
+                            repair_ops.push(Op {
+                                op: "move".to_string(),
+                                pane: w.pane_id.clone(),
+                                deferred: is_deferred(w.agent_status.as_deref()),
+                                target: Target::Split {
+                                    tab: target_tab_ref.clone(),
+                                    anchor,
+                                    direction: "right".to_string(),
+                                    ratio: 0.5,
+                                },
+                            });
+                        } else {
+                            repair_ops.push(Op {
+                                op: "move".to_string(),
+                                pane: w.pane_id.clone(),
+                                deferred: is_deferred(w.agent_status.as_deref()),
+                                target: Target::NewTab {
+                                    label: expected_tab.clone().unwrap_or_else(|| group.clone()),
+                                },
+                            });
+                        }
                     }
                 } else {
                     let want_anchor = &gws[anchor_idx].pane_id;
@@ -478,9 +489,13 @@ pub fn run_reconcile<D: HerdrDriver>(
                     // idle pane's split too (n>=3, pivot != gws[0]).
                     let idle_in_tab = present
                         .iter()
-                        .find(|p| !deferred_ids.contains(p.as_str()))
+                        .find(|p| *p != &w.pane_id && !deferred_ids.contains(p.as_str()))
                         .cloned();
-                    if present.contains(want_anchor) && !deferred_ids.contains(want_anchor.as_str()) {
+                    let any_in_tab = present
+                        .iter()
+                        .find(|p| *p != &w.pane_id)
+                        .cloned();
+                    if present.contains(want_anchor) && want_anchor != &w.pane_id && !deferred_ids.contains(want_anchor.as_str()) {
                         repair_ops.push(Op {
                             op: "move".to_string(),
                             pane: w.pane_id.clone(),
@@ -494,6 +509,19 @@ pub fn run_reconcile<D: HerdrDriver>(
                         });
                     } else if let Some(anchor) = idle_in_tab {
                         // Fallback to the pivot in the workers tab (legacy arranger 454-456)
+                        repair_ops.push(Op {
+                            op: "move".to_string(),
+                            pane: w.pane_id.clone(),
+                            deferred: is_deferred(w.agent_status.as_deref()),
+                            target: Target::Split {
+                                tab: target_tab_ref.clone(),
+                                anchor,
+                                direction: dir.to_string(),
+                                ratio,
+                            },
+                        });
+                    } else if let Some(anchor) = any_in_tab {
+                        // Fallback to any pane already in the workers tab even if working
                         repair_ops.push(Op {
                             op: "move".to_string(),
                             pane: w.pane_id.clone(),

@@ -627,7 +627,15 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let _ = std::fs::write(runs_dir.join(format!("{}.srt.json", opts.name)), srt_json);
 
     println!("worker={} kind={} pane={} worktree={}", opts.name, opts.kind, pane_id, wt.display());
-    run_grid_hook(&grid_tab, Some(&owner))?;
+    if let Err((code, msg)) = run_grid_hook(&grid_tab, Some(&owner)) {
+        return Err((
+            code,
+            format!(
+                "{msg}worker '{}' is running in pane {}; run `quaqua worker cleanup {}` or `quaqua grid reconcile --tab {}`\n",
+                opts.name, pane_id, opts.name, grid_tab
+            ),
+        ));
+    }
 
     Ok(())
 }

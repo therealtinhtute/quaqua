@@ -1308,3 +1308,30 @@ fn test_check_converges_after_repair_when_grid_tab_differs_from_group() {
         "check must converge on the repaired layout"
     );
 }
+
+#[test]
+fn test_repair_anchors_on_working_pane_in_workers_tab_without_self_anchor() {
+    // Defect 3: when the only pane in the workers tab is busy (working),
+    // an unarranged worker being moved into the workers tab must anchor on
+    // that pane (w1:p5) and NEVER anchor on itself (w1:p6).
+    let fix = fixtures_dir().join("busy-worker-in-tab.json");
+    let content = fs::read_to_string(fix).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let snap = parse_snapshot_value(&val).unwrap();
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let opts = repair_opts("quaqua-rs-lead", "quaqua-workers");
+
+    let res = run_reconcile(&mut driver, &opts, "workers", None);
+    assert!(res.is_ok(), "repair must succeed: {:?}", res);
+    assert_eq!(driver.executed_moves.len(), 1);
+    let (pane, target) = &driver.executed_moves[0];
+    assert_eq!(pane, "w1:p6");
+    match target {
+        Target::Split { tab, anchor, .. } => {
+            assert_eq!(tab, "w1:t2");
+            assert_eq!(anchor, "w1:p5", "anchor must be the pane in tab, not itself");
+        }
+        _ => panic!("expected split target, got: {:?}", target),
+    }
+}

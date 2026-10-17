@@ -66,6 +66,9 @@ cat > "$T/bin/herdr" <<'STUB'
 echo "herdr $*" >> "$CALLS"
 [ "${1:-} ${2:-}" = "pane split" ] && echo '{"result":{"pane":{"pane_id":"%1"}}}'
 if [ "${1:-} ${2:-}" = "pane move" ]; then
+  if [ -n "${GRID_AFTER_MOVE_SNAPSHOT:-}" ] && [ -f "$GRID_AFTER_MOVE_SNAPSHOT" ]; then
+    cp "$GRID_AFTER_MOVE_SNAPSHOT" "$GRID_SNAPSHOT"
+  fi
   if [ -n "${GRID_MOVE_FAIL:-}" ]; then
     printf '{"result":{"move_result":{"changed":false,"reason":"same_tab"}}}\n'
   else
@@ -290,6 +293,41 @@ spawn tieude-gridtab2 tieude GRID_SNAPSHOT="$T/coucou.json" GRID_CHECK_TIMEOUT_S
 ! grep -qE 'grid check failed|grid check timed out' "$T/err" \
   || fail "repo-workers must not scope in the coucou move: $(cat "$T/err")"
 echo "ok: GRID_TAB -> the check is scoped to that tab, group recorded; timeout exits non-zero"
+
+# ── 2 unarranged workers + GRID_TAB -> both arranged into GRID_TAB with no manual reconcile
+cat > "$T/unarranged2.json" <<'EOF'
+{"snapshot":{"workspaces":[{"workspace_id":"w1","label":"repo"}],
+ "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":3}],
+ "panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle",
+           "tokens":{"grid_role":"orchestrator","grid_owner":"cos","grid_ready":"1"}},
+          {"pane_id":"w1:p5","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle","label":"tieude-w1",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"myrepo","grid_ready":"1"}},
+          {"pane_id":"w1:p6","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle","label":"tieude-w2",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"myrepo","grid_ready":"1"}}],
+ "layouts":[],"agents":[{"name":"tieude-w1","pane_id":"w1:p5","agent_status":"idle"},
+                        {"name":"tieude-w2","pane_id":"w1:p6","agent_status":"idle"}]}}
+EOF
+cat > "$T/converged2.json" <<'EOF'
+{"snapshot":{"workspaces":[{"workspace_id":"w1","label":"repo"}],
+ "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","pane_count":1},
+         {"tab_id":"w1:t_workers","workspace_id":"w1","label":"myrepo-workers","pane_count":2}],
+ "panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle",
+           "tokens":{"grid_role":"orchestrator","grid_owner":"cos","grid_ready":"1"}},
+          {"pane_id":"w1:p5","tab_id":"w1:t_workers","workspace_id":"w1","agent_status":"idle","label":"tieude-w1",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"myrepo","grid_tab":"myrepo-workers","grid_ready":"1"}},
+          {"pane_id":"w1:p6","tab_id":"w1:t_workers","workspace_id":"w1","agent_status":"idle","label":"tieude-w2",
+           "tokens":{"grid_role":"worker","grid_owner":"cos","grid_group":"myrepo","grid_tab":"myrepo-workers","grid_ready":"1"}}],
+ "layouts":[],"agents":[{"name":"tieude-w1","pane_id":"w1:p5","agent_status":"idle"},
+                        {"name":"tieude-w2","pane_id":"w1:p6","agent_status":"idle"}]}}
+EOF
+cp "$T/unarranged2.json" "$T/snap_live.json"
+spawn tieude-twoarr tieude GRID_TAB=myrepo-workers GRID_SNAPSHOT="$T/snap_live.json" GRID_AFTER_MOVE_SNAPSHOT="$T/converged2.json"
+[[ $rc -eq 0 ]] || fail "2 unarranged workers spawn: exit $rc, want 0: $(cat "$T/err")"
+grep -qF 'herdr pane move w1:p5 --new-tab --label myrepo-workers --no-focus' "$T/calls" \
+  || fail "worker 1 not moved to new tab: $(cat "$T/calls")"
+grep -qF 'herdr pane move w1:p6 --tab w1:t_workers --split right --target-pane w1:p5 --ratio 0.5 --no-focus' "$T/calls" \
+  || fail "worker 2 not split into workers tab: $(cat "$T/calls")"
+echo "ok: 2 unarranged workers + GRID_TAB -> both arranged into GRID_TAB with no manual reconcile"
 
 spawn tieude-gridskip tieude QUAQUA_TEST=1 GRID_SKIP=1
 [[ $rc -eq 0 ]] || fail "GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"
