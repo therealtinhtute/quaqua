@@ -672,13 +672,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
     let brief_text = std::fs::read_to_string(&state.brief)
         .map_err(|e| (1, format!("brief file unreadable: {}: {e}\n", state.brief)))?;
 
-    let grid_owner = if !state.lead.is_empty() {
-        state.lead.clone()
-    } else {
-        std::env::var("PIPELINE_LEAD")
-            .or_else(|_| std::env::var("QUAQUA_OWNER"))
-            .unwrap_or_else(|_| "cos".to_string())
-    };
+    let grid_owner = if state.lead.is_empty() { "cos".to_string() } else { state.lead.clone() };
     let grid_tab = std::env::var("GRID_TAB").unwrap_or_else(|_| {
         let repo_name = repo_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
         crate::worker::spawn::default_grid_tab(&grid_owner, repo_name)

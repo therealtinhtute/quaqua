@@ -161,9 +161,13 @@ impl Fixture {
              \x20 echo \"error: no report after the wait (fake watchdog)\" >&2\n\
              \x20 exit 3\n\
              fi\n\
-             printf '%s\\n' 'fake build report' 'Outcome: BLOCKED' '' '## Blockers' \\\n\
-             \x20 '- fake builder stopped early: this report only proves the prompt was sent' '' \\\n\
-             \x20 '## Lessons' '- none' > \"{runs}/$1.md\"\n\
+             if [[ \"$phase\" == \"PLAN\" ]]; then\n\
+             \x20 printf '%s\\n' '# plan' '' 'Goal: test' '' '## Lessons' '- none' > \"{runs}/$1.md\"\n\
+             else\n\
+             \x20 printf '%s\\n' 'fake build report' 'Outcome: BLOCKED' '' '## Blockers' \\\n\
+             \x20   '- fake builder stopped early: this report only proves the prompt was sent' '' \\\n\
+             \x20   '## Lessons' '- none' > \"{runs}/$1.md\"\n\
+             fi\n\
              exit 0\n"
         );
         let path = self.scripts.join("prompt-worker.sh");
@@ -216,7 +220,7 @@ EOF\n\
              \x20 exit 0\n\
              fi\n\
              if [[ \"${{1:-}} ${{2:-}}\" == 'pane move' ]]; then\n\
-             \x20 echo '{{\"result\":{{\"changed\":true,\"pane\":{{\"pane_id\":\"%b\",\"tab_id\":\"t2\"}}}}}}'\n\
+             \x20 echo '{{\"result\":{{\"move_result\":{{\"changed\":true,\"pane\":{{\"pane_id\":\"%b\",\"tab_id\":\"t2\"}}}}}}}}'\n\
              \x20 exit 0\n\
              fi\n\
              exit 0\n"
@@ -407,6 +411,12 @@ fn pipeline_grid_hook_uses_lead_default_tab() {
         "expected grid hook to arrange workers into Lead's tab 'quaqua-grid-workers', but calls were: {:?}",
         calls,
     );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("PIPELINE plan-ready"),
+        "grid hook should have succeeded and pipeline reached plan-ready, but stderr was: {stderr}",
+    );
+    assert_eq!(f.state_field("pfx4", "phase"), "build");
 }
 
 #[test]
@@ -438,7 +448,7 @@ fn pipeline_grid_hook_explicit_grid_tab_wins() {
 #[test]
 fn pipeline_grid_hook_cos_uses_repo_default_tab() {
     let f = Fixture::new("costab");
-    f.write_spawn_state("pfx6", "cos");
+    f.write_spawn_state("pfx6", "");
     let herdr = f.fake_herdr_grid("cos");
     f.fake_prompt_worker();
 
