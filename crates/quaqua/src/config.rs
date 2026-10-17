@@ -444,12 +444,17 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             if fb == name {
                 return Err(format!("kind '{name}': fallback names itself"));
             }
-            if !cfg.kinds.contains_key(fb) {
-                return Err(format!("kind '{name}': fallback '{fb}' is not a kind"));
+            let fb_kind = match cfg.kinds.get(fb) {
+                Some(k) => k,
+                None => return Err(format!("kind '{name}': fallback '{fb}' is not a kind")),
+            };
+            if kind.can_review && !fb_kind.can_review {
+                return Err(format!(
+                    "kind '{name}': can_review kind has fallback '{fb}' which cannot review"
+                ));
             }
         }
     }
-
     Ok(())
 }
 
@@ -634,5 +639,13 @@ workers_tab = "workers"
         c.kinds.get_mut("tieude").unwrap().fallback = Some("tieude".to_string());
         let err = validate(&c).unwrap_err();
         assert!(err.contains("fallback names itself"), "{err}");
+    }
+
+    #[test]
+    fn fallback_from_can_review_to_non_review_is_rejected() {
+        let mut c = base();
+        c.kinds.get_mut("suhuynh").unwrap().fallback = Some("tieude".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("cannot review"), "{err}");
     }
 }

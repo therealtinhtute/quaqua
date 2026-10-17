@@ -177,6 +177,7 @@ fn config_invalid_fixtures_are_rejected() {
         ("bad-effort.toml", "does not take effort 'banana'"),
         ("fallback-missing.toml", "fallback 'ghost' is not a kind"),
         ("fallback-self.toml", "fallback names itself"),
+        ("fallback-cannot-review.toml", "cannot review"),
         ("bad-schema.toml", "unsupported schema_version"),
         ("integ-branch.toml", "{slug}"),
         ("differ-policy.toml", "unknown differ policy"),

@@ -228,6 +228,12 @@ grep -qF 'WARN: fallback: sude→detu (agent_not_ready)' "$T/err" \
 grep -qF '"fallback":{"from":"sude","to":"detu","reason":"agent_not_ready"}' \
   "$T/home/quaqua/runs/sude-fb.srt.json" \
   || fail "fallback: not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
+grep -qF '"running_kind":"detu"' "$T/home/quaqua/runs/sude-fb.srt.json" \
+  || fail "fallback: running_kind detu not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
+grep -qF '"harness":"opencode"' "$T/home/quaqua/runs/sude-fb.srt.json" \
+  || fail "fallback: harness opencode not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
+grep -qF '"kind":"sude"' "$T/home/quaqua/runs/sude-fb.srt.json" \
+  || fail "fallback: original kind sude not preserved in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
 grep -q "worker=sude-fb" "$T/out" || fail "fallback: no success line"
 echo "ok: fallback -> omp failed, opencode (detu) started, WARN + srt fallback recorded"
 

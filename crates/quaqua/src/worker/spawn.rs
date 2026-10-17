@@ -579,6 +579,13 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         let _ = herdr.pane_close(&pane);
         if idx == 0 {
             if let Some((fb, fb_kind)) = fallback_kind(cfg, kind_info, &opts.kind)? {
+                if opts.review && !fb_kind.can_review {
+                    eprintln!(
+                        "error: fallback '{fb}' cannot review; refusing fallback for review spawn of '{}'",
+                        opts.name
+                    );
+                    return Err((1, String::new()));
+                }
                 let fb_launch = resolve_launch(fb_kind, fb)?;
                 eprintln!("WARN: fallback: {}→{fb} ({reason})", opts.kind);
                 fallback_record = Some((opts.kind.clone(), fb.to_string(), reason.clone()));
@@ -594,14 +601,23 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         return Err((1, String::new()));
     }
 
+    let (running_kind, running_harness) = match &fallback_record {
+        Some((_, to, _)) => {
+            let to_kind = cfg.kinds.get(to.as_str());
+            let h = to_kind.map(|k| k.harness.as_str()).unwrap_or("");
+            (to.as_str(), h)
+        }
+        None => (opts.kind.as_str(), kind_info.harness.as_str()),
+    };
+
     let srt_json = match &fallback_record {
         Some((from, to, reason)) => format!(
-            "{{\"name\":\"{}\",\"kind\":\"{}\",\"created\":\"{}\",\"sandbox\":true,\"owner\":\"{}\",\"review\":{},\"fallback\":{{\"from\":\"{}\",\"to\":\"{}\",\"reason\":\"{}\"}}}}\n",
-            opts.name, opts.kind, iso_now, owner, opts.review, from, to, reason
+            "{{\"name\":\"{}\",\"kind\":\"{}\",\"running_kind\":\"{}\",\"harness\":\"{}\",\"running_harness\":\"{}\",\"created\":\"{}\",\"sandbox\":true,\"owner\":\"{}\",\"review\":{},\"fallback\":{{\"from\":\"{}\",\"to\":\"{}\",\"reason\":\"{}\"}}}}\n",
+            opts.name, opts.kind, running_kind, running_harness, running_harness, iso_now, owner, opts.review, from, to, reason
         ),
         None => format!(
-            "{{\"name\":\"{}\",\"kind\":\"{}\",\"created\":\"{}\",\"sandbox\":true,\"owner\":\"{}\",\"review\":{}}}\n",
-            opts.name, opts.kind, iso_now, owner, opts.review
+            "{{\"name\":\"{}\",\"kind\":\"{}\",\"running_kind\":\"{}\",\"harness\":\"{}\",\"running_harness\":\"{}\",\"created\":\"{}\",\"sandbox\":true,\"owner\":\"{}\",\"review\":{}}}\n",
+            opts.name, opts.kind, running_kind, running_harness, running_harness, iso_now, owner, opts.review
         ),
     };
     let _ = std::fs::write(runs_dir.join(format!("{}.srt.json", opts.name)), srt_json);

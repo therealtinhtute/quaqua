@@ -4,7 +4,7 @@ use quaqua::git::GitOps;
 use quaqua::herdr::HerdrOps;
 use quaqua::worker::cleanup::{resolve_default_runs_dir, resolve_home_quaqua_runs};
 use quaqua::worker::prompt::{
-    brief_budget_sec, brief_headers_ok, fallback_header_line, prepend_header, resolve_budget_sec,
+    brief_budget_sec, brief_headers_ok, fallback_header_line, prepend_header,
     validate_env_budget_val,
 };
 use quaqua::worker::spawn::{
@@ -982,8 +982,9 @@ impl HerdrOps for FallbackSpyHerdr {
         })
     }
     fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
+        let code = if self.fail_harness.is_some() { 1 } else { 0 };
         Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            status: std::os::unix::process::ExitStatusExt::from_raw(code << 8),
             stdout: Vec::new(),
             stderr: Vec::new(),
         })
@@ -1088,6 +1089,18 @@ fn test_spawn_worker_fallback_scenarios() {
             srt_content.contains(r#""fallback":{"from":"sude","to":"detu","reason":"agent_not_ready"}"#),
             "{srt_content}"
         );
+        assert!(
+            srt_content.contains(r#""running_kind":"detu""#),
+            "srt.json must record running_kind after fallback: {srt_content}"
+        );
+        assert!(
+            srt_content.contains(r#""harness":"opencode""#),
+            "srt.json must record running harness after fallback: {srt_content}"
+        );
+        assert!(
+            srt_content.contains(r#""kind":"sude""#),
+            "srt.json must preserve original kind field: {srt_content}"
+        );
     }
 
     // Scenario 2: One hop limit — both primary and fallback fail -> error after 2 starts
@@ -1138,6 +1151,37 @@ fn test_spawn_worker_fallback_scenarios() {
             starts.len(),
             1,
             "only primary attempted before bad fallback error"
+        );
+    }
+
+    // Scenario 4: A review spawn (--review) refuses fallback to a non-review kind
+    {
+        let mut cfg = test_cfg_with_fallback();
+        cfg.kinds.get_mut("ni").unwrap().fallback = Some("detu".to_string());
+        let git = SpawnTestGit;
+        let herdr = FallbackSpyHerdr {
+            agent_starts: std::cell::RefCell::new(Vec::new()),
+            fail_harness: Some("claude".to_string()),
+        };
+
+        let opts = parse_spawn_args(&[
+            "--review".to_string(),
+            "ni-revtest".to_string(),
+            "ni".to_string(),
+            repo_dir.to_str().unwrap().to_string(),
+        ])
+        .unwrap();
+
+        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+        assert!(
+            res.is_err(),
+            "must refuse fallback to non-review kind when in review mode"
+        );
+        let starts = herdr.agent_starts.borrow().clone();
+        assert_eq!(
+            starts.len(),
+            1,
+            "must not attempt start of non-review fallback kind"
         );
     }
 
