@@ -1,5 +1,5 @@
 use super::types::{Agent, Op, Pane, Rect, Snapshot, Target};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 const TOL: i64 = 2;
 
@@ -314,29 +314,43 @@ pub fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) 
 /// The apply path and the hook both propagate that through this same rule;
 /// the planner must too, or the check counts an unrunnable op as pending and
 /// times out while its anchor is still working.
-pub(crate) fn propagate_deferrals(ops: &mut [Op]) {
+pub(crate) fn propagate_deferrals(ops: &mut [Op], panes: &[Pane]) {
+    let pane_group = |pid: &str| -> String {
+        panes
+            .iter()
+            .find(|p| p.pane_id == pid)
+            .and_then(|p| p.tokens.as_ref())
+            .and_then(|t| t.grid_group.as_deref())
+            .unwrap_or("workers")
+            .to_string()
+    };
     let mut deferred_panes: HashSet<String> = HashSet::new();
-    let mut deferred_tabs: HashSet<String> = HashSet::new();
-    let mut new_tab_count = 0;
+    let mut deferred_tabs: HashSet<(String, String)> = HashSet::new();
+    let mut group_new_tab_count: HashMap<String, usize> = HashMap::new();
 
     for op in ops.iter_mut() {
+        let grp = pane_group(&op.pane);
         if op.deferred {
             deferred_panes.insert(op.pane.clone());
             if matches!(op.target, Target::NewTab { .. }) {
-                if new_tab_count == 0 {
-                    deferred_tabs.insert("@workers".to_string());
-                } else {
-                    deferred_tabs.insert("@workers-2".to_string());
-                }
-                new_tab_count += 1;
+                let cnt = group_new_tab_count.entry(grp.clone()).or_insert(0);
+                let tab_ref = if *cnt == 0 { "@workers" } else { "@workers-2" };
+                deferred_tabs.insert((grp.clone(), tab_ref.to_string()));
+                *cnt += 1;
             }
             continue;
         }
         if matches!(op.target, Target::NewTab { .. }) {
-            new_tab_count += 1;
+            let cnt = group_new_tab_count.entry(grp.clone()).or_insert(0);
+            *cnt += 1;
         }
         if let Target::Split { tab, anchor, .. } = &op.target {
-            if deferred_panes.contains(anchor.as_str()) || deferred_tabs.contains(tab.as_str()) {
+            let tab_def = if tab == "@workers" || tab == "@workers-2" {
+                deferred_tabs.contains(&(grp.clone(), tab.clone()))
+            } else {
+                false
+            };
+            if deferred_panes.contains(anchor.as_str()) || tab_def {
                 op.deferred = true;
                 deferred_panes.insert(op.pane.clone());
             }
@@ -479,6 +493,19 @@ pub fn plan_with_deferred(
                     let chunk_label = chunk_tab_label(&base_tab, chunk_idx);
                     let tab_ref = chunk_tab_ref(chunk_idx);
 
+                    // Search for an existing valid workers tab for this group
+                    // jq:
+                    // [ $tabs[]
+                    //   | select((.workspace_id == $owner_ws or $owner_ws == "")
+                    //            and ($anchor_tab == null or .tab_id != $anchor_tab)
+                    //            and accepts_chunk_tab($group; $expected; $chunk_idx; .label))
+                    //   | .tab_id as $tid
+                    //   | [ $panes[] | select(.tab_id == $tid) ] as $occ
+                    //   | select(($occ | length > 0)
+                    //            and ($occ | all(. as $p | any($gws[]; .pane_id == $p.pane_id))))
+                    // ]
+                    // | sort_by(if .label == $chunk_label then 0 else 1 end)
+                    // | first // null
                     let mut matching_tabs: Vec<&super::types::Tab> = snapshot
                         .tabs
                         .iter()
@@ -599,6 +626,9 @@ pub fn plan_with_deferred(
                         }
                     } else {
                         // No valid workers tab exists -> create new tab and split.
+                        // Label the tab with the pane's spawn label when it has one
+                        // (`expected_tab`), so the hook and the repair create the
+                        // same tab instead of fighting over `group` vs `--tab`.
                         for i in build_order(m) {
                             if i == 0 {
                                 ops.push(Op {
@@ -624,6 +654,6 @@ pub fn plan_with_deferred(
         }
     }
 
-    propagate_deferrals(&mut ops);
+    propagate_deferrals(&mut ops, &snapshot.panes);
     Ok(ops)
 }

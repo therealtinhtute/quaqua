@@ -307,31 +307,37 @@ pub fn reconcile_step<D: HerdrDriver>(
     }
 
     // Live mode: filter non-deferred ops and dependent ops
+    let pane_group = |pid: &str| -> String {
+        snap.panes
+            .iter()
+            .find(|p| p.pane_id == pid)
+            .and_then(|p| p.tokens.as_ref())
+            .and_then(|t| t.grid_group.as_deref())
+            .unwrap_or("workers")
+            .to_string()
+    };
     let mut deferred_panes: HashSet<String> = HashSet::new();
-    let mut workers_tab_deferred = false;
-    let mut workers_tab_2_deferred = false;
-    let mut new_tab_count = 0;
+    let mut deferred_tabs: HashSet<(String, String)> = HashSet::new();
+    let mut group_new_tab_count: HashMap<String, usize> = HashMap::new();
     let mut non_deferred: Vec<Op> = Vec::new();
 
     for op in ops {
+        let grp = pane_group(&op.pane);
         if op.deferred {
             deferred_panes.insert(op.pane.clone());
             if matches!(op.target, Target::NewTab { .. }) {
-                if new_tab_count == 0 {
-                    workers_tab_deferred = true;
-                } else {
-                    workers_tab_2_deferred = true;
-                }
-                new_tab_count += 1;
+                let cnt = group_new_tab_count.entry(grp.clone()).or_insert(0);
+                let tab_ref = if *cnt == 0 { "@workers" } else { "@workers-2" };
+                deferred_tabs.insert((grp.clone(), tab_ref.to_string()));
+                *cnt += 1;
             }
         } else if matches!(op.target, Target::NewTab { .. }) {
-            new_tab_count += 1;
+            let cnt = group_new_tab_count.entry(grp.clone()).or_insert(0);
+            *cnt += 1;
             non_deferred.push(op);
         } else if let Target::Split { tab, anchor, .. } = &op.target {
-            let tab_def = if tab == "@workers" {
-                workers_tab_deferred
-            } else if tab == "@workers-2" {
-                workers_tab_2_deferred
+            let tab_def = if tab == "@workers" || tab == "@workers-2" {
+                deferred_tabs.contains(&(grp.clone(), tab.clone()))
             } else {
                 false
             };

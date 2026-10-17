@@ -1,7 +1,6 @@
 use super::apply::{apply_ops, CliHerdrDriver, HerdrDriver};
 use super::plan::{
     accepts_workers_tab, group_expected_tab, is_candidate_worker, plan_with_deferred,
-    strip_tab_suffix,
 };
 use super::types::{Op, Snapshot, Target};
 use std::collections::HashSet;
@@ -124,12 +123,14 @@ pub fn filter_ops_for_check<'a>(
                     if !accepts_workers_tab(pgroup, pgtab, Some(tab)) {
                         return false;
                     }
-                    if strip_tab_suffix(tab) != tab {
+                    let base = pgtab.unwrap_or(pgroup);
+                    let is_chunk_1_filter = tab == super::plan::chunk_tab_label(base, 1) || tab == format!("{pgroup}-workers-2");
+                    if is_chunk_1_filter {
                         let op_matches = match &op.target {
                             Target::NewTab { label } => label == tab,
                             Target::Split { tab: target_tab, .. } => {
                                 if target_tab == "@workers-2" {
-                                    tab.ends_with("-2")
+                                    true
                                 } else {
                                     snapshot.tabs.iter().any(|t| t.tab_id == *target_tab && t.label.as_deref() == Some(tab))
                                 }
@@ -338,6 +339,12 @@ pub fn run_reconcile<D: HerdrDriver>(
                 }
             }
         } else {
+            // !beside -> Dedicated workers tab (N1: never orchestrator tab!)
+            // The one acceptance predicate shared with the planner and the check:
+            // the group tab, or the exact label the panes were spawned into.
+            // `--tab`/GRID_TAB wins when given; else fall back to the pane's
+            // `grid_tab` token, so a repair without `--tab` still reuses the tab
+            // the panes were spawned into instead of creating a second one.
             let expected_tab = requested.clone().or_else(|| group_expected_tab(&gws));
             let base_tab = expected_tab.clone().unwrap_or_else(|| group.clone());
 
@@ -574,7 +581,7 @@ pub fn run_reconcile<D: HerdrDriver>(
     // The planned flags must equal what apply_ops will really do: a split whose
     // anchor is deferred cannot run either, and reporting it as runnable would
     // hide the reason a repair moved fewer panes than it planned.
-    super::plan::propagate_deferrals(&mut repair_ops);
+    super::plan::propagate_deferrals(&mut repair_ops, &snap.panes);
 
     if opts.dry_run {
         let serialized = serde_json::to_string(&repair_ops).map_err(|e| e.to_string())?;

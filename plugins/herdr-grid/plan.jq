@@ -228,30 +228,56 @@ def find_owner_pane($owner; $panes; $agents; $ws):
 # cannot run while the group's new tab is deferred. apply_ops and the hook
 # propagate deferral by this same rule; the planner must too, or the check
 # counts an unrunnable op as pending and times out while its anchor works.
-def propagate_deferrals:
-  ( reduce .[] as $op
-      ( {ops: [], deferred: [], tab_deferred: [], new_tab_count: 0};
-        if $op.deferred then
-          { ops: (.ops + [$op]),
-            deferred: (.deferred + [$op.pane]),
-            tab_deferred: (if $op.target.kind == "new_tab" then
-                             if .new_tab_count == 0 then (.tab_deferred + ["@workers"])
-                             else (.tab_deferred + ["@workers-2"]) end
-                           else .tab_deferred end),
-            new_tab_count: (if $op.target.kind == "new_tab" then .new_tab_count + 1 else .new_tab_count end) }
-        elif ($op.target.kind == "new_tab") then
-          { ops: (.ops + [$op]), deferred: .deferred, tab_deferred: .tab_deferred, new_tab_count: (.new_tab_count + 1) }
-        elif ($op.target.kind == "split"
-              and (((.deferred | index($op.target.anchor)) != null)
-                   or ((.tab_deferred | index($op.target.tab)) != null))) then
-          { ops: (.ops + [$op + {deferred: true}]),
-            deferred: (.deferred + [$op.pane]),
-            tab_deferred: .tab_deferred,
-            new_tab_count: .new_tab_count }
-        else
-          { ops: (.ops + [$op]), deferred: .deferred, tab_deferred: .tab_deferred, new_tab_count: .new_tab_count }
-        end )
-    | .ops );
+def propagate_deferrals($panes):
+  . as $ops
+  | ($panes | map({key: .pane_id, value: (.tokens.grid_group // "workers")}) | from_entries) as $pane_groups
+  | ( reduce $ops[] as $op
+      ( {ops: [], deferred: [], tab_deferred: [], group_counts: {}};
+        ($pane_groups[$op.pane] // "workers") as $grp
+        | if $op.deferred then
+            (if $op.target.kind == "new_tab" then
+               (.group_counts[$grp] // 0) as $cnt
+               | (if $cnt == 0 then "@workers" else "@workers-2" end) as $tref
+               | {
+                   ops: (.ops + [$op]),
+                   deferred: (.deferred + [$op.pane]),
+                   tab_deferred: (.tab_deferred + ["\($grp)/\($tref)"]),
+                   group_counts: (.group_counts + {($grp): ($cnt + 1)})
+                 }
+             else
+               {
+                 ops: (.ops + [$op]),
+                 deferred: (.deferred + [$op.pane]),
+                 tab_deferred: .tab_deferred,
+                 group_counts: .group_counts
+               }
+             end)
+          elif ($op.target.kind == "new_tab") then
+            (.group_counts[$grp] // 0) as $cnt
+            | {
+                ops: (.ops + [$op]),
+                deferred: .deferred,
+                tab_deferred: .tab_deferred,
+                group_counts: (.group_counts + {($grp): ($cnt + 1)})
+              }
+          elif ($op.target.kind == "split"
+                and (((.deferred | index($op.target.anchor)) != null)
+                     or ((.tab_deferred | index("\($grp)/\($op.target.tab)")) != null))) then
+            {
+              ops: (.ops + [$op + {deferred: true}]),
+              deferred: (.deferred + [$op.pane]),
+              tab_deferred: .tab_deferred,
+              group_counts: .group_counts
+            }
+          else
+            {
+              ops: (.ops + [$op]),
+              deferred: .deferred,
+              tab_deferred: .tab_deferred,
+              group_counts: .group_counts
+            }
+          end )
+      | .ops );
 
 # ---------------------------------------------------------------------------
 # Main pipeline
@@ -438,4 +464,4 @@ def propagate_deferrals:
             end
         )
   end
-) | propagate_deferrals
+) | propagate_deferrals($panes)

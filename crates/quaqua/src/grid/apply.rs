@@ -262,39 +262,51 @@ pub fn apply_ops<D: HerdrDriver>(
     _initial_snapshot: Option<&Snapshot>,
 ) -> Result<HashMap<String, String>, String> {
     let mut pane_map: HashMap<String, String> = HashMap::new();
-    let mut latest_tab: Option<String> = None;
-    let mut latest_tab_2: Option<String> = None;
+    let mut latest_tabs: HashMap<(String, String), String> = HashMap::new();
     let mut scratch_counter = 0;
 
+    let init_snap = match _initial_snapshot {
+        Some(s) => s.clone(),
+        None => driver.snapshot()?,
+    };
+    let pane_group = |pid: &str| -> String {
+        init_snap
+            .panes
+            .iter()
+            .find(|p| p.pane_id == pid)
+            .and_then(|p| p.tokens.as_ref())
+            .and_then(|t| t.grid_group.as_deref())
+            .unwrap_or("workers")
+            .to_string()
+    };
+
     let mut deferred_panes: HashSet<String> = HashSet::new();
-    let mut workers_tab_deferred = false;
-    let mut workers_tab_2_deferred = false;
-    let mut new_tab_count = 0;
+    let mut deferred_tabs: HashSet<(String, String)> = HashSet::new();
+    let mut group_new_tab_count: HashMap<String, usize> = HashMap::new();
+    let mut group_created_new_tab_count: HashMap<String, usize> = HashMap::new();
 
     for op in ops {
+        let grp = pane_group(&op.pane);
         // Finding 3: Propagate deferral to dependent ops
         if op.deferred {
             deferred_panes.insert(op.pane.clone());
             if matches!(op.target, Target::NewTab { .. }) {
-                if new_tab_count == 0 {
-                    workers_tab_deferred = true;
-                } else {
-                    workers_tab_2_deferred = true;
-                }
-                new_tab_count += 1;
+                let cnt = group_new_tab_count.entry(grp.clone()).or_insert(0);
+                let tab_ref = if *cnt == 0 { "@workers" } else { "@workers-2" };
+                deferred_tabs.insert((grp.clone(), tab_ref.to_string()));
+                *cnt += 1;
             }
             continue;
         }
 
         if matches!(op.target, Target::NewTab { .. }) {
-            new_tab_count += 1;
+            let cnt = group_new_tab_count.entry(grp.clone()).or_insert(0);
+            *cnt += 1;
         }
 
         if let Target::Split { tab, anchor, .. } = &op.target {
-            let tab_def = if tab == "@workers" {
-                workers_tab_deferred
-            } else if tab == "@workers-2" {
-                workers_tab_2_deferred
+            let tab_def = if tab == "@workers" || tab == "@workers-2" {
+                deferred_tabs.contains(&(grp.clone(), tab.clone()))
             } else {
                 false
             };
@@ -362,14 +374,7 @@ pub fn apply_ops<D: HerdrDriver>(
 
                 // Finding 5 & N1: Resolve @workers to the workers tab, NEVER the orchestrator tab
                 let actual_tab = if tab == "@workers" || tab.starts_with("@workers-") {
-                    let mut resolved = None;
-                    if tab == "@workers-2" {
-                        if let Some(lt2) = &latest_tab_2 {
-                            resolved = Some(lt2.clone());
-                        }
-                    } else if let Some(lt) = &latest_tab {
-                        resolved = Some(lt.clone());
-                    }
+                    let resolved = latest_tabs.get(&(worker_group.to_string(), tab.clone())).cloned();
 
                     if let Some(r) = resolved {
                         r
@@ -466,11 +471,10 @@ pub fn apply_ops<D: HerdrDriver>(
         }
 
         if !res.tab_id.is_empty() && matches!(op.target, Target::NewTab { .. }) {
-            if latest_tab.is_none() {
-                latest_tab = Some(res.tab_id.clone());
-            } else {
-                latest_tab_2 = Some(res.tab_id.clone());
-            }
+            let cnt = group_created_new_tab_count.entry(worker_group.to_string()).or_insert(0);
+            let tab_ref = if *cnt == 0 { "@workers" } else { "@workers-2" };
+            latest_tabs.insert((worker_group.to_string(), tab_ref.to_string()), res.tab_id.clone());
+            *cnt += 1;
         }
     }
 

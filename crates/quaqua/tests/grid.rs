@@ -1507,3 +1507,91 @@ fn test_hook_and_apply_deferred_chunk_2() {
     assert!(res.is_ok(), "apply_ops must succeed: {:?}", res);
     assert_eq!(driver.executed_moves.len(), 4, "must execute only the 4 runnable ops of chunk 0");
 }
+
+#[test]
+fn test_apply_ops_multiple_groups_each_create_tab() {
+    // Round 2 Finding 1 regression repro:
+    // When 2+ groups create tabs in one apply pass, @workers must resolve
+    // to each group's own tab, never to another group's tab.
+    let val = serde_json::json!({
+        "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "main" }],
+            "tabs": [
+                { "tab_id": "w1:t1", "workspace_id": "w1", "label": "main", "pane_count": 1 }
+            ],
+            "panes": [
+                { "pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "orchestrator", "grid_owner": "cos", "grid_ready": "1" } },
+                // Group alpha (2 workers)
+                { "pane_id": "w1:pA1", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "alpha", "grid_ready": "1" } },
+                { "pane_id": "w1:pA2", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "alpha", "grid_ready": "1" } },
+                // Group beta (2 workers)
+                { "pane_id": "w1:pB1", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "beta", "grid_ready": "1" } },
+                { "pane_id": "w1:pB2", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "beta", "grid_ready": "1" } }
+            ],
+            "layouts": [],
+            "agents": []
+        }
+    });
+
+    let snap = parse_snapshot_value(&val).unwrap();
+    let ops = plan(&snap).unwrap();
+    assert_eq!(ops.len(), 4);
+
+    let mut driver = FakeHerdrDriver::new(snap);
+    let res = apply_ops(&mut driver, &ops, None);
+    assert!(res.is_ok(), "apply_ops must succeed across multiple groups: {:?}", res);
+    assert_eq!(driver.executed_moves.len(), 4);
+
+    // Both groups created their own tabs
+    let move_a2 = driver.executed_moves.iter().find(|m| m.0 == "w1:pA2").unwrap();
+    let move_b2 = driver.executed_moves.iter().find(|m| m.0 == "w1:pB2").unwrap();
+    let tab_a = match &move_a2.1 {
+        Target::Split { tab, .. } => tab.clone(),
+        _ => panic!("expected split target for pA2"),
+    };
+    let tab_b = match &move_b2.1 {
+        Target::Split { tab, .. } => tab.clone(),
+        _ => panic!("expected split target for pB2"),
+    };
+    assert_ne!(tab_a, tab_b, "alpha and beta workers must split into different tabs");
+}
+
+#[test]
+fn test_check_filter_does_not_drop_chunk_0_splits_when_tab_ends_in_dash_two() {
+    // Round 2 Finding 2 repro:
+    // When GRID_TAB / group ends in -2 (e.g. web-2), chunk-0 split ops targeting
+    // @workers must not be dropped by the check filter.
+    let val = serde_json::json!({
+        "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "main" }],
+            "tabs": [
+                { "tab_id": "w1:t1", "workspace_id": "w1", "label": "main", "pane_count": 2 },
+                { "tab_id": "w1:t2", "workspace_id": "w1", "label": "web-2-workers", "pane_count": 1 }
+            ],
+            "panes": [
+                { "pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "orchestrator", "grid_owner": "cos", "grid_ready": "1" } },
+                // Worker 1 is in web-2-workers
+                { "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "web-2", "grid_ready": "1" } },
+                // Worker 2 is unarranged in main tab
+                { "pane_id": "w1:p3", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "web-2", "grid_ready": "1" } }
+            ],
+            "layouts": [],
+            "agents": []
+        }
+    });
+
+    let snap = parse_snapshot_value(&val).unwrap();
+    let ops = plan(&snap).unwrap();
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].pane, "w1:p3");
+
+    // filter_ops_for_check scoped with --tab web-2-workers must keep the pending split op!
+    let filtered = quaqua::grid::reconcile::filter_ops_for_check(
+        &ops,
+        &snap,
+        Some("cos"),
+        None,
+        Some("web-2-workers"),
+    );
+    assert_eq!(filtered.len(), 1, "chunk-0 split op must not be dropped when tab label has -2 in base name");
+}
