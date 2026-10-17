@@ -10,6 +10,7 @@ repo="$(cd "$here/.." && pwd)"
 cargo build --locked --manifest-path "$repo/crates/quaqua/Cargo.toml"
 bin="$repo/target/debug/quaqua"
 [[ -x "$bin" ]] || { echo "error: binary not found at $bin" >&2; exit 1; }
+export QUAQUA_BIN="$bin"
 
 T_SHIM=$(mktemp -d "${TMPDIR:-/tmp}/quaqua-r3-shims.XXXXXX")
 T_SHIM=$(cd "$T_SHIM" && pwd -P)
