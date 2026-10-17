@@ -752,6 +752,18 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             let last_tool = last_obs.as_ref().map(|o| o.last_tool.as_str()).filter(|s| !s.is_empty()).unwrap_or("none");
             let elapsed = now.saturating_sub(start);
             eprintln!("WATCHDOG heartbeat | name={name} elapsed={elapsed}s status={status} ctx={ctx} quiet={quiet}s last={last_tool}");
+            if (now >= budget_deadline.saturating_sub(heartbeat) || now >= budget_deadline)
+                && (quiet < heartbeat || (last_progress > 0 && now.saturating_sub(last_progress) <= poll * 2))
+            {
+                let mut ext = heartbeat.max(1);
+                if budget_deadline + ext > deadline {
+                    ext = deadline.saturating_sub(budget_deadline);
+                }
+                if ext > 0 {
+                    budget_deadline += ext;
+                    eprintln!("WATCHDOG auto-extend +{ext}s (progressing, cap {max}s)");
+                }
+            }
             last_hb = now;
         }
 

@@ -16,7 +16,12 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$(cd "$here/.." && pwd)/scripts"
+root="$(cd "$here/.." && pwd)"
+src="$root/scripts"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+export QUAQUA_BIN="$bin"
+export PATH="$root/target/debug:$PATH"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-prompt-watchdog.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -238,6 +243,13 @@ run sude-gracecap FAKE_DELAY=0 FAKE_ROTATE=1 PROMPT_WORKER_POLL_SEC=1 \
 grep -q 'WATCHDOG grace' "$T/err" \
   || fail "sude-gracecap: grace never granted before the cap: $(cat "$T/err")"
 echo "ok: grace clamped by the cap -> exit 2 at the cap"
+# ── (a) progressing agent auto-extends on heartbeat within cap instead of exit 4 ─
+run sude-autoext FAKE_DELAY=0 FAKE_ROTATE=1 PROMPT_WORKER_POLL_SEC=1 \
+  PROMPT_WORKER_HEARTBEAT_SEC=2 PROMPT_WORKER_STALL_SEC=10 \
+  PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_MAX_SEC=7
+[[ $rc -eq 2 ]] || fail "sude-autoext: exit $rc, want 2 (cap): $(cat "$T/err")"
+grep -q 'WATCHDOG auto-extend' "$T/err" || fail "sude-autoext: no auto-extend line: $(cat "$T/err")"
+echo "ok: progressing agent auto-extends within cap until exit 2"
 
 # ── D1: --resume without --extend keeps the old fast exit 4 ────────────────
 run sude-noext FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
