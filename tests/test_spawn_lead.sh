@@ -67,16 +67,20 @@ case "${1:-} ${2:-}" in
       exit 1
     fi ;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"w7","label":"x"},"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"%7"}}}' ;;
+  "workspace get") printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"}}}\n' "$3" "${WS_LABEL:-$3}" ;;
 esac
 exit 0
 STUB
 chmod +x "$T/bin/git" "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
 
 spawn() {  # spawn <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   local slug=$1; shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" PATH="$T/bin:$PATH" QUAQUA_ROOT="$T" env "$@" \
+  CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T" env "$@" \
     "${QUAQUA_BIN:-quaqua}" lead spawn "$slug" >"$T/out" 2>"$T/err" || rc=$?
 }
 
@@ -249,39 +253,14 @@ grep -qF "git -C $amp/Lab/coucou-island rev-parse" "$T/calls" \
 echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corruption)"
 
 # ── concurrent spawn vs cleanup on different INDEX rows must not lose updates ─
-# The stub awk parks inside each script's INDEX read-modify-write (identified
-# by the OFS= program marker — spawn's slug-check/repo-extract awks don't set
-# OFS and pass straight through) until the test releases it. With the shared
-# mkdir lock the cleanup serializes behind the spawn; without it both snapshot
-# the same INDEX and one row's update is lost (F4).
-# cleanup-lead is invoked via binary
-cat > "$T/bin/awk" <<'STUB'
-#!/usr/bin/env bash
-idx=0 s=unknown
-for a in "$@"; do
-  [[ $a == *OFS=* ]] && idx=1
-  [[ $a == slug=* ]] && s=${a#slug=}
-done
-if (( ! idx )); then exec "$REAL_AWK" "$@"; fi
-out=$("$REAL_AWK" "$@"); r=$?
-: >> "$BARRIER_DIR/ready.$s"
-for _ in $(seq 1 800); do [[ -e $BARRIER_DIR/go ]] && break; sleep 0.01; done
-printf '%s\n' "$out"
-exit "$r"
-STUB
-chmod +x "$T/bin/awk"
-
-mkdir -p "$T/barrier" "$T/runs"; : > "$T/calls"
+# Spawn and cleanup run concurrently on different rows. With the shared mkdir lock
+# (projects/INDEX.md.lock.d), writes serialize without data loss or file corruption.
+mkdir -p "$T/runs"; : > "$T/calls"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
-ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" REAL_AWK="$(command -v awk)" BARRIER_DIR="$T/barrier" QUAQUA_ROOT="$T")
+ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T")
 env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead spawn coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
-for _ in $(seq 1 500); do [[ -e $T/barrier/ready.coucou-island ]] && break; sleep 0.01; done
-[[ -e $T/barrier/ready.coucou-island ]] \
-  || fail "concurrent: spawn never reached the INDEX update: $(cat "$T/err.s")"
 env "${ce[@]}" HERDR_LIVE=mono-desk-lead HERDR_PANE_ID=w9:p13 \
   "${QUAQUA_BIN:-quaqua}" lead cleanup mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
-for _ in $(seq 1 400); do [[ -e $T/barrier/ready.mono-desk ]] && break; sleep 0.01; done
-touch "$T/barrier/go"
 rc1=0 rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?
 [[ $rc1 -eq 0 && $rc2 -eq 0 ]] || fail "concurrent: exits $rc1/$rc2: $(cat "$T/err.s" "$T/err.c")"
 grep -qE '^\| coucou-island \| ~/Lab/coucou-island \| coucou-island-lead \|' "$T/projects/INDEX.md" \

@@ -7,10 +7,9 @@ use quaqua::worker::prompt::{
     brief_budget_sec, brief_headers_ok, fallback_header_line, prepend_header,
     validate_env_budget_val,
 };
-use quaqua::worker::spawn::{
-    build_launch_cmd, fallback_kind, parse_spawn_args, resolve_launch, start_failure_reason,
-    Launch,
-};
+use quaqua::launch::{build_launch_cmd, resolve_launch, Launch};
+use quaqua::lead::spawn::{update_index_content, update_project_index_owner};
+use quaqua::worker::spawn::{fallback_kind, parse_spawn_args, start_failure_reason};
 use quaqua::workspace::resolve_workspace_root;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
@@ -2000,6 +1999,89 @@ fn test_cleanup_worker_removes_per_worker_opencode_state() {
 }
 
 #[test]
+fn test_update_index_content_markdown_table() {
+    let original = "# Projects\n\n\
+        | slug | repo | owner | goal | status |\n\
+        |---|---|---|---|---|\n\
+        | mono-desk | ~/Lab/mono-desk | cos | Port zdesk UI | active |\n\
+        | baroiplayer | ~/Personal/baroiplayer | baroiplayer-lead | Publish lib | active |\n\
+        | zimage | ~/Personal/zimage | cos | ImgMole | active |\n\n\
+        Card: `projects/<slug>.md`.\n";
+
+    // Update mono-desk owner to mono-desk-lead
+    let updated = update_index_content(original, "mono-desk", "mono-desk-lead");
+    assert!(
+        updated.contains("| mono-desk | ~/Lab/mono-desk | mono-desk-lead | Port zdesk UI | active |"),
+        "mono-desk owner cell not updated: {updated}"
+    );
+    assert!(
+        updated.contains("| baroiplayer | ~/Personal/baroiplayer | baroiplayer-lead | Publish lib | active |"),
+        "other rows must be preserved: {updated}"
+    );
+    assert!(
+        updated.contains("| zimage | ~/Personal/zimage | cos | ImgMole | active |"),
+        "other rows must be preserved: {updated}"
+    );
+    assert!(
+        updated.contains("| slug | repo | owner | goal | status |"),
+        "header row must remain unchanged: {updated}"
+    );
+
+    // Reset back to cos: should match original byte-for-byte
+    let restored = update_index_content(&updated, "mono-desk", "cos");
+    assert_eq!(restored, original);
+
+    // Updating non-existent slug returns byte-identical content
+    let untouched = update_index_content(original, "unknown-slug", "random-lead");
+    assert_eq!(untouched, original);
+
+    // Rows with fewer than 4 fields are preserved as-is without crashing or modifying
+    let malformed = "| short | row\n";
+    assert_eq!(update_index_content(malformed, "short", "lead"), "| short | row\n");
+}
+
+#[test]
+fn test_update_project_index_owner_fixture_atomic() {
+    let temp = std::env::temp_dir().join(format!("quaqua-test-index-{}", std::process::id()));
+    let projects_dir = temp.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    let index_file = projects_dir.join("INDEX.md");
+
+    let initial_content = "# Projects\n\n\
+        | slug | repo | owner | goal | status |\n\
+        |---|---|---|---|---|\n\
+        | baro | ~/Lab/baro | cos | player | active |\n\
+        | baro-web | ~/Lab/baro-web | cos | site | active |\n";
+    std::fs::write(&index_file, initial_content).unwrap();
+
+    // 1. Update baro to baro-lead
+    let res = update_project_index_owner(&temp, "baro", "baro-lead");
+    assert!(res.is_ok(), "update_project_index_owner failed: {:?}", res);
+
+    let read_back = std::fs::read_to_string(&index_file).unwrap();
+    assert!(read_back.contains("| baro | ~/Lab/baro | baro-lead | player | active |"));
+    assert!(read_back.contains("| baro-web | ~/Lab/baro-web | cos | site | active |"));
+
+    // Lock and tmp files must be cleaned up
+    assert!(!temp.join("projects/INDEX.md.lock.d").exists());
+    for entry in std::fs::read_dir(&projects_dir).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        assert!(!name.starts_with("INDEX.md.tmp."), "leftover tmp file: {name}");
+    }
+
+    // 2. Reset baro to cos
+    let res2 = update_project_index_owner(&temp, "baro", "cos");
+    assert!(res2.is_ok());
+    let read_back2 = std::fs::read_to_string(&index_file).unwrap();
+    assert_eq!(read_back2, initial_content);
+
+    // 3. Missing index file returns error
+    let missing_temp = temp.join("nonexistent");
+    let res_err = update_project_index_owner(&missing_temp, "baro", "cos");
+    assert!(res_err.is_err());
+}
+
+#[test]
 fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
     let _env_lock = lock_env();
     let temp = std::env::temp_dir().join(format!("quaqua-clean-all-{}", std::process::id()));
@@ -2071,6 +2153,50 @@ fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
     }
 
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_update_project_index_owner_concurrency() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let temp = Arc::new(std::env::temp_dir().join(format!("quaqua-test-index-race-{}", std::process::id())));
+    let projects_dir = temp.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    let index_file = projects_dir.join("INDEX.md");
+
+    let mut initial = String::from("# Projects\n\n| slug | repo | owner |\n|---|---|---|\n");
+    for i in 0..8 {
+        initial.push_str(&format!("| proj{i} | ~/Lab/proj{i} | cos |\n"));
+    }
+    std::fs::write(&index_file, &initial).unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let t = Arc::clone(&temp);
+        let handle = thread::spawn(move || {
+            let slug = format!("proj{i}");
+            let owner = format!("lead-{i}");
+            update_project_index_owner(&t, &slug, &owner)
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let res = handle.join().expect("thread panicked");
+        assert!(res.is_ok(), "thread failed update: {:?}", res);
+    }
+
+    let final_content = std::fs::read_to_string(&index_file).unwrap();
+    for i in 0..8 {
+        assert!(
+            final_content.contains(&format!("| proj{i} | ~/Lab/proj{i} | lead-{i} |")),
+            "missing update for proj{i}: {final_content}"
+        );
+    }
+    assert!(!temp.join("projects/INDEX.md.lock.d").exists());
+
+    let _ = std::fs::remove_dir_all(&*temp);
 }
 
 #[test]
