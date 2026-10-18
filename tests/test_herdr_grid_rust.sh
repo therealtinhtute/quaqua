@@ -8,7 +8,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/.." && pwd)"
 fixdir="$repo_root/tests/fixtures/herdr-grid"
-plan_jq="$repo_root/plugins/herdr-grid/plan.jq"
+plan_jq="$repo_root/plugins/herdr-quaqua/plan.jq"
 
 fail() {
   echo "FAIL: $*" >&2

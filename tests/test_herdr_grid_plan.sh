@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit test for plugins/herdr-grid/plan.jq layout planner (phase plugin-shadow, wave 1, T1).
+# Unit test for plugins/herdr-quaqua/plan.jq layout planner (phase plugin-shadow, wave 1, T1).
 # Tests turn a herdr api snapshot JSON into an ordered list of layout ops.
 #
 # Requirements verified:
@@ -35,7 +35,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-plan_jq="$(cd "$here/.." && pwd)/plugins/herdr-grid/plan.jq"
+plan_jq="$(cd "$here/.." && pwd)/plugins/herdr-quaqua/plan.jq"
 fixdir="$here/fixtures/herdr-grid"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

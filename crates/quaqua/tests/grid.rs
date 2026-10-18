@@ -65,7 +65,7 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn plan_jq_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/herdr-grid/plan.jq")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/herdr-quaqua/plan.jq")
 }
 
 #[test]
@@ -689,6 +689,20 @@ fn test_hook_shadow_mode_file_precedence_and_empty_snapshot() {
     std::env::set_var("HERDR_GRID_SHADOW", "1");
     fs::write(tmp_state.join("shadow"), "0\n").unwrap();
     // Even though env=1, shadow file contains 0 -> live mode (false)
+    assert!(!is_shadow_mode(&tmp_state));
+    std::env::remove_var("HERDR_GRID_SHADOW");
+
+    // HERDR_QUAQUA_SHADOW takes precedence over the legacy HERDR_GRID_SHADOW
+    fs::write(tmp_state.join("shadow"), "1\n").unwrap();
+    std::env::set_var("HERDR_GRID_SHADOW", "0");
+    std::env::set_var("HERDR_QUAQUA_SHADOW", "1");
+    assert!(is_shadow_mode(&tmp_state));
+    std::env::remove_var("HERDR_QUAQUA_SHADOW");
+    std::env::remove_var("HERDR_GRID_SHADOW");
+
+    // Legacy HERDR_GRID_SHADOW=0 alone (no QUAQUA var, no shadow file) still disables shadow
+    let _ = fs::remove_file(tmp_state.join("shadow"));
+    std::env::set_var("HERDR_GRID_SHADOW", "0");
     assert!(!is_shadow_mode(&tmp_state));
     std::env::remove_var("HERDR_GRID_SHADOW");
 

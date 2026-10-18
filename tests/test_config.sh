@@ -24,10 +24,10 @@ rev=$("$bin" config get strategy.default_reviewer --file "$root/team.toml")
 echo "ok: config get strategy.default_reviewer = suhuynh"
 
 cap=$("$bin" config get limits.max_workers_per_orchestrator --file "$root/team.toml")
-[[ "$cap" == "4" ]] || fail "cap = '$cap'"
+[[ "$cap" == "8" ]] || fail "cap = '$cap'"
 zcap=$("$bin" config get limits.max_workers_per_orchestrator --file "$root/team.toml" --project zimage)
 [[ "$zcap" == "3" ]] || fail "zimage cap = '$zcap'"
-echo "ok: cap 4, zimage override 3"
+echo "ok: cap 8, zimage override 3"
 
 [[ "$("$bin" config get kinds.suhuynh.can_review --file "$root/team.toml")" == "true" ]] \
   || fail "suhuynh.can_review"

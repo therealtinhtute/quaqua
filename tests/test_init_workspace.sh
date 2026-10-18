@@ -255,13 +255,13 @@ mkdir -p "$N/scripts/hooks"
 [[ -f $N/memory/rules.md ]] || fail "non-repo workspace was not booted"
 echo "ok: outside a git repo -> hook wiring skipped, workspace still booted"
 
-# ── 9. herdr-grid: ONLY the real CoS pane is tagged orchestrator (R5) ───────
+# ── 9. herdr-quaqua: ONLY the real CoS pane is tagged orchestrator (R5) ───────
 # init-workspace.sh runs from whatever pane drives the clone, and every worker
 # worktree of this repo ships a copy of it, so the caller's pane is not the CoS.
 # Regression this covers (2026-10-14): an opencode pane came out of here tagged
 # grid_role=orchestrator/grid_owner=cos while the real CoS pane had no token, so
 # grid-workers.sh anchored the grid beside the wrong pane and timed out.
-tag='herdr pane report-metadata w1:p1 --source herdr-grid --token grid_role=orchestrator --token grid_owner=cos'
+tag='herdr pane report-metadata w1:p1 --source herdr-quaqua --token grid_role=orchestrator --token grid_owner=cos'
 mkdir -p "$T/wt" "$T/elsewhere"   # a worker worktree and a non-checkout cwd
 
 # tag_as <pane> <agent> <cwd> <agent-name>: run init-workspace.sh as if called
@@ -281,7 +281,7 @@ out=$(tag_as w1:p1 claude "$R" "")
 grep -qF "$tag" <<<"$out" \
   || fail "the CoS pane (claude, unregistered, in the checkout) was not tagged: $out"
 ! grep -q 'grid_ready' <<<"$out" || fail "CoS pane should not have grid_ready token"
-echo "ok: herdr-grid -> the CoS pane is tagged orchestrator/owner=cos, no grid_ready"
+echo "ok: herdr-quaqua -> the CoS pane is tagged orchestrator/owner=cos, no grid_ready"
 
 # every other caller stays untagged: a stray orchestrator token anchors the grid
 # beside the wrong pane
@@ -293,7 +293,7 @@ out=$(tag_as w1:p4 claude "$R" acme-lead)            # a Lead: same cwd as the C
 ! grep -q 'report-metadata' <<<"$out" || fail "Lead pane tagged as the CoS orchestrator: $out"
 out=$(tag_as w1:p5 claude "$T/elsewhere" "")         # unregistered, but not this checkout
 ! grep -q 'report-metadata' <<<"$out" || fail "unregistered claude pane outside the checkout tagged as the CoS: $out"
-echo "ok: herdr-grid -> opencode / claude-worker / Lead / foreign-dir panes stay untagged"
+echo "ok: herdr-quaqua -> opencode / claude-worker / Lead / foreign-dir panes stay untagged"
 
 # with HERDR_PANE_ID unset the pane still comes from herdr pane current
 : > "$T/calls"
@@ -304,7 +304,7 @@ echo "ok: herdr-grid -> opencode / claude-worker / Lead / foreign-dir panes stay
   || fail "init-workspace.sh failed with herdr pane current"
 grep -qF "$tag" "$T/calls" \
   || fail "the CoS pane was not tagged via herdr pane current: $(cat "$T/calls")"
-echo "ok: herdr-grid -> herdr pane current fallback still tags the CoS pane"
+echo "ok: herdr-quaqua -> herdr pane current fallback still tags the CoS pane"
 
 # a herdr that cannot say who the pane is -> no tag, and no failure
 : > "$T/calls"
@@ -313,6 +313,6 @@ echo "ok: herdr-grid -> herdr pane current fallback still tags the CoS pane"
   cd "$R" && "${QUAQUA_BIN:-quaqua}" init ) >/dev/null \
   || fail "init-workspace.sh failed when herdr reports no pane metadata"
 ! grep -q 'report-metadata' "$T/calls" || fail "tagged an unidentifiable pane: $(cat "$T/calls")"
-echo "ok: herdr-grid -> an unidentifiable pane fails closed (no tag, no error)"
+echo "ok: herdr-quaqua -> an unidentifiable pane fails closed (no tag, no error)"
 
 echo "PASS"

@@ -96,10 +96,10 @@ grep -qx 'lead=coucou-island-lead slug=coucou-island workspace=w7 pane=%7' "$T/o
   && [[ $(ln 'pane report-metadata') -lt $(ln 'agent start') ]] \
   && [[ $(ln 'agent start') -lt $(ln 'agent prompt') ]] \
   || fail "happy: bad call order: $(cat "$T/calls")"
-grep -qF 'herdr pane report-metadata %7 --source herdr-grid --token grid_role=orchestrator --token grid_owner=coucou-island-lead' "$T/calls" \
+grep -qF 'herdr pane report-metadata %7 --source herdr-quaqua --token grid_role=orchestrator --token grid_owner=coucou-island-lead' "$T/calls" \
   || fail "happy: Lead pane not tagged as orchestrator with owner: $(cat "$T/calls")"
 ! grep -q 'grid_ready' "$T/calls" || fail "happy: Lead pane should not have grid_ready token"
-echo "ok: herdr-grid -> Lead pane tagged as orchestrator (role=orchestrator, owner=coucou-island-lead), no grid_ready"
+echo "ok: herdr-quaqua -> Lead pane tagged as orchestrator (role=orchestrator, owner=coucou-island-lead), no grid_ready"
 grep -q 'agent get coucou-island-lead' "$T/calls" \
   || fail "happy: no duplicate check: $(cat "$T/calls")"
 grep -qF "workspace create --label coucou-island --no-focus --cwd $T --env QUAQUA_OWNER=coucou-island-lead" "$T/calls" \
