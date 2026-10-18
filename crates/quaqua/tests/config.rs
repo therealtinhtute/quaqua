@@ -111,7 +111,7 @@ fn config_get_cap_applies_project_override() {
         "--file",
         &repo_team(),
     ]);
-    assert_eq!(stdout(&base).trim(), "4");
+    assert_eq!(stdout(&base).trim(), "8");
 
     let zimage = run(&[
         "config",
