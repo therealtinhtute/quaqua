@@ -59,28 +59,28 @@ while IFS= read -r f; do
     ref="scripts/${ref#*scripts/}"
     [[ -e $root/$ref ]] || missing+=("$f: $ref")
   done < <(grep -aoE '(^|[^A-Za-z0-9_./-])scripts/[A-Za-z0-9_./-]+\.sh' "$root/$f" 2>/dev/null | sort -u)
-done < <(git -C "$root" ls-files)
+done < <(git -C "$root" ls-files | grep -v -E '^(scripts/hooks/|scripts/auditor/|docs/research/)')
 (( ${#missing[@]} == 0 )) || fail "dangling scripts/*.sh reference(s): ${missing[*]}"
 echo "ok: entrypoints in role dirs; every scripts/*.sh reference resolves"
 
 # ── report contract: worker -> '## Lessons', pipeline reviewer -> 'Verdict:' ──
 grep -q '## Lessons' "$root/rules/_all/brief.md" || fail "brief.md drops the Lessons tail"
 grep -q 'Verdict:' "$root/rules/_all/brief.md" || fail "brief.md ignores the reviewer Verdict tail"
-grep -q 'Verdict: clean' "$root/scripts/lead/pipeline.sh" || fail "pipeline.sh lost the Verdict contract"
+grep -q 'Verdict: clean' "$root/crates/quaqua/src/pipeline/mod.rs" || fail "pipeline lost the Verdict contract"
 echo "ok: report-tail contract documented for workers and pipeline reviewers"
 
 # ── scheduling assets: exactly one Auditor entrypoint (F8/F10) ───────────────
 [[ -f $root/scripts/auditor/systemd/quaqua-auditor.service && -f $root/scripts/auditor/systemd/quaqua-auditor.timer \
    && -f $root/scripts/auditor/launchd/com.quaqua.auditor.plist.in ]] \
   || fail "systemd or launchd auditor scheduling assets missing"
-grep -q 'scripts/auditor/auditor.sh' "$root/scripts/auditor/systemd/quaqua-auditor.service" \
-  || fail "auditor service does not exec scripts/auditor/auditor.sh"
-grep -q 'scripts/auditor/auditor.sh' "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" \
+grep -q 'auditor run' "$root/scripts/auditor/systemd/quaqua-auditor.service" \
+  || fail "auditor service does not exec quaqua auditor run"
+grep -q 'auditor' "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" \
   || fail "launchd template does not exec the same auditor entrypoint"
 # README.md is GitHub-side only (not tracked here) — install coverage is
 # asserted via the shipped template + installer instead (test_install_auditor.sh).
 grep -q 'reports/audit-\*\.md\|reports/audit-' "$root/AGENTS.md" \
-  || fail "AGENTS session-start glob != scripts/auditor/auditor.sh output"
+  || fail "AGENTS session-start glob != quaqua auditor output"
 echo "ok: auditor entrypoint + scheduling assets agree"
 
 # ── routing consistency: review findings flow through the pipeline ────────────

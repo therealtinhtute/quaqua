@@ -1,21 +1,26 @@
 //! Worker spawn logic (`quaqua worker spawn [--base <ref>] [--review] <name> <kind> <repo-path>`).
-//! Reproduces `scripts/worker/spawn-worker.sh`.
 
 use crate::cap::count_owner_slots;
 use crate::config::{Config, Kind};
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
-use crate::json::parse_json;
+use crate::state::WorkerMetadata;
+use serde_json::Value;
 use crate::worker::cleanup::run_grid_hook;
 use std::path::PathBuf;
+pub use crate::launch::{build_launch_cmd, claude_trust_dialog_up, resolve_launch, Launch, LaunchCmd};
+pub use crate::worker::worktree::{
+    apply_push_block, canonicalize_repo_path, prepare_worktree, remove_worktree, resolve_paths,
+    resolve_worktree_path, setup_worktree, validate_base_ref,
+};
 use std::process::{Command, Output};
 
 pub const USAGE: &str = "\
-# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
+# Usage: quaqua worker spawn [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
-#          (*-lead is the project Lead convention — spawn-lead.sh <slug>-lead)
+#          (*-lead is the project Lead convention — quaqua lead spawn <slug>)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
-#   --review      ni|suhuynh|truonglao: repo read-only, $HOME/quaqua/runs writable";
+#   --review      any kind with can_review = true: repo read-only, $HOME/quaqua/runs writable";
 
 pub struct SpawnOptions {
     pub base: Option<String>,
@@ -109,124 +114,6 @@ fn get_iso_now() -> String {
 }
 
 
-/// The harness/model/effort a spawn launches with, resolved from team.toml.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Launch {
-    pub harness: String,
-    pub model: String,
-    pub effort: String,
-}
-
-/// Resolve a kind's launch from team.toml, failing closed when the kind has no
-/// model or effort, or the harness cannot take that effort value. No defaults:
-/// team.toml is the only source (the old `unwrap_or("medium"/"high")` are gone).
-pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, String)> {
-    if !["opencode", "omp", "claude"].contains(&kind.harness.as_str()) {
-        return Err((
-            1,
-            format!("error: unsupported harness '{}' for kind '{kind_name}'\n", kind.harness),
-        ));
-    }
-    if kind.model.trim().is_empty() {
-        return Err((1, format!("error: kind '{kind_name}' has no model in team.toml\n")));
-    }
-    let effort = match kind.effort.as_deref() {
-        Some(e) if !e.trim().is_empty() => e,
-        _ => return Err((1, format!("error: kind '{kind_name}' has no effort in team.toml\n"))),
-    };
-    if !crate::config::effort_allowed(&kind.harness, effort) {
-        return Err((
-            1,
-            format!(
-                "error: harness '{}' does not take effort '{effort}' (kind '{kind_name}')\n",
-                kind.harness
-            ),
-        ));
-    }
-    Ok(Launch {
-        harness: kind.harness.clone(),
-        model: kind.model.clone(),
-        effort: effort.to_string(),
-    })
-}
-
-/// One attempt's `herdr` invocation: the pane-split envs and the args after
-/// `herdr agent start <name> --kind <harness> --pane <p> --timeout <ms>`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaunchCmd {
-    pub split_envs: Vec<(String, String)>,
-    pub agent_args: Vec<String>,
-}
-
-/// Build the exact launch command for a resolved kind. opencode has no `--model`
-/// on the interactive TUI (`opencode --help` flags are --standalone/--server/
-/// --auto/--continue/--session/--prompt), so its model+effort travel as the
-/// config `model` value `<model>#<variant>` in the pane env (variant vocabulary =
-/// `ReasoningEffort`; `providerID/modelID#variant` is the documented form).
-/// omp takes `--model`/`--thinking`, claude takes `--model`/`--effort`.
-pub fn build_launch_cmd(
-    launch: &Launch,
-    rules_file: &str,
-    runs_dir: &str,
-    wt: &str,
-    review: bool,
-) -> Result<LaunchCmd, (i32, String)> {
-    let mut split_envs: Vec<(String, String)> = Vec::new();
-
-    let agent_args: Vec<String> = match launch.harness.as_str() {
-        "opencode" => {
-            let cfg = format!(
-                "{{\"model\":\"{}#{}\",\"instructions\":[\"{}\"]}}",
-                launch.model, launch.effort, rules_file
-            );
-            split_envs.push(("OPENCODE_CONFIG_CONTENT".to_string(), cfg));
-            vec!["--".to_string(), "--standalone".to_string(), "--auto".to_string()]
-        }
-        "omp" => vec![
-            "--".to_string(),
-            "--model".to_string(),
-            launch.model.clone(),
-            "--thinking".to_string(),
-            launch.effort.clone(),
-            "--auto-approve".to_string(),
-            "--append-system-prompt".to_string(),
-            rules_file.to_string(),
-        ],
-        "claude" => {
-            let claude_model = if launch.model.starts_with("claude-") {
-                launch.model.clone()
-            } else {
-                format!("claude-{}", launch.model.replace('.', "-"))
-            };
-            let mut args = vec![
-                "--".to_string(),
-                "--model".to_string(),
-                claude_model,
-                "--effort".to_string(),
-                launch.effort.clone(),
-            ];
-            if review {
-                let runs_clean = runs_dir.trim_start_matches('/');
-                let wt_clean = wt.trim_start_matches('/');
-                let settings = format!(
-                    "{{\"permissions\":{{\"allow\":[\"Edit(//{runs_clean}/**)\",\"Bash(cargo test:*)\",\"Bash(mv *runs/.*.tmp *runs/*.md)\"],\"deny\":[\"Edit(//{wt_clean}/**)\"]}}}}"
-                );
-                args.push("--permission-mode".to_string());
-                args.push("dontAsk".to_string());
-                args.push("--add-dir".to_string());
-                args.push(runs_dir.to_string());
-                args.push("--settings".to_string());
-                args.push(settings);
-            }
-            args.push("--append-system-prompt-file".to_string());
-            args.push(rules_file.to_string());
-            args
-        }
-        other => return Err((1, format!("error: unsupported harness '{other}'\n"))),
-    };
-
-    Ok(LaunchCmd { split_envs, agent_args })
-}
 
 /// A short, stable slug for why an agent start failed: herdr's `error.code`
 /// when the output carries one (`agent_not_ready`, auth/quota codes), else
@@ -238,8 +125,8 @@ pub fn start_failure_reason(out: &Output) -> String {
     } else {
         stdout.into_owned()
     };
-    if let Ok(j) = parse_json(&text) {
-        if let Some(code) = j.get("error").and_then(|e| e.get_str("code")) {
+    if let Ok(j) = serde_json::from_str::<Value>(&text) {
+        if let Some(code) = j.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_str()) {
             if !code.is_empty() {
                 return code.to_string();
             }
@@ -270,18 +157,20 @@ pub fn fallback_kind<'a>(
     }
 }
 
-/// Is Claude Code's workspace-trust dialog still on screen? Its wording varies
-/// between versions; every variant contains the word "trust" ("Quick safety
-/// check: is this a project you created or one you trust?" / "Yes, I trust this
-/// folder"), and it is word-wrapped to fit the pane, so match that one word
-/// rather than a phrase. The look is deliberately sensitive: answering a dialog
-/// that is not there costs a harmless Down and Enter on an empty prompt box,
-/// missing one leaves the worker stalled.
-fn claude_trust_dialog_up<H: HerdrOps>(herdr: &H, pane: &str) -> bool {
-    herdr
-        .pane_read(pane, "visible", 30)
-        .map(|text| text.contains("trust"))
-        .unwrap_or(false)
+
+/// Default workers-tab label for a spawn. A project Lead's workers belong to its
+/// project tab — owner `<slug>-lead` → `<slug>-workers`, the exact tab the Lead's
+/// spawn instructions name — not to a tab derived from the repo dir name: one
+/// checkout (`quaqua`) hosts several projects (`quaqua-rs`, `quaqua-grid`), and
+/// a repo-derived label splits one owner's workers across tabs
+/// (runs/tieude-testlow.grid vs runs/tieude-spawneff.grid). Any other owner
+/// (the CoS) keeps the repo-derived label. Explicit GRID_TAB wins before this
+/// is reached.
+pub fn default_grid_tab(owner: &str, repo_name: &str) -> String {
+    match owner.strip_suffix("-lead") {
+        Some(slug) if !slug.is_empty() => format!("{slug}-workers"),
+        _ => format!("{repo_name}-workers"),
+    }
 }
 
 pub fn spawn_worker<G: GitOps, H: HerdrOps>(
@@ -302,7 +191,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
 
     if opts.review && !kind_info.can_review {
         eprintln!(
-            "error: --review is only supported for claude kinds (ni, suhuynh, truonglao), not {}",
+            "error: --review requires a kind with can_review = true in team.toml (ni, suhuynh, truonglao), not {}",
             opts.kind
         );
         return Err((1, format!("{}\n", USAGE)));
@@ -313,23 +202,11 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let primary_launch = resolve_launch(kind_info, &opts.kind)?;
     let primary_fallback = kind_info.fallback.clone();
 
-    let repo = match std::fs::canonicalize(&opts.repo_path) {
-        Ok(p) => p,
-        Err(_) => opts.repo_path.clone(),
-    };
-
-    let wt = match repo.parent() {
-        Some(p) => p.join(".wt").join(&opts.name),
-        None => PathBuf::from(".wt").join(&opts.name),
-    };
+    let repo = canonicalize_repo_path(&opts.repo_path);
+    let wt = resolve_worktree_path(&repo, &opts.name);
 
     if let Some(base_ref) = &opts.base {
-        if !git.rev_parse_commit(&repo, base_ref) {
-            return Err((
-                1,
-                format!("error: --base '{base_ref}' is not a known commit-ish in {}\n", repo.display()),
-            ));
-        }
+        validate_base_ref(git, &repo, base_ref)?;
     }
 
     let owner = std::env::var("QUAQUA_OWNER").unwrap_or_else(|_| "cos".to_string());
@@ -350,65 +227,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         }
     }
 
-    if wt.is_dir() {
-        let porcelain_wts = git.worktree_list_porcelain(&repo).unwrap_or_default();
-        let wt_str = wt.to_string_lossy().to_string();
-        if porcelain_wts.iter().any(|w| w == &wt_str) {
-            eprintln!("note: {} already a registered worktree — reusing it (resumed spawn)", wt.display());
-        } else {
-            return Err((
-                1,
-                format!(
-                    "error: {} exists but is not a git worktree of {} — remove it or pick another name\n",
-                    wt.display(),
-                    repo.display()
-                ),
-            ));
-        }
-    } else {
-        let branch = format!("quaqua/{}", opts.name);
-        let add_out = if git.branch_exists(&repo, &branch) {
-            // cleanup-worker.sh drops the worktree but keeps the branch for the
-            // Lead to merge, so a same-name retry after a failed (or cleaned)
-            // spawn would die on `worktree add -b` with "a branch named
-            // 'quaqua/<name>' already exists". Reuse the kept branch — the
-            // retry resumes that task, commits included — and say so: a --base
-            // cannot apply to a branch that already exists.
-            let base_note = match &opts.base {
-                Some(b) => format!("; --base {b} ignored"),
-                None => String::new(),
-            };
-            eprintln!(
-                "note: branch {branch} already exists — reusing it (same-name retry){base_note}"
-            );
-            git.worktree_add_existing(&repo, &branch, &wt)
-        } else {
-            git.worktree_add(&repo, &branch, &wt, opts.base.as_deref())
-        }
-        .map_err(|e| (1, format!("error: failed to add worktree: {e}\n")))?;
-        if !add_out.status.success() {
-            let err_text = String::from_utf8_lossy(&add_out.stderr).to_string();
-            return Err((1, err_text));
-        }
-    }
-
-    // Push block check
-    if git.is_core_bare(&repo) || git.has_core_worktree(&repo) {
-        return Err((
-            1,
-            format!(
-                "error: {} has core.bare=true or core.worktree in its common config; enabling extensions.worktreeConfig for the push block would break every worktree of it. Move those keys to the main worktree's config.worktree (see git-worktree(1), CONFIGURATION FILE) or spawn from another clone.\n",
-                repo.display()
-            ),
-        ));
-    }
-
-    let _ = git.enable_worktree_config(&repo);
-    if let Ok(remotes) = git.remote_list(&repo) {
-        for remote in remotes {
-            let _ = git.set_worktree_pushurl_blocked(&wt, &remote);
-        }
-    }
+    prepare_worktree(git, &repo, &wt, &opts.name, opts.base.as_deref())?;
 
     // Worker rules dump
     let rules_dir = crate::workspace::workspace_root().join("rules");
@@ -445,11 +264,12 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     }
     let _ = std::fs::write(&rf, &rules_content);
 
-    let grid_tab = std::env::var("GRID_TAB").unwrap_or_else(|_| format!("{repo_name}-workers"));
-    let _ = std::fs::write(runs_dir.join(format!("{}.owner", opts.name)), format!("{owner}\n"));
-    let _ = std::fs::write(runs_dir.join(format!("{}.grid", opts.name)), format!("{grid_tab}\n"));
+    let grid_tab =
+        std::env::var("GRID_TAB").unwrap_or_else(|_| default_grid_tab(&owner, repo_name));
+    let _ = WorkerMetadata::save_owner(&runs_dir, &opts.name, &owner);
+    let _ = WorkerMetadata::save_grid(&runs_dir, &opts.name, &grid_tab);
     if let Ok(pt) = std::env::var("PIPELINE_TASK") {
-        let _ = std::fs::write(runs_dir.join(format!("{}.pipeline", opts.name)), format!("{pt}\n"));
+        let _ = WorkerMetadata::save_pipeline(&runs_dir, &opts.name, &pt);
     }
 
     let rf_str = rf.to_string_lossy().to_string();
@@ -466,7 +286,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let mut idx = 0;
     while idx < attempts.len() {
         let launch = attempts[idx].clone();
-        let cmd = build_launch_cmd(&launch, &rf_str, &runs_str, &wt_str, opts.review)?;
+        let cmd = build_launch_cmd(&launch, &opts.name, &rf_str, &runs_str, &wt_str, opts.review)?;
         let split_envs: Vec<(&str, &str)> = cmd
             .split_envs
             .iter()
@@ -479,9 +299,9 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         if !split_out.status.success() {
             return Err((1, String::from_utf8_lossy(&split_out.stderr).to_string()));
         }
-        let pane = parse_json(&String::from_utf8_lossy(&split_out.stdout))
+        let pane = serde_json::from_str::<Value>(&String::from_utf8_lossy(&split_out.stdout))
             .ok()
-            .and_then(|j| j.get("result").and_then(|r| r.get("pane")).and_then(|p| p.get_str("pane_id")).map(String::from))
+            .and_then(|j| j.get("result").and_then(|r| r.get("pane")).and_then(|p| p.get("pane_id")).and_then(|p| p.as_str()).map(String::from))
             .unwrap_or_default();
         if pane.is_empty() {
             return Err((1, "error: herdr pane split returned no pane_id\n".to_string()));
@@ -624,7 +444,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
             opts.name, opts.kind, running_kind, running_harness, running_harness, iso_now, owner, opts.review
         ),
     };
-    let _ = std::fs::write(runs_dir.join(format!("{}.srt.json", opts.name)), srt_json);
+    let _ = WorkerMetadata::save_srt(&runs_dir, &opts.name, &srt_json);
 
     println!("worker={} kind={} pane={} worktree={}", opts.name, opts.kind, pane_id, wt.display());
     if let Err((code, msg)) = run_grid_hook(&grid_tab, Some(&owner)) {

@@ -3,7 +3,7 @@
 # projects/INDEX.md row, the projects/<slug>.md card), the one-Lead-per-slug
 # refusal via `herdr agent get`, the workspace/start/prompt call sequence (own
 # <slug> workspace, cwd = the script's repo root, no worktree), the
-# INDEX.md owner-column update, and the LEAD_MODEL/LEAD_EFFORT overrides.
+# INDEX.md owner-column update, and the LEAD_KIND override.
 # herdr and git are stubbed on PATH and log every call; the script runs
 # against a temp repo root. No real herdr, INDEX.md, or pane touched.
 # Usage: tests/test_spawn_lead.sh   (exit 0 = pass)
@@ -19,9 +19,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 unset HERDR_PANE_ID
 
 # ── sandbox: temp quaqua root (script copy under scripts/) + stub herdr/git ─
-mkdir -p "$T/bin" "$T/scripts/lead" "$T/projects" "$T/rules/_all"
-cp "$src/lead/spawn-lead.sh" "$T/scripts/lead/spawn-lead.sh"
-cp -R "$src/lib" "$T/scripts/"
+mkdir -p "$T/bin" "$T/projects" "$T/rules/_all"
 
 cat > "$T/projects/INDEX.md" <<'EOF'
 # Projects
@@ -63,23 +61,27 @@ case "${1:-} ${2:-}" in
   "agent get")
     # names in $HERDR_LIVE exist; anything else is agent_not_found (rc 1)
     if [[ " ${HERDR_LIVE:-} " == *" ${3:-} "* ]]; then
-      printf '{"result":{"agent":{"name":"%s","agent_status":"idle","pane_id":"w1:p9"}}}\n' "$3"
+      printf '{"result":{"agent":{"name":"%s","agent_status":"idle","pane_id":"%%7","workspace_id":"w7"}}}\n' "$3"
     else
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "${3:-}"
       exit 1
     fi ;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"w7","label":"x"},"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"%7"}}}' ;;
+  "workspace get") printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"}}}\n' "$3" "${WS_LABEL:-$3}" ;;
 esac
 exit 0
 STUB
 chmod +x "$T/bin/git" "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
 
 spawn() {  # spawn <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   local slug=$1; shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" PATH="$T/bin:$PATH" env "$@" \
-    bash "$T/scripts/lead/spawn-lead.sh" "$slug" >"$T/out" 2>"$T/err" || rc=$?
+  CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T" env "$@" \
+    "${QUAQUA_BIN:-quaqua}" lead spawn "$slug" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 ln() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }  # first matching call line
@@ -102,17 +104,15 @@ grep -q 'agent get coucou-island-lead' "$T/calls" \
   || fail "happy: no duplicate check: $(cat "$T/calls")"
 grep -qF "workspace create --label coucou-island --no-focus --cwd $T --env QUAQUA_OWNER=coucou-island-lead" "$T/calls" \
   || fail "happy: Lead not in its own <slug> workspace at the repo root: $(cat "$T/calls")"
-grep -q 'agent start coucou-island-lead --kind claude --pane %7 --timeout 60000' "$T/calls" \
+grep -q 'agent start coucou-island-lead --kind opencode --pane %7 --timeout 60000 -- --standalone --auto' "$T/calls" \
   || fail "happy: bad agent start: $(cat "$T/calls")"
-grep -q -- '--model claude-opus-5-5 --effort low' "$T/calls" \
-  || fail "happy: default model/effort missing: $(cat "$T/calls")"
-grep -qF -- "--append-system-prompt-file $T/runs/coucou-island-lead.rules.md" "$T/calls" \
-  || fail "happy: no rules file arg: $(cat "$T/calls")"
+grep -qF "OPENCODE_CONFIG_CONTENT={\"model\":{\"providerID\":\"opencode-go\",\"model\":\"deepseek-v4.1-flash\",\"variant\":\"max\"},\"instructions\":[\"$T/runs/coucou-island-lead.rules.md\"]}" "$T/calls" \
+  || fail "happy: opencode config content missing from workspace create: $(cat "$T/calls")"
 grep -q 'r1 stay in the project' "$T/runs/coucou-island-lead.rules.md" \
   || fail "happy: rules file missing rules/_all content"
 grep -q 'agent prompt coucou-island-lead' "$T/calls" \
   || fail "happy: no brief prompt: $(cat "$T/calls")"
-for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'pipeline.sh' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ' 'reaches you through the CoS'; do
+for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'quaqua pipeline' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ' 'reaches you through the CoS'; do
   grep -qF "$frag" "$T/calls" || fail "happy: brief missing '$frag'"
 done
 ! grep -qF 'record steering from anh iu or CoS' "$T/calls" \
@@ -176,12 +176,16 @@ grep -qE '^\| mono-desk \| ~/Lab/mono-desk \| quaqua-monodesk-orchestrator \|' "
   || fail "mono: mono-desk row was touched: $(cat "$T/projects/INDEX.md")"
 echo "ok: 'mono' updates only its own row (mono-desk untouched)"
 
-# ── LEAD_MODEL / LEAD_EFFORT override the claude args ───────────────────────
-spawn coucou-island LEAD_MODEL=claude-haiku-4 LEAD_EFFORT=high
+# ── LEAD_KIND overrides strategy.lead_kind ──────────────────────────────────
+spawn coucou-island LEAD_KIND=truonglao
 [[ $rc -eq 0 ]] || fail "env: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- '--model claude-haiku-4 --effort high' "$T/calls" \
-  || fail "env: overrides not passed: $(cat "$T/calls")"
-echo "ok: LEAD_MODEL/LEAD_EFFORT override the defaults"
+grep -q 'agent start coucou-island-lead --kind claude --pane %7 --timeout 60000' "$T/calls" \
+  || fail "env: LEAD_KIND not passed as claude: $(cat "$T/calls")"
+grep -q -- '--model claude-opus-5-5 --effort high' "$T/calls" \
+  || fail "env: truonglao model/effort not passed: $(cat "$T/calls")"
+grep -qF -- "--append-system-prompt-file $T/runs/coucou-island-lead.rules.md" "$T/calls" \
+  || fail "env: claude rules file arg missing: $(cat "$T/calls")"
+echo "ok: LEAD_KIND overrides strategy.lead_kind"
 
 # ── integration branch: created from the default branch before side effects ─
 # no origin/HEAD, main present -> main
@@ -249,39 +253,14 @@ grep -qF "git -C $amp/Lab/coucou-island rev-parse" "$T/calls" \
 echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corruption)"
 
 # ── concurrent spawn vs cleanup on different INDEX rows must not lose updates ─
-# The stub awk parks inside each script's INDEX read-modify-write (identified
-# by the OFS= program marker — spawn's slug-check/repo-extract awks don't set
-# OFS and pass straight through) until the test releases it. With the shared
-# mkdir lock the cleanup serializes behind the spawn; without it both snapshot
-# the same INDEX and one row's update is lost (F4).
-cp "$src/lead/cleanup-lead.sh" "$T/scripts/lead/cleanup-lead.sh"
-cat > "$T/bin/awk" <<'STUB'
-#!/usr/bin/env bash
-idx=0 s=unknown
-for a in "$@"; do
-  [[ $a == *OFS=* ]] && idx=1
-  [[ $a == slug=* ]] && s=${a#slug=}
-done
-if (( ! idx )); then exec "$REAL_AWK" "$@"; fi
-out=$("$REAL_AWK" "$@"); r=$?
-: >> "$BARRIER_DIR/ready.$s"
-for _ in $(seq 1 800); do [[ -e $BARRIER_DIR/go ]] && break; sleep 0.01; done
-printf '%s\n' "$out"
-exit "$r"
-STUB
-chmod +x "$T/bin/awk"
-
-mkdir -p "$T/barrier" "$T/runs"; : > "$T/calls"
+# Spawn and cleanup run concurrently on different rows. With the shared mkdir lock
+# (projects/INDEX.md.lock.d), writes serialize without data loss or file corruption.
+mkdir -p "$T/runs"; : > "$T/calls"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
-ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" REAL_AWK="$(command -v awk)" BARRIER_DIR="$T/barrier")
-env "${ce[@]}" bash "$T/scripts/lead/spawn-lead.sh" coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
-for _ in $(seq 1 500); do [[ -e $T/barrier/ready.coucou-island ]] && break; sleep 0.01; done
-[[ -e $T/barrier/ready.coucou-island ]] \
-  || fail "concurrent: spawn never reached the INDEX update: $(cat "$T/err.s")"
+ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T")
+env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead spawn coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
 env "${ce[@]}" HERDR_LIVE=mono-desk-lead HERDR_PANE_ID=w9:p13 \
-  bash "$T/scripts/lead/cleanup-lead.sh" mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
-for _ in $(seq 1 400); do [[ -e $T/barrier/ready.mono-desk ]] && break; sleep 0.01; done
-touch "$T/barrier/go"
+  "${QUAQUA_BIN:-quaqua}" lead cleanup mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
 rc1=0 rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?
 [[ $rc1 -eq 0 && $rc2 -eq 0 ]] || fail "concurrent: exits $rc1/$rc2: $(cat "$T/err.s" "$T/err.c")"
 grep -qE '^\| coucou-island \| ~/Lab/coucou-island \| coucou-island-lead \|' "$T/projects/INDEX.md" \

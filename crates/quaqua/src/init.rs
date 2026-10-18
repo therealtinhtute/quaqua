@@ -1,7 +1,6 @@
-//! `quaqua init` — the port of `scripts/workspace/init-workspace.sh`. It boots
-//! the per-workspace personal state a fresh clone needs (`memory/`, `projects/`,
-//! `raw/`, `runs/`, `reports/`, seeded files), wires `core.hooksPath`, tags the
-//! real CoS pane in herdr, and prints the install line.
+//! `quaqua init` boots the per-workspace personal state a fresh clone needs
+//! (`memory/`, `projects/`, `raw/`, `runs/`, `reports/`, seeded files), wires
+//! `core.hooksPath`, tags the real CoS pane in herdr, and prints the install line.
 //!
 //! Idempotent: an existing target is never overwritten — every file is copied
 //! only when missing. The repo root is resolved from the shim's
@@ -12,6 +11,73 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const INSTALL_LINE: &str = "cargo install --path crates/quaqua";
+
+const PRE_COMMIT_TEMPLATE: &str = r#"#!/usr/bin/env bash
+# pre-commit — rules/_all/portable-paths.md: reject a commit whose ADDED lines
+# carry a machine-specific absolute path (/home/<name>/…, /Users/<name>/…).
+# The repo syncs across machines, so committed scripts, docs, settings and run
+# reports must use repo-relative paths, ~/, $HOME or $(dirname "$0").
+#
+# Scope: only lines this commit adds. Existing tracked content is never
+# re-judged — a checkout that already violates the rule still commits, which
+# keeps the hook from bricking a legacy tree. A rename-with-modification adds
+# its content, so a moved file is re-checked under its new name; a pure rename
+# adds nothing and passes. Binary diffs carry no lines and pass.
+#
+# Allowlist: rules/_all/portable-paths.md (it names the pattern) and tests/**
+# (fixtures must spell real machine paths). Excluded via pathspec, so the
+# allowlist is exact — "tests-helper.sh" is still checked.
+#
+# Heuristic guardrail, like scripts/hooks/herdr-gate.sh: not a security
+# boundary. Known holes — a user component outside [A-Za-z0-9._-], a path that
+# only appears through a file marked `-diff` in .gitattributes (git then calls
+# it binary), and commits made with --no-verify.
+#
+# The diff is parsed rather than diffed per file: `git diff -- <path>` re-adds
+# every line when a rename is detected, which would re-judge untouched content.
+# `--no-prefix` + `core.quotePath=false` make the "+++" line the literal path
+# (a trailing TAB is added when the name contains a space, hence the strip).
+#
+# Installed by `quaqua init` via `core.hooksPath`.
+# Exit 1 with each offending file:line on stderr; 0 when clean.
+set -uo pipefail
+
+path_re='/(home|Users)/[A-Za-z0-9._-]+'
+
+diff=$(git -c core.quotePath=false diff --cached -U0 --no-prefix --no-ext-diff \
+         --no-textconv --diff-filter=ACMR -- . \
+         ':(exclude,literal)tests' \
+         ':(exclude,literal)rules/_all/portable-paths.md' || true)
+[[ -n $diff ]] || exit 0
+
+bad=0
+cur=
+while IFS= read -r line; do
+  case $line in
+    '+++ '*)
+      cur=${line#+++ }
+      cur=${cur%$'\t'}
+      cur=${cur% }
+      [[ $cur == /dev/null ]] && cur=
+      ;;
+    '+'*)
+      [[ -n $cur ]] || continue
+      if [[ $line =~ $path_re ]]; then
+        printf '%s: %s\n' "$cur" "${line#+}" >&2
+        bad=1
+      fi
+      ;;
+  esac
+done <<<"$diff"
+
+(( bad )) || exit 0
+{
+  echo "pre-commit: machine-specific absolute path in the added lines above."
+  echo "Use a repo-relative path, ~/, \$HOME or \$(dirname \"\$0\") instead"
+  echo "— rules/_all/portable-paths.md"
+} >&2
+exit 1
+"#;
 
 pub fn run() -> Result<(), String> {
     let root = resolve_root()?;
@@ -102,19 +168,93 @@ fn seed(root: &Path, src_rel: &str, dst_rel: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Wire `core.hooksPath` -> `<root>/scripts/hooks` on a real git repo, only when
-/// nothing else owns it. An existing different value (local or global) is left
-/// in place with a warning. A failed write fails the run, like the bash script's
-/// `set -e`.
+/// Wire `core.hooksPath` -> `<root>/.git/quaqua-hooks` on a real git repo, generating
+/// the embedded `pre-commit` hook if missing or refreshing it if changed.
+/// An existing different value (local or global) is left in place with a warning.
+/// If `core.hooksPath` is legacy `<root>/scripts/hooks`, it is migrated to the new dir.
+/// A failed write fails the run, like the bash script's `set -e`.
 fn wire_hooks(root: &Path) -> Result<(), String> {
     if !git_ok(root, &["rev-parse", "--git-dir"]) {
         return Ok(());
     }
-    let want = root.join("scripts/hooks");
-    let want_str = want.to_string_lossy().to_string();
+
+    let hooks_dir = if root.join(".git").is_file() {
+        git_output(root, &["rev-parse", "--git-dir"])
+            .map(PathBuf::from)
+            .map(|p| if p.is_absolute() { p } else { root.join(p) })
+            .map(|p| p.join("quaqua-hooks"))
+            .unwrap_or_else(|| root.join(".git/quaqua-hooks"))
+    } else {
+        root.join(".git/quaqua-hooks")
+    };
+
+    std::fs::create_dir_all(&hooks_dir).map_err(|e| {
+        format!("init-workspace: cannot create {}: {e}", hooks_dir.display())
+    })?;
+
+    let hook_file = hooks_dir.join("pre-commit");
+    if !hook_file.exists() {
+        std::fs::write(&hook_file, PRE_COMMIT_TEMPLATE).map_err(|e| {
+            format!("init-workspace: cannot write {}: {e}", hook_file.display())
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook_file, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
+                format!("init-workspace: failed to chmod {}: {e}", hook_file.display())
+            })?;
+        }
+    } else {
+        let existing = std::fs::read_to_string(&hook_file).unwrap_or_default();
+        if existing != PRE_COMMIT_TEMPLATE {
+            std::fs::write(&hook_file, PRE_COMMIT_TEMPLATE).map_err(|e| {
+                format!("init-workspace: cannot refresh {}: {e}", hook_file.display())
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&hook_file, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
+                    format!("init-workspace: failed to chmod {}: {e}", hook_file.display())
+                })?;
+            }
+            println!("hooks: refreshed {}", hook_file.display());
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&hook_file, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+
+    let want_str = hooks_dir.to_string_lossy().to_string();
+    let legacy = root.join("scripts/hooks");
+    let legacy_str = legacy.to_string_lossy().to_string();
+
     match git_output(root, &["config", "--get", "core.hooksPath"]) {
-        Some(have) if have == want_str => {
+        Some(have)
+            if have == want_str
+                || have == format!("{want_str}/")
+                || have == ".git/quaqua-hooks"
+                || have == ".git/quaqua-hooks/"
+                || Path::new(&have) == hooks_dir
+                || root.join(&have) == hooks_dir =>
+        {
             // already ours — silent, like the rest of this command
+        }
+        Some(have)
+            if have == legacy_str
+                || have == "scripts/hooks"
+                || have == format!("{legacy_str}/")
+                || Path::new(&have) == legacy
+                || root.join(&have) == legacy =>
+        {
+            if !git_ok(root, &["config", "core.hooksPath", &want_str]) {
+                return Err(format!(
+                    "init-workspace: failed to set core.hooksPath to {want_str}"
+                ));
+            }
+            println!("hooks: migrated core.hooksPath from '{have}' to {want_str}");
         }
         Some(have) if !have.is_empty() => {
             eprintln!(

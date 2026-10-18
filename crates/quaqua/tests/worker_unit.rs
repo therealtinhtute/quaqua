@@ -7,10 +7,9 @@ use quaqua::worker::prompt::{
     brief_budget_sec, brief_headers_ok, fallback_header_line, prepend_header,
     validate_env_budget_val,
 };
-use quaqua::worker::spawn::{
-    build_launch_cmd, fallback_kind, parse_spawn_args, resolve_launch, start_failure_reason,
-    Launch,
-};
+use quaqua::launch::{build_launch_cmd, resolve_launch, Launch};
+use quaqua::lead::spawn::{update_index_content, update_project_index_owner};
+use quaqua::worker::spawn::{fallback_kind, parse_spawn_args, start_failure_reason};
 use quaqua::workspace::resolve_workspace_root;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
@@ -464,6 +463,60 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+#[test]
+fn test_cap_pipeline_double_count_repro() {
+    // Repro for Cause (c): pipeline gridown2 has a live builder tieude-gridown2
+    // (e.g. after a fallback or non-default builder) without .pipeline sidecar.
+    // Must count as 2 slots (the pipeline once), not 3 (builder 1 + reserve 2).
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-doublecount-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let owner = "quaqua-rs-lead";
+
+    std::fs::write(temp_dir.join("tieude-gridown2.owner"), format!("{owner}\n")).unwrap();
+    // No tieude-gridown2.pipeline file written
+    std::fs::write(
+        temp_dir.join("pipeline-gridown2.state"),
+        format!("repo=/repo\nbuilder=sude\nphase=build\nround=1\nfinished=0\nlead=quaqua-rs-lead\npipeline_pid={}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let mock = MockHerdr {
+        agents_json: r#"{"result":{"agents":[{"name":"tieude-gridown2","agent_status":"working"}]}}"#.to_string(),
+    };
+
+    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    assert_eq!(count, 2, "a pipeline must count once (2 slots), never double-count to 3");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+#[test]
+fn test_cost_budget_parser_and_reader() {
+    use quaqua::worker::prompt::{brief_cost_budget, read_worker_cost};
+
+    let b1 = "Goal: test\nHard constraints: none\nCurrent design: none\nCost budget: $0.001\nTime budget: 5 min";
+    assert_eq!(brief_cost_budget(b1), Some(0.001));
+
+    let b2 = "Goal: test\nCost budget: $2.50\n";
+    assert_eq!(brief_cost_budget(b2), Some(2.5));
+
+    let b3 = "Goal: test\nCost budget: 0.75\n";
+    assert_eq!(brief_cost_budget(b3), Some(0.75));
+
+    let b4 = "Goal: test\nNo cost line";
+    assert_eq!(brief_cost_budget(b4), None);
+
+    // Cost reader via PROMPT_WORKER_COST_FILE fixture
+    let tmp = std::env::temp_dir().join(format!("cost-fixture-{}", std::process::id()));
+    std::fs::write(&tmp, "0.4242\n").unwrap();
+    std::env::set_var("PROMPT_WORKER_COST_FILE", &tmp);
+    let cost = read_worker_cost("tieude-test", "ses_123", "/tmp", "opencode");
+    assert_eq!(cost, Some(0.4242));
+    std::env::remove_var("PROMPT_WORKER_COST_FILE");
+    let _ = std::fs::remove_file(&tmp);
+
+    // Non-opencode without fixture returns None
+    assert_eq!(read_worker_cost("sude-test", "ses_123", "/tmp", "omp"), None);
+}
 
 #[test]
 fn test_runs_dir_resolution_n5() {
@@ -511,18 +564,95 @@ fn test_team_toml_harness_routing() {
     assert_eq!(cfg.kinds["sude"].effort.as_deref(), Some("high"));
     assert!(!cfg.kinds["sude"].can_review);
 
-    // ni/suhuynh/truonglao are claude with can_review=true
+    // ni is claude with can_review=true
     assert_eq!(cfg.kinds["ni"].harness, "claude");
     assert_eq!(cfg.kinds["ni"].model, "opus-5.5");
     assert!(cfg.kinds["ni"].can_review);
 
-    // suhuynh/truonglao are claude with can_review=true; every kind is opencode/omp/claude
-    assert_eq!(cfg.kinds["suhuynh"].harness, "claude");
+    // suhuynh is opencode with can_review=true (Claude out, anh iu 2026-10-17)
+    assert_eq!(cfg.kinds["suhuynh"].harness, "opencode");
+    assert_eq!(cfg.kinds["suhuynh"].model, "opencode-go/deepseek-v4.1-flash");
+    assert_eq!(cfg.kinds["suhuynh"].effort.as_deref(), Some("max"));
     assert!(cfg.kinds["suhuynh"].can_review);
+
+    // truonglao is claude with can_review=true; every kind is opencode/omp/claude
     assert_eq!(cfg.kinds["truonglao"].harness, "claude");
     assert!(cfg.kinds["truonglao"].can_review);
     assert_eq!(cfg.kinds.len(), 6, "only the six surviving kinds");
     assert!(cfg.kinds.values().all(|k| ["opencode", "omp", "claude"].contains(&k.harness.as_str())));
+
+    // strategy.lead_kind defaults to tieude
+    assert_eq!(cfg.strategy.lead_kind.as_deref(), Some("tieude"));
+}
+
+#[test]
+fn test_lead_launch_uses_strategy_lead_kind_and_override() {
+    let team_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../team.toml");
+    let cfg = config::load(&team_path).expect("valid team.toml");
+
+    // 1. Default lead launch uses strategy.lead_kind ("tieude" on opencode)
+    let (kind, launch) = quaqua::lead::spawn::resolve_lead_launch(&cfg, None).expect("lead launch");
+    assert_eq!(kind, "tieude");
+    assert_eq!(launch.harness, "opencode");
+    assert_eq!(launch.model, "opencode-go/deepseek-v4.1-flash");
+    assert_eq!(launch.effort, "max");
+
+    let cmd = build_launch_cmd(&launch, "quaqua-rs-lead", "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
+    assert_eq!(cmd.split_envs.len(), 2);
+    assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
+    assert!(cmd.split_envs[0].1.contains("\"variant\":\"max\""));
+    assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
+
+    // 2. LEAD_KIND env override switches lead to detu (omp)
+    let (kind_detu, launch_detu) = quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("detu")).expect("detu lead");
+    assert_eq!(kind_detu, "detu");
+    assert_eq!(launch_detu.harness, "omp");
+    assert_eq!(launch_detu.model, "google-antigravity/gemini-3.8-flash");
+    assert_eq!(launch_detu.effort, "high");
+
+    let cmd_detu = build_launch_cmd(&launch_detu, "quaqua-rs-lead", "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
+    assert!(cmd_detu.split_envs.is_empty());
+    assert_eq!(cmd_detu.agent_args, vec![
+        "--",
+        "--model",
+        "google-antigravity/gemini-3.8-flash",
+        "--thinking",
+        "high",
+        "--auto-approve",
+        "--append-system-prompt",
+        "/runs/test.rules.md",
+    ]);
+
+    // 3. LEAD_KIND env override switches lead to ni (claude)
+    let (kind_ni, launch_ni) = quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("ni")).expect("ni lead");
+    assert_eq!(kind_ni, "ni");
+    assert_eq!(launch_ni.harness, "claude");
+    assert_eq!(launch_ni.model, "opus-5.5");
+    assert_eq!(launch_ni.effort, "low");
+
+    let cmd_ni = build_launch_cmd(&launch_ni, "quaqua-rs-lead", "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
+    assert!(cmd_ni.split_envs.is_empty());
+    assert_eq!(cmd_ni.agent_args, vec![
+        "--",
+        "--model",
+        "claude-opus-5-5",
+        "--effort",
+        "low",
+        "--append-system-prompt-file",
+        "/runs/test.rules.md",
+    ]);
+
+    // 4. Unknown LEAD_KIND falls back to tieude
+    let (kind_fallback, launch_fallback) = quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("nonexistent_kind")).expect("fallback");
+    assert_eq!(kind_fallback, "tieude");
+    assert_eq!(launch_fallback.harness, "opencode");
+
+    // 5. Missing lead_kind in Strategy defaults to tieude
+    let mut cfg_no_lead = cfg.clone();
+    cfg_no_lead.strategy.lead_kind = None;
+    let (kind_default, launch_default) = quaqua::lead::spawn::resolve_lead_launch(&cfg_no_lead, None).expect("default");
+    assert_eq!(kind_default, "tieude");
+    assert_eq!(launch_default.harness, "opencode");
 }
 
 #[test]
@@ -659,12 +789,20 @@ fn test_pipeline_blockers_none_exemption() {
     assert!(!has_real_blockers("## Blockers\n* none…\n"));
     assert!(!has_real_blockers("## Blockers\n\n- none\n\n## Lessons\n- none\n"));
     assert!(!has_real_blockers("Just plan text\n\n## Lessons\n- none\n"));
+    // Informational notes after None must not be treated as blockers
+    assert!(!has_real_blockers("## Blockers\n- None. All done...\n"));
+    assert!(!has_real_blockers("## Blockers\n- None. All 9 tests passed.\n"));
+    assert!(!has_real_blockers("## Blockers\n- **None**. All done\n"));
+    assert!(!has_real_blockers("## Blockers\n**None**. All done...\n"));
+    assert!(!has_real_blockers("## Blockers\n- None... all clear\n"));
 
     // Real blockers must return true
     assert!(has_real_blockers("## Blockers\n- cannot plan without the spec\n"));
     assert!(has_real_blockers("## Blockers\n- implementation incomplete\n"));
     assert!(has_real_blockers("## Blockers\n- none\n- also a real blocker\n"));
     assert!(has_real_blockers("## Blockers\n- None of the tests pass\n"));
+    assert!(has_real_blockers("## Blockers\n- none: cannot connect to db\n"));
+    assert!(has_real_blockers("## Blockers\n- None - build compilation failed\n"));
 }
 
 #[test]
@@ -680,6 +818,54 @@ fn test_pipeline_blocked_keeps_finished_zero() {
     // Non-zero exits never finish the state, whatever the status says.
     assert!(!pipeline_finished("plan-ready", 5));
     assert!(!pipeline_finished("clean", 4));
+}
+
+#[test]
+fn test_pipeline_rounds_raise_only_on_resume() {
+    let mut state = quaqua::pipeline::PipelineState::default();
+    state.rounds = 3;
+    let resume_rounds: Option<u32> = Some(2);
+    if let Some(r) = resume_rounds {
+        if r > state.rounds {
+            state.rounds = r;
+        }
+    }
+    assert_eq!(state.rounds, 3, "resuming with lower rounds must not lower the cap");
+
+    let resume_rounds_higher: Option<u32> = Some(5);
+    if let Some(r) = resume_rounds_higher {
+        if r > state.rounds {
+            state.rounds = r;
+        }
+    }
+    assert_eq!(state.rounds, 5, "resuming with higher rounds must raise the cap");
+}
+
+#[test]
+fn test_pipeline_outcome_no_changes_detection() {
+    let content = "Outcome: no changes\n\n## Lessons\n- none\n";
+    let is_no_changes = content.lines().any(|line| {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("Outcome:").or_else(|| t.strip_prefix("outcome:")) {
+            let rest_upper = rest.trim().to_ascii_uppercase();
+            rest_upper.starts_with("NO CHANGES") || rest_upper.starts_with("NO-OP") || rest_upper.starts_with("NO OP")
+        } else {
+            false
+        }
+    });
+    assert!(is_no_changes);
+
+    let content_changes = "Outcome: modified 2 files\n\n## Lessons\n- none\n";
+    let is_no_changes = content_changes.lines().any(|line| {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("Outcome:").or_else(|| t.strip_prefix("outcome:")) {
+            let rest_upper = rest.trim().to_ascii_uppercase();
+            rest_upper.starts_with("NO CHANGES") || rest_upper.starts_with("NO-OP") || rest_upper.starts_with("NO OP")
+        } else {
+            false
+        }
+    });
+    assert!(!is_no_changes);
 }
 
 #[test]
@@ -742,8 +928,19 @@ max_workers_per_orchestrator = 3
 
 #[test]
 fn test_sude_harness_mapped_to_omp() {
-    use quaqua::pipeline::harness_of;
-    assert_eq!(harness_of("sude"), Some("omp"));
+    use quaqua::pipeline::harness_of_kind;
+    let toml_str = r#"
+        schema_version = 1
+
+        [kinds.sude]
+        harness = "omp"
+        model = "google-antigravity/gemini-3.8-flash"
+        effort = "high"
+        fallback = "detu"
+        can_review = false
+    "#;
+    let cfg: quaqua::config::Config = toml::from_str(toml_str).unwrap();
+    assert_eq!(harness_of_kind("sude", &cfg), Some("omp"));
 }
 
 #[test]
@@ -789,15 +986,32 @@ fn test_launch_args_carry_exact_model_and_effort() {
             effort: "max".into(),
         }
     );
-    let cmd = build_launch_cmd(&oc, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+    let cmd = build_launch_cmd(&oc, "tieude-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
         .unwrap();
-    assert_eq!(cmd.split_envs.len(), 1);
+    assert_eq!(cmd.split_envs.len(), 2);
     assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
     assert_eq!(
         cmd.split_envs[0].1,
-        r#"{"model":"opencode-go/deepseek-v4.1-flash#max","instructions":["/r/x.rules.md"]}"#
+        r#"{"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"max"},"instructions":["/r/x.rules.md"]}"#
+    );
+    assert_eq!(cmd.split_envs[1].0, "XDG_STATE_HOME");
+    assert_eq!(cmd.split_envs[1].1, "~/quaqua/runs/.opencode-state/tieude-test");
+
+    // opencode carries "low" variant as object
+    let oc_low = resolve_launch(
+        &kind("opencode", "opencode-go/deepseek-v4.1-flash", Some("low")),
+        "tieude",
+    )
+    .unwrap();
+    let cmd_low = build_launch_cmd(&oc_low, "tieude-low", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+        .unwrap();
+    assert_eq!(
+        cmd_low.split_envs[0].1,
+        r#"{"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"low"},"instructions":["/r/x.rules.md"]}"#
     );
     assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
+    assert_eq!(cmd_low.split_envs[1].0, "XDG_STATE_HOME");
+    assert_eq!(cmd_low.split_envs[1].1, "~/quaqua/runs/.opencode-state/tieude-low");
 
     // omp: `--model` + `--thinking` (`omp --help`).
     let omp = resolve_launch(
@@ -805,7 +1019,7 @@ fn test_launch_args_carry_exact_model_and_effort() {
         "sude",
     )
     .unwrap();
-    let cmd = build_launch_cmd(&omp, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
+    let cmd = build_launch_cmd(&omp, "sude-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
         .unwrap();
     assert!(cmd.split_envs.is_empty(), "omp takes no pane env");
     let joined = cmd.agent_args.join(" ");
@@ -817,7 +1031,7 @@ fn test_launch_args_carry_exact_model_and_effort() {
 
     // claude: `--model` (mapped to claude-*) + `--effort` (`claude --help`).
     let cl = resolve_launch(&kind("claude", "opus-5.5", Some("high")), "truonglao").unwrap();
-    let cmd = build_launch_cmd(&cl, "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", true)
+    let cmd = build_launch_cmd(&cl, "truonglao-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", true)
         .unwrap();
     let joined = cmd.agent_args.join(" ");
     assert!(joined.contains("--model claude-opus-5-5"), "{joined}");
@@ -837,6 +1051,33 @@ fn test_launch_fails_closed_without_model_or_effort() {
         .unwrap_err()
         .1;
     assert!(e.contains("does not take effort 'banana'"), "{e}");
+
+    // opencode model variant vocabulary is enforced per-model
+    let e = resolve_launch(
+        &kind("opencode", "opencode-go/deepseek-v4.1-flash", Some("medium")),
+        "tieude",
+    )
+    .unwrap_err()
+    .1;
+    assert!(e.contains("does not take effort 'medium'"), "{e}");
+
+    // openrouter model variant vocabulary is matched on last segment
+    let e = resolve_launch(
+        &kind("opencode", "openrouter/deepseek/deepseek-v4.1-flash", Some("medium")),
+        "tieude",
+    )
+    .unwrap_err()
+    .1;
+    assert!(e.contains("does not take effort 'medium'"), "{e}");
+
+    // unknown opencode model rejected with allowlist error
+    let e = resolve_launch(
+        &kind("opencode", "opencode-go/unknown-model", Some("max")),
+        "tieude",
+    )
+    .unwrap_err()
+    .1;
+    assert!(e.contains("is not in allowlist"), "{e}");
 
     // claude's vocabulary is narrower than opencode's
     let e = resolve_launch(&kind("claude", "m", Some("minimal")), "ni")
@@ -1138,7 +1379,7 @@ fn test_cfg_with_fallback() -> config::Config {
         "detu".to_string(),
         config::Kind {
             harness: "opencode".to_string(),
-            model: "deepseek".to_string(),
+            model: "deepseek-v4.1-flash".to_string(),
             effort: Some("max".to_string()),
             fallback: Some("tieude".to_string()),
             can_review: false,
@@ -1330,6 +1571,84 @@ fn test_spawn_worker_fallback_scenarios() {
 }
 
 #[test]
+fn test_spawn_worker_default_grid_tab_from_owner() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-tab-{}", std::process::id()));
+    // The repo dir name is deliberately NOT the project slug: a Lead's project
+    // (`quaqua-rs`) spawns into the `quaqua` checkout.
+    let repo_dir = temp.join("quaqua");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::remove_var("GRID_TAB");
+
+    let cfg = test_cfg_with_fallback();
+    let git = SpawnTestGit;
+    let herdr = FallbackSpyHerdr {
+        agent_starts: std::cell::RefCell::new(Vec::new()),
+        fail_harness: None,
+    };
+    let spawn_and_read_tab = |name: &str| -> String {
+        let opts = parse_spawn_args(&[
+            name.to_string(),
+            "sude".to_string(),
+            repo_dir.to_str().unwrap().to_string(),
+        ])
+        .unwrap();
+        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+        assert!(res.is_ok(), "spawn {name} failed: {:?}", res.err());
+        std::fs::read_to_string(runs_dir.join(format!("{name}.grid")))
+            .expect("runs/<name>.grid must be recorded")
+            .trim()
+            .to_string()
+    };
+
+    // A Lead-owned worker gets the project tab from the owner (`<slug>-lead` ->
+    // `<slug>-workers`), never a tab derived from the repo dir name — otherwise
+    // siblings of the same owner split across `quaqua-workers` and
+    // `quaqua-rs-workers` (runs/tieude-testlow.grid vs runs/tieude-spawneff.grid).
+    std::env::set_var("QUAQUA_OWNER", "quaqua-rs-lead");
+    assert_eq!(spawn_and_read_tab("sude-tablead"), "quaqua-rs-workers");
+
+    // The CoS owner is not a project slug: it keeps the repo-derived default.
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    assert_eq!(spawn_and_read_tab("sude-tabcos"), "quaqua-workers");
+
+    // An explicit GRID_TAB still wins over the owner-derived default.
+    std::env::set_var("QUAQUA_OWNER", "quaqua-rs-lead");
+    std::env::set_var("GRID_TAB", "quaqua-rs-workers-2");
+    assert_eq!(spawn_and_read_tab("sude-tabexp"), "quaqua-rs-workers-2");
+    std::env::remove_var("GRID_TAB");
+
+    std::env::remove_var("QUAQUA_RUNS_DIR");
+    std::env::remove_var("QUAQUA_OWNER");
+    std::env::remove_var("GRID_SKIP");
+    std::env::remove_var("QUAQUA_TEST");
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_default_grid_tab_helper() {
+    use quaqua::worker::spawn::default_grid_tab;
+
+    // Lead owners (<slug>-lead) resolve to <slug>-workers
+    assert_eq!(default_grid_tab("quaqua-grid-lead", "myrepo"), "quaqua-grid-workers");
+    assert_eq!(default_grid_tab("quaqua-rs-lead", "quaqua"), "quaqua-rs-workers");
+
+    // Non-lead owners (cos, arbitrary names) resolve to <repo>-workers
+    assert_eq!(default_grid_tab("cos", "myrepo"), "myrepo-workers");
+    assert_eq!(default_grid_tab("", "myrepo"), "myrepo-workers");
+    assert_eq!(default_grid_tab("other", "myrepo"), "myrepo-workers");
+
+    // Edge cases: -lead with empty slug falls back to <repo>-workers
+    assert_eq!(default_grid_tab("-lead", "myrepo"), "myrepo-workers");
+    assert_eq!(default_grid_tab("lead", "myrepo"), "myrepo-workers");
+}
+
+#[test]
 fn test_spawn_worker_grid_timeout_fails() {
     let temp = std::env::temp_dir().join(format!("quaqua-spawn-gridfail-{}", std::process::id()));
     let repo_dir = temp.join("repo");
@@ -1343,9 +1662,7 @@ fn test_spawn_worker_grid_timeout_fails() {
     std::env::set_var("GRID_CHECK_TIMEOUT_SEC", "0");
     std::env::remove_var("GRID_SKIP");
 
-    let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/herdr-grid/2-workers.json");
-    std::env::set_var("HERDR_STUB_SNAPSHOT", fix.to_str().unwrap());
+    std::env::set_var("HERDR_BIN_PATH", "/dev/null");
 
     let cfg = test_cfg_with_fallback();
     let git = SpawnTestGit;
@@ -1367,7 +1684,7 @@ fn test_spawn_worker_grid_timeout_fails() {
     std::env::remove_var("QUAQUA_OWNER");
     std::env::remove_var("GRID_TAB");
     std::env::remove_var("GRID_CHECK_TIMEOUT_SEC");
-    std::env::remove_var("HERDR_STUB_SNAPSHOT");
+    std::env::remove_var("HERDR_BIN_PATH");
     let _ = std::fs::remove_dir_all(&temp);
 
     let err = res.expect_err("spawn_worker must fail when grid check times out");
@@ -1394,9 +1711,7 @@ fn test_cleanup_worker_grid_timeout_fails() {
     std::env::set_var("GRID_CHECK_TIMEOUT_SEC", "0");
     std::env::remove_var("GRID_SKIP");
 
-    let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/herdr-grid/2-workers.json");
-    std::env::set_var("HERDR_STUB_SNAPSHOT", fix.to_str().unwrap());
+    std::env::set_var("HERDR_BIN_PATH", "/dev/null");
 
     let git = SpawnTestGit;
     struct CleanupTestHerdr;
@@ -1431,7 +1746,7 @@ fn test_cleanup_worker_grid_timeout_fails() {
     std::env::remove_var("QUAQUA_OWNER");
     std::env::remove_var("GRID_TAB");
     std::env::remove_var("GRID_CHECK_TIMEOUT_SEC");
-    std::env::remove_var("HERDR_STUB_SNAPSHOT");
+    std::env::remove_var("HERDR_BIN_PATH");
     let _ = std::fs::remove_dir_all(&temp);
 
     let err = res.expect_err("cleanup_worker must fail when grid check times out");
@@ -1625,4 +1940,646 @@ fn test_stop_requires_exactly_one_valid_name() {
     assert!(parse_stop_args(&["Tieude-X".to_string()]).is_err());
     assert!(parse_stop_args(&["--force".to_string()]).is_err());
     assert_eq!(parse_stop_args(&["tieude-x".to_string()]).unwrap(), "tieude-x");
+}
+
+#[test]
+fn test_cleanup_worker_removes_per_worker_opencode_state() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-clean-state-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    let worker_name = "tieude-cleanup";
+    let wt = temp.join(".wt").join(worker_name);
+    std::fs::create_dir_all(&wt).unwrap();
+
+    let state_dir = runs_dir.join(".opencode-state").join(worker_name);
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(state_dir.join("model.json"), "{}").unwrap();
+    assert!(state_dir.exists());
+
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    struct CleanHerdr;
+    impl HerdrOps for CleanHerdr {
+        fn run(&self, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
+        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
+            Ok((true, r#"{"result":{"agent":{"pane_id":"w1:p2"}}}"#.to_string()))
+        }
+        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
+            Ok(Output { status: std::process::ExitStatus::default(), stdout: vec![], stderr: vec![] })
+        }
+        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool { unimplemented!() }
+        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
+    }
+    let git = SpawnTestGit;
+    let herdr = CleanHerdr;
+    let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
+    assert!(res.is_ok(), "cleanup_worker failed: {:?}", res);
+    assert!(!state_dir.exists(), "per-worker state dir must be removed on cleanup");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_update_index_content_markdown_table() {
+    let original = "# Projects\n\n\
+        | slug | repo | owner | goal | status |\n\
+        |---|---|---|---|---|\n\
+        | mono-desk | ~/Lab/mono-desk | cos | Port zdesk UI | active |\n\
+        | baroiplayer | ~/Personal/baroiplayer | baroiplayer-lead | Publish lib | active |\n\
+        | zimage | ~/Personal/zimage | cos | ImgMole | active |\n\n\
+        Card: `projects/<slug>.md`.\n";
+
+    // Update mono-desk owner to mono-desk-lead
+    let updated = update_index_content(original, "mono-desk", "mono-desk-lead");
+    assert!(
+        updated.contains("| mono-desk | ~/Lab/mono-desk | mono-desk-lead | Port zdesk UI | active |"),
+        "mono-desk owner cell not updated: {updated}"
+    );
+    assert!(
+        updated.contains("| baroiplayer | ~/Personal/baroiplayer | baroiplayer-lead | Publish lib | active |"),
+        "other rows must be preserved: {updated}"
+    );
+    assert!(
+        updated.contains("| zimage | ~/Personal/zimage | cos | ImgMole | active |"),
+        "other rows must be preserved: {updated}"
+    );
+    assert!(
+        updated.contains("| slug | repo | owner | goal | status |"),
+        "header row must remain unchanged: {updated}"
+    );
+
+    // Reset back to cos: should match original byte-for-byte
+    let restored = update_index_content(&updated, "mono-desk", "cos");
+    assert_eq!(restored, original);
+
+    // Updating non-existent slug returns byte-identical content
+    let untouched = update_index_content(original, "unknown-slug", "random-lead");
+    assert_eq!(untouched, original);
+
+    // Rows with fewer than 4 fields are preserved as-is without crashing or modifying
+    let malformed = "| short | row\n";
+    assert_eq!(update_index_content(malformed, "short", "lead"), "| short | row\n");
+}
+
+#[test]
+fn test_update_project_index_owner_fixture_atomic() {
+    let temp = std::env::temp_dir().join(format!("quaqua-test-index-{}", std::process::id()));
+    let projects_dir = temp.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    let index_file = projects_dir.join("INDEX.md");
+
+    let initial_content = "# Projects\n\n\
+        | slug | repo | owner | goal | status |\n\
+        |---|---|---|---|---|\n\
+        | baro | ~/Lab/baro | cos | player | active |\n\
+        | baro-web | ~/Lab/baro-web | cos | site | active |\n";
+    std::fs::write(&index_file, initial_content).unwrap();
+
+    // 1. Update baro to baro-lead
+    let res = update_project_index_owner(&temp, "baro", "baro-lead");
+    assert!(res.is_ok(), "update_project_index_owner failed: {:?}", res);
+
+    let read_back = std::fs::read_to_string(&index_file).unwrap();
+    assert!(read_back.contains("| baro | ~/Lab/baro | baro-lead | player | active |"));
+    assert!(read_back.contains("| baro-web | ~/Lab/baro-web | cos | site | active |"));
+
+    // Lock and tmp files must be cleaned up
+    assert!(!temp.join("projects/INDEX.md.lock.d").exists());
+    for entry in std::fs::read_dir(&projects_dir).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        assert!(!name.starts_with("INDEX.md.tmp."), "leftover tmp file: {name}");
+    }
+
+    // 2. Reset baro to cos
+    let res2 = update_project_index_owner(&temp, "baro", "cos");
+    assert!(res2.is_ok());
+    let read_back2 = std::fs::read_to_string(&index_file).unwrap();
+    assert_eq!(read_back2, initial_content);
+
+    // 3. Missing index file returns error
+    let missing_temp = temp.join("nonexistent");
+    let res_err = update_project_index_owner(&missing_temp, "baro", "cos");
+    assert!(res_err.is_err());
+}
+
+#[test]
+fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-clean-all-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    let worker_name = "sude-cleanall";
+    let wt = temp.join(".wt").join(worker_name);
+    std::fs::create_dir_all(&wt).unwrap();
+
+    let files_to_create = [
+        runs_dir.join(format!("{worker_name}.owner")),
+        runs_dir.join(format!("{worker_name}.grid")),
+        runs_dir.join(format!("{worker_name}.pipeline")),
+        runs_dir.join(format!("{worker_name}.srt.json")),
+        runs_dir.join(format!(".{worker_name}.provider_retry")),
+        runs_dir.join(format!(".{worker_name}.autoext")),
+        runs_dir.join(format!(".{worker_name}.cost80")),
+        runs_dir.join(format!(".{worker_name}.cost100")),
+        runs_dir.join(format!(".{worker_name}.budget")),
+        runs_dir.join(format!(".{worker_name}.grace")),
+        runs_dir.join(format!(".{worker_name}.progress")),
+        runs_dir.join(format!(".{worker_name}.elapsed")),
+        runs_dir.join(format!(".{worker_name}.nudged")),
+        runs_dir.join(format!(".{worker_name}.submit.log")),
+    ];
+
+    for f in &files_to_create {
+        std::fs::write(f, "test").unwrap();
+        assert!(f.exists());
+    }
+
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    struct MockHerdr;
+    impl HerdrOps for MockHerdr {
+        fn run(&self, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
+        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
+            Ok((true, r#"{"result":{"agent":{"pane_id":"w1:p3"}}}"#.to_string()))
+        }
+        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
+            Ok(Output { status: std::process::ExitStatus::default(), stdout: vec![], stderr: vec![] })
+        }
+        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool { unimplemented!() }
+        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
+    }
+
+    let git = SpawnTestGit;
+    let herdr = MockHerdr;
+    let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
+    assert!(res.is_ok(), "cleanup_worker failed: {:?}", res);
+
+    for f in &files_to_create {
+        assert!(!f.exists(), "file must be cleaned up: {}", f.display());
+    }
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_update_project_index_owner_concurrency() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let temp = Arc::new(std::env::temp_dir().join(format!("quaqua-test-index-race-{}", std::process::id())));
+    let projects_dir = temp.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    let index_file = projects_dir.join("INDEX.md");
+
+    let mut initial = String::from("# Projects\n\n| slug | repo | owner |\n|---|---|---|\n");
+    for i in 0..8 {
+        initial.push_str(&format!("| proj{i} | ~/Lab/proj{i} | cos |\n"));
+    }
+    std::fs::write(&index_file, &initial).unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let t = Arc::clone(&temp);
+        let handle = thread::spawn(move || {
+            let slug = format!("proj{i}");
+            let owner = format!("lead-{i}");
+            update_project_index_owner(&t, &slug, &owner)
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let res = handle.join().expect("thread panicked");
+        assert!(res.is_ok(), "thread failed update: {:?}", res);
+    }
+
+    let final_content = std::fs::read_to_string(&index_file).unwrap();
+    for i in 0..8 {
+        assert!(
+            final_content.contains(&format!("| proj{i} | ~/Lab/proj{i} | lead-{i} |")),
+            "missing update for proj{i}: {final_content}"
+        );
+    }
+    assert!(!temp.join("projects/INDEX.md.lock.d").exists());
+
+    let _ = std::fs::remove_dir_all(&*temp);
+}
+
+#[test]
+fn test_state_atomic_write_and_metadata_roundtrip() {
+    use quaqua::state::{atomic_write, ExecutionState, WorkerMetadata};
+
+    let temp = std::env::temp_dir().join(format!("quaqua-state-test-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).unwrap();
+
+    // 1. atomic_write
+    let p = temp.join("test_atomic.txt");
+    atomic_write(&p, "hello atomic").unwrap();
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello atomic");
+
+    // 2. WorkerMetadata load/save
+    WorkerMetadata::save_owner(&temp, "worker1", "mylead").unwrap();
+    assert_eq!(WorkerMetadata::load_owner(&temp, "worker1"), "mylead");
+    assert_eq!(WorkerMetadata::load_owner(&temp, "nonexistent"), "cos");
+
+    WorkerMetadata::save_grid(&temp, "worker1", "my-tab").unwrap();
+    assert_eq!(WorkerMetadata::load_grid(&temp, "worker1"), Some("my-tab".to_string()));
+    assert_eq!(WorkerMetadata::load_grid(&temp, "nonexistent"), None);
+
+    WorkerMetadata::save_budget(&temp, "worker1", 1800).unwrap();
+    assert_eq!(WorkerMetadata::load_budget(&temp, "worker1"), Some(1800));
+    assert_eq!(WorkerMetadata::load_budget(&temp, "nonexistent"), None);
+
+    assert!(!WorkerMetadata::has_grace(&temp, "worker1"));
+    WorkerMetadata::record_grace(&temp, "worker1").unwrap();
+    assert!(WorkerMetadata::has_grace(&temp, "worker1"));
+
+    assert_eq!(WorkerMetadata::load_autoext(&temp, "worker1"), 0);
+    WorkerMetadata::save_autoext(&temp, "worker1", 600).unwrap();
+    assert_eq!(WorkerMetadata::load_autoext(&temp, "worker1"), 600);
+
+    assert_eq!(WorkerMetadata::load_elapsed(&temp, "worker1"), 0);
+    WorkerMetadata::save_elapsed(&temp, "worker1", 120).unwrap();
+    assert_eq!(WorkerMetadata::load_elapsed(&temp, "worker1"), 120);
+
+    assert_eq!(WorkerMetadata::load_progress(&temp, "worker1"), 0);
+    WorkerMetadata::save_progress(&temp, "worker1", 12345).unwrap();
+    assert_eq!(WorkerMetadata::load_progress(&temp, "worker1"), 12345);
+
+    assert!(!WorkerMetadata::has_nudged(&temp, "worker1"));
+    WorkerMetadata::record_nudged(&temp, "worker1").unwrap();
+    assert!(WorkerMetadata::has_nudged(&temp, "worker1"));
+
+    // 3. ExecutionState
+    let pipe_file = temp.join("pipeline-myfeature.state");
+    std::fs::write(&pipe_file, "lead=lead1\nbuilder=sude\nfinished=0\n").unwrap();
+    let es = ExecutionState::load(&pipe_file).expect("must parse pipeline state");
+    assert!(!es.is_finished());
+    assert_eq!(es.owner(), "lead1");
+
+    // A file without finished=0 counts as finished (exact base cap.rs parity)
+    let pipe_no_fin = temp.join("pipeline-nofin.state");
+    std::fs::write(&pipe_no_fin, "lead=lead1\nbuilder=sude\n").unwrap();
+    let es_no_fin = ExecutionState::load(&pipe_no_fin).expect("must parse pipeline state");
+    assert!(es_no_fin.is_finished(), "missing finished=0 must be considered finished");
+
+    let tf_file = temp.join("taskforce-eval.state");
+    std::fs::write(&tf_file, "task=eval\nowner=cos\nfinished=1\n").unwrap();
+    let es_tf = ExecutionState::load(&tf_file).expect("must parse taskforce state");
+    assert!(es_tf.is_finished());
+    assert_eq!(es_tf.owner(), "cos");
+
+    // advisor- is not part of taskforce state files
+    let adv_file = temp.join("advisor-test.state");
+    std::fs::write(&adv_file, "task=eval\nowner=cos\nfinished=0\n").unwrap();
+    assert_eq!(ExecutionState::load(&adv_file), None);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_report_lessons_heading_matcher_and_numbered_headings() {
+    use quaqua::worker::prompt::{is_lessons_heading, validate_report_content};
+
+    // 1. Heading line matcher: exact and numbered
+    assert!(is_lessons_heading("## Lessons"));
+    assert!(is_lessons_heading("## Lessons\n"));
+    assert!(is_lessons_heading("## Lessons - none"));
+    assert!(is_lessons_heading("## Lessons:"));
+    assert!(is_lessons_heading("## 5. Lessons"));
+    assert!(is_lessons_heading("## 5. Lessons\n"));
+    assert!(is_lessons_heading("## 5. Lessons:"));
+    assert!(is_lessons_heading("## 12. Lessons"));
+    assert!(is_lessons_heading("## 1.  Lessons"));
+    assert!(is_lessons_heading("## 5) Lessons"));
+    assert!(is_lessons_heading("  ## 5. Lessons"));
+
+    // Non-matching lines
+    assert!(!is_lessons_heading("## Blockers"));
+    assert!(!is_lessons_heading("## 5. Blockers"));
+    assert!(!is_lessons_heading("## Summary"));
+    assert!(!is_lessons_heading("### 5. Lessons")); // h3, not h2
+    assert!(!is_lessons_heading("# 5. Lessons"));   // h1, not h2
+    assert!(!is_lessons_heading("## 5."));
+    assert!(!is_lessons_heading("## LessonsLearned"));
+    assert!(!is_lessons_heading("Just text with ## 5. Lessons in body"));
+
+    // 2. Full report validation: standard worker report
+    let report_exact = "# run report\n\n## Blockers\nnone\n\n## Lessons\n- none\n";
+    assert_eq!(validate_report_content(report_exact, false), Ok(()));
+
+    let report_numbered = "# run report\n\n## 1. Summary\nDone\n\n## 2. Blockers\nnone\n\n## 5. Lessons\n- lesson learned\n";
+    assert_eq!(validate_report_content(report_numbered, false), Ok(()));
+
+    let report_missing_lessons = "# run report\n\n## Blockers\nnone\n\n## Summary\nNo lessons section\n";
+    assert_eq!(
+        validate_report_content(report_missing_lessons, false),
+        Err("'## Lessons' section")
+    );
+
+    let report_h3_only = "# run report\n\n## Blockers\nnone\n\n### 5. Lessons\n- sub-heading only\n";
+    assert_eq!(
+        validate_report_content(report_h3_only, false),
+        Err("'## Lessons' section")
+    );
+
+    // 3. Reviewer report validation: requires Verdict:
+    let reviewer_valid = "# review report\n\nVerdict: approved\n";
+    assert_eq!(validate_report_content(reviewer_valid, true), Ok(()));
+
+    let reviewer_missing = "# review report\n\n## Lessons\n- none\n";
+    assert_eq!(
+        validate_report_content(reviewer_missing, true),
+        Err("'Verdict:' line")
+    );
+}
+
+#[test]
+fn test_parse_prompt_args() {
+    use quaqua::worker::prompt::{parse_prompt_args, PromptAction};
+
+    // --check-brief
+    let cb = vec!["--check-brief".to_string(), "Goal: g\nHard constraints: none\nCurrent design: d".to_string()];
+    assert_eq!(
+        parse_prompt_args(&cb),
+        Ok(PromptAction::CheckBrief("Goal: g\nHard constraints: none\nCurrent design: d".to_string()))
+    );
+
+    // --resume without extend
+    let res = vec!["--resume".to_string(), "sude-w4a".to_string()];
+    assert_eq!(
+        parse_prompt_args(&res),
+        Ok(PromptAction::Resume {
+            name: "sude-w4a".to_string(),
+            extend: None,
+        })
+    );
+
+    // --resume with extend
+    let res_ext = vec!["--resume".to_string(), "sude-w4a".to_string(), "--extend".to_string(), "600".to_string()];
+    assert_eq!(
+        parse_prompt_args(&res_ext),
+        Ok(PromptAction::Resume {
+            name: "sude-w4a".to_string(),
+            extend: Some(600),
+        })
+    );
+
+    // Normal prompt
+    let norm = vec!["sude-w4a".to_string(), "Goal: g\nHard constraints: none\nCurrent design: d".to_string()];
+    assert_eq!(
+        parse_prompt_args(&norm),
+        Ok(PromptAction::Prompt {
+            name: "sude-w4a".to_string(),
+            task: "Goal: g\nHard constraints: none\nCurrent design: d".to_string(),
+        })
+    );
+
+    // Missing brief headers
+    let bad_brief = vec!["sude-w4a".to_string(), "just do this".to_string()];
+    assert!(parse_prompt_args(&bad_brief).is_err());
+}
+
+#[test]
+fn test_worktree_paths_and_branch_naming() {
+    use quaqua::worker::worktree::{
+        canonicalize_repo_path, resolve_paths, resolve_worktree_path, worker_branch_name,
+    };
+
+    assert_eq!(worker_branch_name("sude-w4b"), "quaqua/sude-w4b");
+
+    let repo = Path::new("/path/to/myrepo");
+    let wt = resolve_worktree_path(repo, "sude-task1");
+    assert_eq!(wt, PathBuf::from("/path/to/.wt/sude-task1"));
+
+    let no_parent = Path::new("repo");
+    let wt_no_parent = resolve_worktree_path(no_parent, "sude-task1");
+    assert_eq!(wt_no_parent, PathBuf::from(".wt/sude-task1"));
+
+    let (r, w) = resolve_paths(repo, "sude-task1");
+    assert_eq!(r, canonicalize_repo_path(repo));
+    assert_eq!(w, resolve_worktree_path(&r, "sude-task1"));
+}
+
+#[test]
+fn test_worktree_validate_base_ref() {
+    use quaqua::worker::worktree::validate_base_ref;
+
+    struct BaseRefTestGit(bool);
+    impl GitOps for BaseRefTestGit {
+        fn run_in(&self, _dir: &Path, _args: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn run(&self, _args: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool { self.0 }
+        fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> { unimplemented!() }
+        fn worktree_add(&self, _repo: &Path, _branch: &str, _wt: &Path, _base: Option<&str>) -> std::io::Result<Output> { unimplemented!() }
+        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool { unimplemented!() }
+        fn worktree_add_existing(&self, _repo: &Path, _branch: &str, _wt: &Path) -> std::io::Result<Output> { unimplemented!() }
+        fn worktree_remove(&self, _repo: &Path, _wt: &Path) -> std::io::Result<Output> { unimplemented!() }
+        fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> { unimplemented!() }
+        fn is_core_bare(&self, _repo: &Path) -> bool { unimplemented!() }
+        fn has_core_worktree(&self, _repo: &Path) -> bool { unimplemented!() }
+        fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<Output> { unimplemented!() }
+        fn set_worktree_pushurl_blocked(&self, _wt: &Path, _remote: &str) -> std::io::Result<()> { unimplemented!() }
+        fn is_git_dir(&self, _cwd: &Path) -> bool { unimplemented!() }
+        fn diff_and_status(&self, _cwd: &Path) -> (String, String) { unimplemented!() }
+    }
+
+    let repo = Path::new("/test/repo");
+    assert!(validate_base_ref(&BaseRefTestGit(true), repo, "main").is_ok());
+
+    let err = validate_base_ref(&BaseRefTestGit(false), repo, "badref").expect_err("must error on invalid ref");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("error: --base 'badref' is not a known commit-ish"));
+}
+
+#[test]
+fn test_worktree_prepare_and_guards() {
+    use quaqua::worker::worktree::{apply_push_block, is_worktree_dirty, prepare_worktree, remove_worktree};
+
+    struct WtMockGit {
+        branch_exists_val: bool,
+        porcelain_wts: Vec<String>,
+        bare: bool,
+        wt_config: bool,
+        dirty_output: String,
+        remotes: Vec<String>,
+        pushurl_blocked: std::cell::RefCell<Vec<String>>,
+        removed: std::cell::RefCell<bool>,
+    }
+
+    impl GitOps for WtMockGit {
+        fn run_in(&self, _dir: &Path, args: &[&str]) -> std::io::Result<Output> {
+            let out_str = if args.contains(&"status") {
+                self.dirty_output.clone()
+            } else {
+                String::new()
+            };
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: out_str.into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+        fn run(&self, _args: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool { true }
+        fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            Ok(self.porcelain_wts.clone())
+        }
+        fn worktree_add(&self, _repo: &Path, _branch: &str, wt: &Path, _base: Option<&str>) -> std::io::Result<Output> {
+            let _ = std::fs::create_dir_all(wt);
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
+            self.branch_exists_val
+        }
+        fn worktree_add_existing(&self, _repo: &Path, _branch: &str, wt: &Path) -> std::io::Result<Output> {
+            let _ = std::fs::create_dir_all(wt);
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn worktree_remove(&self, _repo: &Path, wt: &Path) -> std::io::Result<Output> {
+            let _ = std::fs::remove_dir_all(wt);
+            *self.removed.borrow_mut() = true;
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            Ok(self.remotes.clone())
+        }
+        fn is_core_bare(&self, _repo: &Path) -> bool { self.bare }
+        fn has_core_worktree(&self, _repo: &Path) -> bool { self.wt_config }
+        fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn set_worktree_pushurl_blocked(&self, _wt: &Path, remote: &str) -> std::io::Result<()> {
+            self.pushurl_blocked.borrow_mut().push(remote.to_string());
+            Ok(())
+        }
+        fn is_git_dir(&self, _cwd: &Path) -> bool { true }
+        fn diff_and_status(&self, _cwd: &Path) -> (String, String) { ("".to_string(), "".to_string()) }
+    }
+
+    let temp = std::env::temp_dir().join(format!("quaqua-wt-unit-{}", std::process::id()));
+    let repo = temp.join("repo");
+    let wt = temp.join(".wt").join("sude-testwt");
+    let _ = std::fs::create_dir_all(&repo);
+
+    // 1. Bare guard triggers error
+    let git_bare = WtMockGit {
+        branch_exists_val: false,
+        porcelain_wts: vec![],
+        bare: true,
+        wt_config: false,
+        dirty_output: "".to_string(),
+        remotes: vec!["origin".to_string()],
+        pushurl_blocked: std::cell::RefCell::new(Vec::new()),
+        removed: std::cell::RefCell::new(false),
+    };
+    let err = apply_push_block(&git_bare, &repo, &wt).expect_err("bare must fail");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("core.bare=true or core.worktree"));
+
+    // 2. Foreign dir at wt path rejected
+    let _ = std::fs::create_dir_all(&wt);
+    let git_foreign = WtMockGit {
+        branch_exists_val: false,
+        porcelain_wts: vec![], // wt is not in porcelain worktree list!
+        bare: false,
+        wt_config: false,
+        dirty_output: "".to_string(),
+        remotes: vec!["origin".to_string()],
+        pushurl_blocked: std::cell::RefCell::new(Vec::new()),
+        removed: std::cell::RefCell::new(false),
+    };
+    let err = prepare_worktree(&git_foreign, &repo, &wt, "sude-testwt", None).expect_err("foreign dir must fail");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("exists but is not a git worktree"));
+
+    // 3. Registered dir reused
+    let git_reg = WtMockGit {
+        branch_exists_val: false,
+        porcelain_wts: vec![wt.to_string_lossy().to_string()],
+        bare: false,
+        wt_config: false,
+        dirty_output: "".to_string(),
+        remotes: vec!["origin".to_string(), "upstream".to_string()],
+        pushurl_blocked: std::cell::RefCell::new(Vec::new()),
+        removed: std::cell::RefCell::new(false),
+    };
+    assert!(prepare_worktree(&git_reg, &repo, &wt, "sude-testwt", None).is_ok());
+    assert_eq!(git_reg.pushurl_blocked.borrow().len(), 2);
+
+    // 4. Dirty check
+    let git_clean = WtMockGit {
+        branch_exists_val: false,
+        porcelain_wts: vec![],
+        bare: false,
+        wt_config: false,
+        dirty_output: "".to_string(),
+        remotes: vec![],
+        pushurl_blocked: std::cell::RefCell::new(Vec::new()),
+        removed: std::cell::RefCell::new(false),
+    };
+    assert_eq!(is_worktree_dirty(&git_clean, &wt), Ok(false));
+
+    let git_dirty = WtMockGit {
+        branch_exists_val: false,
+        porcelain_wts: vec![],
+        bare: false,
+        wt_config: false,
+        dirty_output: " M file.rs\n?? new.rs\n".to_string(),
+        remotes: vec![],
+        pushurl_blocked: std::cell::RefCell::new(Vec::new()),
+        removed: std::cell::RefCell::new(false),
+    };
+    assert_eq!(is_worktree_dirty(&git_dirty, &wt), Ok(true));
+
+    // 5. Worktree remove
+    assert!(remove_worktree(&git_clean, &repo, &wt).is_ok());
+    assert!(*git_clean.removed.borrow());
+
+    let _ = std::fs::remove_dir_all(&temp);
 }

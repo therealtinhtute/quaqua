@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sandbox test for the spawn-worker.sh shim (-> `quaqua worker spawn`) name
+# Sandbox test for `quaqua worker spawn` name
 # validation (models.md Naming: <kind>-<task>, ascii [a-z0-9-], <=20 chars),
 # the optional --base <ref> worktree start point, the same-name retry that
 # reuses a branch kept by cleanup, the --review read-only mode for the claude
@@ -28,9 +28,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 unset HERDR_PANE_ID HERDR_STUB_SNAPSHOT
 
 # ── sandbox: stub git/herdr that log every call, temp HOME, dummy repo ───────
-mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/scripts/worker"
-cp "$src/worker/spawn-worker.sh" "$T/scripts/worker/spawn-worker.sh"
-cp -R "$src/lib" "$T/scripts/"
+mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs"
 cat > "$T/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
@@ -149,7 +147,7 @@ spawn() {  # spawn <name> <kind> [VAR=val...]; script opts via array $spawn_args
   : > "$T/calls"; : > "$T/gridcalls"
   rc=0
   CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" LC_ALL="${SPAWN_LC_ALL:-C}" QUAQUA_OWNER=cos \
-    env "$@" bash "$T/scripts/worker/spawn-worker.sh" ${spawn_args+"${spawn_args[@]}"} "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" "${QUAQUA_BIN:-quaqua}" worker spawn ${spawn_args+"${spawn_args[@]}"} "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 ln_call() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }
@@ -203,7 +201,7 @@ spawn "tieude-model" "tieude"
 [[ $rc -eq 0 ]] || fail "tieude: exit $rc, want 0: $(cat "$T/err")"
 grep -qF -- '--kind opencode' "$T/calls" \
   || fail "tieude: not an opencode start: $(cat "$T/calls")"
-grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":"opencode-go/deepseek-v4.1-flash#max","instructions":' "$T/calls" \
+grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"max"},"instructions":' "$T/calls" \
   || fail "tieude: model+effort not in OPENCODE_CONFIG_CONTENT: $(cat "$T/calls")"
 ! grep -q -- '--kind omp' "$T/calls" || fail "tieude: still spawned as omp: $(cat "$T/calls")"
 ! grep -q 'gemini' "$T/calls" || fail "tieude: gemini flag leaked: $(cat "$T/calls")"
@@ -369,12 +367,13 @@ grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_ready=1
   || fail "tokens: bad call order: $(cat "$T/calls")"
 echo "ok: pane tokens -> grid_role=worker/grid_group/grid_owner on split, grid_ready=1 after agent start"
 
-# custom owner via QUAQUA_OWNER
+# custom owner via QUAQUA_OWNER: a `<slug>-lead` owner defaults its grid tab
+# to `<slug>-workers` (the Lead's project tab), not the repo-derived label
 spawn tieude-customowner tieude QUAQUA_OWNER=custom-lead
 [[ $rc -eq 0 ]] || fail "custom owner: exit $rc, want 0: $(cat "$T/err")"
-grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=custom-lead --token grid_tab=repo-workers' "$T/calls" \
-  || fail "custom owner: grid_owner not set to custom-lead: $(cat "$T/calls")"
-echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER"
+grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=custom-lead --token grid_tab=custom-workers' "$T/calls" \
+  || fail "custom owner: tokens not custom-lead/custom-workers: $(cat "$T/calls")"
+echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER, lead owner -> <slug>-workers grid tab"
 
 
 
@@ -385,7 +384,7 @@ expect_reject_review() {  # expect_reject_review <name> <kind> <label>
   unset spawn_args
   [[ $rc -eq 1 ]] || fail "$3: exit $rc, want 1"
   grep -q '^# Usage:' "$T/err" || fail "$3: no usage on stderr"
-  grep -qF "error: --review is only supported for claude kinds (ni, suhuynh, truonglao)" "$T/err" \
+  grep -qF "error: --review requires a kind with can_review = true in team.toml (ni, suhuynh, truonglao), not $2" "$T/err" \
     || fail "$3: no clear refusal: $(cat "$T/err")"
   [[ ! -s "$T/calls" ]] || fail "$3: git/herdr called before rejection: $(cat "$T/calls")"
   echo "ok: $3 -> exit 1, no git/herdr"
@@ -404,8 +403,8 @@ expect_reject_review sude-revbad sude "--review on sude"
 # evidence commands; mutating Bash is denied except two narrow allows the
 # reviewer needs to finish a review: `cargo test` (its suite) and the
 # runs/.<name>.tmp -> runs/<name>.md atomic report `mv`.
-for k in ni suhuynh truonglao; do
-  case $k in ni) eff=low ;; suhuynh) eff=medium ;; truonglao) eff=high ;; esac
+for k in ni truonglao; do
+  case $k in ni) eff=low ;; truonglao) eff=high ;; esac
   spawn_args=(--review)
   spawn "$k-revread" "$k"
   unset spawn_args
@@ -434,6 +433,17 @@ for k in ni suhuynh truonglao; do
   echo "ok: --review $k -> dontAsk + Edit() rules (runs writable, worktree denied) + narrow Bash allows (cargo test, atomic mv), model/effort unchanged"
 done
 
+# --review on suhuynh (opencode kind with can_review = true)
+spawn_args=(--review)
+spawn "suhuynh-revread" "suhuynh"
+unset spawn_args
+[[ $rc -eq 0 ]] || fail "--review suhuynh: exit $rc, want 0: $(cat "$T/err")"
+grep -qF -- '--kind opencode' "$T/calls" || fail "--review suhuynh: not an opencode start: $(cat "$T/calls")"
+grep -qF '"review":true' "$T/home/quaqua/runs/suhuynh-revread.srt.json" \
+  || fail "--review suhuynh: srt.json missing review: true"
+grep -q "worker=suhuynh-revread" "$T/out" || fail "--review suhuynh: no success line"
+echo "ok: --review suhuynh -> opencode start, review: true recorded in srt.json"
+
 # the review Bash allows are review-only: a plain claude spawn keeps ambient settings
 spawn ni-plain ni
 [[ $rc -eq 0 ]] || fail "plain ni: exit $rc, want 0: $(cat "$T/err")"
@@ -452,7 +462,7 @@ echo "ok: plain ni (no --review) -> ambient settings, no review mode/Bash rules"
 # folder", then Enter, and only then reports grid_ready=1.
 echo 1 > "$T/claude-dialog"
 spawn_args=(--review)
-spawn suhuynh-trust suhuynh CLAUDE_DIALOG="$T/claude-dialog"
+spawn truonglao-trust truonglao CLAUDE_DIALOG="$T/claude-dialog"
 unset spawn_args
 [[ $rc -eq 0 ]] || fail "trust dialog: exit $rc, want 0: $(cat "$T/err")"
 grep -qF 'herdr pane wait-output %1 --match trust --timeout 15000' "$T/calls" \
@@ -469,37 +479,37 @@ grep -qF 'herdr pane send-keys %1 enter' "$T/calls" \
   || fail "trust dialog: review boundary weakened: $(cat "$T/calls")"
 grep -qF -- '--permission-mode dontAsk' "$T/calls" \
   || fail "trust dialog: review permission mode lost: $(cat "$T/calls")"
-grep -q "worker=suhuynh-trust" "$T/out" || fail "trust dialog: no success line"
+grep -q "worker=truonglao-trust" "$T/out" || fail "trust dialog: no success line"
 echo "ok: claude trust dialog -> wait-output trust, Down+Enter before grid_ready, boundary untouched"
 
 # an already-trusted repo (no dialog): nothing is sent, the spawn is unchanged
-spawn suhuynh-notrust suhuynh
+spawn truonglao-notrust truonglao
 [[ $rc -eq 0 ]] || fail "no trust dialog: exit $rc, want 0: $(cat "$T/err")"
 ! grep -qF 'pane send-keys' "$T/calls" || fail "no trust dialog: keys sent anyway: $(cat "$T/calls")"
 echo "ok: no trust dialog -> waited, nothing sent"
 
 # a start herdr could not confirm (blocked during startup, or a slow hook) is
 # not proof of failure: the spawn waits for idle instead of abandoning it
-spawn suhuynh-blocked suhuynh START_FAIL=1
+spawn truonglao-blocked truonglao START_FAIL=1
 [[ $rc -eq 0 ]] || fail "blocked start: exit $rc, want 0: $(cat "$T/err")"
-grep -qF 'herdr agent wait suhuynh-blocked --until idle --timeout 120000' "$T/calls" \
+grep -qF 'herdr agent wait truonglao-blocked --until idle --timeout 120000' "$T/calls" \
   || fail "blocked start: no idle wait: $(cat "$T/calls")"
-[[ $(ln_call 'agent start') -lt $(ln_call 'agent wait suhuynh-blocked') ]] \
-  && [[ $(ln_call 'agent wait suhuynh-blocked') -lt $(ln_call 'grid_ready=1') ]] \
+[[ $(ln_call 'agent start') -lt $(ln_call 'agent wait truonglao-blocked') ]] \
+  && [[ $(ln_call 'agent wait truonglao-blocked') -lt $(ln_call 'grid_ready=1') ]] \
   || fail "blocked start: bad order: $(cat "$T/calls")"
-grep -q "worker=suhuynh-blocked" "$T/out" || fail "blocked start: no success line"
+grep -q "worker=truonglao-blocked" "$T/out" || fail "blocked start: no success line"
 echo "ok: blocked claude start -> trust wait, idle wait, then grid_ready=1"
 
 # a dialog that never clears is a loud failure, never a stalled worker
 echo 1 > "$T/claude-dialog"
-spawn suhuynh-stuck suhuynh CLAUDE_DIALOG="$T/claude-dialog" \
+spawn truonglao-stuck truonglao CLAUDE_DIALOG="$T/claude-dialog" \
   PANE_TEXT='❯ No, exit
   Yes, I trust this folder'
 [[ $rc -eq 1 ]] || fail "stuck dialog: exit $rc, want 1: $(cat "$T/err")"
 grep -q 'workspace-trust dialog did not clear' "$T/err" \
   || fail "stuck dialog: no clear error: $(cat "$T/err")"
 grep -qF 'herdr pane close %1' "$T/calls" || fail "stuck dialog: pane not closed: $(cat "$T/calls")"
-! grep -q 'worker=suhuynh-stuck' "$T/out" || fail "stuck dialog: reported success anyway"
+! grep -q 'worker=truonglao-stuck' "$T/out" || fail "stuck dialog: reported success anyway"
 echo "ok: stuck trust dialog -> exit 1 with a clear error, pane closed"
 
 # ── --base <ref>: branch starts at <ref>, validated before any side effect ──
@@ -522,8 +532,8 @@ grep -q "worktree add -b quaqua/tieude-nobase .*/tieude-nobase\$" "$T/calls" \
 echo "ok: no --base -> worktree add <wt> only (HEAD), no rev-parse"
 
 # ── same-name retry: a branch kept by a cleanup is reused, not re-created ────
-# cleanup-worker.sh removes the worker's worktree but keeps quaqua/<name> for
-# the Lead to merge, so `worktree add -b` would die on
+# `quaqua worker cleanup` removes the worker's worktree but keeps
+# quaqua/<name> for the Lead to merge, so `worktree add -b` would die on
 # "a branch named 'quaqua/<name>' already exists" — the retry must reuse it.
 spawn tieude-branchfix tieude FAKE_BRANCH='quaqua/tieude-branchfix'
 [[ $rc -eq 0 ]] || fail "same-name retry: exit $rc, want 0: $(cat "$T/err")"
@@ -577,7 +587,7 @@ echo "ok: --base= empty -> exit 1, no git/herdr"
 : > "$T/calls"; : > "$T/gridcalls"
 rc=0
 CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" LC_ALL=C \
-  bash "$T/scripts/worker/spawn-worker.sh" tieude-noval tieude "$T/repo" --base >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn tieude-noval tieude "$T/repo" --base >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "trailing --base: exit $rc, want 1"
 grep -q '^# Usage:' "$T/err" || fail "trailing --base: no usage on stderr"
 [[ ! -s "$T/calls" ]] || fail "trailing --base: git/herdr called: $(cat "$T/calls")"
@@ -652,7 +662,7 @@ chmod +x "$T/bin2/herdr"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 spawn: exit $rc: $(cat "$T/err")"
 [[ -d $T/.wt/sude-rw1 ]] || fail "rw1: no worktree created"
 
@@ -661,7 +671,7 @@ rm -f "$T/failed-sude-rw1"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 respawn: exit $rc, want 0: $(cat "$T/err")"
 grep -q 'reusing it' "$T/err" || fail "rw1 respawn: no reuse note: $(cat "$T/err")"
 grep -q 'agent start sude-rw1' "$T/calls" || fail "rw1 respawn: agent start not retried"
@@ -672,7 +682,7 @@ mkdir -p "$T/.wt/sude-rw2"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-rw2 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-rw2 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "rw2 foreign dir: exit $rc, want 1"
 grep -q 'not a git worktree' "$T/err" || fail "rw2: no refusal message: $(cat "$T/err")"
 ! grep -q 'agent start' "$T/calls" || fail "rw2: agent started over a foreign dir"
@@ -690,7 +700,7 @@ git -C "$T/rgrepo" worktree remove --force "$T/.wt/sude-rw1"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 retry: exit $rc, want 0: $(cat "$T/err")"
 grep -q 'branch quaqua/sude-rw1 already exists' "$T/err" \
   || fail "rw1 retry: no reuse note: $(cat "$T/err")"
@@ -709,7 +719,7 @@ echo "ok: real git -> retry after cleanup reuses the kept branch (marker commit 
   || fail "rw1: pushurl not blocked on a reused worktree: $(git -C "$T/.wt/sude-rw1" remote get-url --push origin)"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-nopush sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-nopush sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "nopush spawn: exit $rc: $(cat "$T/err")"
 wt_np="$T/.wt/sude-nopush"
 [[ $(git -C "$wt_np" remote get-url --push origin) == 'PUSH DISABLED - task workers never push (AGENTS.md handoff rule)' ]] \
@@ -742,7 +752,7 @@ git -C "$T/rgpushurl" config remote.origin.pushurl "$shared"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-inherit sude "$T/rgpushurl" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-inherit sude "$T/rgpushurl" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "inherit spawn: exit $rc: $(cat "$T/err")"
 wt_inh="$T/.wt/sude-inherit"
 rc=0
@@ -770,7 +780,7 @@ for guard_case in bare worktree; do
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-    bash "$T/scripts/worker/spawn-worker.sh" "sude-g$guard_case" sude "$gr" >"$T/out" 2>"$T/err" || rc=$?
+    "${QUAQUA_BIN:-quaqua}" worker spawn "sude-g$guard_case" sude "$gr" >"$T/out" 2>"$T/err" || rc=$?
   [[ $rc -eq 1 ]] || fail "guard $guard_case: exit $rc, want 1: $(cat "$T/err")"
   grep -q 'core.bare=true or core.worktree' "$T/err" \
     || fail "guard $guard_case: no clear message: $(cat "$T/err")"

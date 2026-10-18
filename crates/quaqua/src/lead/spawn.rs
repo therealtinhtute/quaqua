@@ -1,26 +1,25 @@
 //! Project Lead spawn logic (`quaqua lead spawn <slug>`).
-//! Reproduces `scripts/lead/spawn-lead.sh`.
 
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
-use crate::json::parse_json;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
 use std::time::Duration;
 
 pub const USAGE: &str = "\
-# Usage: spawn-lead.sh <slug>
-#   Start the project Lead for <slug> (AGENTS.md '## Roles (SLP)'): a claude
+# Usage: quaqua lead spawn <slug>
+#   Start the project Lead for <slug> (AGENTS.md '## Roles (SLP)'): an agent
 #   session named <slug>-lead running in the quaqua checkout this script
 #   belongs to (normally ~/quaqua). The Lead is not a worker — no worktree,
 #   no slot in the 4-worker cap, no grid hook: each SLP team gets its own
 #   herdr workspace labelled <slug> (the Lead in its first tab, its Peers grid
 #   beside it or in <repo>-workers there); the CoS stays the one Supervisor in
-#   its own workspace and reaches the Lead by agent name. scripts/lead/cleanup-lead.sh
+#   its own workspace and reaches the Lead by agent name. quaqua lead cleanup <slug>
 #   closes the workspace when the project is done. rules/_all/*.md are the
 #   appended system prompt (the spawn-worker convention); the first prompt
 #   is a short lead brief pointing at AGENTS.md, projects/<slug>.md and
-#   scripts/lead/pipeline.sh. The project integration branch quaqua/<slug>-integ
+#   quaqua pipeline. The project integration branch quaqua/<slug>-integ
 #   is created from the project repo's default branch when missing —
 #   origin/HEAD if set, else main, else master (Peers branch from it --base
 #   and are merged back into it at acceptance). Refuses when
@@ -28,54 +27,35 @@ pub const USAGE: &str = "\
 #   card), when its Lead is already registered with herdr, or when
 #   <slug>-lead would exceed herdr's 32-char agent-name limit; on success
 #   the row's owner column becomes the Lead name (serialized with
-#   cleanup-lead.sh via projects/INDEX.md.lock.d, published by atomic rename).
-#   Env: LEAD_MODEL (default claude-opus-5-5) · LEAD_EFFORT (default low).";
+#   quaqua lead cleanup via projects/INDEX.md.lock.d, published by atomic rename).
+#   Env: LEAD_KIND (overrides strategy.lead_kind in team.toml).";
 
-pub fn find_quaqua_root() -> Result<PathBuf, (i32, String)> {
-    if let Ok(r) = std::env::var("QUAQUA_ROOT") {
-        if !r.is_empty() {
-            let p = PathBuf::from(r);
-            if p.join("projects/INDEX.md").is_file() {
-                return Ok(p);
-            }
-        }
-    }
-    if let Ok(script_dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
-        let p = PathBuf::from(script_dir);
-        if let Some(parent2) = p.parent().and_then(|p| p.parent()) {
-            if parent2.join("projects/INDEX.md").is_file() {
-                return Ok(parent2.to_path_buf());
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut cur = cwd.clone();
-        loop {
-            if cur.join("projects/INDEX.md").is_file() {
-                return Ok(cur);
-            }
-            if !cur.pop() {
-                break;
-            }
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let mut cur = parent.to_path_buf();
-            loop {
-                if cur.join("projects/INDEX.md").is_file() {
-                    return Ok(cur);
-                }
-                if !cur.pop() {
-                    break;
-                }
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        return Ok(cwd);
-    }
-    Ok(PathBuf::from("."))
+pub use crate::workspace::find_quaqua_root;
+
+/// Resolve the lead kind and launch settings from config and optional LEAD_KIND override.
+/// On missing or unknown lead_kind, defaults to "tieude".
+pub fn resolve_lead_launch(
+    cfg: &crate::config::Config,
+    env_override: Option<&str>,
+) -> Result<(String, crate::launch::Launch), (i32, String)> {
+    let candidate = env_override
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| cfg.strategy.lead_kind.clone())
+        .unwrap_or_else(|| "tieude".to_string());
+
+    let kind_name = if cfg.kinds.contains_key(&candidate) {
+        candidate
+    } else {
+        "tieude".to_string()
+    };
+
+    let kind_info = cfg.kinds.get(&kind_name).ok_or_else(|| {
+        (1, format!("error: default lead kind '{kind_name}' not found in team.toml\n"))
+    })?;
+
+    let launch = crate::launch::resolve_launch(kind_info, &kind_name)?;
+    Ok((kind_name, launch))
 }
 pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     args: &[String],
@@ -139,7 +119,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
 
     // one Lead per slug check via herdr agent get
     if let Ok((_, get_json)) = herdr.agent_get(&name) {
-        if let Ok(parsed) = parse_json(&get_json) {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&get_json) {
             if parsed.get("result").and_then(|r| r.get("agent")).is_some() {
                 return Err((1, format!("a Lead for '{slug}' already exists: {name}\n")));
             }
@@ -246,10 +226,27 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
     let _ = std::fs::write(&rf, rules_content);
 
-    // Herdr workspace create
+    // Load config and resolve lead launch
+    let base_cfg = crate::config::load_team_config()?;
+    let cfg = crate::config::resolve(base_cfg.clone(), Some(slug)).unwrap_or(base_cfg);
+    let lead_env = std::env::var("LEAD_KIND").ok();
+    let (_lead_kind, launch) = resolve_lead_launch(&cfg, lead_env.as_deref())?;
+
     let root_str = root.to_string_lossy().to_string();
+    let runs_str = runs_dir.to_string_lossy().to_string();
+    let rf_str = rf.to_string_lossy().to_string();
+    let cmd = crate::launch::build_launch_cmd(
+        &launch,
+        &name,
+        &rf_str,
+        &runs_str,
+        &root_str,
+        false,
+    )?;
+
+    // Herdr workspace create
     let owner_env = format!("QUAQUA_OWNER={name}");
-    let ws_out = herdr.run(&[
+    let mut ws_args = vec![
         "workspace",
         "create",
         "--label",
@@ -259,19 +256,30 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         &root_str,
         "--env",
         &owner_env,
-    ]).map_err(|e| (1, format!("herdr workspace create failed: {e}\n")))?;
-
+    ];
+    let split_env_strs: Vec<String> = cmd
+        .split_envs
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    for env_str in &split_env_strs {
+        ws_args.push("--env");
+        ws_args.push(env_str);
+    }
+    let ws_out = herdr.run(&ws_args).map_err(|e| (1, format!("herdr workspace create failed: {e}\n")))?;
     let ws_str = String::from_utf8_lossy(&ws_out.stdout).to_string();
-    let ws_json = parse_json(&ws_str).map_err(|e| (1, format!("invalid workspace JSON: {e}\n")))?;
+    let ws_json: Value = serde_json::from_str(&ws_str).map_err(|e| (1, format!("invalid workspace JSON: {e}\n")))?;
     let pane = ws_json
         .get("result")
         .and_then(|r| r.get("root_pane"))
-        .and_then(|p| p.get_str("pane_id"))
+        .and_then(|p| p.get("pane_id"))
+        .and_then(|p| p.as_str())
         .ok_or_else(|| (1, "no root_pane.pane_id in workspace JSON\n".to_string()))?;
     let wsid = ws_json
         .get("result")
         .and_then(|r| r.get("workspace"))
-        .and_then(|w| w.get_str("workspace_id"))
+        .and_then(|w| w.get("workspace_id"))
+        .and_then(|w| w.as_str())
         .ok_or_else(|| (1, "no workspace.workspace_id in workspace JSON\n".to_string()))?;
 
     // Tag Lead pane as orchestrator
@@ -292,31 +300,53 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
 
     // Start agent
-    let lead_model = std::env::var("LEAD_MODEL").unwrap_or_else(|_| "claude-opus-5-5".to_string());
-    let lead_effort = std::env::var("LEAD_EFFORT").unwrap_or_else(|_| "low".to_string());
-    let rf_str = rf.to_string_lossy().to_string();
-    let start_out = herdr.run(&[
+    let mut start_args = vec![
         "agent",
         "start",
         &name,
         "--kind",
-        "claude",
+        &launch.harness,
         "--pane",
         pane,
         "--timeout",
         "60000",
-        "--",
-        "--model",
-        &lead_model,
-        "--effort",
-        &lead_effort,
-        "--append-system-prompt-file",
-        &rf_str,
-    ]).map_err(|e| (1, format!("herdr agent start failed: {e}\n")))?;
+    ];
+    for arg in &cmd.agent_args {
+        start_args.push(arg);
+    }
+    let start_out = herdr.run(&start_args).map_err(|e| (1, format!("herdr agent start failed: {e}\n")))?;
     if !start_out.status.success() {
         return Err((1, String::from_utf8_lossy(&start_out.stderr).to_string()));
     }
     // Update projects/INDEX.md with mkdir lock
+    update_project_index_owner(&root, slug, &name)?;
+
+    // Prompt Lead
+    let prompt_text = format!(
+        "You are the Lead for project '{slug}' (QUAQUA_OWNER={name}) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).\n- Own the project card projects/{slug}.md: read it now, then keep its '## Now' at the current truth after every outcome.\n- Pipeline-size work runs through quaqua pipeline. Peers: quaqua worker spawn with GRID_TAB={slug}-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.\n- You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch {integ} (created from the repo's default branch if it was missing — spawn Peers --base {integ} so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.\n- Resolve any '## Challenge' in runs/<worker>.md before acceptance; every redirect (from anh iu, the Auditor, or any report) reaches you through the CoS — record CoS steering in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.\nReply 'ready' once the card is read."
+    );
+    let _ = herdr.run(&["agent", "prompt", &name, &prompt_text]);
+
+    println!("lead={name} slug={slug} workspace={wsid} pane={pane}");
+    Ok(())
+}
+
+/// Update the owner column for a project slug in projects/INDEX.md.
+///
+/// On standard LF markdown files with well-formed table rows (`| slug | repo | owner | ... |`),
+/// modifies only the owner cell for the matching project row (preserving all other
+/// rows and column spacing byte-identically), serialized via mkdir spinlock on
+/// `projects/INDEX.md.lock.d` and written via atomic rename.
+pub fn update_project_index_owner(
+    root: &Path,
+    slug: &str,
+    new_owner: &str,
+) -> Result<(), (i32, String)> {
+    let index = root.join("projects/INDEX.md");
+    if !index.is_file() {
+        return Err((1, format!("no projects/INDEX.md in {}\n", root.display())));
+    }
+
     let lock_dir = root.join("projects/INDEX.md.lock.d");
     let mut locked = false;
     for _ in 0..200 {
@@ -327,46 +357,58 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         std::thread::sleep(Duration::from_millis(50));
     }
     if !locked {
-        return Err((1, format!("{} is locked (stale {}? remove it manually)\n", index.display(), lock_dir.display())));
+        return Err((
+            1,
+            format!(
+                "{} is locked (stale {}? remove it manually)\n",
+                index.display(),
+                lock_dir.display()
+            ),
+        ));
     }
 
-    let awk_res = Command::new("awk")
-        .arg("-F|")
-        .arg("-v")
-        .arg(format!("slug={slug}"))
-        .arg("-v")
-        .arg(format!("owner={name}"))
-        .arg(
-            "BEGIN { OFS=\"|\" }\n/^[[:space:]]*\\|/ {\n  s=$2; r=$3\n  gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", s); gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", r)\n  if (s == slug && r != \"repo\") $4 = \" \" owner \" \"\n}\n{ print }",
-        )
-        .arg(&index)
-        .output();
+    let res = (|| -> Result<(), (i32, String)> {
+        let content = std::fs::read_to_string(&index)
+            .map_err(|e| (1, format!("cannot read {}: {e}\n", index.display())))?;
+        let updated = update_index_content(&content, slug, new_owner);
+        let tmp_path = root
+            .join("projects")
+            .join(format!("INDEX.md.tmp.{}", std::process::id()));
+        std::fs::write(&tmp_path, updated)
+            .map_err(|e| (1, format!("cannot write {}: {e}\n", tmp_path.display())))?;
+        std::fs::rename(&tmp_path, &index)
+            .map_err(|e| (1, format!("cannot rename {} to {}: {e}\n", tmp_path.display(), index.display())))?;
+        Ok(())
+    })();
 
-    let awk_out = match awk_res {
-        Ok(out) => {
-            if !out.status.success() {
-                let _ = std::fs::remove_dir(&lock_dir);
-                return Err((1, String::from_utf8_lossy(&out.stderr).to_string()));
-            }
-            out.stdout
-        }
-        Err(e) => {
-            let _ = std::fs::remove_dir(&lock_dir);
-            return Err((1, format!("awk execution failed: {e}\n")));
-        }
-    };
-
-    let tmp_path = root.join("projects").join(format!("INDEX.md.tmp.{}", std::process::id()));
-    let _ = std::fs::write(&tmp_path, awk_out);
-    let _ = std::fs::rename(&tmp_path, &index);
     let _ = std::fs::remove_dir(&lock_dir);
+    res
+}
 
-    // Prompt Lead
-    let prompt_text = format!(
-        "You are the Lead for project '{slug}' (QUAQUA_OWNER={name}) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).\n- Own the project card projects/{slug}.md: read it now, then keep its '## Now' at the current truth after every outcome.\n- Pipeline-size work runs through scripts/lead/pipeline.sh (usage in its header). Peers: scripts/worker/spawn-worker.sh + `quaqua grid reconcile` with GRID_TAB={slug}-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.\n- You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch {integ} (created from the repo's default branch if it was missing — spawn Peers --base {integ} so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.\n- Resolve any '## Challenge' in runs/<worker>.md before acceptance; every redirect (from anh iu, the Auditor, or any report) reaches you through the CoS — record CoS steering in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.\nReply 'ready' once the card is read."
-    );
-    let _ = herdr.run(&["agent", "prompt", &name, &prompt_text]);
-
-    println!("lead={name} slug={slug} workspace={wsid} pane={pane}");
-    Ok(())
+/// Pure string transformation updating the owner column of a markdown table.
+///
+/// On standard LF markdown files with well-formed table rows (`| slug | repo | owner | ... |`),
+/// modifies only the matching slug's owner column while preserving all other rows,
+/// headers, comments, and column spacing byte-identically.
+pub fn update_index_content(content: &str, slug: &str, new_owner: &str) -> String {
+    let mut out = String::with_capacity(content.len() + 16);
+    for line in content.lines() {
+        if line.trim_start().starts_with('|') {
+            let mut parts: Vec<&str> = line.split('|').collect();
+            if parts.len() >= 4 {
+                let s = parts[1].trim();
+                let r = parts[2].trim();
+                if s == slug && r != "repo" {
+                    let replacement = format!(" {new_owner} ");
+                    parts[3] = &replacement;
+                    out.push_str(&parts.join("|"));
+                    out.push('\n');
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }

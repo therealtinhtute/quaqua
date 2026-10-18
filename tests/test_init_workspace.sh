@@ -4,7 +4,7 @@
 # re-running must never clobber local content.
 #
 # The sandbox is a COPY of this checkout's skeleton (templates/,
-# USER.example.md, .gitignore, scripts/workspace/init-workspace.sh) in a temp dir — the
+# USER.example.md, .gitignore, quaqua init) in a temp dir — the
 # real workspace is never touched, so running this test on a populated
 # ~/quaqua is safe.
 # Usage: tests/test_init_workspace.sh   (exit 0 = pass)
@@ -38,12 +38,7 @@ git -C "$root" ls-files -z | while IFS= read -r -d '' f; do
   mkdir -p "$R/$(dirname "$f")"
   cp "$root/$f" "$R/$f"
 done
-mkdir -p "$R/scripts/workspace"
-cp "$src/workspace/init-workspace.sh" "$R/scripts/workspace/init-workspace.sh"
-# copied explicitly too: this test runs before they are committed
-mkdir -p "$R/scripts/hooks"
-cp "$src/hooks/pre-commit" "$R/scripts/hooks/pre-commit"
-chmod +x "$R/scripts/hooks/pre-commit"
+# pre-commit hook is embedded in binary and generated into .git/quaqua-hooks/
 cp "$root/USER.example.md" "$R/USER.example.md"
 cp -R "$root/templates" "$R/templates"
 git -C "$R" init -q  # step 0's check-ignore guard needs a repo to consult
@@ -84,7 +79,7 @@ chmod +x "$T/bin/herdr"
 export PATH="$T/bin:$PATH"
 unset HERDR_PANE_ID
 
-run() { ( unset HERDR_PANE_ID; cd / && bash "$R/scripts/workspace/init-workspace.sh"); }  # foreign cwd
+run() { ( unset HERDR_PANE_ID; cd "$R" && "${QUAQUA_BIN:-quaqua}" init); }
 
 # the sandbox must really model a fresh clone: personal state absent up front
 for f in memory projects raw runs reports USER.md; do
@@ -208,12 +203,12 @@ echo "ok: AGENTS.md always-reads seeded ($(printf '%s\n' $includes $always | sor
 # The pre-commit portable-paths gate only runs if init-workspace.sh points git
 # at scripts/hooks/. Three states must hold: fresh repo -> wired; already ours
 # -> silent no-op; a different value (local or global) -> warned and left.
-exp="$R/scripts/hooks"
-[[ -d $exp ]] || fail "sandbox has no scripts/hooks dir to wire"
+exp="$R/.git/quaqua-hooks"
+[[ -d $exp ]] || fail "sandbox has no .git/quaqua-hooks dir to wire"
 [[ "$(git -C "$R" config --get core.hooksPath)" == "$exp" ]] \
   || fail "init-workspace.sh did not set core.hooksPath (want $exp)"
-[[ -x $exp/pre-commit ]] || fail "scripts/hooks/pre-commit is not executable"
-echo "ok: fresh clone -> core.hooksPath wired to scripts/hooks"
+[[ -x $exp/pre-commit ]] || fail ".git/quaqua-hooks/pre-commit is not executable"
+echo "ok: fresh clone -> core.hooksPath wired to .git/quaqua-hooks"
 
 # idempotent when it is already ours (and quiet about it)
 out=$(run 2>&1)
@@ -242,15 +237,21 @@ out=$(GIT_CONFIG_GLOBAL="$G" run 2>&1) || fail "run failed with a global core.ho
   || fail "the global core.hooksPath value was modified"
 echo "ok: foreign global core.hooksPath -> warned, not overwritten"
 
+# legacy migration: scripts/hooks -> .git/quaqua-hooks
+git -C "$R" config core.hooksPath "$R/scripts/hooks"
+out=$(run 2>&1)
+[[ "$(git -C "$R" config --get core.hooksPath)" == "$exp" ]] \
+  || fail "legacy core.hooksPath was not migrated"
+[[ $out == *"migrated"* ]] || fail "no migration log: $out"
+echo "ok: legacy core.hooksPath -> migrated to .git/quaqua-hooks"
+
 # not a git repo -> the wiring block is skipped, everything else still boots
 N="$T/notarepo"
 mkdir -p "$N"
 cp -R "$R/templates" "$R/USER.example.md" "$N/"
-mkdir -p "$N/scripts/workspace" "$N/scripts/hooks"
-cp "$src/workspace/init-workspace.sh" "$N/scripts/workspace/init-workspace.sh"
-cp "$src/hooks/pre-commit" "$N/scripts/hooks/pre-commit"
-( unset HERDR_PANE_ID; cd / && bash "$N/scripts/workspace/init-workspace.sh" ) >/dev/null \
-  || fail "init-workspace.sh failed outside a git repo"
+mkdir -p "$N/scripts/hooks"
+( unset HERDR_PANE_ID; cd "$N" && "${QUAQUA_BIN:-quaqua}" init ) >/dev/null \
+  || fail "init-workspace failed outside a git repo"
 [[ -f $N/memory/rules.md ]] || fail "non-repo workspace was not booted"
 echo "ok: outside a git repo -> hook wiring skipped, workspace still booted"
 
@@ -270,7 +271,7 @@ tag_as() {
   : > "$T/calls"
   ( export CALLS="$T/calls" HERDR_PANE_ID="$1" PANE_CURRENT_ID="$1" \
            PANE_AGENT="$2" PANE_CWD="$3" PA_PANE_ID="$1" PA_AGENT="$2" PA_AGENT_NAME="$4"
-    cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
+    cd "$R" && "${QUAQUA_BIN:-quaqua}" init ) >/dev/null \
     || fail "init-workspace.sh failed for pane $1 ($2/${4:-unnamed})"
   cat "$T/calls"
 }
@@ -299,7 +300,7 @@ echo "ok: herdr-grid -> opencode / claude-worker / Lead / foreign-dir panes stay
 ( export CALLS="$T/calls" PANE_CURRENT_ID="w1:p1" PANE_AGENT=claude PANE_CWD="$R" \
          PA_PANE_ID="w1:p1" PA_AGENT=claude
   unset HERDR_PANE_ID PA_AGENT_NAME
-  cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
+  cd "$R" && "${QUAQUA_BIN:-quaqua}" init ) >/dev/null \
   || fail "init-workspace.sh failed with herdr pane current"
 grep -qF "$tag" "$T/calls" \
   || fail "the CoS pane was not tagged via herdr pane current: $(cat "$T/calls")"
@@ -309,7 +310,7 @@ echo "ok: herdr-grid -> herdr pane current fallback still tags the CoS pane"
 : > "$T/calls"
 ( export CALLS="$T/calls" HERDR_PANE_ID="w1:p1" PANE_CURRENT_ID="w1:p1"
   unset PANE_AGENT PANE_CWD PA_PANE_ID PA_AGENT_NAME
-  cd / && bash "$R/scripts/workspace/init-workspace.sh" ) >/dev/null \
+  cd "$R" && "${QUAQUA_BIN:-quaqua}" init ) >/dev/null \
   || fail "init-workspace.sh failed when herdr reports no pane metadata"
 ! grep -q 'report-metadata' "$T/calls" || fail "tagged an unidentifiable pane: $(cat "$T/calls")"
 echo "ok: herdr-grid -> an unidentifiable pane fails closed (no tag, no error)"

@@ -111,7 +111,7 @@ fn config_get_cap_applies_project_override() {
         "--file",
         &repo_team(),
     ]);
-    assert_eq!(stdout(&base).trim(), "4");
+    assert_eq!(stdout(&base).trim(), "8");
 
     let zimage = run(&[
         "config",
@@ -175,6 +175,9 @@ fn config_invalid_fixtures_are_rejected() {
         ("reviewer-cannot-review.toml", "can_review = false"),
         ("missing-effort.toml", "effort is missing"),
         ("bad-effort.toml", "does not take effort 'banana'"),
+        ("bad-opencode-variant.toml", "does not take effort 'medium'"),
+        ("bad-opencode-openrouter-variant.toml", "does not take effort 'medium'"),
+        ("unknown-opencode-model.toml", "is not in allowlist (fix: add model and variants to config.rs model_effort_allowed)"),
         ("fallback-missing.toml", "fallback 'ghost' is not a kind"),
         ("fallback-self.toml", "fallback names itself"),
         ("fallback-cannot-review.toml", "cannot review"),

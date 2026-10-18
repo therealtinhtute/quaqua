@@ -14,7 +14,15 @@ mkdir -p "$root/scripts/auditor" "$T/bin" "$T/claude & tools" "$T/home"
 cp "$src/auditor/install-auditor.sh" "$root/scripts/auditor/"
 cp -R "$here/../scripts/auditor/systemd" "$root/scripts/auditor/"
 if [[ -d $here/../scripts/auditor/launchd ]]; then cp -R "$here/../scripts/auditor/launchd" "$root/scripts/auditor/"; fi
-ln -s "$BASH" "$T/bin/bash"  # proves the installer discovers, rather than hardcodes, Bash
+modern_bash=""
+for b in "$BASH" "$(command -v bash)" /opt/homebrew/bin/bash /opt/zerobrew/bin/bash /usr/local/bin/bash; do
+  if [[ -x $b ]] && "$b" -c '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))' 2>/dev/null; then
+    modern_bash="$b"
+    break
+  fi
+done
+[[ -n $modern_bash ]] || fail "no Bash >= 4.4 found on system for test harness"
+ln -s "$modern_bash" "$T/bin/bash"  # proves the installer discovers, rather than hardcodes, Bash
 cat > "$T/bin/uname" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$TEST_OS"
@@ -34,6 +42,11 @@ printf 'FORBIDDEN claude %s\n' "$*" >> "$CALLS"
 exit 99
 EOF
 chmod +x "$T/bin/uname" "$T/bin/systemctl" "$T/bin/launchctl" "$T/claude & tools/claude"
+cat > "$T/bin/quaqua" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$T/bin/quaqua"
 run() {
   : > "$T/calls"
   rc=0
@@ -61,17 +74,17 @@ plist="$T/home/Library/LaunchAgents/com.quaqua.auditor.plist"
 [[ -f $plist ]] || fail 'Darwin: no LaunchAgents plist'
 [[ -d $T/home/Library/Logs ]] || fail 'Darwin: log directory not created'
 [[ ! -s $T/calls ]] || fail "Darwin: invoked a manager or claude: $(cat "$T/calls")"
-python3 - "$plist" "$root" "$T/home" "$T/claude & tools" "$T/bin/bash" <<'PY'
+python3 - "$plist" "$root" "$T/home" "$T/claude & tools" "$T/bin/bash" "$T/bin/quaqua" <<'PY'
 import pathlib, plistlib, sys
-plist, root, home, claude_dir, bash_bin = sys.argv[1:]
+plist, root, home, claude_dir, bash_bin, quaqua_bin = sys.argv[1:]
 with open(plist, 'rb') as f:
     p = plistlib.load(f)
 assert p['Label'] == 'com.quaqua.auditor', p
-assert p['ProgramArguments'] == [bash_bin, root + '/scripts/auditor/auditor.sh'], p
-assert all(pathlib.Path(v).is_absolute() for v in p['ProgramArguments']), p
+assert p['ProgramArguments'] == [quaqua_bin, 'auditor', 'run'], p
+assert pathlib.Path(p['ProgramArguments'][0]).is_absolute(), p
 assert p['StartCalendarInterval'] == [{'Hour': 7, 'Minute': 0}, {'Hour': 19, 'Minute': 0}], p
 paths = p['EnvironmentVariables']['PATH'].split(':')
-assert str(pathlib.Path(bash_bin).parent) in paths and claude_dir in paths, paths
+assert str(pathlib.Path(quaqua_bin).parent) in paths and claude_dir in paths, paths
 assert '/usr/bin' in paths and '/bin' in paths, paths
 for k in ['StandardOutPath', 'StandardErrorPath']:
     assert p[k] == home + '/Library/Logs/quaqua-auditor.log', p
@@ -119,7 +132,7 @@ fi
 
 # No claude on the install PATH: checked before any destination is created.
 rm "$T/bin/bash" "$T/claude & tools/claude"
-ln -s "$BASH" "$T/bin/bash"
+ln -s "$modern_bash" "$T/bin/bash"
 # Only essential native tools are visible; no user's claude can leak in.
 rc=0
 TEST_OS=Darwin CALLS="$T/calls" HOME="$T/missing-claude-home" \
@@ -129,4 +142,19 @@ TEST_OS=Darwin CALLS="$T/calls" HOME="$T/missing-claude-home" \
 grep -q 'claude must be on PATH' "$T/err" || fail 'missing claude: no diagnostic'
 [[ ! -d $T/missing-claude-home ]] || fail 'missing claude: installed anyway'
 echo 'ok: Darwin -> requires claude on install PATH before writing files'
+# No quaqua on the install PATH: checked before any destination is created.
+rm "$T/bin/quaqua"
+cat > "$T/claude & tools/claude" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$T/claude & tools/claude"
+rc=0
+TEST_OS=Darwin CALLS="$T/calls" HOME="$T/missing-quaqua-home" \
+  PATH="$T/bin:$T/claude & tools:/usr/bin:/bin:/usr/sbin:/sbin" \
+  "$BASH" "$root/scripts/auditor/install-auditor.sh" > "$T/out" 2> "$T/err" || rc=$?
+[[ $rc -eq 1 ]] || fail "missing quaqua: exit $rc, want 1"
+grep -q 'quaqua must be on PATH' "$T/err" || fail 'missing quaqua: no diagnostic'
+[[ ! -d $T/missing-quaqua-home ]] || fail 'missing quaqua: installed anyway'
+echo 'ok: Darwin -> requires quaqua on install PATH before writing files'
 echo PASS

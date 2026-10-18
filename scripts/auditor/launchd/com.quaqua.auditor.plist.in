@@ -7,8 +7,9 @@
   <string>com.quaqua.auditor</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@BASH@</string>
-    <string>@ROOT@/scripts/auditor/auditor.sh</string>
+    <string>@QUAQUA@</string>
+    <string>auditor</string>
+    <string>run</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

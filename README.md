@@ -50,9 +50,9 @@ Rules:
 | `models.md` | Worker roster: nickname → kind / model / effort |
 | `.claude/settings.json` | Denies the built-in `Agent` tool so all workers go through Herdr |
 | `.claude/skills/herdr-orchestration/` | Worker flow + consolidated command, recovery, and assignment/acceptance references |
-| `scripts/auditor/auditor.sh` | Auditor: read-only drift + pipeline-run audit → `reports/audit-*.md` |
+| `quaqua auditor run` | Auditor: read-only drift + pipeline-run audit → `reports/audit-*.md` |
 | `scripts/auditor/install-auditor.sh`, `scripts/auditor/systemd/`, `scripts/auditor/launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
-| `scripts/workspace/init-workspace.sh`, `templates/` | Bootstraps a fresh clone's gitignored personal state (dirs + `memory/rules.md`, `projects/INDEX.md`, `_template.md`, `USER.md`); idempotent, never overwrites |
+| `quaqua init`, `templates/` | Bootstraps a fresh clone's gitignored personal state (dirs + `memory/rules.md`, `projects/INDEX.md`, `_template.md`, `USER.md`); idempotent, never overwrites |
 | `tests/` | Sandboxed test suite: `tests/run.sh` runs every `tests/test_*.sh` (the 2 slow suites only when the change touches a script they cover, or with `--slow`) and exits non-zero on any failure |
 | `USER.example.md` | Template for the per-workspace `USER.md` |
 | `SETUP-PROMPT.md` | Original prompt used to bootstrap this setup |
@@ -67,10 +67,10 @@ them. Bootstrap the skeleton — the dirs plus `memory/rules.md`,
 
 ```bash
 git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
-bash scripts/workspace/init-workspace.sh
+quaqua init
 ```
 
-`init-workspace.sh` is idempotent and never overwrites an existing file, so it
+`quaqua init` is idempotent and never overwrites an existing file, so it
 is safe to re-run after a pull. Then edit `USER.md` for the workspace, add one
 row per project to `projects/INDEX.md` (copy `projects/_template.md` for the
 card), and continue with the auditor install below. Templates live in
@@ -81,7 +81,7 @@ card), and continue with the auditor install below. Templates live in
 
 ```bash
 git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
-bash scripts/workspace/init-workspace.sh     # dirs + rules.md, INDEX.md, _template.md, USER.md
+quaqua init     # dirs + rules.md, INDEX.md, _template.md, USER.md
 bash scripts/auditor/install-auditor.sh  # installs scheduling files; prints manual activation command
 ```
 
@@ -95,7 +95,7 @@ Run `bash scripts/auditor/install-auditor.sh` with `claude` on PATH. The install
 Bash >= 4.4 from `command -v bash` and refuses the macOS system Bash 3.2.
 It renders `scripts/auditor/launchd/com.quaqua.auditor.plist.in` into
 `~/Library/LaunchAgents/com.quaqua.auditor.plist`, pinning the discovered Bash,
-this checkout's absolute `scripts/auditor/auditor.sh` path, and the install-time PATH (including
+the resolved `quaqua auditor run` path, and the install-time PATH (including
 claude's directory). Logs go to `~/Library/Logs/quaqua-auditor.log`; reports still go
 in this checkout's `reports/`. It never calls launchctl; run the printed bootstrap
 command yourself. Reinstall after moving the checkout or changing toolchain paths.
@@ -118,4 +118,4 @@ unless the change touches a script they cover, and prints which it skipped and w
 Tests run locally only (no CI).
 
 Run CoS (Quả Quả) from `~/quaqua` inside Herdr (`HERDR_ENV=1`); it spawns project Leads with
-`scripts/lead/spawn-lead.sh <slug>`.
+`quaqua lead spawn <slug>`.

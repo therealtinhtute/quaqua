@@ -22,3 +22,9 @@ Pick by task shape. Name = kind passed to `quaqua worker spawn`. Update "Seen" a
 - Implementer and reviewer must be different harnesses (e.g. sude builds → suhuynh reviews).
 - Read-only question → `detu`; design unclear → `truonglao` before any builder.
 - Unsure between two → cheaper tier first (tieude < sude < ni < suhuynh < truonglao); escalate only on a failed run.
+
+## Claude out — ACTIVE since 2026-10-17 (only when anh iu says Claude tokens are out)
+- CoS: anh iu opens opencode in `~/quaqua` (reads AGENTS.md); persona and rules unchanged.
+- suhuynh → opencode · opencode-go/deepseek-v4.1-flash · max (anh iu, 2026-10-17); ni/truonglao paused.
+- Builder in this mode = `sude` (omp), so the reviewer stays on a different harness.
+- Back to the table above when anh iu says Claude is back.

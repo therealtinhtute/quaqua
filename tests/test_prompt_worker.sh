@@ -29,6 +29,10 @@ echo "herdr $*" >> "$CALLS"
 content=${FAKE_CONTENT:-$'fake summary\n\n## Lessons\n- none'}
 case "${1:-} ${2:-}" in
   "api snapshot")
+    if [[ -n "${HERDR_STUB_SNAPSHOT:-}" && -f "${HERDR_STUB_SNAPSHOT}" ]]; then
+      cat "${HERDR_STUB_SNAPSHOT}"
+      exit 0
+    fi
     echo '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}'
     exit 0 ;;
   "agent get")
@@ -64,6 +68,8 @@ esac
 exit "${FAKE_RC:-0}"
 STUB
 chmod +x "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
 CLK=(PROMPT_WORKER_CLOCK_FILE="$T/clock" PROMPT_WORKER_SLEEP_CMD="$T/bin/advance-clock")
 printf '%s\n' 1700000000 > "$T/clock"
 cat > "$T/bin/advance-clock" <<'ADV'
@@ -78,15 +84,15 @@ prompt() {  # prompt <name> <task> [VAR=val...]; sets rc, $T/out, $T/err, $T/cal
   local name=$1 task=$2; shift 2
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "$@" bash "$src/worker/prompt-worker.sh" "$name" "$task" >"$T/out" 2>"$T/err" || rc=$?
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" FAKE_NAME="$name" \
+    env "$@" "${QUAQUA_BIN:-quaqua}" worker prompt "$name" "$task" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 reject() {  # reject <label> [args...]
   local label=$1; shift
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-    bash "$src/worker/prompt-worker.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" \
+    "${QUAQUA_BIN:-quaqua}" worker prompt "$@" >"$T/out" 2>"$T/err" || rc=$?
   [[ $rc -eq 1 ]] || fail "$label: exit $rc, want 1"
   grep -q '^# Usage:' "$T/err" || fail "$label: no usage on stderr"
   echo "ok: $label -> exit 1, usage on stderr"
@@ -97,8 +103,8 @@ resume() {
   local name=$1; shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-    env "$@" bash "$src/worker/prompt-worker.sh" --resume "$name" >"$T/out" 2>"$T/err" || rc=$?
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" \
+    env "$@" "${QUAQUA_BIN:-quaqua}" worker prompt --resume "$name" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # malformed <label> <name> <missing> — exit 6 + the WATCHDOG line, no path
@@ -119,8 +125,8 @@ Current design (open to challenge): via the existing helper'
 reject_brief() {  # reject_brief <label> <task>: missing headers -> exit 1
   local label=$1 task=$2
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-    bash "$src/worker/prompt-worker.sh" sude-brief "$task" >"$T/out" 2>"$T/err" || rc=$?
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" \
+    "${QUAQUA_BIN:-quaqua}" worker prompt sude-brief "$task" >"$T/out" 2>"$T/err" || rc=$?
   [[ $rc -eq 1 ]] || fail "$label: exit $rc, want 1"
   grep -q 'Goal.*Hard constraints.*Current design' "$T/err" \
     || fail "$label: no brief error on stderr: $(cat "$T/err")"
@@ -151,7 +157,7 @@ check_brief() {  # check_brief <task> [VAR=val...]; sets rc, $T/out, $T/err
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-    env "$@" bash "$src/worker/prompt-worker.sh" --check-brief "$task" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" "${QUAQUA_BIN:-quaqua}" worker prompt --check-brief "$task" >"$T/out" 2>"$T/err" || rc=$?
 }
 check_brief "$brief"
 [[ $rc -eq 0 ]] || fail "check-brief valid: exit $rc, want 0: $(cat "$T/err")"
@@ -171,7 +177,7 @@ check_brief "fix the flaky test"
 grep -q 'Goal.*Hard constraints.*Current design' "$T/err" \
   || fail "check-brief invalid: no brief error: $(cat "$T/err")"
 rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-  bash "$src/worker/prompt-worker.sh" --check-brief >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker prompt --check-brief >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "check-brief no arg: exit $rc, want 1"
 [[ ! -s $T/calls ]] || fail "--check-brief called herdr: $(cat "$T/calls")"
 echo "ok: --check-brief -> validates headers, resolves budget (brief/env/default), no herdr"
@@ -360,7 +366,7 @@ grep -q 'agent idle' "$T/err" || fail "sude-ompidle: no agent idle reason: $(cat
 echo "ok: true idle without run file -> exit 3 after idle_sec"
 
 # ── omp watchdog: (b) false positive — cat AGENTS.md in historical output -> no exit 5 ──
-agents_output=$'6. `scripts/worker/cleanup-worker.sh <name> <repo>` right after `runs/<name>.md` is read + its test re-run passes — every worker, no approval needed (branch is kept; merge still needs approval). Then `scripts/worker/grid-workers.sh`.
+agents_output=$'6. `quaqua worker cleanup <name> <repo>` right after `runs/<name>.md` is read + its test re-run passes — every worker, no approval needed (branch is kept; merge still needs approval). Then `quaqua grid reconcile`.
 
 ## Rules
 No push, branch delete, or main merge without anh iu'\''s approval. A Lead merges Peer branches into its project integration branch (acceptance). Max 4 task workers per orchestrator (the CoS and each Lead) — a pipeline counts as 2. One task per worker.

@@ -3,7 +3,7 @@
 
 use crate::config::load_team_config;
 use crate::git::{Git, GitOps};
-use crate::lead::spawn::find_quaqua_root;
+use crate::workspace::find_quaqua_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

@@ -64,17 +64,17 @@ fn equivalent_spellings_are_blocked() {
 fn scripts_and_read_only_herdr_calls_are_allowed() {
     assert_cases(
         &[
-            "scripts/worker/spawn-worker.sh sude-x sude ~/repo",
-            "scripts/worker/grid-workers.sh --tab x-workers --dry-run",
+            "quaqua worker spawn sude-x sude ~/repo",
+            "quaqua grid reconcile --tab x-workers --dry-run",
             "herdr agent list",
             "herdr agent read sude-x --lines 80",
             "herdr pane send-keys w1:p5 enter",
             "herdr tab list",
             "herdr workspace list",
             "herdr workspace get w7",
-            "scripts/lead/cleanup-lead.sh baro",
-            "grep -n \"herdr pane split\" scripts/worker/spawn-worker.sh",
-            "bash scripts/worker/spawn-worker.sh sude-x sude ~/repo",
+            "quaqua lead cleanup baro",
+            "grep -n \"herdr pane split\" crates/quaqua/src/lib.rs",
+            "quaqua worker spawn sude-x sude ~/repo",
             "bash -c 'echo no herdr here'",
             "echo $(herdr agent list)",
         ],

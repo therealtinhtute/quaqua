@@ -129,6 +129,7 @@ export QUAQUA_SCRIPT_DIR="$T/bin"
 # the pipeline's grid check is in-process (`herdr api snapshot`): pin the stub
 # so a leaked HERDR_BIN_PATH can never reach the live herdr
 export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
 unset HERDR_STUB_SNAPSHOT
 
 # ── 1. Pipeline execution: builder + reviewer gridded into GRID_TAB ──────────────
@@ -147,7 +148,7 @@ rc=0
 snapcount=$(grep -c '^herdr api snapshot$' "$CALLS" || true)
 [[ "$snapcount" -ge 2 ]] || fail "pipeline grid check missing (want >=2, got $snapcount): $(cat "$CALLS")"
 first_snap=$(grep -n '^herdr api snapshot$' "$CALLS" | head -1 | cut -d: -f1 || true)
-builder_spawn=$(grep -n '^spawn sude-pgrid' "$CALLS" | head -1 | cut -d: -f1 || true)
+builder_spawn=$(grep -n 'agent start sude-pgrid' "$CALLS" | head -1 | cut -d: -f1 || true)
 [[ -n "$first_snap" && -n "$builder_spawn" && "$builder_spawn" -lt "$first_snap" ]] \
   || fail "builder grid check not after the spawn: $(cat "$CALLS")"
 ! grep -q 'warning: grid check failed' "$T/err" \
@@ -155,6 +156,7 @@ builder_spawn=$(grep -n '^spawn sude-pgrid' "$CALLS" | head -1 | cut -d: -f1 || 
 echo "ok: builder + reviewer grid checked in-process"
 
 # ── 1b. an unreachable herdr pauses the run before any prompt ────────────────
+: > "$CALLS"
 rc=0
 GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0 "$bin" pipeline gfail "$T/repo" --brief "$T/brief.md" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 5 ]] || fail "grid failure: exit $rc, want 5: $(cat "$T/err")"

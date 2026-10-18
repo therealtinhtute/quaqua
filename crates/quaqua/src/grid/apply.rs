@@ -9,28 +9,8 @@ pub struct MoveResult {
     pub previous_pane_id: Option<String>,
 }
 
-pub trait HerdrDriver {
-    fn snapshot(&mut self) -> Result<Snapshot, String>;
-    fn move_pane(&mut self, pane: &str, target: &Target) -> Result<MoveResult, String>;
-    fn rename_pane(&mut self, pane: &str, label: &str) -> Result<(), String>;
-}
-
-pub struct CliHerdrDriver {
-    pub bin: String,
-}
-
-impl CliHerdrDriver {
-    pub fn new() -> Self {
-        let bin = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
-        CliHerdrDriver { bin }
-    }
-}
-
-impl Default for CliHerdrDriver {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use crate::herdr::HerdrDriver;
+pub type CliHerdrDriver = crate::herdr::Herdr;
 
 pub fn parse_move_response(val: &serde_json::Value, orig_pane: &str) -> Result<MoveResult, String> {
     let mr = val
@@ -73,185 +53,6 @@ pub fn parse_move_response(val: &serde_json::Value, orig_pane: &str) -> Result<M
     })
 }
 
-impl HerdrDriver for CliHerdrDriver {
-    fn snapshot(&mut self) -> Result<Snapshot, String> {
-        if let Ok(stub_path) = std::env::var("HERDR_STUB_SNAPSHOT") {
-            let content = std::fs::read_to_string(&stub_path)
-                .map_err(|e| format!("cannot read HERDR_STUB_SNAPSHOT {stub_path}: {e}"))?;
-            let val: serde_json::Value = serde_json::from_str(&content)
-                .map_err(|e| format!("invalid stub snapshot JSON: {e}"))?;
-            return super::types::parse_snapshot_value(&val);
-        }
-
-        let out = std::process::Command::new(&self.bin)
-            .args(["api", "snapshot"])
-            .output()
-            .map_err(|e| format!("cannot run {} api snapshot: {e}", self.bin))?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("{} api snapshot failed: {err}", self.bin));
-        }
-        let val: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| format!("invalid snapshot JSON from herdr: {e}"))?;
-        super::types::parse_snapshot_value(&val)
-    }
-
-    fn move_pane(&mut self, pane: &str, target: &Target) -> Result<MoveResult, String> {
-        if std::env::var("HERDR_STUB_SNAPSHOT").is_ok() {
-            let tab_id = match target {
-                Target::NewTab { .. } => "w1:t_stub_new".to_string(),
-                Target::Split { tab, .. } => tab.clone(),
-            };
-            return Ok(MoveResult {
-                pane_id: pane.to_string(),
-                tab_id,
-                previous_pane_id: None,
-            });
-        }
-
-        let mut cmd = std::process::Command::new(&self.bin);
-        cmd.args(["pane", "move", pane]);
-        match target {
-            Target::NewTab { label } => {
-                cmd.args(["--new-tab", "--label", label, "--no-focus"]);
-            }
-            Target::Split {
-                tab,
-                anchor,
-                direction,
-                ratio,
-            } => {
-                let ratio_s = format!("{ratio:.1}");
-                cmd.args([
-                    "--tab",
-                    tab,
-                    "--split",
-                    direction,
-                    "--target-pane",
-                    anchor,
-                    "--ratio",
-                    &ratio_s,
-                    "--no-focus",
-                ]);
-            }
-        }
-        let out = cmd
-            .output()
-            .map_err(|e| format!("cannot run {} pane move: {e}", self.bin))?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("pane move failed: {err}"));
-        }
-        let val: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| format!("invalid move response JSON: {e}"))?;
-        parse_move_response(&val, pane)
-    }
-
-    fn rename_pane(&mut self, pane: &str, label: &str) -> Result<(), String> {
-        if std::env::var("HERDR_STUB_SNAPSHOT").is_ok() {
-            return Ok(());
-        }
-        let out = std::process::Command::new(&self.bin)
-            .args(["pane", "rename", pane, label])
-            .output()
-            .map_err(|e| format!("cannot run {} pane rename: {e}", self.bin))?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("pane rename failed: {err}"));
-        }
-        Ok(())
-    }
-}
-
-/// Fake driver for testing without calling real herdr.
-/// Models reality:
-/// - Assigns a new pane ID on move.
-/// - Creates a tab/layout on NewTab.
-/// - Updates current_snapshot with the new pane ID and tab ID.
-/// - Updates agent pane_ids (N2).
-pub struct FakeHerdrDriver {
-    pub current_snapshot: Snapshot,
-    pub executed_moves: Vec<(String, Target)>,
-    pub executed_renames: Vec<(String, String)>,
-    pub next_pane_counter: u64,
-    pub next_tab_counter: u64,
-}
-
-impl FakeHerdrDriver {
-    pub fn new(snapshot: Snapshot) -> Self {
-        FakeHerdrDriver {
-            current_snapshot: snapshot,
-            executed_moves: Vec::new(),
-            executed_renames: Vec::new(),
-            next_pane_counter: 100,
-            next_tab_counter: 100,
-        }
-    }
-}
-
-impl HerdrDriver for FakeHerdrDriver {
-    fn snapshot(&mut self) -> Result<Snapshot, String> {
-        Ok(self.current_snapshot.clone())
-    }
-
-    fn move_pane(&mut self, pane: &str, target: &Target) -> Result<MoveResult, String> {
-        self.executed_moves.push((pane.to_string(), target.clone()));
-        self.next_pane_counter += 1;
-        self.next_tab_counter += 1;
-        let new_pane_id = format!("w1:p{}", self.next_pane_counter);
-
-        let tab_id = match target {
-            Target::NewTab { label } => {
-                let tid = format!("w1:t_{}", self.next_tab_counter);
-                self.current_snapshot.tabs.push(super::types::Tab {
-                    tab_id: tid.clone(),
-                    workspace_id: Some("w1".to_string()),
-                    label: Some(label.clone()),
-                    pane_count: Some(1),
-                });
-                self.current_snapshot.layouts.push(super::types::Layout {
-                    tab_id: tid.clone(),
-                    workspace_id: Some("w1".to_string()),
-                    area: Some(super::types::Rect { x: 0, y: 0, width: 200, height: 50 }),
-                    panes: vec![super::types::PaneLayout {
-                        pane_id: new_pane_id.clone(),
-                        rect: Some(super::types::Rect { x: 0, y: 0, width: 200, height: 50 }),
-                    }],
-                    zoomed: None,
-                });
-                tid
-            }
-            Target::Split { tab, .. } => tab.clone(),
-        };
-
-        // Update current_snapshot so subsequent fresh snapshots reflect the moved pane
-        if let Some(p) = self.current_snapshot.panes.iter_mut().find(|p| p.pane_id == pane) {
-            p.pane_id = new_pane_id.clone();
-            p.tab_id = Some(tab_id.clone());
-        }
-
-        // N2: Update agent pane_id
-        for a in &mut self.current_snapshot.agents {
-            if a.pane_id.as_deref() == Some(pane) {
-                a.pane_id = Some(new_pane_id.clone());
-            }
-        }
-
-        Ok(MoveResult {
-            pane_id: new_pane_id,
-            tab_id,
-            previous_pane_id: Some(pane.to_string()),
-        })
-    }
-
-    fn rename_pane(&mut self, pane: &str, label: &str) -> Result<(), String> {
-        self.executed_renames.push((pane.to_string(), label.to_string()));
-        if let Some(p) = self.current_snapshot.panes.iter_mut().find(|p| p.pane_id == pane) {
-            p.label = Some(label.to_string());
-        }
-        Ok(())
-    }
-}
 
 /// Execute layout ops via a HerdrDriver, verifying fresh snapshots before each move,
 /// propagating deferrals, parking panes if in-tab repositioning, and returning
@@ -262,24 +63,55 @@ pub fn apply_ops<D: HerdrDriver>(
     _initial_snapshot: Option<&Snapshot>,
 ) -> Result<HashMap<String, String>, String> {
     let mut pane_map: HashMap<String, String> = HashMap::new();
-    let mut latest_tab: Option<String> = None;
+    let mut latest_tabs: HashMap<(String, String), String> = HashMap::new();
     let mut scratch_counter = 0;
 
+    let init_snap = match _initial_snapshot {
+        Some(s) => s.clone(),
+        None => driver.snapshot()?,
+    };
+    let pane_group = |pid: &str| -> String {
+        init_snap
+            .panes
+            .iter()
+            .find(|p| p.pane_id == pid)
+            .and_then(|p| p.tokens.as_ref())
+            .and_then(|t| t.grid_group.as_deref())
+            .unwrap_or("workers")
+            .to_string()
+    };
+
     let mut deferred_panes: HashSet<String> = HashSet::new();
-    let mut workers_tab_deferred = false;
+    let mut deferred_tabs: HashSet<(String, String)> = HashSet::new();
+    let mut group_new_tab_count: HashMap<String, usize> = HashMap::new();
+    let mut group_created_new_tab_count: HashMap<String, usize> = HashMap::new();
 
     for op in ops {
+        let grp = pane_group(&op.pane);
         // Finding 3: Propagate deferral to dependent ops
         if op.deferred {
             deferred_panes.insert(op.pane.clone());
             if matches!(op.target, Target::NewTab { .. }) {
-                workers_tab_deferred = true;
+                let cnt = group_new_tab_count.entry(grp.clone()).or_insert(0);
+                let tab_ref = if *cnt == 0 { "@workers" } else { "@workers-2" };
+                deferred_tabs.insert((grp.clone(), tab_ref.to_string()));
+                *cnt += 1;
             }
             continue;
         }
 
+        if matches!(op.target, Target::NewTab { .. }) {
+            let cnt = group_new_tab_count.entry(grp.clone()).or_insert(0);
+            *cnt += 1;
+        }
+
         if let Target::Split { tab, anchor, .. } = &op.target {
-            if deferred_panes.contains(anchor) || (tab == "@workers" && workers_tab_deferred) {
+            let tab_def = if tab == "@workers" || tab == "@workers-2" {
+                deferred_tabs.contains(&(grp.clone(), tab.clone()))
+            } else {
+                false
+            };
+            if deferred_panes.contains(anchor) || tab_def {
                 deferred_panes.insert(op.pane.clone());
                 continue;
             }
@@ -342,9 +174,11 @@ pub fn apply_ops<D: HerdrDriver>(
                     .ok_or_else(|| format!("apply: anchor {actual_anchor} missing from snapshot"))?;
 
                 // Finding 5 & N1: Resolve @workers to the workers tab, NEVER the orchestrator tab
-                let actual_tab = if tab == "@workers" {
-                    if let Some(lt) = &latest_tab {
-                        lt.clone()
+                let actual_tab = if tab == "@workers" || tab.starts_with("@workers-") {
+                    let resolved = latest_tabs.get(&(worker_group.to_string(), tab.clone())).cloned();
+
+                    if let Some(r) = resolved {
+                        r
                     } else {
                         // Look for an existing valid workers tab for this group,
                         // by the same acceptance predicate the plan and the
@@ -362,7 +196,7 @@ pub fn apply_ops<D: HerdrDriver>(
                         if is_workers_tab {
                             anchor_tid.to_string()
                         } else {
-                            return Err(format!("apply: cannot resolve @workers tab for group {worker_group}"));
+                            return Err(format!("apply: cannot resolve {tab} tab for group {worker_group}"));
                         }
                     }
                 } else {
@@ -438,7 +272,10 @@ pub fn apply_ops<D: HerdrDriver>(
         }
 
         if !res.tab_id.is_empty() && matches!(op.target, Target::NewTab { .. }) {
-            latest_tab = Some(res.tab_id);
+            let cnt = group_created_new_tab_count.entry(worker_group.to_string()).or_insert(0);
+            let tab_ref = if *cnt == 0 { "@workers" } else { "@workers-2" };
+            latest_tabs.insert((worker_group.to_string(), tab_ref.to_string()), res.tab_id.clone());
+            *cnt += 1;
         }
     }
 

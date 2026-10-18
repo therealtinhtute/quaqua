@@ -18,8 +18,7 @@ bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
 export QUAQUA_BIN="$bin"
 
 # ── sandbox: temp worker repo + fake herdr ──────────────────────────────────
-mkdir -p "$T/quaqua" "$T/bin" "$T/scripts/worker"
-cp "$src/worker/cleanup-worker.sh" "$T/scripts/worker/cleanup-worker.sh"
+mkdir -p "$T/quaqua" "$T/bin"
 
 cat > "$T/bin/herdr" <<'EOF'
 #!/usr/bin/env bash
@@ -92,7 +91,7 @@ run_cleanup() {  # run_cleanup <name> [VAR=val...]
   local name=$1; shift
   : > "$T/events"
   env PATH="$T/bin:$PATH" EVENTS="$T/events" "$@" \
-    bash "$T/scripts/worker/cleanup-worker.sh" "$name" "$T/quaqua"
+    "${QUAQUA_BIN:-quaqua}" worker cleanup "$name" "$T/quaqua"
 }
 
 # ── 1. cleanup removes the worktree; grid check runs after the pane close ───

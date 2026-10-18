@@ -10,7 +10,7 @@ use std::path::Path;
 
 pub const SCHEMA_VERSION: u32 = 2;
 /// AGENTS.md `## Rules`: "Max 4 task workers per orchestrator".
-pub const CAP_CEILING: i64 = 4;
+pub const CAP_CEILING: i64 = 8;
 /// `can_spawn` / `can_prompt` vocabulary (role classes).
 pub const ROLE_CLASSES: [&str; 4] = ["cos", "lead", "peer", "taskforce"];
 /// `[roles.<r>]` table keys.
@@ -155,6 +155,8 @@ pub struct Strategy {
     pub default_reviewer: Vec<String>,
     #[serde(default = "default_differ")]
     pub builder_reviewer_differ: String,
+    #[serde(default)]
+    pub lead_kind: Option<String>,
 }
 
 impl Default for Strategy {
@@ -163,6 +165,7 @@ impl Default for Strategy {
             default_kind: String::new(),
             default_reviewer: Vec::new(),
             builder_reviewer_differ: default_differ(),
+            lead_kind: None,
         }
     }
 }
@@ -196,6 +199,28 @@ pub fn effort_allowed(harness: &str, effort: &str) -> bool {
         "omp" => ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"].contains(&effort),
         "claude" => ["low", "medium", "high", "xhigh", "max"].contains(&effort),
         _ => false,
+    }
+}
+
+/// The variant vocabulary allowed for known opencode models.
+/// Key is the last path segment of the model ID (e.g. "deepseek-v4.1-flash").
+pub fn opencode_model_variants(model: &str) -> Option<&'static [&'static str]> {
+    let model_id = model.rsplit('/').next().unwrap_or(model);
+    match model_id {
+        "deepseek-v4.1-flash" => Some(&["low", "high", "max"]),
+        _ => None,
+    }
+}
+
+/// Check if an effort/variant value is allowed for a specific harness and model.
+/// opencode models can restrict variant vocabulary (e.g. deepseek-v4.1-flash takes low, high, max).
+pub fn model_effort_allowed(harness: &str, model: &str, effort: &str) -> bool {
+    if harness != "opencode" {
+        return true;
+    }
+    match opencode_model_variants(model) {
+        Some(allowed) => allowed.contains(&effort),
+        None => false,
     }
 }
 
@@ -437,6 +462,25 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
                 kind.harness
             ));
         }
+        if kind.harness == "opencode" {
+            match opencode_model_variants(&kind.model) {
+                Some(allowed) => {
+                    if !allowed.contains(&effort) {
+                        return Err(format!(
+                            "kind '{name}': harness 'opencode' model '{}' does not take effort '{effort}' (allowed: {})",
+                            kind.model,
+                            allowed.join(", ")
+                        ));
+                    }
+                }
+                None => {
+                    return Err(format!(
+                        "kind '{name}': opencode model '{}' is not in allowlist (fix: add model and variants to config.rs model_effort_allowed)",
+                        kind.model
+                    ));
+                }
+            }
+        }
         if let Some(fb) = kind.fallback.as_deref() {
             if fb.trim().is_empty() {
                 return Err(format!("kind '{name}': fallback is empty"));
@@ -483,6 +527,7 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
         ["timers", "grace"] => cfg.timers.grace.to_string(),
         ["timers", "pilot_budget"] => cfg.timers.pilot_budget.clone(),
         ["strategy", "default_kind"] => cfg.strategy.default_kind.clone(),
+        ["strategy", "lead_kind"] => cfg.strategy.lead_kind.clone().unwrap_or_else(|| "tieude".to_string()),
         ["strategy", "default_reviewer"] => cfg.strategy.default_reviewer.join("\n"),
         ["strategy", "builder_reviewer_differ"] => cfg.strategy.builder_reviewer_differ.clone(),
         ["kinds", k, field] => {
@@ -555,7 +600,7 @@ default_reviewer = ["suhuynh"]
 builder_reviewer_differ = "harness"
 [kinds.tieude]
 harness = "opencode"
-model = "m"
+model = "opencode-go/deepseek-v4.1-flash"
 effort = "max"
 fallback = "suhuynh"
 can_review = false
@@ -581,7 +626,7 @@ workers_tab = "workers"
     #[test]
     fn cap_over_is_rejected() {
         let mut c = base();
-        c.limits.max_workers_per_orchestrator = 5;
+        c.limits.max_workers_per_orchestrator = 9;
         assert!(validate(&c).unwrap_err().contains("over the cap"));
     }
 
@@ -647,5 +692,37 @@ workers_tab = "workers"
         c.kinds.get_mut("suhuynh").unwrap().fallback = Some("tieude".to_string());
         let err = validate(&c).unwrap_err();
         assert!(err.contains("cannot review"), "{err}");
+    }
+
+    #[test]
+    fn opencode_model_variant_is_enforced() {
+        let mut c = base();
+        c.kinds.get_mut("tieude").unwrap().model = "opencode-go/deepseek-v4.1-flash".to_string();
+        // medium is a valid opencode variant in general, but deepseek-v4.1-flash only takes low, high, max
+        c.kinds.get_mut("tieude").unwrap().effort = Some("medium".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("does not take effort 'medium'"), "{err}");
+
+        // openrouter path also matches last segment and rejects medium
+        c.kinds.get_mut("tieude").unwrap().model = "openrouter/deepseek/deepseek-v4.1-flash".to_string();
+        c.kinds.get_mut("tieude").unwrap().effort = Some("medium".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("does not take effort 'medium'"), "{err}");
+
+        // unknown opencode model rejected with fix message
+        c.kinds.get_mut("tieude").unwrap().model = "opencode-go/unknown-model".to_string();
+        c.kinds.get_mut("tieude").unwrap().effort = Some("max".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(
+            err.contains("is not in allowlist (fix: add model and variants to config.rs model_effort_allowed)"),
+            "{err}"
+        );
+
+        // low and max work for known models
+        c.kinds.get_mut("tieude").unwrap().model = "opencode-go/deepseek-v4.1-flash".to_string();
+        c.kinds.get_mut("tieude").unwrap().effort = Some("low".to_string());
+        assert!(validate(&c).is_ok());
+        c.kinds.get_mut("tieude").unwrap().effort = Some("max".to_string());
+        assert!(validate(&c).is_ok());
     }
 }

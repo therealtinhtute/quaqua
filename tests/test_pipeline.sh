@@ -150,7 +150,7 @@ run_pipe() {
   CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
-    env "${vars[@]}" bash "$src/lead/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" "${QUAQUA_BIN:-quaqua}" pipeline "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── arg validation: refused before any spawn/prompt ─────────────────────────
@@ -169,9 +169,9 @@ reject "missing --brief"      'brief.*required' -- isl "$T/repo"
 reject "missing brief file"   'brief.*required' -- isl "$T/repo" --brief "$T/nope.md"
 printf 'just prose\n' > "$T/nobrief.md"
 reject "brief lacks headers"  'Goal.*Hard constraints.*Current design' -- isl "$T/repo" --brief "$T/nobrief.md"
-reject "same harness"         'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder suhuynh --reviewer truonglao
+reject "same harness"         'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder tieude --reviewer suhuynh
 reject "same kind"            'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder suhuynh --reviewer suhuynh
-reject "non-claude reviewer"  'claude kind' -- isl "$T/repo" --brief "$T/brief.md" --builder ni --reviewer sude
+reject "non-reviewer kind"    'can_review = false in team.toml' -- isl "$T/repo" --brief "$T/brief.md" --builder ni --reviewer sude
 reject "bad --review"         'auto|always|skip' -- isl "$T/repo" --brief "$T/brief.md" --review maybe
 reject "--rounds 0"           'integer >= 1' -- isl "$T/repo" --brief "$T/brief.md" --rounds 0
 reject "builder name >20"     'exceeds 20 chars' -- abcdefghijklmnopq "$T/repo" --brief "$T/brief.md"
@@ -210,8 +210,8 @@ grep -q 'worktree add -b quaqua/suhuynh-islr1 .* c0ffee1deadbeef' "$T/calls" \
   || fail "isl resume: reviewer not based on the gated head sha: $(cat "$T/calls")"
 grep -q 'commit c0ffee1' "$runsdir/pipeline-isl.md" \
   || fail "isl resume: committed head sha not recorded in the report"
-grep -q -- '--permission-mode dontAsk' "$T/calls" \
-  || fail "isl resume: reviewer spawned without read-only profile"
+grep -qF 'agent start suhuynh-islr1 --kind opencode' "$T/calls" \
+  || fail "isl resume: reviewer not spawned as opencode: $(cat "$T/calls")"
 ! grep -q 'agent start sude-isl' "$T/calls" || fail "isl resume: builder respawned"
 grep -q 'pane close' "$T/calls" || fail "isl resume: reviewer pane not closed"
 grep -q 'worktree remove' "$T/calls" || fail "isl resume: reviewer worktree kept"
@@ -313,11 +313,12 @@ echo "ok: --base -> builder worktree starts at quaqua/integ"
 # grid check is observable. The check is in-process: one `herdr api snapshot`
 # per check (the inner spawn/cleanup hooks are skipped by GRID_SKIP, so an
 # `agent list`-free extra snapshot would mean a leak).
-mkdir -p "$T/p2/scripts/lead" "$T/p2/scripts/worker"
-cp "$src/lead/pipeline.sh" "$T/p2/scripts/lead/"
-cp -R "$src/lib" "$T/p2/scripts/"
-cp "$src/worker/prompt-worker.sh" "$src/worker/spawn-worker.sh" \
-   "$src/worker/cleanup-worker.sh" "$T/p2/scripts/worker/"
+mkdir -p "$T/p2/scripts/worker"
+cat > "$T/p2/scripts/worker/spawn-worker.sh" << 'EOF'
+#!/usr/bin/env bash
+exec "${QUAQUA_BIN:-quaqua}" worker spawn "$@"
+EOF
+chmod +x "$T/p2/scripts/worker/spawn-worker.sh"
 
 run_pipe2() {  # like run_pipe, but against $T/p2/scripts and without GRID_SKIP
   local vars=()
@@ -329,7 +330,7 @@ run_pipe2() {  # like run_pipe, but against $T/p2/scripts and without GRID_SKIP
     HERDR_BIN_PATH="$T/bin/herdr" QUAQUA_OWNER=cos \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
-    env "${vars[@]}" bash "$T/p2/scripts/lead/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    QUAQUA_SCRIPT_DIR="$T/p2/scripts/lead" env "${vars[@]}" "${QUAQUA_BIN:-quaqua}" pipeline "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 # The pipeline's grid check is in-process now (one `herdr api snapshot` per
 # check); the --only/--tab scoping is covered in crates/quaqua/tests/grid.rs.
@@ -689,7 +690,7 @@ run_rg() {  # real-git run (only herdr stubbed); sets rc, $T/out, $T/err, $T/cal
   CALLS="$T/calls" HOME="$T/home" PATH="$T/rgbin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 T="$T" \
-    env "${vars[@]}" bash "$src/lead/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" "${QUAQUA_BIN:-quaqua}" pipeline "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # F2: the reviewer worktree is created at exactly the committed tip the gate saw
