@@ -2039,6 +2039,18 @@ fn test_state_atomic_write_and_metadata_roundtrip() {
     WorkerMetadata::save_autoext(&temp, "worker1", 600).unwrap();
     assert_eq!(WorkerMetadata::load_autoext(&temp, "worker1"), 600);
 
+    assert_eq!(WorkerMetadata::load_elapsed(&temp, "worker1"), 0);
+    WorkerMetadata::save_elapsed(&temp, "worker1", 120).unwrap();
+    assert_eq!(WorkerMetadata::load_elapsed(&temp, "worker1"), 120);
+
+    assert_eq!(WorkerMetadata::load_progress(&temp, "worker1"), 0);
+    WorkerMetadata::save_progress(&temp, "worker1", 12345).unwrap();
+    assert_eq!(WorkerMetadata::load_progress(&temp, "worker1"), 12345);
+
+    assert!(!WorkerMetadata::has_nudged(&temp, "worker1"));
+    WorkerMetadata::record_nudged(&temp, "worker1").unwrap();
+    assert!(WorkerMetadata::has_nudged(&temp, "worker1"));
+
     // 3. ExecutionState
     let pipe_file = temp.join("pipeline-myfeature.state");
     std::fs::write(&pipe_file, "lead=lead1\nbuilder=sude\nfinished=0\n").unwrap();
@@ -2046,11 +2058,21 @@ fn test_state_atomic_write_and_metadata_roundtrip() {
     assert!(!es.is_finished());
     assert_eq!(es.owner(), "lead1");
 
+    // A file without finished=0 counts as finished (exact base cap.rs parity)
+    let pipe_no_fin = temp.join("pipeline-nofin.state");
+    std::fs::write(&pipe_no_fin, "lead=lead1\nbuilder=sude\n").unwrap();
+    let es_no_fin = ExecutionState::load(&pipe_no_fin).expect("must parse pipeline state");
+    assert!(es_no_fin.is_finished(), "missing finished=0 must be considered finished");
+
     let tf_file = temp.join("taskforce-eval.state");
     std::fs::write(&tf_file, "task=eval\nowner=cos\nfinished=1\n").unwrap();
     let es_tf = ExecutionState::load(&tf_file).expect("must parse taskforce state");
     assert!(es_tf.is_finished());
     assert_eq!(es_tf.owner(), "cos");
 
+    // advisor- is not part of taskforce state files
+    let adv_file = temp.join("advisor-test.state");
+    std::fs::write(&adv_file, "task=eval\nowner=cos\nfinished=0\n").unwrap();
+    assert_eq!(ExecutionState::load(&adv_file), None);
     let _ = std::fs::remove_dir_all(&temp);
 }

@@ -162,6 +162,35 @@ impl WorkerMetadata {
     pub fn save_srt(runs_dir: &Path, name: &str, srt_json: &str) -> io::Result<()> {
         atomic_write(&Self::srt_path(runs_dir, name), srt_json)
     }
+    pub fn load_elapsed(runs_dir: &Path, name: &str) -> u64 {
+        fs::read_to_string(Self::elapsed_path(runs_dir, name))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    pub fn save_elapsed(runs_dir: &Path, name: &str, elapsed: u64) -> io::Result<()> {
+        atomic_write(&Self::elapsed_path(runs_dir, name), format!("{elapsed}\n"))
+    }
+
+    pub fn load_progress(runs_dir: &Path, name: &str) -> u64 {
+        fs::read_to_string(Self::progress_path(runs_dir, name))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    pub fn save_progress(runs_dir: &Path, name: &str, progress: u64) -> io::Result<()> {
+        atomic_write(&Self::progress_path(runs_dir, name), format!("{progress}\n"))
+    }
+
+    pub fn has_nudged(runs_dir: &Path, name: &str) -> bool {
+        Self::nudged_path(runs_dir, name).exists()
+    }
+
+    pub fn record_nudged(runs_dir: &Path, name: &str) -> io::Result<()> {
+        atomic_write(&Self::nudged_path(runs_dir, name), "")
+    }
 
     /// Reset transient watchdog state files when initiating a fresh prompt.
     pub fn reset_prompt_state(runs_dir: &Path, name: &str) {
@@ -247,18 +276,19 @@ impl ExecutionState {
         let file_name = path.file_name().and_then(|n| n.to_str())?;
         let is_pipeline = file_name.starts_with("pipeline-") && file_name.ends_with(".state");
         let is_taskforce = file_name.ends_with(".state")
-            && (file_name.starts_with("taskforce-")
-                || file_name.starts_with("dual-lens-")
-                || file_name.starts_with("advisor-"));
-
+            && (file_name.starts_with("taskforce-") || file_name.starts_with("dual-lens-"));
         if !is_pipeline && !is_taskforce {
             return None;
         }
 
         let content = fs::read_to_string(path).ok()?;
+        let is_running = content.lines().any(|l| l.trim() == "finished=0");
 
         if is_pipeline {
-            let mut state = PipelineExecutionState::default();
+            let mut state = PipelineExecutionState {
+                finished: !is_running,
+                ..Default::default()
+            };
             for line in content.lines() {
                 let line = line.trim();
                 if let Some(v) = line.strip_prefix("lead=") {
@@ -269,8 +299,6 @@ impl ExecutionState {
                     state.builder = v.to_string();
                 } else if let Some(v) = line.strip_prefix("task=") {
                     state.task = v.to_string();
-                } else if let Some(v) = line.strip_prefix("finished=") {
-                    state.finished = v == "1" || v == "true";
                 }
             }
             if state.task.is_empty() {
@@ -282,7 +310,10 @@ impl ExecutionState {
             }
             Some(ExecutionState::Pipeline(state))
         } else {
-            let mut state = TaskforceExecutionState::default();
+            let mut state = TaskforceExecutionState {
+                finished: !is_running,
+                ..Default::default()
+            };
             for line in content.lines() {
                 let line = line.trim();
                 if let Some(v) = line.strip_prefix("lead=").or_else(|| line.strip_prefix("owner=")) {
@@ -293,8 +324,6 @@ impl ExecutionState {
                     state.kind = v.to_string();
                 } else if let Some(v) = line.strip_prefix("task=") {
                     state.task = v.to_string();
-                } else if let Some(v) = line.strip_prefix("finished=") {
-                    state.finished = v == "1" || v == "true";
                 }
             }
             Some(ExecutionState::Taskforce(state))
