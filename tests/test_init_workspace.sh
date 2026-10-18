@@ -38,11 +38,7 @@ git -C "$root" ls-files -z | while IFS= read -r -d '' f; do
   mkdir -p "$R/$(dirname "$f")"
   cp "$root/$f" "$R/$f"
 done
-mkdir -p "$R/scripts/hooks"
-# copied explicitly too: this test runs before they are committed
-mkdir -p "$R/scripts/hooks"
-cp "$src/hooks/pre-commit" "$R/scripts/hooks/pre-commit"
-chmod +x "$R/scripts/hooks/pre-commit"
+# pre-commit hook is embedded in binary and generated into .git/quaqua-hooks/
 cp "$root/USER.example.md" "$R/USER.example.md"
 cp -R "$root/templates" "$R/templates"
 git -C "$R" init -q  # step 0's check-ignore guard needs a repo to consult
@@ -207,12 +203,12 @@ echo "ok: AGENTS.md always-reads seeded ($(printf '%s\n' $includes $always | sor
 # The pre-commit portable-paths gate only runs if init-workspace.sh points git
 # at scripts/hooks/. Three states must hold: fresh repo -> wired; already ours
 # -> silent no-op; a different value (local or global) -> warned and left.
-exp="$R/scripts/hooks"
-[[ -d $exp ]] || fail "sandbox has no scripts/hooks dir to wire"
+exp="$R/.git/quaqua-hooks"
+[[ -d $exp ]] || fail "sandbox has no .git/quaqua-hooks dir to wire"
 [[ "$(git -C "$R" config --get core.hooksPath)" == "$exp" ]] \
   || fail "init-workspace.sh did not set core.hooksPath (want $exp)"
-[[ -x $exp/pre-commit ]] || fail "scripts/hooks/pre-commit is not executable"
-echo "ok: fresh clone -> core.hooksPath wired to scripts/hooks"
+[[ -x $exp/pre-commit ]] || fail ".git/quaqua-hooks/pre-commit is not executable"
+echo "ok: fresh clone -> core.hooksPath wired to .git/quaqua-hooks"
 
 # idempotent when it is already ours (and quiet about it)
 out=$(run 2>&1)
@@ -241,12 +237,19 @@ out=$(GIT_CONFIG_GLOBAL="$G" run 2>&1) || fail "run failed with a global core.ho
   || fail "the global core.hooksPath value was modified"
 echo "ok: foreign global core.hooksPath -> warned, not overwritten"
 
+# legacy migration: scripts/hooks -> .git/quaqua-hooks
+git -C "$R" config core.hooksPath "$R/scripts/hooks"
+out=$(run 2>&1)
+[[ "$(git -C "$R" config --get core.hooksPath)" == "$exp" ]] \
+  || fail "legacy core.hooksPath was not migrated"
+[[ $out == *"migrated"* ]] || fail "no migration log: $out"
+echo "ok: legacy core.hooksPath -> migrated to .git/quaqua-hooks"
+
 # not a git repo -> the wiring block is skipped, everything else still boots
 N="$T/notarepo"
 mkdir -p "$N"
 cp -R "$R/templates" "$R/USER.example.md" "$N/"
 mkdir -p "$N/scripts/hooks"
-cp "$src/hooks/pre-commit" "$N/scripts/hooks/pre-commit"
 ( unset HERDR_PANE_ID; cd "$N" && "${QUAQUA_BIN:-quaqua}" init ) >/dev/null \
   || fail "init-workspace failed outside a git repo"
 [[ -f $N/memory/rules.md ]] || fail "non-repo workspace was not booted"

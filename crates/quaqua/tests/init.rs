@@ -244,3 +244,95 @@ fn init_fails_when_it_cannot_wire_hooks() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn init_wires_embedded_hook_and_migrates_legacy() {
+    let Some(git) = find_git() else {
+        return;
+    };
+    let root = temp_root("wirehook");
+    skeleton(&root);
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let ok = Command::new(&git)
+        .args(["init", "-q"])
+        .arg(&root)
+        .status()
+        .expect("git init");
+    assert!(ok.success(), "git init failed");
+
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&git, bin.join("git")).unwrap();
+
+    // 1. Fresh clone: wires .git/quaqua-hooks/pre-commit (+exec) and sets core.hooksPath
+    let mut inv = Invocation::new(&root);
+    inv.path = bin.clone();
+    let out = inv.run();
+    assert!(out.status.success(), "init failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let hook = root.join(".git/quaqua-hooks/pre-commit");
+    assert!(hook.is_file(), "hook was not created");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "hook is not executable");
+    }
+
+    let hook_content = std::fs::read_to_string(&hook).unwrap();
+    assert!(hook_content.contains("portable-paths.md"));
+
+    let hooks_path = Command::new(&git)
+        .arg("-C")
+        .arg(&root)
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&hooks_path.stdout).trim(),
+        root.join(".git/quaqua-hooks").to_string_lossy().trim()
+    );
+
+    // 2. Modified hook is refreshed + logged
+    std::fs::write(&hook, "tampered").unwrap();
+    let out = inv.run();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("hooks: refreshed"), "no refresh log: {stdout}");
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), hook_content);
+
+    // 3. Legacy migration: core.hooksPath set to scripts/hooks
+    let legacy_path = root.join("scripts/hooks");
+    let ok = Command::new(&git)
+        .arg("-C")
+        .arg(&root)
+        .args(["config", "core.hooksPath", &legacy_path.to_string_lossy()])
+        .status()
+        .unwrap();
+    assert!(ok.success());
+
+    let out = inv.run();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("migrated core.hooksPath"), "no migration log: {stdout}");
+
+    let hooks_path = Command::new(&git)
+        .arg("-C")
+        .arg(&root)
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&hooks_path.stdout).trim(),
+        root.join(".git/quaqua-hooks").to_string_lossy().trim()
+    );
+
+    // 4. Idempotent re-run is quiet
+    let out = inv.run();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("migrated"), "re-run logged migration: {stdout}");
+    assert!(!stdout.contains("core.hooksPath="), "re-run logged core.hooksPath: {stdout}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
