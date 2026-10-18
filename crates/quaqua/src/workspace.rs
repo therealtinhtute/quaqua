@@ -2,10 +2,6 @@
 //!
 //! Every workspace path the binary resolves (rules, runs, team.toml) goes
 //! through [`workspace_root`]: `QUAQUA_HOME` first, else `$HOME/quaqua`.
-//!
-/// [`find_quaqua_root`] discovers the checkout that owns `projects/INDEX.md`
-/// (via `QUAQUA_ROOT`, `QUAQUA_SCRIPT_DIR`, cwd ancestor walk, exe ancestor walk).
-/// In contrast, [`workspace_root`] resolves the installed workspace directory.
 
 use std::path::{Path, PathBuf};
 

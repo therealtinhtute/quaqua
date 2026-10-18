@@ -3,8 +3,8 @@
 
 use crate::herdr::HerdrOps;
 use crate::json::parse_json;
-use std::path::Path;
 use crate::util::is_pid_alive;
+use std::path::Path;
 
 const WORKER_KINDS: [&str; 6] = [
     "tieude", "detu", "sude", "ni", "suhuynh", "truonglao",
@@ -22,7 +22,6 @@ pub fn is_task_worker_name(name: &str) -> bool {
     }
     false
 }
-
 
 fn contains_prefix_digit(w: &str, prefix: &str) -> bool {
     let mut search = w;
