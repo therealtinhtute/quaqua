@@ -1,6 +1,8 @@
+mod common;
+use common::FakeHerdrDriver;
 use quaqua::grid::hook::{compute_snapshot_signature, reconcile_step};
 use quaqua::grid::{
-    apply_ops, parse_snapshot_value, plan, run_reconcile, FakeHerdrDriver, HerdrDriver, MoveResult,
+    apply_ops, parse_snapshot_value, plan, run_reconcile, HerdrDriver, MoveResult,
     ReconcileOptions, Snapshot, Target,
 };
 use std::fs;
@@ -1594,4 +1596,66 @@ fn test_check_filter_does_not_drop_chunk_0_splits_when_tab_ends_in_dash_two() {
         Some("web-2-workers"),
     );
     assert_eq!(filtered.len(), 1, "chunk-0 split op must not be dropped when tab label has -2 in base name");
+}
+
+#[test]
+fn test_fake_herdr_driver_common_lifecycle() {
+    let snap = load_edge_fixture("1-worker");
+    let mut driver = FakeHerdrDriver::new(snap);
+
+    // Verify initial snapshot
+    let s = driver.snapshot().expect("snapshot should succeed");
+    assert_eq!(s.panes.len(), 2);
+
+    // Perform NewTab move
+    let res = driver
+        .move_pane("w1:p5", &Target::NewTab { label: "workers-tab".to_string() })
+        .expect("move_pane NewTab should succeed");
+    assert_eq!(res.previous_pane_id, Some("w1:p5".to_string()));
+    assert!(res.tab_id.starts_with("w1:t_"));
+
+    // Perform Rename
+    driver
+        .rename_pane(&res.pane_id, "renamed-worker")
+        .expect("rename_pane should succeed");
+    assert_eq!(driver.executed_renames.len(), 1);
+    assert_eq!(driver.executed_renames[0].1, "renamed-worker");
+}
+
+#[test]
+fn test_reconcile_step_convergence_matches_filter_ops_for_check() {
+    // Test on working-deferred.json: worker is working, so plan has deferred op,
+    // but filter_ops_for_check and reconcile_step must both agree that runnable ops = 0 (converged).
+    let snap = load_edge_fixture("working-deferred");
+    let ops = plan(&snap).expect("plan must succeed for working-deferred");
+    assert!(!ops.is_empty(), "plan has deferred ops");
+    assert!(ops.iter().all(|op| op.deferred), "all ops in working-deferred must be deferred");
+
+    let runnable = quaqua::grid::reconcile::filter_ops_for_check(&ops, &snap, None, None, None);
+    assert!(runnable.is_empty(), "filter_ops_for_check must yield 0 runnable ops");
+
+    let sdir = edge_state_dir("test-deferred-convergence");
+    let mut driver = FakeHerdrDriver::new(snap);
+    let res = reconcile_step(&sdir, &mut driver, None);
+    assert!(res.is_ok(), "reconcile_step must succeed on converged/deferred layout: {:?}", res);
+    assert!(
+        driver.executed_moves.is_empty(),
+        "reconcile_step must not execute any moves when layout has 0 runnable ops"
+    );
+    let _ = fs::remove_dir_all(&sdir);
+}
+
+#[test]
+fn test_unified_herdr_driver_instantiation_and_contract() {
+    // CliHerdrDriver is an alias to quaqua::herdr::Herdr
+    let mut driver = quaqua::grid::CliHerdrDriver::new();
+    let expected_bin = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+    assert_eq!(driver.bin, expected_bin);
+
+    // Overridden binary via struct field
+    driver.bin = "/nonexistent/herdr/binary".to_string();
+    let snap_res = driver.snapshot();
+    assert!(snap_res.is_err(), "snapshot with invalid binary path must return Err");
+    let err = snap_res.unwrap_err();
+    assert!(err.contains("cannot run /nonexistent/herdr/binary"), "unexpected error: {err}");
 }
