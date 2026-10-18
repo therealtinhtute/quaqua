@@ -25,9 +25,15 @@ case $(uname -s) in
       exit 1
     fi
     claude="$(cd "$(dirname "$claude")" && pwd -P)/$(basename "$claude")"
+    quaqua_bin=$(command -v quaqua || true)
+    if [[ -z $quaqua_bin ]]; then
+      echo 'error: quaqua must be on PATH before installing the auditor' >&2
+      exit 1
+    fi
+    quaqua_bin="$(cd "$(dirname "$quaqua_bin")" && pwd -P)/$(basename "$quaqua_bin")"
     # launchd does not source shell profiles. Keep the install-time toolchain
     # (e.g. node/mise) as well as Bash and the directory containing claude.
-    job_path="$(dirname "$bash_bin"):$(dirname "$claude"):${PATH:-/usr/bin:/bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    job_path="$(dirname "$quaqua_bin"):$(dirname "$bash_bin"):$(dirname "$claude"):${PATH:-/usr/bin:/bin}:/usr/bin:/bin:/usr/sbin:/sbin"
     dst="$HOME/Library/LaunchAgents"
     plist="$dst/com.quaqua.auditor.plist"
     mkdir -p "$dst" "$HOME/Library/Logs"
@@ -43,6 +49,7 @@ case $(uname -s) in
     sed -e "s|@ROOT@|$(xml_replacement "$root")|g" \
         -e "s|@HOME@|$(xml_replacement "$HOME")|g" \
         -e "s|@BASH@|$(xml_replacement "$bash_bin")|g" \
+        -e "s|@QUAQUA@|$(xml_replacement "$quaqua_bin")|g" \
         -e "s|@PATH@|$(xml_replacement "$job_path")|g" \
       "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" > "$tmp"
     chmod 644 "$tmp"

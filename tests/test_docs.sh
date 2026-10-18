@@ -73,14 +73,14 @@ echo "ok: report-tail contract documented for workers and pipeline reviewers"
 [[ -f $root/scripts/auditor/systemd/quaqua-auditor.service && -f $root/scripts/auditor/systemd/quaqua-auditor.timer \
    && -f $root/scripts/auditor/launchd/com.quaqua.auditor.plist.in ]] \
   || fail "systemd or launchd auditor scheduling assets missing"
-grep -q 'scripts/auditor/auditor.sh' "$root/scripts/auditor/systemd/quaqua-auditor.service" \
-  || fail "auditor service does not exec scripts/auditor/auditor.sh"
-grep -q 'scripts/auditor/auditor.sh' "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" \
+grep -q 'auditor run' "$root/scripts/auditor/systemd/quaqua-auditor.service" \
+  || fail "auditor service does not exec quaqua auditor run"
+grep -q 'auditor' "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" \
   || fail "launchd template does not exec the same auditor entrypoint"
 # README.md is GitHub-side only (not tracked here) — install coverage is
 # asserted via the shipped template + installer instead (test_install_auditor.sh).
 grep -q 'reports/audit-\*\.md\|reports/audit-' "$root/AGENTS.md" \
-  || fail "AGENTS session-start glob != scripts/auditor/auditor.sh output"
+  || fail "AGENTS session-start glob != quaqua auditor output"
 echo "ok: auditor entrypoint + scheduling assets agree"
 
 # ── routing consistency: review findings flow through the pipeline ────────────

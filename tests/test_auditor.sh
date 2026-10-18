@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sandbox test for auditor.sh: report naming, the claude -p invocation
+# Sandbox test for quaqua auditor run: report naming, the claude -p invocation
 # (read-only tool whitelist, repo-root cwd, report on stdout, default model),
 # the prompt contents, AUDITOR_MODEL/AUDITOR_OUT overrides, claude failure
 # handling, and that nothing but the report lands in the repo tree. claude is
@@ -13,12 +13,16 @@ src="$(cd "$here/.." && pwd)/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-auditor.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
+root="$(cd "$here/.." && pwd)"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+export QUAQUA_BIN="$bin"
+
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# ── sandbox: stub claude + fake repo with scripts/auditor/auditor.sh ─────────
-mkdir -p "$T/bin" "$T/repo/scripts/auditor" "$T/repo/memory" "$T/repo/projects"
-cp "$src/auditor/auditor.sh" "$T/repo/scripts/auditor/auditor.sh"
+# ── sandbox: stub claude + fake repo for quaqua auditor run ─────────────────
+mkdir -p "$T/bin" "$T/repo/memory" "$T/repo/projects"
 cat > "$T/bin/claude" <<'STUB'
 #!/usr/bin/env bash
 echo "claude $*" >> "$CALLS"
@@ -59,7 +63,7 @@ run() {  # run [VAR=val...]; sets rc, $T/out, $T/err, $T/calls, $T/args.head|pro
   rc=0
   CALLS="$T/calls" ARGS_HEAD="$T/args.head" ARGS_PROMPT="$T/args.prompt" \
     PATH="$T/bin:$PATH" \
-    env "$@" bash "$T/repo/scripts/auditor/auditor.sh" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" "$QUAQUA_BIN" auditor run --repo "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── happy path: report file, read-only sandbox invocation, prompt contents ──
@@ -147,22 +151,21 @@ grep -q 'FAILED' "$report" || fail "failure: no failure report written"
 echo "ok: failure -> exit propagates, stub report notes the failure"
 
 # ── F8 packaging: exactly one Auditor entrypoint with all scheduling assets ──
-root=$(cd "$here/.." && pwd)
 [[ -f $root/scripts/auditor/systemd/quaqua-auditor.service ]] || fail "pkg: no systemd service shipped"
 [[ -f $root/scripts/auditor/systemd/quaqua-auditor.timer ]] || fail "pkg: no systemd timer shipped"
-grep -q 'scripts/auditor/auditor.sh' "$root/scripts/auditor/systemd/quaqua-auditor.service" \
-  || fail "pkg: service does not exec scripts/auditor/auditor.sh"
+grep -q 'auditor run' "$root/scripts/auditor/systemd/quaqua-auditor.service" \
+  || fail "pkg: service does not exec quaqua auditor run"
 grep -q 'OnCalendar' "$root/scripts/auditor/systemd/quaqua-auditor.timer" || fail "pkg: timer has no schedule"
 grep -q 'systemd' "$src/auditor/install-auditor.sh" || fail "pkg: installer does not use systemd/"
 [[ ! -d "$root/super""visor" ]] || fail "pkg: legacy runner still installed"
 [[ -f $root/scripts/auditor/launchd/com.quaqua.auditor.plist.in ]] || fail "pkg: no launchd template shipped"
-grep -q 'scripts/auditor/auditor.sh' "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" \
+grep -q 'auditor' "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" \
   || fail "pkg: launchd template does not use the same auditor entrypoint"
 # README.md is GitHub-side only (not tracked in this repo) — launchd install
 # coverage is asserted via the template + installer instead.
 grep -q 'reports/audit-' "$root/AGENTS.md" \
   || fail "pkg: AGENTS session-start glob missing reports/audit-"
-echo "ok: packaging -> systemd + launchd share scripts/auditor/auditor.sh; legacy retired"
+echo "ok: packaging -> systemd + launchd share quaqua auditor run; legacy retired"
 
 # ── pipeline pre-checks: one fixture per flag + clean no-flag cases ─────────
 # Fixtures live in the sandbox repo (runs/, memory/); the stub claude logs argv,

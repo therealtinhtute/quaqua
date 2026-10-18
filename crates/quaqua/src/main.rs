@@ -77,6 +77,11 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Read-only drift and pipeline audit.
+    Auditor {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -494,6 +499,15 @@ fn main() {
             Err(e) => {
                 eprintln!("{e}");
                 1
+            }
+        },
+        Some(Command::Auditor { args }) => match quaqua::auditor::handle_auditor(&args) {
+            Ok(code) => code,
+            Err((code, msg)) => {
+                if !msg.is_empty() {
+                    eprint!("{msg}");
+                }
+                code
             }
         },
         None => 0,

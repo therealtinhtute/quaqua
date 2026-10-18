@@ -1,6 +1,6 @@
 [Unit]
-Description=quaqua Auditor — read-only drift audit (scripts/auditor/auditor.sh)
+Description=quaqua Auditor — read-only drift audit (quaqua auditor run)
 
 [Service]
 Type=oneshot
-ExecStart=%h/quaqua/scripts/auditor/auditor.sh
+ExecStart=%h/.cargo/bin/quaqua auditor run
