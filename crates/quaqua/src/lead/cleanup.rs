@@ -5,8 +5,6 @@ use super::spawn::find_quaqua_root;
 use crate::herdr::HerdrOps;
 use crate::json::parse_json;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::Duration;
 
 pub const USAGE: &str = "\
 # Usage: cleanup-lead.sh <slug>
@@ -175,47 +173,7 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
 
     let index = root.join("projects/INDEX.md");
     if index.is_file() {
-        let lock_dir = root.join("projects/INDEX.md.lock.d");
-        let mut locked = false;
-        for _ in 0..200 {
-            if std::fs::create_dir(&lock_dir).is_ok() {
-                locked = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !locked {
-            return Err((1, format!("{} is locked (stale {}? remove it manually)\n", index.display(), lock_dir.display())));
-        }
-
-        let awk_res = Command::new("awk")
-            .arg("-F|")
-            .arg("-v")
-            .arg(format!("slug={slug}"))
-            .arg(
-                "BEGIN { OFS=\"|\" }\n/^[[:space:]]*\\|/ {\n  s=$2; r=$3\n  gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", s); gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", r)\n  if (s == slug && r != \"repo\") $4 = \" cos \"\n}\n{ print }",
-            )
-            .arg(&index)
-            .output();
-
-        let awk_out = match awk_res {
-            Ok(out) => {
-                if !out.status.success() {
-                    let _ = std::fs::remove_dir(&lock_dir);
-                    return Err((1, String::from_utf8_lossy(&out.stderr).to_string()));
-                }
-                out.stdout
-            }
-            Err(e) => {
-                let _ = std::fs::remove_dir(&lock_dir);
-                return Err((1, format!("awk execution failed: {e}\n")));
-            }
-        };
-
-        let tmp_path = root.join("projects").join(format!("INDEX.md.tmp.{}", std::process::id()));
-        let _ = std::fs::write(&tmp_path, awk_out);
-        let _ = std::fs::rename(&tmp_path, &index);
-        let _ = std::fs::remove_dir(&lock_dir);
+        crate::lead::spawn::update_project_index_owner(&root, slug, "cos")?;
     }
 
     println!("cleaned {name} ({closed} closed; branch quaqua/{slug}-integ kept)");

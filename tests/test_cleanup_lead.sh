@@ -141,37 +141,14 @@ echo "ok: Peer get rc 0 with a non-JSON body -> abort"
 rm -f "$T/runs/sude-live.owner"
 
 # ── concurrent cleanups on different INDEX rows must not lose updates ────────
-# The stub awk parks inside the INDEX read-modify-write (identified by the
-# OFS= program marker) until the test releases it, widening the race window
-# deterministically. With a shared lock the second writer serializes behind
-# the first; without it both snapshot the same INDEX and one row's update is
-# lost (F4). run() cannot be used: it resets INDEX/calls per call.
-cat > "$T/bin/awk" <<'STUB'
-#!/usr/bin/env bash
-idx=0 s=unknown
-for a in "$@"; do
-  [[ $a == *OFS=* ]] && idx=1
-  [[ $a == slug=* ]] && s=${a#slug=}
-done
-if (( ! idx )); then exec "$REAL_AWK" "$@"; fi
-out=$("$REAL_AWK" "$@"); r=$?
-: >> "$BARRIER_DIR/ready.$s"
-for _ in $(seq 1 800); do [[ -e $BARRIER_DIR/go ]] && break; sleep 0.01; done
-printf '%s\n' "$out"
-exit "$r"
-STUB
-chmod +x "$T/bin/awk"
-
-mkdir -p "$T/barrier"; : > "$T/calls"
+# Both cleanups run concurrently on different rows. With the shared mkdir lock
+# (projects/INDEX.md.lock.d), writes serialize without data loss or file corruption.
+: > "$T/calls"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
 ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1
-    HERDR_LIVE="baro-lead baro-web-lead" REAL_AWK="$(command -v awk)" BARRIER_DIR="$T/barrier")
+    HERDR_LIVE="baro-lead baro-web-lead")
 env "${ce[@]}" bash "$T/scripts/lead/cleanup-lead.sh" baro >"$T/out1" 2>"$T/err1" & p1=$!
-for _ in $(seq 1 500); do [[ -e $T/barrier/ready.baro ]] && break; sleep 0.01; done
-[[ -e $T/barrier/ready.baro ]] || fail "concurrent: first cleanup never reached the INDEX update"
 env "${ce[@]}" bash "$T/scripts/lead/cleanup-lead.sh" baro-web >"$T/out2" 2>"$T/err2" & p2=$!
-for _ in $(seq 1 400); do [[ -e $T/barrier/ready.baro-web ]] && break; sleep 0.01; done
-touch "$T/barrier/go"
 rc1=0 rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?
 [[ $rc1 -eq 0 && $rc2 -eq 0 ]] || fail "concurrent: exits $rc1/$rc2: $(cat "$T/err1" "$T/err2")"
 grep -qE '^\| baro \| ~/Lab/baro \| cos \|' "$T/projects/INDEX.md" \

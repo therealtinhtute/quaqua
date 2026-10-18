@@ -5,7 +5,7 @@ use crate::git::GitOps;
 use crate::herdr::HerdrOps;
 use crate::json::parse_json;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
 use std::time::Duration;
 
 pub const USAGE: &str = "\
@@ -38,7 +38,7 @@ pub use crate::workspace::find_quaqua_root;
 pub fn resolve_lead_launch(
     cfg: &crate::config::Config,
     env_override: Option<&str>,
-) -> Result<(String, crate::worker::spawn::Launch), (i32, String)> {
+) -> Result<(String, crate::launch::Launch), (i32, String)> {
     let candidate = env_override
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string())
@@ -55,7 +55,7 @@ pub fn resolve_lead_launch(
         (1, format!("error: default lead kind '{kind_name}' not found in team.toml\n"))
     })?;
 
-    let launch = crate::worker::spawn::resolve_launch(kind_info, &kind_name)?;
+    let launch = crate::launch::resolve_launch(kind_info, &kind_name)?;
     Ok((kind_name, launch))
 }
 pub fn spawn_lead<G: GitOps, H: HerdrOps>(
@@ -236,7 +236,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     let root_str = root.to_string_lossy().to_string();
     let runs_str = runs_dir.to_string_lossy().to_string();
     let rf_str = rf.to_string_lossy().to_string();
-    let cmd = crate::worker::spawn::build_launch_cmd(
+    let cmd = crate::launch::build_launch_cmd(
         &launch,
         &name,
         &rf_str,
@@ -318,6 +318,33 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         return Err((1, String::from_utf8_lossy(&start_out.stderr).to_string()));
     }
     // Update projects/INDEX.md with mkdir lock
+    update_project_index_owner(&root, slug, &name)?;
+
+    // Prompt Lead
+    let prompt_text = format!(
+        "You are the Lead for project '{slug}' (QUAQUA_OWNER={name}) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).\n- Own the project card projects/{slug}.md: read it now, then keep its '## Now' at the current truth after every outcome.\n- Pipeline-size work runs through scripts/lead/pipeline.sh (usage in its header). Peers: scripts/worker/spawn-worker.sh + `quaqua grid reconcile` with GRID_TAB={slug}-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.\n- You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch {integ} (created from the repo's default branch if it was missing — spawn Peers --base {integ} so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.\n- Resolve any '## Challenge' in runs/<worker>.md before acceptance; every redirect (from anh iu, the Auditor, or any report) reaches you through the CoS — record CoS steering in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.\nReply 'ready' once the card is read."
+    );
+    let _ = herdr.run(&["agent", "prompt", &name, &prompt_text]);
+
+    println!("lead={name} slug={slug} workspace={wsid} pane={pane}");
+    Ok(())
+}
+
+/// Update the owner column for a project slug in projects/INDEX.md.
+///
+/// Modifies only the owner cell for the matching project row (preserving all other
+/// rows and column spacing byte-identically), serialized via mkdir spinlock on
+/// `projects/INDEX.md.lock.d` and written via atomic rename.
+pub fn update_project_index_owner(
+    root: &Path,
+    slug: &str,
+    new_owner: &str,
+) -> Result<(), (i32, String)> {
+    let index = root.join("projects/INDEX.md");
+    if !index.is_file() {
+        return Err((1, format!("no projects/INDEX.md in {}\n", root.display())));
+    }
+
     let lock_dir = root.join("projects/INDEX.md.lock.d");
     let mut locked = false;
     for _ in 0..200 {
@@ -328,46 +355,54 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         std::thread::sleep(Duration::from_millis(50));
     }
     if !locked {
-        return Err((1, format!("{} is locked (stale {}? remove it manually)\n", index.display(), lock_dir.display())));
+        return Err((
+            1,
+            format!(
+                "{} is locked (stale {}? remove it manually)\n",
+                index.display(),
+                lock_dir.display()
+            ),
+        ));
     }
 
-    let awk_res = Command::new("awk")
-        .arg("-F|")
-        .arg("-v")
-        .arg(format!("slug={slug}"))
-        .arg("-v")
-        .arg(format!("owner={name}"))
-        .arg(
-            "BEGIN { OFS=\"|\" }\n/^[[:space:]]*\\|/ {\n  s=$2; r=$3\n  gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", s); gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", r)\n  if (s == slug && r != \"repo\") $4 = \" \" owner \" \"\n}\n{ print }",
-        )
-        .arg(&index)
-        .output();
+    let res = (|| -> Result<(), (i32, String)> {
+        let content = std::fs::read_to_string(&index)
+            .map_err(|e| (1, format!("cannot read {}: {e}\n", index.display())))?;
+        let updated = update_index_content(&content, slug, new_owner);
+        let tmp_path = root
+            .join("projects")
+            .join(format!("INDEX.md.tmp.{}", std::process::id()));
+        std::fs::write(&tmp_path, updated)
+            .map_err(|e| (1, format!("cannot write {}: {e}\n", tmp_path.display())))?;
+        std::fs::rename(&tmp_path, &index)
+            .map_err(|e| (1, format!("cannot rename {} to {}: {e}\n", tmp_path.display(), index.display())))?;
+        Ok(())
+    })();
 
-    let awk_out = match awk_res {
-        Ok(out) => {
-            if !out.status.success() {
-                let _ = std::fs::remove_dir(&lock_dir);
-                return Err((1, String::from_utf8_lossy(&out.stderr).to_string()));
-            }
-            out.stdout
-        }
-        Err(e) => {
-            let _ = std::fs::remove_dir(&lock_dir);
-            return Err((1, format!("awk execution failed: {e}\n")));
-        }
-    };
-
-    let tmp_path = root.join("projects").join(format!("INDEX.md.tmp.{}", std::process::id()));
-    let _ = std::fs::write(&tmp_path, awk_out);
-    let _ = std::fs::rename(&tmp_path, &index);
     let _ = std::fs::remove_dir(&lock_dir);
+    res
+}
 
-    // Prompt Lead
-    let prompt_text = format!(
-        "You are the Lead for project '{slug}' (QUAQUA_OWNER={name}) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).\n- Own the project card projects/{slug}.md: read it now, then keep its '## Now' at the current truth after every outcome.\n- Pipeline-size work runs through scripts/lead/pipeline.sh (usage in its header). Peers: scripts/worker/spawn-worker.sh + `quaqua grid reconcile` with GRID_TAB={slug}-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.\n- You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch {integ} (created from the repo's default branch if it was missing — spawn Peers --base {integ} so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.\n- Resolve any '## Challenge' in runs/<worker>.md before acceptance; every redirect (from anh iu, the Auditor, or any report) reaches you through the CoS — record CoS steering in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.\nReply 'ready' once the card is read."
-    );
-    let _ = herdr.run(&["agent", "prompt", &name, &prompt_text]);
-
-    println!("lead={name} slug={slug} workspace={wsid} pane={pane}");
-    Ok(())
+/// Pure string transformation updating the owner column of a markdown table.
+pub fn update_index_content(content: &str, slug: &str, new_owner: &str) -> String {
+    let mut out = String::with_capacity(content.len() + 16);
+    for line in content.lines() {
+        if line.trim_start().starts_with('|') {
+            let mut parts: Vec<&str> = line.split('|').collect();
+            if parts.len() >= 4 {
+                let s = parts[1].trim();
+                let r = parts[2].trim();
+                if s == slug && r != "repo" {
+                    let replacement = format!(" {new_owner} ");
+                    parts[3] = &replacement;
+                    out.push_str(&parts.join("|"));
+                    out.push('\n');
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }

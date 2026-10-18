@@ -10,6 +10,7 @@ pub mod git;
 pub mod herdr;
 pub mod json;
 pub mod cap;
+pub mod launch;
 pub mod worker;
 pub mod grid;
 pub mod lead;
