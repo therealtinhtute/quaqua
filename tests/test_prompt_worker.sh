@@ -29,6 +29,10 @@ echo "herdr $*" >> "$CALLS"
 content=${FAKE_CONTENT:-$'fake summary\n\n## Lessons\n- none'}
 case "${1:-} ${2:-}" in
   "api snapshot")
+    if [[ -n "${HERDR_STUB_SNAPSHOT:-}" && -f "${HERDR_STUB_SNAPSHOT}" ]]; then
+      cat "${HERDR_STUB_SNAPSHOT}"
+      exit 0
+    fi
     echo '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}'
     exit 0 ;;
   "agent get")
@@ -64,6 +68,8 @@ esac
 exit "${FAKE_RC:-0}"
 STUB
 chmod +x "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
 CLK=(PROMPT_WORKER_CLOCK_FILE="$T/clock" PROMPT_WORKER_SLEEP_CMD="$T/bin/advance-clock")
 printf '%s\n' 1700000000 > "$T/clock"
 cat > "$T/bin/advance-clock" <<'ADV'
@@ -78,14 +84,14 @@ prompt() {  # prompt <name> <task> [VAR=val...]; sets rc, $T/out, $T/err, $T/cal
   local name=$1 task=$2; shift 2
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" FAKE_NAME="$name" \
     env "$@" "${QUAQUA_BIN:-quaqua}" worker prompt "$name" "$task" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 reject() {  # reject <label> [args...]
   local label=$1; shift
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" \
     "${QUAQUA_BIN:-quaqua}" worker prompt "$@" >"$T/out" 2>"$T/err" || rc=$?
   [[ $rc -eq 1 ]] || fail "$label: exit $rc, want 1"
   grep -q '^# Usage:' "$T/err" || fail "$label: no usage on stderr"
@@ -97,7 +103,7 @@ resume() {
   local name=$1; shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" \
     env "$@" "${QUAQUA_BIN:-quaqua}" worker prompt --resume "$name" >"$T/out" 2>"$T/err" || rc=$?
 }
 
@@ -119,7 +125,7 @@ Current design (open to challenge): via the existing helper'
 reject_brief() {  # reject_brief <label> <task>: missing headers -> exit 1
   local label=$1 task=$2
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" \
     "${QUAQUA_BIN:-quaqua}" worker prompt sude-brief "$task" >"$T/out" 2>"$T/err" || rc=$?
   [[ $rc -eq 1 ]] || fail "$label: exit $rc, want 1"
   grep -q 'Goal.*Hard constraints.*Current design' "$T/err" \

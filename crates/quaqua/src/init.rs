@@ -1,7 +1,6 @@
-//! `quaqua init` — the port of `scripts/workspace/init-workspace.sh`. It boots
-//! the per-workspace personal state a fresh clone needs (`memory/`, `projects/`,
-//! `raw/`, `runs/`, `reports/`, seeded files), wires `core.hooksPath`, tags the
-//! real CoS pane in herdr, and prints the install line.
+//! `quaqua init` boots the per-workspace personal state a fresh clone needs
+//! (`memory/`, `projects/`, `raw/`, `runs/`, `reports/`, seeded files), wires
+//! `core.hooksPath`, tags the real CoS pane in herdr, and prints the install line.
 //!
 //! Idempotent: an existing target is never overwritten — every file is copied
 //! only when missing. The repo root is resolved from the shim's

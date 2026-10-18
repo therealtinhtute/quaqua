@@ -59,7 +59,7 @@ pub fn run_spawn<G: GitOps, H: HerdrOps>(
 
         if spawn_res.is_err() {
             let b = format!(
-                "spawn-worker.sh failed for builder {bname} — fix the cause, then 'pipeline.sh --resume {} {}'",
+                "worker spawn failed for builder {bname} — fix the cause, then 'quaqua pipeline --resume {} {}'",
                 ctx.task, state.repo
             );
             return ctx.finish(state, "blocked", 3, Some(&b));
@@ -70,7 +70,7 @@ pub fn run_spawn<G: GitOps, H: HerdrOps>(
 
     if !ctx.run_grid_hook() {
         let b = format!(
-            "grid check failed for {bname} — arrange the pane per rules/_all/fanout-agent-grid.md, then 'pipeline.sh --resume {} {}'",
+            "grid check failed for {bname} — arrange the pane per rules/_all/fanout-agent-grid.md, then 'quaqua pipeline --resume {} {}'",
             ctx.task, state.repo
         );
         let _ = state.save(&ctx.state_file);

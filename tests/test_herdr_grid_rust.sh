@@ -15,6 +15,33 @@ fail() {
   exit 1
 }
 
+T=$(mktemp -d "${TMPDIR:-/tmp}/test-herdr-grid.XXXXXX")
+T=$(cd "$T" && pwd -P)
+trap 'rm -rf "$T"' EXIT
+
+mkdir -p "$T/bin"
+cat > "$T/bin/herdr" << 'STUB'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "api snapshot")
+    if [[ -n "${HERDR_STUB_SNAPSHOT:-}" && -f "${HERDR_STUB_SNAPSHOT}" ]]; then
+      cat "${HERDR_STUB_SNAPSHOT}"
+      exit 0
+    fi
+    echo '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}'
+    exit 0
+    ;;
+  *)
+    echo "unexpected stub call: $*" >&2
+    exit 1
+    ;;
+esac
+STUB
+chmod +x "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
+
 # Locate or build quaqua binary
 QUAQUA_BIN="${QUAQUA_BIN:-}"
 if [ -z "$QUAQUA_BIN" ]; then

@@ -1,5 +1,4 @@
 //! Worker cleanup logic (`quaqua worker cleanup <name> <repo-path>`).
-//! Reproduces `scripts/worker/cleanup-worker.sh`.
 
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
@@ -38,7 +37,7 @@ pub fn run_grid_hook(grid_tab: &str, owner: Option<&str>) -> Result<(), (i32, St
         if is_pipeline || is_test {
             return Ok(());
         }
-        eprintln!("warning: GRID_SKIP=1 ignored outside pipeline.sh/tests (rules/_all/fanout-agent-grid.md)");
+        eprintln!("warning: GRID_SKIP=1 ignored outside pipeline/tests (rules/_all/fanout-agent-grid.md)");
     }
 
     if let Err(e) = crate::grid::run_grid_repair(grid_tab, owner) {

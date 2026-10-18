@@ -1,5 +1,4 @@
 //! Project Lead spawn logic (`quaqua lead spawn <slug>`).
-//! Reproduces `scripts/lead/spawn-lead.sh`.
 
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
@@ -9,18 +8,18 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const USAGE: &str = "\
-# Usage: spawn-lead.sh <slug>
+# Usage: quaqua lead spawn <slug>
 #   Start the project Lead for <slug> (AGENTS.md '## Roles (SLP)'): an agent
 #   session named <slug>-lead running in the quaqua checkout this script
 #   belongs to (normally ~/quaqua). The Lead is not a worker — no worktree,
 #   no slot in the 4-worker cap, no grid hook: each SLP team gets its own
 #   herdr workspace labelled <slug> (the Lead in its first tab, its Peers grid
 #   beside it or in <repo>-workers there); the CoS stays the one Supervisor in
-#   its own workspace and reaches the Lead by agent name. scripts/lead/cleanup-lead.sh
+#   its own workspace and reaches the Lead by agent name. quaqua lead cleanup <slug>
 #   closes the workspace when the project is done. rules/_all/*.md are the
 #   appended system prompt (the spawn-worker convention); the first prompt
 #   is a short lead brief pointing at AGENTS.md, projects/<slug>.md and
-#   scripts/lead/pipeline.sh. The project integration branch quaqua/<slug>-integ
+#   quaqua pipeline. The project integration branch quaqua/<slug>-integ
 #   is created from the project repo's default branch when missing —
 #   origin/HEAD if set, else main, else master (Peers branch from it --base
 #   and are merged back into it at acceptance). Refuses when
@@ -28,7 +27,7 @@ pub const USAGE: &str = "\
 #   card), when its Lead is already registered with herdr, or when
 #   <slug>-lead would exceed herdr's 32-char agent-name limit; on success
 #   the row's owner column becomes the Lead name (serialized with
-#   cleanup-lead.sh via projects/INDEX.md.lock.d, published by atomic rename).
+#   quaqua lead cleanup via projects/INDEX.md.lock.d, published by atomic rename).
 #   Env: LEAD_KIND (overrides strategy.lead_kind in team.toml).";
 
 pub use crate::workspace::find_quaqua_root;

@@ -28,7 +28,7 @@ pass=0 fail=0 failed=() skipped=()
 slow_cover() {
   case "$1" in
     test_prompt_worker.sh)
-      printf '%s' 'tests/test_prompt_worker.sh crates/quaqua/src/worker/prompt.rs' ;;
+      printf '%s' 'tests/test_prompt_worker.sh crates/quaqua/src/worker/prompt/' ;;
     test_pipeline.sh)
       printf '%s' 'tests/test_pipeline.sh crates/quaqua/src/pipeline/' ;;
   esac
@@ -101,10 +101,12 @@ for t in "$here"/test_*.sh; do
 done
 
 # failing tests: surface their output (the tail is where the assertion died)
-for name in "${failed[@]}"; do
-  printf '\n--- %s ---\n' "$name"
-  tail -n 30 "$T/$name.log"
-done
+if ((${#failed[@]})); then
+  for name in "${failed[@]}"; do
+    printf '\n--- %s ---\n' "$name"
+    tail -n 30 "$T/$name.log"
+  done
+fi
 
 if ((${#skipped[@]})); then
   printf '\n%s passed, %s failed, %s skipped (of %s; slow suites run with --slow;\nself-skipping suites name their Rust replacements in the test file)\n' \

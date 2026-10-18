@@ -1,5 +1,4 @@
 //! Project Lead cleanup logic (`quaqua lead cleanup <slug>`).
-//! Reproduces `scripts/lead/cleanup-lead.sh`.
 
 use super::spawn::find_quaqua_root;
 use crate::herdr::HerdrOps;
@@ -8,14 +7,14 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "\
-# Usage: cleanup-lead.sh <slug>
+# Usage: quaqua lead cleanup <slug>
 #   Tear down the project Lead <slug>-lead once the project is done. Refuses
 #   while any of its Peers is still registered with herdr (runs/<peer>.owner
-#   naming the Lead) — clean those up first with cleanup-worker.sh. Closes the
-#   Lead's team workspace only when it is the one spawn-lead.sh made (label
+#   naming the Lead) — clean those up first with quaqua worker cleanup. Closes the
+#   Lead's team workspace only when it is the one quaqua lead spawn made (label
 #   <slug>) and not the caller's; a Lead living anywhere else (older spawns)
 #   gets just its pane closed. Branch quaqua/<slug>-integ is kept; the
-#   projects/INDEX.md owner cell returns to cos (serialized with spawn-lead.sh
+#   projects/INDEX.md owner cell returns to cos (serialized with quaqua lead spawn
 #   via projects/INDEX.md.lock.d, published by atomic rename). A Peer or Lead
 #   whose `herdr agent get` fails for any reason other than a definite
 #   agent_not_found is of unknown liveness: cleanup aborts rather than close

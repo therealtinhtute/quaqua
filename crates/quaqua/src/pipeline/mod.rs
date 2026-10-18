@@ -19,13 +19,13 @@ use crate::worker::cleanup::default_runs_dir;
 use std::path::{Path, PathBuf};
 
 pub const USAGE: &str = "\
-# Usage: pipeline.sh <task> <repo> --brief <file> [--builder sude] [--reviewer suhuynh]
+# Usage: quaqua pipeline <task> <repo> --brief <file> [--builder sude] [--reviewer suhuynh]
 #                    [--review auto|always|skip] [--rounds 2] [--base <ref>]
-#        pipeline.sh --resume <task> <repo> [--rounds 2]
+#        quaqua pipeline --resume <task> <repo> [--rounds 2]
 #   Build -> review -> fix loop on top of
-#   spawn-worker.sh / prompt-worker.sh / cleanup-worker.sh; counts as 2 workers
+#   quaqua worker {spawn,prompt,cleanup}; counts as 2 workers
 #   toward the cap. <task> is a slug ([a-z0-9-]): builder <builder>-<task>, a
-#   fresh reviewer <reviewer>-<task>r<N> each round (spawn-worker.sh --review).
+#   fresh reviewer <reviewer>-<task>r<N> each round (quaqua worker spawn --review).
 #   Flow: builder writes a plan -> exit 5 'plan-ready' (the Lead approves by
 #   resuming) -> build -> review (auto: diff vs the spawn base is >150 changed
 #   lines or touches >1 top-level dir; always/skip override) -> findings go
@@ -44,16 +44,16 @@ pub const USAGE: &str = "\
 #   intentionally changed nothing says 'Outcome: no changes' (clean, review
 #   skipped). Reviewers are cleaned right after their runs file is read; the
 #   caller cleans the builder after re-running its test.
-#   Exit codes reuse prompt-worker.sh's watchdog meanings: 0 finished (status
+#   Exit codes reuse quaqua worker prompt's watchdog meanings: 0 finished (status
 #   line on stdout + runs/pipeline-<task>.md) · 1 usage/state error · 2 cap ·
 #   3 stall/gone (also: resumable snapshot/spawn failures) · 4 budget · 5
 #   plan-ready pause, a mandatory grid-arrange pause, or a worker blocked on
 #   a question. On 2-5 fix the cause (a stuck wait keeps waiting via
-#   'prompt-worker.sh --resume <worker>'), then 'pipeline.sh --resume <task>
+#   'quaqua worker prompt --resume <worker>'), then 'quaqua pipeline --resume <task>
 #   <repo>' continues from runs/pipeline-<task>.state. Every stop appends one
 #   line to runs/telemetry.jsonl {ts,task,repo,builder,reviewer,
 #   review:run|skip,rounds,review_changed_outcome,status,minutes} — the last
-#   line per task is current. Exit 6 (malformed report: prompt-worker.sh
+#   line per task is current. Exit 6 (malformed report: quaqua worker prompt
 #   rejects a phase report missing its '## Lessons' / 'Verdict:' tail, R3)
 #   propagates here as blocked like every other watchdog exit.
 #   Env budgets (sec): PIPELINE_PLAN_BUDGET_SEC 900 · _BUILD_ 2700 · _REVIEW_

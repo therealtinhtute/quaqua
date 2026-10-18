@@ -1662,9 +1662,7 @@ fn test_spawn_worker_grid_timeout_fails() {
     std::env::set_var("GRID_CHECK_TIMEOUT_SEC", "0");
     std::env::remove_var("GRID_SKIP");
 
-    let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/herdr-grid/2-workers.json");
-    std::env::set_var("HERDR_STUB_SNAPSHOT", fix.to_str().unwrap());
+    std::env::set_var("HERDR_BIN_PATH", "/dev/null");
 
     let cfg = test_cfg_with_fallback();
     let git = SpawnTestGit;
@@ -1686,7 +1684,7 @@ fn test_spawn_worker_grid_timeout_fails() {
     std::env::remove_var("QUAQUA_OWNER");
     std::env::remove_var("GRID_TAB");
     std::env::remove_var("GRID_CHECK_TIMEOUT_SEC");
-    std::env::remove_var("HERDR_STUB_SNAPSHOT");
+    std::env::remove_var("HERDR_BIN_PATH");
     let _ = std::fs::remove_dir_all(&temp);
 
     let err = res.expect_err("spawn_worker must fail when grid check times out");
@@ -1713,9 +1711,7 @@ fn test_cleanup_worker_grid_timeout_fails() {
     std::env::set_var("GRID_CHECK_TIMEOUT_SEC", "0");
     std::env::remove_var("GRID_SKIP");
 
-    let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/herdr-grid/2-workers.json");
-    std::env::set_var("HERDR_STUB_SNAPSHOT", fix.to_str().unwrap());
+    std::env::set_var("HERDR_BIN_PATH", "/dev/null");
 
     let git = SpawnTestGit;
     struct CleanupTestHerdr;
@@ -1750,7 +1746,7 @@ fn test_cleanup_worker_grid_timeout_fails() {
     std::env::remove_var("QUAQUA_OWNER");
     std::env::remove_var("GRID_TAB");
     std::env::remove_var("GRID_CHECK_TIMEOUT_SEC");
-    std::env::remove_var("HERDR_STUB_SNAPSHOT");
+    std::env::remove_var("HERDR_BIN_PATH");
     let _ = std::fs::remove_dir_all(&temp);
 
     let err = res.expect_err("cleanup_worker must fail when grid check times out");

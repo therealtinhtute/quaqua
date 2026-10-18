@@ -1,5 +1,4 @@
 //! Worker spawn logic (`quaqua worker spawn [--base <ref>] [--review] <name> <kind> <repo-path>`).
-//! Reproduces `scripts/worker/spawn-worker.sh`.
 
 use crate::cap::count_owner_slots;
 use crate::config::{Config, Kind};
@@ -17,9 +16,9 @@ pub use crate::worker::worktree::{
 use std::process::{Command, Output};
 
 pub const USAGE: &str = "\
-# Usage: spawn-worker.sh [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
+# Usage: quaqua worker spawn [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
-#          (*-lead is the project Lead convention — spawn-lead.sh <slug>-lead)
+#          (*-lead is the project Lead convention — quaqua lead spawn <slug>)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
 #   --review      any kind with can_review = true: repo read-only, $HOME/quaqua/runs writable";
 

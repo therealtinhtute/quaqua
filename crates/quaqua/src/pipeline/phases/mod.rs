@@ -249,12 +249,12 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
         if rc != 0 {
             let b = if prompt_never_sent {
                 format!(
-                    "prompt dispatch failed for {worker} (exit 1 before send) — state left prompted=0 so '--resume' re-sends the prompt instead of waiting on an idle worker; run 'pipeline.sh --resume {} {}'",
+                    "prompt dispatch failed for {worker} (exit 1 before send) — state left prompted=0 so '--resume' re-sends the prompt instead of waiting on an idle worker; run 'quaqua pipeline --resume {} {}'",
                     self.task, state.repo
                 )
             } else {
                 format!(
-                    "{} wait for {worker}: watchdog exit {rc} — fix the cause ('prompt-worker.sh --resume {worker}' keeps a live wait going), then 'pipeline.sh --resume {} {}'",
+                    "{} wait for {worker}: watchdog exit {rc} — fix the cause ('quaqua worker prompt --resume {worker}' keeps a live wait going), then 'quaqua pipeline --resume {} {}'",
                     state.phase, self.task, state.repo
                 )
             };
@@ -289,7 +289,7 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
 
         if head == "?" || dirty == "?" {
             let b = format!(
-                "cannot inspect {} (git rev-parse/status failed) — fix the worktree, then 'pipeline.sh --resume {} {}'",
+                "cannot inspect {} (git rev-parse/status failed) — fix the worktree, then 'quaqua pipeline --resume {} {}'",
                 state.wt, self.task, state.repo
             );
             let _ = self.finish(state, "blocked", 3, Some(&b));
@@ -307,7 +307,7 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
             if head == p {
                 let prev7 = if p.len() >= 7 { &p[..7] } else { p };
                 let b = format!(
-                    "fix produced no commits past {prev7} on quaqua/{}-{} — a no-op answer to findings belongs in '## Challenge'. Commit the fixes, then 'pipeline.sh --resume {} {}'",
+                    "fix produced no commits past {prev7} on quaqua/{}-{} — a no-op answer to findings belongs in '## Challenge'. Commit the fixes, then 'quaqua pipeline --resume {} {}'",
                     state.builder, self.task, self.task, state.repo
                 );
                 let _ = self.finish(state, "blocked", 3, Some(&b));
@@ -343,7 +343,7 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
                 &state.base_sha
             };
             let b = format!(
-                "builder produced no commits on quaqua/{}-{} (HEAD == base {base7}) and did not declare 'Outcome: no changes' — commit the work (or fix the report), then 'pipeline.sh --resume {} {}'",
+                "builder produced no commits on quaqua/{}-{} (HEAD == base {base7}) and did not declare 'Outcome: no changes' — commit the work (or fix the report), then 'quaqua pipeline --resume {} {}'",
                 state.builder, self.task, self.task, state.repo
             );
             let _ = self.finish(state, "blocked", 3, Some(&b));
@@ -358,7 +358,7 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
             ));
             let _ = std::fs::write(&self.pfile, pcontent);
             let b = format!(
-                "worktree dirty — the files above are missing from quaqua/{}-{}, so the gate and the reviewer would see a different snapshot. Commit or clean them, then 'pipeline.sh --resume {} {}'",
+                "worktree dirty — the files above are missing from quaqua/{}-{}, so the gate and the reviewer would see a different snapshot. Commit or clean them, then 'quaqua pipeline --resume {} {}'",
                 state.builder, self.task, self.task, state.repo
             );
             let _ = self.finish(state, "blocked", 3, Some(&b));

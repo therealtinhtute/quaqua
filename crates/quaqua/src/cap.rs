@@ -1,5 +1,4 @@
 //! Worker cap calculation and enforcement (`quaqua cap`).
-//! Reproduces `scripts/worker/worker-cap.sh` and `count_owner_slots` in `scripts/lib/common.sh`.
 
 use crate::herdr::HerdrOps;
 use crate::state::{ExecutionState, WorkerMetadata};

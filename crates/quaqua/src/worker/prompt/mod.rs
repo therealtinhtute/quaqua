@@ -1,5 +1,4 @@
 //! Worker prompt & watchdog logic (`quaqua worker prompt <name> <task>`).
-//! Reproduces `scripts/worker/prompt-worker.sh`.
 
 pub mod cost;
 pub mod observer;
@@ -19,12 +18,12 @@ use crate::state::WorkerMetadata;
 use crate::worker::cleanup::default_runs_dir;
 
 pub const USAGE: &str = "\
-# Usage: prompt-worker.sh <name> <task>        submit task brief, wait for runs file
-#        prompt-worker.sh --resume <name> [--extend <sec>]
+# Usage: quaqua worker prompt <name> <task>        submit task brief, wait for runs file
+#        quaqua worker prompt --resume <name> [--extend <sec>]
 #                                             keep waiting; --extend adds <sec> to
 #                                             this name's allowance (persisted in
 #                                             runs/.<name>.budget; the cap still wins)
-#        prompt-worker.sh --check-brief \"<task>\"   validate a brief + print its budget";
+#        quaqua worker prompt --check-brief \"<task>\"   validate a brief + print its budget";
 
 pub fn brief_headers_ok(text: &str) -> bool {
     text.contains("Goal:")

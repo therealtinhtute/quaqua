@@ -51,7 +51,7 @@ pub fn run_plan<G: GitOps, H: HerdrOps>(
     let _ = state.save(&ctx.state_file);
 
     eprintln!(
-        "PIPELINE plan-ready: approve {} then resume: pipeline.sh --resume {} {}",
+        "PIPELINE plan-ready: approve {} then resume: quaqua pipeline --resume {} {}",
         state.planfile, ctx.task, state.repo
     );
     ctx.finish(state, "plan-ready", 5, None)
