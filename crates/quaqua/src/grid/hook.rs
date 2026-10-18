@@ -42,16 +42,7 @@ pub fn is_shadow_mode(state_dir: &Path) -> bool {
     shadow_mode
 }
 
-pub fn is_pid_alive(pid_str: &str) -> bool {
-    if pid_str.trim().is_empty() {
-        return false;
-    }
-    std::process::Command::new("kill")
-        .args(["-0", pid_str.trim()])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
+pub use crate::util::is_pid_alive;
 
 pub struct LockGuard {
     pub lock_dir: PathBuf,

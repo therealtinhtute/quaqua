@@ -31,52 +31,7 @@ pub const USAGE: &str = "\
 #   cleanup-lead.sh via projects/INDEX.md.lock.d, published by atomic rename).
 #   Env: LEAD_KIND (overrides strategy.lead_kind in team.toml).";
 
-pub fn find_quaqua_root() -> Result<PathBuf, (i32, String)> {
-    if let Ok(r) = std::env::var("QUAQUA_ROOT") {
-        if !r.is_empty() {
-            let p = PathBuf::from(r);
-            if p.join("projects/INDEX.md").is_file() {
-                return Ok(p);
-            }
-        }
-    }
-    if let Ok(script_dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
-        let p = PathBuf::from(script_dir);
-        if let Some(parent2) = p.parent().and_then(|p| p.parent()) {
-            if parent2.join("projects/INDEX.md").is_file() {
-                return Ok(parent2.to_path_buf());
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut cur = cwd.clone();
-        loop {
-            if cur.join("projects/INDEX.md").is_file() {
-                return Ok(cur);
-            }
-            if !cur.pop() {
-                break;
-            }
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let mut cur = parent.to_path_buf();
-            loop {
-                if cur.join("projects/INDEX.md").is_file() {
-                    return Ok(cur);
-                }
-                if !cur.pop() {
-                    break;
-                }
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        return Ok(cwd);
-    }
-    Ok(PathBuf::from("."))
-}
+pub use crate::workspace::find_quaqua_root;
 
 /// Resolve the lead kind and launch settings from config and optional LEAD_KIND override.
 /// On missing or unknown lead_kind, defaults to "tieude".

@@ -96,21 +96,9 @@ pub fn select_default_reviewer(builder: &str, cfg: &crate::config::Config) -> Re
 }
 
 
-pub fn now_sec() -> u64 {
-    if let Ok(clock_file) = std::env::var("PROMPT_WORKER_CLOCK_FILE") {
-        if let Ok(c) = std::fs::read_to_string(&clock_file) {
-            if let Ok(v) = c.trim().parse::<u64>() {
-                return v;
-            }
-        }
-    }
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+pub use crate::util::now_sec;
 pub fn resolve_project_slug_from_repo(repo: &Path) -> Option<String> {
-    if let Ok(root) = crate::lead::spawn::find_quaqua_root() {
+    if let Ok(root) = crate::workspace::find_quaqua_root() {
         let index = root.join("projects/INDEX.md");
         if index.is_file() {
             if let Ok(content) = std::fs::read_to_string(&index) {

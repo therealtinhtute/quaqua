@@ -5,7 +5,7 @@ use super::plan::{
 use super::types::{Op, Snapshot, Target};
 use std::collections::HashSet;
 use std::thread::sleep;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct ReconcileOptions {
@@ -32,20 +32,7 @@ impl Default for ReconcileOptions {
     }
 }
 
-/// Read timestamp via shared fake-clock hook (PROMPT_WORKER_CLOCK_FILE), else system time
-pub fn now_sec() -> u64 {
-    if let Ok(clock_file) = std::env::var("PROMPT_WORKER_CLOCK_FILE") {
-        if let Ok(content) = std::fs::read_to_string(&clock_file) {
-            if let Ok(sec) = content.trim().parse::<u64>() {
-                return sec;
-            }
-        }
-    }
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+pub use crate::util::now_sec;
 
 fn poll_interval() -> Duration {
     if let Ok(poll_s) = std::env::var("GRID_CHECK_POLL_SEC") {

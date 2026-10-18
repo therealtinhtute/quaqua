@@ -4,7 +4,7 @@
 use crate::herdr::HerdrOps;
 use crate::json::parse_json;
 use std::path::Path;
-use std::process::Command;
+use crate::util::is_pid_alive;
 
 const WORKER_KINDS: [&str; 6] = [
     "tieude", "detu", "sude", "ni", "suhuynh", "truonglao",
@@ -23,16 +23,6 @@ pub fn is_task_worker_name(name: &str) -> bool {
     false
 }
 
-/// Check if process with `pid` is currently alive.
-fn is_pid_alive(pid_str: &str) -> bool {
-    if let Ok(pid) = pid_str.parse::<i32>() {
-        if pid > 0 {
-            let res = Command::new("kill").arg("-0").arg(pid_str).status();
-            return res.map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    false
-}
 
 fn contains_prefix_digit(w: &str, prefix: &str) -> bool {
     let mut search = w;

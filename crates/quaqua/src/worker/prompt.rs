@@ -8,6 +8,7 @@ use crate::json::parse_json;
 use crate::worker::cleanup::default_runs_dir;
 use std::path::Path;
 use std::process::Command;
+use crate::util::is_pid_alive;
 
 pub const USAGE: &str = "\
 # Usage: prompt-worker.sh <name> <task>        submit task brief, wait for runs file
@@ -229,19 +230,7 @@ pub fn resolve_budget_sec(task: &str) -> (u64, &'static str) {
     (2700, "default")
 }
 
-pub fn now_sec() -> u64 {
-    if let Ok(clock_file) = std::env::var("PROMPT_WORKER_CLOCK_FILE") {
-        if let Ok(c) = std::fs::read_to_string(&clock_file) {
-            if let Ok(v) = c.trim().parse::<u64>() {
-                return v;
-            }
-        }
-    }
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+pub use crate::util::now_sec;
 
 pub fn nap(sec: u64) {
     if let Ok(sleep_cmd) = std::env::var("PROMPT_WORKER_SLEEP_CMD") {
@@ -384,7 +373,7 @@ fn lead_waiting(runs_dir: &Path, name: &str, watcher_pane: &str) -> bool {
                         }
                     }
                     if !p_pid.is_empty() {
-                        let is_alive = Command::new("kill").arg("-0").arg(p_pid).status().map(|s| s.success()).unwrap_or(false);
+                        let is_alive = is_pid_alive(p_pid);
                         if !is_alive {
                             continue;
                         }

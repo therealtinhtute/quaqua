@@ -148,9 +148,6 @@ pub fn accepts_chunk_tab(
     }
 }
 
-pub fn strip_tab_suffix(label: &str) -> &str {
-    label.strip_suffix("-2").unwrap_or(label)
-}
 /// The workers tab label the group's panes were spawned into (GRID_TAB), read
 /// from the pane tokens. `None` for legacy panes that carry no `grid_tab`; such
 /// panes still match a group-derived label through `is_group_tab`.
