@@ -2,8 +2,8 @@
 # Sandbox test for taskforce weight 2 in cap:
 # 1. Active dual-lens taskforce reserves 2 slots in worker cap (weights["dual-lens"] = 2).
 # 2. Combined live workers and reservation equals 2.
-# 3. Cap enforcement: 1 dual-lens (2 slots) + 2 standalone workers reaches cap (5th refused).
-# 4. Starting refusal: owner with 3 workers cannot start dual-lens (needs 2 slots, cap is 4).
+# 3. Cap enforcement: 1 dual-lens (2 slots) + 6 standalone workers reaches cap (7th standalone refused).
+# 4. Starting refusal: owner with 7 workers cannot start dual-lens (needs 2 slots, cap is 8).
 # 5. Finished dual-lens releases its slot reservation.
 # Usage: tests/test_taskforce_cap.sh   (exit 0 = pass)
 set -euo pipefail
@@ -107,37 +107,48 @@ cap_out=$("$bin" cap cos)
 [[ "$cap_out" -eq 2 ]] || fail "dual-lens with 2 workers: want 2 slots, got $cap_out"
 echo "ok: dual-lens with 2 live workers accounts for 2 slots"
 
-# ── 4. Cap reached: dual-lens (2 slots) + 2 standalone workers = 4 slots ──────────
+# ── 4. Cap reached: dual-lens (2 slots) + 6 standalone workers = 8 slots ──────────
 cat > "$AGENT_JSON" << 'JSON'
 {"result":{"agents":[
   {"name":"truonglao-tf1dl1","agent_status":"working"},
   {"name":"suhuynh-tf1dl2","agent_status":"working"},
   {"name":"sude-w1","agent_status":"working"},
-  {"name":"sude-w2","agent_status":"working"}
+  {"name":"sude-w2","agent_status":"working"},
+  {"name":"sude-w3","agent_status":"working"},
+  {"name":"sude-w4","agent_status":"working"},
+  {"name":"sude-w5","agent_status":"working"},
+  {"name":"sude-w6","agent_status":"working"}
 ]}}
 JSON
-echo "cos" > "$runs_dir/sude-w1.owner"
-echo "cos" > "$runs_dir/sude-w2.owner"
+for i in 1 2 3 4 5 6; do
+  echo "cos" > "$runs_dir/sude-w$i.owner"
+done
 
 cap_out=$("$bin" cap cos)
-[[ "$cap_out" -eq 4 ]] || fail "cap at limit: want 4 slots, got $cap_out"
+[[ "$cap_out" -eq 8 ]] || fail "cap at limit: want 8 slots, got $cap_out"
 
-# Attempting 5th worker spawn is refused
+# Attempting 7th worker spawn is refused
 rc=0
-"$bin" worker spawn sude-w3 sude "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
-[[ $rc -eq 1 ]] || fail "5th worker should be refused: exit $rc, want 1"
+"$bin" worker spawn sude-w7 sude "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 1 ]] || fail "7th worker should be refused: exit $rc, want 1"
 grep -q "worker cap exceeded" "$T/err" || fail "missing worker cap exceeded error: $(cat "$T/err")"
-echo "ok: dual-lens (2 slots) + 2 standalone = 4 slots; 5th worker refused"
+echo "ok: dual-lens (2 slots) + 6 standalone = 8 slots; 7th worker refused"
 
-# ── 5. Starting refusal: owner with 3 workers cannot start dual-lens ───────────────
+# ── 5. Starting refusal: owner with 7 workers cannot start dual-lens ───────────────
 cat > "$AGENT_JSON" << 'JSON'
 {"result":{"agents":[
   {"name":"sude-w1","agent_status":"working"},
   {"name":"sude-w2","agent_status":"working"},
-  {"name":"sude-w3","agent_status":"working"}
+  {"name":"sude-w3","agent_status":"working"},
+  {"name":"sude-w4","agent_status":"working"},
+  {"name":"sude-w5","agent_status":"working"},
+  {"name":"sude-w6","agent_status":"working"},
+  {"name":"sude-w7","agent_status":"working"}
 ]}}
 JSON
-echo "cos" > "$runs_dir/sude-w3.owner"
+for i in 1 2 3 4 5 6 7; do
+  echo "cos" > "$runs_dir/sude-w$i.owner"
+done
 rm -f "$runs_dir"/taskforce-*.state
 
 cat > "$T/brief.md" << 'EOF'
@@ -150,7 +161,7 @@ rc=0
 "$bin" taskforce dual-lens testtf "$T/repo" --brief "$T/brief.md" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 2 ]] || fail "taskforce start over cap: exit $rc, want 2"
 grep -q "worker cap exceeded" "$T/err" || fail "missing cap error on taskforce start: $(cat "$T/err")"
-echo "ok: owner with 3 workers cannot start dual-lens (needs 2, cap is 4)"
+echo "ok: owner with 7 workers cannot start dual-lens (needs 2, cap is 8)"
 
 # ── 6. Finished dual-lens releases reservation ────────────────────────────────────
 cat > "$AGENT_JSON" << 'JSON'
