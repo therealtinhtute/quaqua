@@ -3,7 +3,7 @@
 # projects/INDEX.md row, the projects/<slug>.md card), the one-Lead-per-slug
 # refusal via `herdr agent get`, the workspace/start/prompt call sequence (own
 # <slug> workspace, cwd = the script's repo root, no worktree), the
-# INDEX.md owner-column update, and the LEAD_MODEL/LEAD_EFFORT overrides.
+# INDEX.md owner-column update, and the LEAD_KIND override.
 # herdr and git are stubbed on PATH and log every call; the script runs
 # against a temp repo root. No real herdr, INDEX.md, or pane touched.
 # Usage: tests/test_spawn_lead.sh   (exit 0 = pass)

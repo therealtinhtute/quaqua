@@ -1261,7 +1261,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 let rev_report = runs_dir.join(format!("{revname}.md"));
                 let rev_already_delivered = rev_report.is_file() && {
                     let content = std::fs::read_to_string(&rev_report).unwrap_or_default();
-                    content.lines().any(|l| l.trim_start().starts_with("Verdict:") || l.trim().starts_with("## Challenge"))
+                    content.lines().any(|l| l.trim_start().to_ascii_lowercase().starts_with("verdict:") || l.trim().starts_with("## Challenge"))
                 };
 
                 if !rev_already_delivered {

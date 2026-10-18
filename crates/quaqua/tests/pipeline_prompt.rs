@@ -477,6 +477,9 @@ fn pipeline_resume_with_rounds_raises_cap() {
     f.fake_prompt_worker();
 
     let mut cmd = f.pipeline();
+    cmd.env("QUAQUA_SCRIPT_DIR", &f.scripts)
+        .env("GRID_SKIP", "1")
+        .env("QUAQUA_TEST", "1");
     let _ = cmd
         .args(["--resume", "pfx7", &f.repo_arg(), "--rounds", "5"])
         .output()
@@ -496,8 +499,8 @@ fn pipeline_resume_at_phase_review_with_delivered_report_avoids_exit_6() {
     let state = format!(
         "repo={}\nbrief={}\nbuilder=sude\nreviewer=suhuynh\nreview=always\nrounds=1\n\
          base=\nwt={}/.wt/sude-{task}\nbase_sha=\nhead_sha=\nplanfile=\ncommit=\n\
-         phase=review\nround=1\nprompted=1\nprompt_ts=0\nrounds_run=1\nreview_run=run\n\
-         review_changed=true\nlast_findings=2\nfinished=0\nstart_elapsed=0\n\
+         phase=review\nround=1\nprompted=1\nprompt_ts=0\nrounds_run=0\nreview_run=run\n\
+         review_changed=false\nlast_findings=0\nfinished=0\nstart_elapsed=0\n\
          builder_spawned=1\nreviewer_spawned=1\nlead=\nlead_pane=\npipeline_pid=0\n",
         f.repo_arg(),
         f.brief.display(),
@@ -511,28 +514,47 @@ fn pipeline_resume_at_phase_review_with_delivered_report_avoids_exit_6() {
     fs::write(f.runs.join(format!("{revname}.md")), "findings\nVerdict: 2 findings\n").unwrap();
     assert!(!f.runs.join(format!("{revname}.srt.json")).exists());
 
-    // Fake prompt worker that exits 6 on resume if invoked (which would happen if wait_file ran)
+    // Fake prompt-worker.sh: if wait_file is called on the reviewer (--resume),
+    // simulate watchdog exit 6 on missing srt.json post-cleanup.
     let psh = f.scripts.join("prompt-worker.sh");
-    fs::write(&psh, "#!/usr/bin/env bash\nexit 6\n").unwrap();
+    let script = "#!/usr/bin/env bash\n\
+if [ \"$1\" = \"--resume\" ]; then\n\
+    exit 6\n\
+fi\n\
+exit 0\n";
+    fs::write(&psh, script).unwrap();
     fs::set_permissions(&psh, fs::Permissions::from_mode(0o755)).unwrap();
 
-    // Resuming with raised rounds must bypass wait_file, avoid exit 6, and advance phase to fix
+    // Resuming must bypass wait_file, consume the delivered report, and exit 0 (rounds exhausted),
+    // never exit 6 (watchdog).
     let mut cmd = f.pipeline();
-    cmd.env("QUAQUA_SCRIPT_DIR", &f.scripts);
+    cmd.env("QUAQUA_SCRIPT_DIR", &f.scripts)
+        .env("GRID_SKIP", "1")
+        .env("QUAQUA_TEST", "1");
     let out = cmd
-        .args(["--resume", task, &f.repo_arg(), "--rounds", "2"])
+        .args(["--resume", task, &f.repo_arg()])
         .output()
         .expect("failed to spawn the quaqua binary");
 
-    assert_ne!(
+    assert_eq!(
         out.status.code(),
-        Some(6),
-        "resuming a delivered review report must never exit 6 (watchdog): stderr={}",
+        Some(0),
+        "resuming with delivered report must consume report and exit 0: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(
-        f.state_field(task, "rounds"),
+        f.state_field(task, "last_findings"),
         "2",
-        "rounds cap must be raised to 2",
+        "findings count from delivered report must be recorded",
+    );
+    assert_eq!(
+        f.state_field(task, "rounds_run"),
+        "1",
+        "rounds_run must be recorded as 1",
+    );
+    let pfile = fs::read_to_string(f.runs.join(format!("pipeline-{task}.md"))).unwrap();
+    assert!(
+        pfile.contains("- review round 1: Verdict: 2 findings"),
+        "pipeline file must record the delivered review verdict: {pfile}",
     );
 }
