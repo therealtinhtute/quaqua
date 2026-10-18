@@ -48,6 +48,9 @@ esac
 exit 0
 STUB
 chmod +x "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
 
 run() {  # run <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   local slug=$1; shift
@@ -55,7 +58,7 @@ run() {  # run <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   cp "$T/INDEX.orig" "$T/projects/INDEX.md"
   printf '# rules\n' > "$T/runs/baro-lead.rules.md"
   rc=0
-  CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1 QUAQUA_ROOT="$T" env "$@" \
+  CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1 QUAQUA_ROOT="$T" env "$@" \
     "${QUAQUA_BIN:-quaqua}" lead cleanup "$slug" >"$T/out" 2>"$T/err" || rc=$?
 }
 
@@ -143,7 +146,7 @@ rm -f "$T/runs/sude-live.owner"
 # (projects/INDEX.md.lock.d), writes serialize without data loss or file corruption.
 : > "$T/calls"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
-ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1 QUAQUA_ROOT="$T"
+ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1 QUAQUA_ROOT="$T"
     HERDR_LIVE="baro-lead baro-web-lead")
 env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead cleanup baro >"$T/out1" 2>"$T/err1" & p1=$!
 env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead cleanup baro-web >"$T/out2" 2>"$T/err2" & p2=$!

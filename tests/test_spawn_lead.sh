@@ -67,16 +67,20 @@ case "${1:-} ${2:-}" in
       exit 1
     fi ;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"w7","label":"x"},"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"%7"}}}' ;;
+  "workspace get") printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"}}}\n' "$3" "${WS_LABEL:-$3}" ;;
 esac
 exit 0
 STUB
 chmod +x "$T/bin/git" "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
 
 spawn() {  # spawn <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   local slug=$1; shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" PATH="$T/bin:$PATH" QUAQUA_ROOT="$T" env "$@" \
+  CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T" env "$@" \
     "${QUAQUA_BIN:-quaqua}" lead spawn "$slug" >"$T/out" 2>"$T/err" || rc=$?
 }
 
@@ -253,7 +257,7 @@ echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corrup
 # (projects/INDEX.md.lock.d), writes serialize without data loss or file corruption.
 mkdir -p "$T/runs"; : > "$T/calls"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
-ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" QUAQUA_ROOT="$T")
+ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T")
 env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead spawn coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
 env "${ce[@]}" HERDR_LIVE=mono-desk-lead HERDR_PANE_ID=w9:p13 \
   "${QUAQUA_BIN:-quaqua}" lead cleanup mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
