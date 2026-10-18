@@ -331,6 +331,7 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
                                 pcontent.push_str(
                                     "- build: no commits — builder declared 'Outcome: no changes'; nothing to review\n",
                                 );
+                                let _ = std::fs::write(&self.pfile, pcontent);
                                 return self.finish(state, "clean", 0, None).map(Some);
                             }
                         }
