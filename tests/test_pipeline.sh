@@ -111,6 +111,8 @@ esac
 exit 0
 STUB
 chmod +x "$T/bin/git" "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
 
 cat > "$T/bin/advance-clock" <<'ADV'
 #!/usr/bin/env bash
@@ -148,6 +150,7 @@ run_pipe() {
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
+    HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
     env "${vars[@]}" "${QUAQUA_BIN:-quaqua}" pipeline "$@" >"$T/out" 2>"$T/err" || rc=$?
@@ -327,7 +330,7 @@ run_pipe2() {  # like run_pipe, but against $T/p2/scripts and without GRID_SKIP
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" \
-    HERDR_BIN_PATH="$T/bin/herdr" QUAQUA_OWNER=cos \
+    HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_OWNER=cos \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
     QUAQUA_SCRIPT_DIR="$T/p2/scripts/lead" env "${vars[@]}" "${QUAQUA_BIN:-quaqua}" pipeline "$@" >"$T/out" 2>"$T/err" || rc=$?
@@ -680,6 +683,8 @@ esac
 exit 0
 STUB
 chmod +x "$T/rgbin/herdr"
+export HERDR_BIN_PATH="$T/rgbin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
 
 run_rg() {  # real-git run (only herdr stubbed); sets rc, $T/out, $T/err, $T/calls
   local vars=()
@@ -688,6 +693,7 @@ run_rg() {  # real-git run (only herdr stubbed); sets rc, $T/out, $T/err, $T/cal
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/rgbin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
+    HERDR_BIN_PATH="$T/rgbin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 T="$T" \
     env "${vars[@]}" "${QUAQUA_BIN:-quaqua}" pipeline "$@" >"$T/out" 2>"$T/err" || rc=$?

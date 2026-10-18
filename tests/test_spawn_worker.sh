@@ -128,6 +128,8 @@ fi
 exit 0
 STUB
 chmod +x "$T/bin/git" "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
 
 # a pending move for group "coucou": only --tab coucou-workers scopes it in
 cat > "$T/coucou.json" <<'EOF'
@@ -146,7 +148,7 @@ spawn() {  # spawn <name> <kind> [VAR=val...]; script opts via array $spawn_args
   local name=$1 kind=$2; shift 2
   : > "$T/calls"; : > "$T/gridcalls"
   rc=0
-  CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" LC_ALL="${SPAWN_LC_ALL:-C}" QUAQUA_OWNER=cos \
+  CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" LC_ALL="${SPAWN_LC_ALL:-C}" QUAQUA_OWNER=cos \
     env "$@" "${QUAQUA_BIN:-quaqua}" worker spawn ${spawn_args+"${spawn_args[@]}"} "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
@@ -586,7 +588,7 @@ echo "ok: --base= empty -> exit 1, no git/herdr"
 
 : > "$T/calls"; : > "$T/gridcalls"
 rc=0
-CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" LC_ALL=C \
+CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" LC_ALL=C \
   "${QUAQUA_BIN:-quaqua}" worker spawn tieude-noval tieude "$T/repo" --base >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "trailing --base: exit $rc, want 1"
 grep -q '^# Usage:' "$T/err" || fail "trailing --base: no usage on stderr"
@@ -657,6 +659,8 @@ echo "herdr $*" >> "$CALLS"
 exit 0
 STUB
 chmod +x "$T/bin2/herdr"
+export HERDR_BIN_PATH="$T/bin2/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
 
 # first spawn creates the real worktree
 : > "$T/calls"

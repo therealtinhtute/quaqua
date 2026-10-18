@@ -117,6 +117,9 @@ esac
 exit 0
 STUB
 chmod +x "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
 
 # ── virtual clock (test-only hooks, inert in production) ────────────────────
 # prompt-worker.sh reads epoch seconds from PROMPT_WORKER_CLOCK_FILE instead of
@@ -148,7 +151,7 @@ run() {
   for a in "$@"; do [[ $a == REAL_CLOCK=1 ]] && clock=(); done
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" FAKE_NAME="$name" \
     env "${clock[@]}" "$@" "${QUAQUA_BIN:-quaqua}" worker prompt "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
 }
 run_brief() {
@@ -157,7 +160,7 @@ run_brief() {
   for a in "$@"; do [[ $a == REAL_CLOCK=1 ]] && clock=(); done
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" FAKE_NAME="$name" \
     env "${clock[@]}" "$@" "${QUAQUA_BIN:-quaqua}" worker prompt "$name" "$btext" >"$T/out" 2>"$T/err" || rc=$?
 }
 # resume <name> [--extend <sec>] [VAR=val...] — resume wait; same capture
@@ -172,7 +175,7 @@ resume() {
   done
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
+  CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" FAKE_NAME="$name" \
     env "${clock[@]}" "${vars[@]}" "${QUAQUA_BIN:-quaqua}" worker prompt --resume "$name" "${wargs[@]}" >"$T/out" 2>"$T/err" || rc=$?
 }
 sentinel() { [[ -f $T/home/quaqua/runs/.$1.nudged ]]; }
