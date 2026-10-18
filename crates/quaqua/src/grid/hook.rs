@@ -283,8 +283,11 @@ pub fn reconcile_step<D: HerdrDriver>(
             let _ = std::fs::rename(tmp, &last_snap_file);
         }
     }
-
     let ops = plan_with_deferred(&snap, deferred_statuses)?;
+    if ops.is_empty() {
+        let _ = remove_file(&failed_ops_file);
+        let _ = remove_file(&failed_snap_file);
+    }
 
     let shadow_mode = is_shadow_mode(sdir);
     if shadow_mode {
@@ -294,12 +297,12 @@ pub fn reconcile_step<D: HerdrDriver>(
         return Ok(());
     }
 
-    // Live mode: filter runnable ops using the shared convergence engine from reconcile.rs
-    let owner_env = std::env::var("QUAQUA_OWNER").ok();
+    // Live mode: filter runnable ops using the shared convergence engine from reconcile.rs.
+    // Pass owner=None to preserve legacy hook semantics (arranging all candidate workers in workspace).
     let mut non_deferred: Vec<Op> = filter_ops_for_check(
         &ops,
         &snap,
-        owner_env.as_deref(),
+        None,
         None,
         None,
     )
@@ -308,11 +311,8 @@ pub fn reconcile_step<D: HerdrDriver>(
     .collect();
 
     if non_deferred.is_empty() {
-        let _ = remove_file(&failed_ops_file);
-        let _ = remove_file(&failed_snap_file);
         return Ok(());
     }
-
     // Failure backoff: avoid error storms when an op fails on an unchanged layout
     let snap_sig = compute_snapshot_signature(&snap);
     if failed_ops_file.is_file() && failed_snap_file.is_file() {
