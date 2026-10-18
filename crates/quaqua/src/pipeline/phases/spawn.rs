@@ -79,22 +79,16 @@ pub fn run_spawn<G: GitOps, H: HerdrOps>(
 
     let wt_path = Path::new(&state.wt);
     let rev_out = ctx.git.run_in(wt_path, &["rev-parse", "HEAD"]);
-    let head = match rev_out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => "?".to_string(),
-    };
+    let head = rev_out
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     state.base_sha = head;
     let _ = state.save(&ctx.state_file);
 
     let mut pcontent = std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
     pcontent.push_str(&format!(
-        "- builder {bname} spawned on {} (base {})\n",
-        state.base_sha,
-        if state.base.is_empty() {
-            "default"
-        } else {
-            &state.base
-        }
+        "- builder {bname} spawned (base {})\n",
+        state.base_sha
     ));
     let _ = std::fs::write(&ctx.pfile, pcontent);
 

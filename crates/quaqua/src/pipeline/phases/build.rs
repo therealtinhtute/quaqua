@@ -51,56 +51,66 @@ pub fn run_build<G: GitOps, H: HerdrOps>(
     ));
 
     let wt_path = Path::new(&state.wt);
-    let diff_target = if state.base_sha.is_empty() {
-        "HEAD~1"
-    } else {
-        &state.base_sha
-    };
-    let diff_out = ctx.git.run_in(wt_path, &["diff", "--stat", diff_target, "HEAD"]);
-    let stat_str = diff_out
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    match state.review.as_str() {
+        "always" => state.review_run = "run".to_string(),
+        "skip" => state.review_run = "skip".to_string(),
+        _ => {
+            // auto
+            let numstat_out = ctx.git.run_in(
+                wt_path,
+                &["diff", "--numstat", &state.base_sha, &state.head_sha],
+            );
+            let mut total_lines = 0usize;
+            if let Ok(o) = numstat_out {
+                for line in String::from_utf8_lossy(&o.stdout).lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let add: usize = parts[0].parse().unwrap_or(0);
+                        let del: usize = parts[1].parse().unwrap_or(0);
+                        total_lines += add + del;
+                    }
+                }
+            }
 
-    let diff_files = ctx.git.run_in(wt_path, &["diff", "--name-only", diff_target, "HEAD"]);
-    let files_str = diff_files
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+            let names_out = ctx.git.run_in(
+                wt_path,
+                &["diff", "--name-only", &state.base_sha, &state.head_sha],
+            );
+            let mut dirs: BTreeSet<String> = BTreeSet::new();
+            if let Ok(o) = names_out {
+                for line in String::from_utf8_lossy(&o.stdout).lines() {
+                    let path = line.trim();
+                    if let Some(idx) = path.find('/') {
+                        dirs.insert(path[..idx].to_string());
+                    } else if !path.is_empty() {
+                        dirs.insert(".".to_string());
+                    }
+                }
+            }
 
-    let mut top_dirs = BTreeSet::new();
-    for f in files_str.lines() {
-        if let Some(idx) = f.find('/') {
-            top_dirs.insert(&f[..idx]);
+            let mut pcontent = std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+            pcontent.push_str(&format!(
+                "- review gate: {total_lines} changed lines, {} top-level dirs (run if >{} or >1)\n",
+                dirs.len(),
+                ctx.review_lines
+            ));
+            let _ = std::fs::write(&ctx.pfile, pcontent);
+
+            if total_lines > ctx.review_lines || dirs.len() > 1 {
+                state.review_run = "run".to_string();
+            } else {
+                state.review_run = "skip".to_string();
+            }
         }
     }
 
-    let mut changed_lines = 0;
-    for part in stat_str.split_whitespace() {
-        if part.ends_with('+') || part.ends_with('-') {
-            continue;
-        }
-        if let Ok(n) = part.parse::<usize>() {
-            changed_lines = n;
-        }
-    }
-
-    let run_review = match state.review.as_str() {
-        "always" => true,
-        "skip" => false,
-        _ => changed_lines > ctx.review_lines || top_dirs.len() > 1,
-    };
-
-    if !run_review {
-        let reason = if state.review == "skip" {
-            "--review skip"
-        } else {
-            "small single-area change"
-        };
-        pcontent.push_str(&format!("- review skipped ({reason})\n"));
+    if state.review_run == "skip" {
+        let mut pcontent = std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+        pcontent.push_str(&format!("- review: skipped (gate: {})\n", state.review));
         let _ = std::fs::write(&ctx.pfile, pcontent);
         return ctx.finish(state, "clean", 0, None);
     }
 
-    let _ = std::fs::write(&ctx.pfile, pcontent);
     state.phase = "review".to_string();
     state.round = 1;
     state.prompted = 0;

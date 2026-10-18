@@ -232,7 +232,9 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         state.pipeline_pid = std::process::id();
         state.lead_pane = std::env::var("HERDR_PANE_ID").unwrap_or_default();
         if let Some(r) = resume_rounds {
-            state.rounds = r;
+            if r > state.rounds {
+                state.rounds = r;
+            }
         }
         let _ = state.save(&state_file);
 

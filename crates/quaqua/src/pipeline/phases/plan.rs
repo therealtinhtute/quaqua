@@ -19,10 +19,16 @@ pub fn run_plan<G: GitOps, H: HerdrOps>(
 
     let planfile = ctx.runs_dir.join(format!("{bname}.plan.md"));
     let cur_md = ctx.runs_dir.join(format!("{bname}.md"));
-    let _ = std::fs::copy(&cur_md, &planfile);
-    state.planfile = format!("{bname}.plan.md");
-    let _ = state.save(&ctx.state_file);
+    let _ = std::fs::rename(&cur_md, &planfile);
 
+    state.planfile = planfile.to_string_lossy().to_string();
+    let mut pcontent = std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+    pcontent.push_str(&format!(
+        "- plan: {}\n",
+        planfile.file_name().and_then(|n| n.to_str()).unwrap_or("")
+    ));
+    let _ = std::fs::write(&ctx.pfile, pcontent);
+    let _ = state.save(&ctx.state_file);
     if let Ok(content) = std::fs::read_to_string(&planfile) {
         if content
             .lines()

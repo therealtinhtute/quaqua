@@ -4,11 +4,11 @@
 //! error left `prompted=1` in `runs/pipeline-<task>.state`, so `--resume` took
 //! the wait-only path and the watchdog exited 3 while the worker sat idle).
 //!
-//! Both prompt paths are covered with no real herdr/worker/git:
-//! - the `prompt-worker.sh` subprocess path (a fake shim that fails like the
-//!   real pre-prompt grid check does, exit 1 before dispatch);
-//! - the in-process `worker prompt` path (a fake `herdr` whose `api snapshot`
-//!   fails, so the in-process grid check rejects the run before dispatch).
+//! In-process prompt dispatch and pre-prompt grid check are covered with no real
+//! herdr/worker/git via fake `herdr`:
+//! - pre-prompt grid-check failure rejects the run before dispatch (exit 1 before send);
+//! - successful dispatch and report consumption;
+//! - watchdog exit keeps dispatched prompt marked sent.
 //!
 //! The pipeline runs from a hand-written state file in phase `build`, so a
 //! `--resume` goes straight to the prompt step.

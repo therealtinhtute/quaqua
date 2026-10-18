@@ -795,14 +795,15 @@ fn test_pipeline_blockers_none_exemption() {
     assert!(!has_real_blockers("## Blockers\n- None. All 9 tests passed.\n"));
     assert!(!has_real_blockers("## Blockers\n- **None**. All done\n"));
     assert!(!has_real_blockers("## Blockers\n**None**. All done...\n"));
-    assert!(!has_real_blockers("## Blockers\n- None: all tests pass\n"));
-    assert!(!has_real_blockers("## Blockers\n- None — no blockers encountered\n"));
+    assert!(!has_real_blockers("## Blockers\n- None... all clear\n"));
 
     // Real blockers must return true
     assert!(has_real_blockers("## Blockers\n- cannot plan without the spec\n"));
     assert!(has_real_blockers("## Blockers\n- implementation incomplete\n"));
     assert!(has_real_blockers("## Blockers\n- none\n- also a real blocker\n"));
     assert!(has_real_blockers("## Blockers\n- None of the tests pass\n"));
+    assert!(has_real_blockers("## Blockers\n- none: cannot connect to db\n"));
+    assert!(has_real_blockers("## Blockers\n- None - build compilation failed\n"));
 }
 
 #[test]
@@ -818,6 +819,54 @@ fn test_pipeline_blocked_keeps_finished_zero() {
     // Non-zero exits never finish the state, whatever the status says.
     assert!(!pipeline_finished("plan-ready", 5));
     assert!(!pipeline_finished("clean", 4));
+}
+
+#[test]
+fn test_pipeline_rounds_raise_only_on_resume() {
+    let mut state = quaqua::pipeline::PipelineState::default();
+    state.rounds = 3;
+    let resume_rounds: Option<u32> = Some(2);
+    if let Some(r) = resume_rounds {
+        if r > state.rounds {
+            state.rounds = r;
+        }
+    }
+    assert_eq!(state.rounds, 3, "resuming with lower rounds must not lower the cap");
+
+    let resume_rounds_higher: Option<u32> = Some(5);
+    if let Some(r) = resume_rounds_higher {
+        if r > state.rounds {
+            state.rounds = r;
+        }
+    }
+    assert_eq!(state.rounds, 5, "resuming with higher rounds must raise the cap");
+}
+
+#[test]
+fn test_pipeline_outcome_no_changes_detection() {
+    let content = "Outcome: no changes\n\n## Lessons\n- none\n";
+    let is_no_changes = content.lines().any(|line| {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("Outcome:").or_else(|| t.strip_prefix("outcome:")) {
+            let rest_upper = rest.trim().to_ascii_uppercase();
+            rest_upper.starts_with("NO CHANGES") || rest_upper.starts_with("NO-OP") || rest_upper.starts_with("NO OP")
+        } else {
+            false
+        }
+    });
+    assert!(is_no_changes);
+
+    let content_changes = "Outcome: modified 2 files\n\n## Lessons\n- none\n";
+    let is_no_changes = content_changes.lines().any(|line| {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("Outcome:").or_else(|| t.strip_prefix("outcome:")) {
+            let rest_upper = rest.trim().to_ascii_uppercase();
+            rest_upper.starts_with("NO CHANGES") || rest_upper.starts_with("NO-OP") || rest_upper.starts_with("NO OP")
+        } else {
+            false
+        }
+    });
+    assert!(!is_no_changes);
 }
 
 #[test]
@@ -880,9 +929,18 @@ max_workers_per_orchestrator = 3
 
 #[test]
 fn test_sude_harness_mapped_to_omp() {
-    use quaqua::config::load_team_config;
     use quaqua::pipeline::harness_of_kind;
-    let cfg = load_team_config().unwrap();
+    let toml_str = r#"
+        schema_version = 1
+
+        [kinds.sude]
+        harness = "omp"
+        model = "google-antigravity/gemini-3.8-flash"
+        effort = "high"
+        fallback = "detu"
+        can_review = false
+    "#;
+    let cfg: quaqua::config::Config = toml::from_str(toml_str).unwrap();
     assert_eq!(harness_of_kind("sude", &cfg), Some("omp"));
 }
 

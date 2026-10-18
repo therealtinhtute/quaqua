@@ -394,17 +394,11 @@ pub fn has_real_blockers(content: &str) -> bool {
                 continue;
             }
 
-            // Extract the leading sentence/declaration before common clause delimiters:
-            // '.', ':', ';', '—', '…', ' - '
-            let first_part = if let Some((head, _)) = item.split_once(" - ") {
-                head
-            } else if let Some((head, _)) = item.split_once(" — ") {
-                head
-            } else {
-                item.split(|c: char| c == '.' || c == ':' || c == ';' || c == '—' || c == '…')
-                    .next()
-                    .unwrap_or(item)
-            };
+            // Extract the leading sentence/declaration before sentence-ending delimiters ('.', '…')
+            let first_part = item
+                .split(|c: char| c == '.' || c == '…')
+                .next()
+                .unwrap_or(item);
 
             // Strip markdown emphasis (*, _, `), trailing dots/ellipsis, and whitespace
             let core = first_part
