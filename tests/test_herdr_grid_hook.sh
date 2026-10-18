@@ -657,7 +657,7 @@ worker_w=$(/usr/bin/jq -r '(.snapshot // .result.snapshot // .).layouts[] | sele
 
 # grid-workers.sh --check returns 0
 PATH="$T/bin:$PATH" HERDR_CALLS_FILE="$CALLS_FILE" HERDR_MOVES_LOG="$MOVES_LOG" HERDR_SNAPSHOT_FILE="$CURRENT_SNAPSHOT" \
-  GRID_CHECK_TIMEOUT_SEC=5 bash "$repo_root/scripts/worker/grid-workers.sh" --check --tab quaqua >/dev/null \
+  GRID_CHECK_TIMEOUT_SEC=5 "${QUAQUA_BIN:-quaqua}" grid reconcile --check --tab quaqua >/dev/null \
   || fail "test 16: grid-workers.sh --check failed"
 
 unset HERDR_GRID_SHADOW

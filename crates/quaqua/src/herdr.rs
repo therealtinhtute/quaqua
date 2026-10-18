@@ -33,18 +33,27 @@ pub trait HerdrOps {
     ) -> std::io::Result<Child>;
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Herdr;
+#[derive(Debug, Clone)]
+pub struct Herdr {
+    pub bin: String,
+}
 
 impl Herdr {
     pub fn new() -> Self {
-        Self
+        let bin = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+        Herdr { bin }
+    }
+}
+
+impl Default for Herdr {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl HerdrOps for Herdr {
     fn run(&self, args: &[&str]) -> std::io::Result<Output> {
-        Command::new("herdr").args(args).output()
+        Command::new(&self.bin).args(args).output()
     }
 
     fn agent_list(&self) -> std::io::Result<String> {
@@ -78,7 +87,7 @@ impl HerdrOps for Herdr {
         timeout_ms: u32,
         extra_args: &[&str],
     ) -> std::io::Result<Output> {
-        let mut cmd = Command::new("herdr");
+        let mut cmd = Command::new(&self.bin);
         let timeout_str = timeout_ms.to_string();
         cmd.args(["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", &timeout_str]);
         cmd.args(extra_args);
@@ -86,7 +95,7 @@ impl HerdrOps for Herdr {
     }
 
     fn pane_split(&self, cwd: &str, owner: &str, envs: &[(&str, &str)]) -> std::io::Result<Output> {
-        let mut cmd = Command::new("herdr");
+        let mut cmd = Command::new(&self.bin);
         cmd.args(["pane", "split", "--current", "--direction", "right", "--no-focus", "--cwd", cwd]);
         cmd.args(["--env", "QUAQUA_SANDBOX=1"]);
         let owner_env = format!("QUAQUA_OWNER={}", owner);
@@ -103,7 +112,7 @@ impl HerdrOps for Herdr {
     }
 
     fn pane_report_metadata(&self, pane: &str, tokens: &[&str]) -> std::io::Result<Output> {
-        let mut cmd = Command::new("herdr");
+        let mut cmd = Command::new(&self.bin);
         cmd.args(["pane", "report-metadata", pane, "--source", "herdr-grid"]);
         for token in tokens {
             cmd.args(["--token", token]);
@@ -150,7 +159,7 @@ impl HerdrOps for Herdr {
         log_file: std::fs::File,
     ) -> std::io::Result<Child> {
         let t_str = timeout_ms.to_string();
-        Command::new("herdr")
+        Command::new(&self.bin)
             .arg("agent")
             .arg("prompt")
             .arg(name)
@@ -161,5 +170,86 @@ impl HerdrOps for Herdr {
             .stdout(log_file.try_clone().unwrap())
             .stderr(log_file)
             .spawn()
+    }
+}
+
+pub trait HerdrDriver {
+    fn snapshot(&mut self) -> Result<crate::grid::Snapshot, String>;
+    fn move_pane(
+        &mut self,
+        pane: &str,
+        target: &crate::grid::Target,
+    ) -> Result<crate::grid::MoveResult, String>;
+    fn rename_pane(&mut self, pane: &str, label: &str) -> Result<(), String>;
+}
+
+impl HerdrDriver for Herdr {
+    fn snapshot(&mut self) -> Result<crate::grid::Snapshot, String> {
+        let out = Command::new(&self.bin)
+            .args(["api", "snapshot"])
+            .output()
+            .map_err(|e| format!("cannot run {} api snapshot: {e}", self.bin))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("{} api snapshot failed: {err}", self.bin));
+        }
+        let val: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("invalid snapshot JSON from herdr: {e}"))?;
+        crate::grid::types::parse_snapshot_value(&val)
+    }
+
+    fn move_pane(
+        &mut self,
+        pane: &str,
+        target: &crate::grid::Target,
+    ) -> Result<crate::grid::MoveResult, String> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["pane", "move", pane]);
+        match target {
+            crate::grid::Target::NewTab { label } => {
+                cmd.args(["--new-tab", "--label", label, "--no-focus"]);
+            }
+            crate::grid::Target::Split {
+                tab,
+                anchor,
+                direction,
+                ratio,
+            } => {
+                let ratio_s = format!("{ratio:.1}");
+                cmd.args([
+                    "--tab",
+                    tab,
+                    "--split",
+                    direction,
+                    "--target-pane",
+                    anchor,
+                    "--ratio",
+                    &ratio_s,
+                    "--no-focus",
+                ]);
+            }
+        }
+        let out = cmd
+            .output()
+            .map_err(|e| format!("cannot run {} pane move: {e}", self.bin))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("pane move failed: {err}"));
+        }
+        let val: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("invalid move response JSON: {e}"))?;
+        crate::grid::apply::parse_move_response(&val, pane)
+    }
+
+    fn rename_pane(&mut self, pane: &str, label: &str) -> Result<(), String> {
+        let out = Command::new(&self.bin)
+            .args(["pane", "rename", pane, label])
+            .output()
+            .map_err(|e| format!("cannot run {} pane rename: {e}", self.bin))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("pane rename failed: {err}"));
+        }
+        Ok(())
     }
 }

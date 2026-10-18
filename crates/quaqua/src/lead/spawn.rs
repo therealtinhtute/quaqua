@@ -3,7 +3,7 @@
 
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
-use crate::json::parse_json;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 use std::time::Duration;
@@ -120,7 +120,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
 
     // one Lead per slug check via herdr agent get
     if let Ok((_, get_json)) = herdr.agent_get(&name) {
-        if let Ok(parsed) = parse_json(&get_json) {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&get_json) {
             if parsed.get("result").and_then(|r| r.get("agent")).is_some() {
                 return Err((1, format!("a Lead for '{slug}' already exists: {name}\n")));
             }
@@ -269,16 +269,18 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
     let ws_out = herdr.run(&ws_args).map_err(|e| (1, format!("herdr workspace create failed: {e}\n")))?;
     let ws_str = String::from_utf8_lossy(&ws_out.stdout).to_string();
-    let ws_json = parse_json(&ws_str).map_err(|e| (1, format!("invalid workspace JSON: {e}\n")))?;
+    let ws_json: Value = serde_json::from_str(&ws_str).map_err(|e| (1, format!("invalid workspace JSON: {e}\n")))?;
     let pane = ws_json
         .get("result")
         .and_then(|r| r.get("root_pane"))
-        .and_then(|p| p.get_str("pane_id"))
+        .and_then(|p| p.get("pane_id"))
+        .and_then(|p| p.as_str())
         .ok_or_else(|| (1, "no root_pane.pane_id in workspace JSON\n".to_string()))?;
     let wsid = ws_json
         .get("result")
         .and_then(|r| r.get("workspace"))
-        .and_then(|w| w.get_str("workspace_id"))
+        .and_then(|w| w.get("workspace_id"))
+        .and_then(|w| w.as_str())
         .ok_or_else(|| (1, "no workspace.workspace_id in workspace JSON\n".to_string()))?;
 
     // Tag Lead pane as orchestrator
@@ -322,7 +324,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
 
     // Prompt Lead
     let prompt_text = format!(
-        "You are the Lead for project '{slug}' (QUAQUA_OWNER={name}) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).\n- Own the project card projects/{slug}.md: read it now, then keep its '## Now' at the current truth after every outcome.\n- Pipeline-size work runs through scripts/lead/pipeline.sh (usage in its header). Peers: scripts/worker/spawn-worker.sh + `quaqua grid reconcile` with GRID_TAB={slug}-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.\n- You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch {integ} (created from the repo's default branch if it was missing — spawn Peers --base {integ} so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.\n- Resolve any '## Challenge' in runs/<worker>.md before acceptance; every redirect (from anh iu, the Auditor, or any report) reaches you through the CoS — record CoS steering in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.\nReply 'ready' once the card is read."
+        "You are the Lead for project '{slug}' (QUAQUA_OWNER={name}) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).\n- Own the project card projects/{slug}.md: read it now, then keep its '## Now' at the current truth after every outcome.\n- Pipeline-size work runs through quaqua pipeline. Peers: quaqua worker spawn with GRID_TAB={slug}-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.\n- You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch {integ} (created from the repo's default branch if it was missing — spawn Peers --base {integ} so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.\n- Resolve any '## Challenge' in runs/<worker>.md before acceptance; every redirect (from anh iu, the Auditor, or any report) reaches you through the CoS — record CoS steering in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.\nReply 'ready' once the card is read."
     );
     let _ = herdr.run(&["agent", "prompt", &name, &prompt_text]);
 

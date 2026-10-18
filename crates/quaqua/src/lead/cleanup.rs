@@ -3,7 +3,8 @@
 
 use super::spawn::find_quaqua_root;
 use crate::herdr::HerdrOps;
-use crate::json::parse_json;
+use crate::state::WorkerMetadata;
+use serde_json::Value;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "\
@@ -46,14 +47,15 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
 
     // Check Lead liveness
     let (lead_ok, lead_body) = herdr.agent_get(&name).unwrap_or((false, String::new()));
-    let lead_json = parse_json(&lead_body).ok();
+    let lead_json = serde_json::from_str::<Value>(&lead_body).ok();
     let has_agent = lead_ok && lead_json.as_ref().and_then(|j| j.get("result")).and_then(|r| r.get("agent")).is_some();
 
     if !has_agent {
         let is_not_found = lead_body.contains("agent_not_found")
             || lead_json.as_ref()
                 .and_then(|j| j.get("error"))
-                .and_then(|e| e.get_str("code"))
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str())
                 == Some("agent_not_found");
         if is_not_found {
             return Err((1, format!("no live Lead '{name}'\n")));
@@ -68,9 +70,10 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
     }
 
     let agent_obj = lead_json.as_ref().and_then(|j| j.get("result")).and_then(|r| r.get("agent")).unwrap();
-    let pane = agent_obj.get_str("pane_id").unwrap_or("");
+    let pane = agent_obj.get("pane_id").and_then(|p| p.as_str()).unwrap_or("");
     let ws = agent_obj
-        .get_str("workspace_id")
+        .get("workspace_id")
+        .and_then(|w| w.as_str())
         .unwrap_or_else(|| {
             if let Some(colon) = pane.find(':') {
                 &pane[..colon]
@@ -85,25 +88,24 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("owner") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if content.trim() == name {
-                        let peer = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                        if !peer.is_empty() {
-                            let (peer_ok, peer_body) = herdr.agent_get(peer).unwrap_or((false, String::new()));
-                            let peer_json = parse_json(&peer_body).ok();
-                            let peer_live = peer_ok
-                                && peer_json.as_ref()
-                                    .and_then(|j| j.get("result"))
-                                    .and_then(|r| r.get("agent"))
-                                    .is_some();
-                            if peer_live {
-                                live_peers.push(peer.to_string());
-                            } else {
-                                let is_peer_not_found = peer_body.contains("agent_not_found")
-                                    || peer_json.as_ref()
-                                        .and_then(|j| j.get("error"))
-                                        .and_then(|e| e.get_str("code"))
-                                        == Some("agent_not_found");
+                let peer = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if !peer.is_empty() && WorkerMetadata::load_owner(&runs_dir, peer) == name {
+                    let (peer_ok, peer_body) = herdr.agent_get(peer).unwrap_or((false, String::new()));
+                    let peer_json = serde_json::from_str::<Value>(&peer_body).ok();
+                    let peer_live = peer_ok
+                        && peer_json.as_ref()
+                            .and_then(|j| j.get("result"))
+                            .and_then(|r| r.get("agent"))
+                            .is_some();
+                    if peer_live {
+                        live_peers.push(peer.to_string());
+                    } else {
+                        let is_peer_not_found = peer_body.contains("agent_not_found")
+                            || peer_json.as_ref()
+                                .and_then(|j| j.get("error"))
+                                .and_then(|e| e.get("code"))
+                                .and_then(|c| c.as_str())
+                                == Some("agent_not_found");
                                 if !is_peer_not_found {
                                     return Err((
                                         1,
@@ -114,8 +116,6 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
                                 }
                             }
                         }
-                    }
-                }
             }
         }
     }
@@ -137,12 +137,13 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
                 .run(&["pane", "current"])
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
                 .unwrap_or_default();
-            let cur_json = parse_json(&out).ok();
+            let cur_json = serde_json::from_str::<Value>(&out).ok();
             cur_json
                 .as_ref()
                 .and_then(|j| j.get("result"))
                 .and_then(|r| r.get("pane"))
-                .and_then(|p| p.get_str("pane_id"))
+                .and_then(|p| p.get("pane_id"))
+                .and_then(|p| p.as_str())
                 .unwrap_or("")
                 .to_string()
         }
@@ -153,12 +154,13 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
         .run(&["workspace", "get", ws])
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
-    let ws_parsed = parse_json(&ws_out).ok();
+    let ws_parsed = serde_json::from_str::<Value>(&ws_out).ok();
     let ws_label = ws_parsed
         .as_ref()
         .and_then(|j| j.get("result"))
         .and_then(|r| r.get("workspace"))
-        .and_then(|w| w.get_str("label"))
+        .and_then(|w| w.get("label"))
+        .and_then(|w| w.as_str())
         .unwrap_or("");
     let closed = if ws_label == slug && ws != caller_ws {
         let _ = herdr.run(&["workspace", "close", ws]);

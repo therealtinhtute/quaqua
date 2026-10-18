@@ -149,7 +149,7 @@ run() {
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "${clock[@]}" "$@" bash "$src/worker/prompt-worker.sh" "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
+    env "${clock[@]}" "$@" "${QUAQUA_BIN:-quaqua}" worker prompt "$name" "$brief" >"$T/out" 2>"$T/err" || rc=$?
 }
 run_brief() {
   local name=$1 btext=$2; shift 2
@@ -158,7 +158,7 @@ run_brief() {
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "${clock[@]}" "$@" bash "$src/worker/prompt-worker.sh" "$name" "$btext" >"$T/out" 2>"$T/err" || rc=$?
+    env "${clock[@]}" "$@" "${QUAQUA_BIN:-quaqua}" worker prompt "$name" "$btext" >"$T/out" 2>"$T/err" || rc=$?
 }
 # resume <name> [--extend <sec>] [VAR=val...] — resume wait; same capture
 # (virtual clock by default, REAL_CLOCK=1 to opt out — see run)
@@ -173,22 +173,22 @@ resume() {
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" FAKE_NAME="$name" \
-    env "${clock[@]}" "${vars[@]}" bash "$src/worker/prompt-worker.sh" --resume "$name" "${wargs[@]}" >"$T/out" 2>"$T/err" || rc=$?
+    env "${clock[@]}" "${vars[@]}" "${QUAQUA_BIN:-quaqua}" worker prompt --resume "$name" "${wargs[@]}" >"$T/out" 2>"$T/err" || rc=$?
 }
 sentinel() { [[ -f $T/home/quaqua/runs/.$1.nudged ]]; }
 nudges()   { grep -c 'agent prompt.*Time check' "$T/calls" || true; }
 
 # ── --resume arg validation ─────────────────────────────────────────────────
 rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-  bash "$src/worker/prompt-worker.sh" --resume >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker prompt --resume >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "--resume no name: exit $rc, want 1"
 grep -q '^# Usage:' "$T/err" || fail "--resume no name: no usage on stderr"
 rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-  bash "$src/worker/prompt-worker.sh" --resume 'bad_name' >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker prompt --resume 'bad_name' >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "--resume bad name: exit $rc, want 1"
 for bad in '--extend 0' '--extend abc' '--extend'; do
   rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
-    bash "$src/worker/prompt-worker.sh" --resume sude-ext $bad >"$T/out" 2>"$T/err" || rc=$?
+    "${QUAQUA_BIN:-quaqua}" worker prompt --resume sude-ext $bad >"$T/out" 2>"$T/err" || rc=$?
   [[ $rc -eq 1 ]] || fail "--resume $bad: exit $rc, want 1"
 done
 echo "ok: --resume arg validation -> exit 1, usage on stderr"

@@ -3,7 +3,8 @@
 
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
-use crate::json::parse_json;
+use crate::state::WorkerMetadata;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub fn resolve_home_quaqua_runs(home: Option<&Path>) -> PathBuf {
@@ -118,20 +119,20 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
         .agent_get(name)
         .map_err(|e| (1, format!("error: failed to inspect agent {name}: {e}")))?;
 
-    let parsed_json = parse_json(&agent_info).ok();
+    let parsed_json = serde_json::from_str::<Value>(&agent_info).ok();
     let mut pane_to_close: Option<String> = None;
     let mut inspect_ok = false;
 
     if let Some(json) = &parsed_json {
         if let Some(agent) = json.get("result").and_then(|r| r.get("agent")) {
             inspect_ok = true;
-            if let Some(pane) = agent.get_str("pane_id") {
+            if let Some(pane) = agent.get("pane_id").and_then(|p| p.as_str()) {
                 if !pane.is_empty() {
                     pane_to_close = Some(pane.to_string());
                 }
             }
         } else if let Some(err) = json.get("error") {
-            if err.get_str("code") == Some("agent_not_found") {
+            if err.get("code").and_then(|c| c.as_str()) == Some("agent_not_found") {
                 inspect_ok = true; // agent already gone: no pane to close
             }
         }
@@ -153,12 +154,7 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
 
     let owner = std::env::var("QUAQUA_OWNER")
         .ok()
-        .or_else(|| {
-            std::fs::read_to_string(runs_dir.join(format!("{name}.owner")))
-                .ok()
-                .map(|s| s.trim().to_string())
-        })
-        .unwrap_or_else(|| "cos".to_string());
+        .unwrap_or_else(|| WorkerMetadata::load_owner(&runs_dir, name));
 
     let repo_name = repo
         .file_name()
@@ -166,11 +162,7 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
         .unwrap_or("repo");
     let grid_tab = std::env::var("GRID_TAB")
         .ok()
-        .or_else(|| {
-            std::fs::read_to_string(runs_dir.join(format!("{name}.grid")))
-                .ok()
-                .map(|s| s.trim().to_string())
-        })
+        .or_else(|| WorkerMetadata::load_grid(&runs_dir, name))
         .unwrap_or_else(|| format!("{repo_name}-workers"));
 
     let rm_out = git
@@ -182,15 +174,7 @@ pub fn cleanup_worker<G: GitOps, H: HerdrOps>(name: &str, repo_path: &Path, git:
         return Err((rm_out.status.code().unwrap_or(1), err_text));
     }
 
-    let _ = std::fs::remove_file(runs_dir.join(format!("{name}.owner")));
-    let _ = std::fs::remove_file(runs_dir.join(format!("{name}.grid")));
-    let _ = std::fs::remove_file(runs_dir.join(format!("{name}.pipeline")));
-    let _ = std::fs::remove_file(runs_dir.join(format!("{name}.srt.json")));
-    let _ = std::fs::remove_file(runs_dir.join(format!(".{name}.provider_retry")));
-    let _ = std::fs::remove_file(runs_dir.join(format!(".{name}.autoext")));
-    let _ = std::fs::remove_file(runs_dir.join(format!(".{name}.cost80")));
-    let _ = std::fs::remove_file(runs_dir.join(format!(".{name}.cost100")));
-    let _ = std::fs::remove_dir_all(runs_dir.join(".opencode-state").join(name));
+    WorkerMetadata::cleanup_worker_files(&runs_dir, name);
     println!("cleaned {name} (branch quaqua/{name} kept)");
 
     run_grid_hook(&grid_tab, Some(&owner))?;

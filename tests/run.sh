@@ -22,15 +22,15 @@ pass=0 fail=0 failed=() skipped=()
 
 # The files each slow suite exercises, space-separated: the suite runs only
 # when one of them changed. A test's own file counts (editing a slow test must
-# run it). test_prompt_worker.sh drives prompt-worker.sh, and its pre-prompt
-# grid check runs grid-workers.sh (which sources lib/). test_pipeline.sh drives
-# pipeline.sh plus the worker scripts it calls in-process.
+# run it). test_prompt_worker.sh drives `quaqua worker prompt`, including its
+# in-process pre-prompt grid check; test_pipeline.sh drives `quaqua pipeline`
+# plus the worker steps it runs in-process.
 slow_cover() {
   case "$1" in
     test_prompt_worker.sh)
-      printf '%s' 'tests/test_prompt_worker.sh scripts/worker/prompt-worker.sh scripts/worker/grid-workers.sh scripts/lib/' ;;
+      printf '%s' 'tests/test_prompt_worker.sh crates/quaqua/src/worker/prompt.rs' ;;
     test_pipeline.sh)
-      printf '%s' 'tests/test_pipeline.sh scripts/lead/pipeline.sh scripts/lib/ scripts/worker/prompt-worker.sh scripts/worker/spawn-worker.sh scripts/worker/cleanup-worker.sh scripts/worker/grid-workers.sh' ;;
+      printf '%s' 'tests/test_pipeline.sh crates/quaqua/src/pipeline/' ;;
   esac
 }
 

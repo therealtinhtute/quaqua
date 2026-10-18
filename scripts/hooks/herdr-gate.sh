@@ -31,7 +31,7 @@ guarded='(pane[[:space:]]+(split|move)|tab[[:space:]]+create|workspace[[:space:]
 stdin=$(cat)
 if grep -Eq "herdr.*$guarded" <<<"$stdin"; then
   echo "quaqua gate: '$bin' not found — fallback match; blocking pane/workspace spawn+move (fail-closed)" >&2
-  echo "blocked: spawn/move panes and workspaces only via scripts/ (spawn-worker.sh, spawn-lead.sh, grid-workers.sh, cleanup-worker.sh, cleanup-lead.sh) — rules/_all/fanout-agent-grid.md" >&2
+  echo "blocked: spawn/move panes and workspaces only via the quaqua binary — install quaqua or set QUAQUA_BIN, then retry — rules/_all/fanout-agent-grid.md" >&2
   exit 2
 fi
 

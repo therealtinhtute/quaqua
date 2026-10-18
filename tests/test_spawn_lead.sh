@@ -19,9 +19,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 unset HERDR_PANE_ID
 
 # ── sandbox: temp quaqua root (script copy under scripts/) + stub herdr/git ─
-mkdir -p "$T/bin" "$T/scripts/lead" "$T/projects" "$T/rules/_all"
-cp "$src/lead/spawn-lead.sh" "$T/scripts/lead/spawn-lead.sh"
-cp -R "$src/lib" "$T/scripts/"
+mkdir -p "$T/bin" "$T/projects" "$T/rules/_all"
 
 cat > "$T/projects/INDEX.md" <<'EOF'
 # Projects
@@ -78,8 +76,8 @@ spawn() {  # spawn <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   local slug=$1; shift
   : > "$T/calls"
   rc=0
-  CALLS="$T/calls" PATH="$T/bin:$PATH" env "$@" \
-    bash "$T/scripts/lead/spawn-lead.sh" "$slug" >"$T/out" 2>"$T/err" || rc=$?
+  CALLS="$T/calls" PATH="$T/bin:$PATH" QUAQUA_ROOT="$T" env "$@" \
+    "${QUAQUA_BIN:-quaqua}" lead spawn "$slug" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 ln() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }  # first matching call line
@@ -110,7 +108,7 @@ grep -q 'r1 stay in the project' "$T/runs/coucou-island-lead.rules.md" \
   || fail "happy: rules file missing rules/_all content"
 grep -q 'agent prompt coucou-island-lead' "$T/calls" \
   || fail "happy: no brief prompt: $(cat "$T/calls")"
-for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'pipeline.sh' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ' 'reaches you through the CoS'; do
+for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'quaqua pipeline' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ' 'reaches you through the CoS'; do
   grep -qF "$frag" "$T/calls" || fail "happy: brief missing '$frag'"
 done
 ! grep -qF 'record steering from anh iu or CoS' "$T/calls" \
@@ -253,13 +251,12 @@ echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corrup
 # ── concurrent spawn vs cleanup on different INDEX rows must not lose updates ─
 # Spawn and cleanup run concurrently on different rows. With the shared mkdir lock
 # (projects/INDEX.md.lock.d), writes serialize without data loss or file corruption.
-cp "$src/lead/cleanup-lead.sh" "$T/scripts/lead/cleanup-lead.sh"
 mkdir -p "$T/runs"; : > "$T/calls"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
-ce=(CALLS="$T/calls" PATH="$T/bin:$PATH")
-env "${ce[@]}" bash "$T/scripts/lead/spawn-lead.sh" coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
+ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" QUAQUA_ROOT="$T")
+env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead spawn coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
 env "${ce[@]}" HERDR_LIVE=mono-desk-lead HERDR_PANE_ID=w9:p13 \
-  bash "$T/scripts/lead/cleanup-lead.sh" mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
+  "${QUAQUA_BIN:-quaqua}" lead cleanup mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
 rc1=0 rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?
 [[ $rc1 -eq 0 && $rc2 -eq 0 ]] || fail "concurrent: exits $rc1/$rc2: $(cat "$T/err.s" "$T/err.c")"
 grep -qE '^\| coucou-island \| ~/Lab/coucou-island \| coucou-island-lead \|' "$T/projects/INDEX.md" \
