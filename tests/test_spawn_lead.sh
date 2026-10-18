@@ -63,7 +63,7 @@ case "${1:-} ${2:-}" in
   "agent get")
     # names in $HERDR_LIVE exist; anything else is agent_not_found (rc 1)
     if [[ " ${HERDR_LIVE:-} " == *" ${3:-} "* ]]; then
-      printf '{"result":{"agent":{"name":"%s","agent_status":"idle","pane_id":"w1:p9"}}}\n' "$3"
+      printf '{"result":{"agent":{"name":"%s","agent_status":"idle","pane_id":"%%7","workspace_id":"w7"}}}\n' "$3"
     else
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "${3:-}"
       exit 1
@@ -102,12 +102,10 @@ grep -q 'agent get coucou-island-lead' "$T/calls" \
   || fail "happy: no duplicate check: $(cat "$T/calls")"
 grep -qF "workspace create --label coucou-island --no-focus --cwd $T --env QUAQUA_OWNER=coucou-island-lead" "$T/calls" \
   || fail "happy: Lead not in its own <slug> workspace at the repo root: $(cat "$T/calls")"
-grep -q 'agent start coucou-island-lead --kind claude --pane %7 --timeout 60000' "$T/calls" \
+grep -q 'agent start coucou-island-lead --kind opencode --pane %7 --timeout 60000 -- --standalone --auto' "$T/calls" \
   || fail "happy: bad agent start: $(cat "$T/calls")"
-grep -q -- '--model claude-opus-5-5 --effort low' "$T/calls" \
-  || fail "happy: default model/effort missing: $(cat "$T/calls")"
-grep -qF -- "--append-system-prompt-file $T/runs/coucou-island-lead.rules.md" "$T/calls" \
-  || fail "happy: no rules file arg: $(cat "$T/calls")"
+grep -qF "OPENCODE_CONFIG_CONTENT={\"model\":{\"providerID\":\"opencode-go\",\"model\":\"deepseek-v4.1-flash\",\"variant\":\"max\"},\"instructions\":[\"$T/runs/coucou-island-lead.rules.md\"]}" "$T/calls" \
+  || fail "happy: opencode config content missing from workspace create: $(cat "$T/calls")"
 grep -q 'r1 stay in the project' "$T/runs/coucou-island-lead.rules.md" \
   || fail "happy: rules file missing rules/_all content"
 grep -q 'agent prompt coucou-island-lead' "$T/calls" \
@@ -176,12 +174,16 @@ grep -qE '^\| mono-desk \| ~/Lab/mono-desk \| quaqua-monodesk-orchestrator \|' "
   || fail "mono: mono-desk row was touched: $(cat "$T/projects/INDEX.md")"
 echo "ok: 'mono' updates only its own row (mono-desk untouched)"
 
-# ── LEAD_MODEL / LEAD_EFFORT override the claude args ───────────────────────
-spawn coucou-island LEAD_MODEL=claude-haiku-4 LEAD_EFFORT=high
+# ── LEAD_KIND overrides strategy.lead_kind ──────────────────────────────────
+spawn coucou-island LEAD_KIND=truonglao
 [[ $rc -eq 0 ]] || fail "env: exit $rc, want 0: $(cat "$T/err")"
-grep -q -- '--model claude-haiku-4 --effort high' "$T/calls" \
-  || fail "env: overrides not passed: $(cat "$T/calls")"
-echo "ok: LEAD_MODEL/LEAD_EFFORT override the defaults"
+grep -q 'agent start coucou-island-lead --kind claude --pane %7 --timeout 60000' "$T/calls" \
+  || fail "env: LEAD_KIND not passed as claude: $(cat "$T/calls")"
+grep -q -- '--model claude-opus-5-5 --effort high' "$T/calls" \
+  || fail "env: truonglao model/effort not passed: $(cat "$T/calls")"
+grep -qF -- "--append-system-prompt-file $T/runs/coucou-island-lead.rules.md" "$T/calls" \
+  || fail "env: claude rules file arg missing: $(cat "$T/calls")"
+echo "ok: LEAD_KIND overrides strategy.lead_kind"
 
 # ── integration branch: created from the default branch before side effects ─
 # no origin/HEAD, main present -> main

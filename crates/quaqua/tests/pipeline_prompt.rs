@@ -469,3 +469,70 @@ fn pipeline_grid_hook_cos_uses_repo_default_tab() {
         calls,
     );
 }
+
+#[test]
+fn pipeline_resume_with_rounds_raises_cap() {
+    let f = Fixture::new("capraise");
+    f.write_state("pfx7");
+    f.fake_prompt_worker();
+
+    let mut cmd = f.pipeline();
+    let _ = cmd
+        .args(["--resume", "pfx7", &f.repo_arg(), "--rounds", "5"])
+        .output()
+        .expect("failed to spawn the quaqua binary");
+
+    assert_eq!(
+        f.state_field("pfx7", "rounds"),
+        "5",
+        "resuming with --rounds 5 must raise state.rounds to 5",
+    );
+}
+
+#[test]
+fn pipeline_resume_at_phase_review_with_delivered_report_avoids_exit_6() {
+    let f = Fixture::new("revdeliv");
+    let task = "pfx8";
+    let state = format!(
+        "repo={}\nbrief={}\nbuilder=sude\nreviewer=suhuynh\nreview=always\nrounds=1\n\
+         base=\nwt={}/.wt/sude-{task}\nbase_sha=\nhead_sha=\nplanfile=\ncommit=\n\
+         phase=review\nround=1\nprompted=1\nprompt_ts=0\nrounds_run=1\nreview_run=run\n\
+         review_changed=true\nlast_findings=2\nfinished=0\nstart_elapsed=0\n\
+         builder_spawned=1\nreviewer_spawned=1\nlead=\nlead_pane=\npipeline_pid=0\n",
+        f.repo_arg(),
+        f.brief.display(),
+        f.root.display(),
+    );
+    fs::write(f.runs.join(format!("pipeline-{task}.state")), state).unwrap();
+    fs::write(f.runs.join(format!("pipeline-{task}.md")), format!("# pipeline {task}\n")).unwrap();
+
+    // Already-delivered reviewer report with findings, but NO srt.json exists (post-cleanup)
+    let revname = format!("suhuynh-{task}r1");
+    fs::write(f.runs.join(format!("{revname}.md")), "findings\nVerdict: 2 findings\n").unwrap();
+    assert!(!f.runs.join(format!("{revname}.srt.json")).exists());
+
+    // Fake prompt worker that exits 6 on resume if invoked (which would happen if wait_file ran)
+    let psh = f.scripts.join("prompt-worker.sh");
+    fs::write(&psh, "#!/usr/bin/env bash\nexit 6\n").unwrap();
+    fs::set_permissions(&psh, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Resuming with raised rounds must bypass wait_file, avoid exit 6, and advance phase to fix
+    let mut cmd = f.pipeline();
+    cmd.env("QUAQUA_SCRIPT_DIR", &f.scripts);
+    let out = cmd
+        .args(["--resume", task, &f.repo_arg(), "--rounds", "2"])
+        .output()
+        .expect("failed to spawn the quaqua binary");
+
+    assert_ne!(
+        out.status.code(),
+        Some(6),
+        "resuming a delivered review report must never exit 6 (watchdog): stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        f.state_field(task, "rounds"),
+        "2",
+        "rounds cap must be raised to 2",
+    );
+}

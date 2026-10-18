@@ -386,7 +386,7 @@ expect_reject_review() {  # expect_reject_review <name> <kind> <label>
   unset spawn_args
   [[ $rc -eq 1 ]] || fail "$3: exit $rc, want 1"
   grep -q '^# Usage:' "$T/err" || fail "$3: no usage on stderr"
-  grep -qF "error: --review is only supported for claude kinds (ni, suhuynh, truonglao)" "$T/err" \
+  grep -qF "error: --review requires a kind with can_review = true in team.toml (ni, suhuynh, truonglao), not $2" "$T/err" \
     || fail "$3: no clear refusal: $(cat "$T/err")"
   [[ ! -s "$T/calls" ]] || fail "$3: git/herdr called before rejection: $(cat "$T/calls")"
   echo "ok: $3 -> exit 1, no git/herdr"
@@ -405,8 +405,8 @@ expect_reject_review sude-revbad sude "--review on sude"
 # evidence commands; mutating Bash is denied except two narrow allows the
 # reviewer needs to finish a review: `cargo test` (its suite) and the
 # runs/.<name>.tmp -> runs/<name>.md atomic report `mv`.
-for k in ni suhuynh truonglao; do
-  case $k in ni) eff=low ;; suhuynh) eff=medium ;; truonglao) eff=high ;; esac
+for k in ni truonglao; do
+  case $k in ni) eff=low ;; truonglao) eff=high ;; esac
   spawn_args=(--review)
   spawn "$k-revread" "$k"
   unset spawn_args
@@ -435,6 +435,17 @@ for k in ni suhuynh truonglao; do
   echo "ok: --review $k -> dontAsk + Edit() rules (runs writable, worktree denied) + narrow Bash allows (cargo test, atomic mv), model/effort unchanged"
 done
 
+# --review on suhuynh (opencode kind with can_review = true)
+spawn_args=(--review)
+spawn "suhuynh-revread" "suhuynh"
+unset spawn_args
+[[ $rc -eq 0 ]] || fail "--review suhuynh: exit $rc, want 0: $(cat "$T/err")"
+grep -qF -- '--kind opencode' "$T/calls" || fail "--review suhuynh: not an opencode start: $(cat "$T/calls")"
+grep -qF '"review":true' "$T/home/quaqua/runs/suhuynh-revread.srt.json" \
+  || fail "--review suhuynh: srt.json missing review: true"
+grep -q "worker=suhuynh-revread" "$T/out" || fail "--review suhuynh: no success line"
+echo "ok: --review suhuynh -> opencode start, review: true recorded in srt.json"
+
 # the review Bash allows are review-only: a plain claude spawn keeps ambient settings
 spawn ni-plain ni
 [[ $rc -eq 0 ]] || fail "plain ni: exit $rc, want 0: $(cat "$T/err")"
@@ -453,7 +464,7 @@ echo "ok: plain ni (no --review) -> ambient settings, no review mode/Bash rules"
 # folder", then Enter, and only then reports grid_ready=1.
 echo 1 > "$T/claude-dialog"
 spawn_args=(--review)
-spawn suhuynh-trust suhuynh CLAUDE_DIALOG="$T/claude-dialog"
+spawn truonglao-trust truonglao CLAUDE_DIALOG="$T/claude-dialog"
 unset spawn_args
 [[ $rc -eq 0 ]] || fail "trust dialog: exit $rc, want 0: $(cat "$T/err")"
 grep -qF 'herdr pane wait-output %1 --match trust --timeout 15000' "$T/calls" \
@@ -470,37 +481,37 @@ grep -qF 'herdr pane send-keys %1 enter' "$T/calls" \
   || fail "trust dialog: review boundary weakened: $(cat "$T/calls")"
 grep -qF -- '--permission-mode dontAsk' "$T/calls" \
   || fail "trust dialog: review permission mode lost: $(cat "$T/calls")"
-grep -q "worker=suhuynh-trust" "$T/out" || fail "trust dialog: no success line"
+grep -q "worker=truonglao-trust" "$T/out" || fail "trust dialog: no success line"
 echo "ok: claude trust dialog -> wait-output trust, Down+Enter before grid_ready, boundary untouched"
 
 # an already-trusted repo (no dialog): nothing is sent, the spawn is unchanged
-spawn suhuynh-notrust suhuynh
+spawn truonglao-notrust truonglao
 [[ $rc -eq 0 ]] || fail "no trust dialog: exit $rc, want 0: $(cat "$T/err")"
 ! grep -qF 'pane send-keys' "$T/calls" || fail "no trust dialog: keys sent anyway: $(cat "$T/calls")"
 echo "ok: no trust dialog -> waited, nothing sent"
 
 # a start herdr could not confirm (blocked during startup, or a slow hook) is
 # not proof of failure: the spawn waits for idle instead of abandoning it
-spawn suhuynh-blocked suhuynh START_FAIL=1
+spawn truonglao-blocked truonglao START_FAIL=1
 [[ $rc -eq 0 ]] || fail "blocked start: exit $rc, want 0: $(cat "$T/err")"
-grep -qF 'herdr agent wait suhuynh-blocked --until idle --timeout 120000' "$T/calls" \
+grep -qF 'herdr agent wait truonglao-blocked --until idle --timeout 120000' "$T/calls" \
   || fail "blocked start: no idle wait: $(cat "$T/calls")"
-[[ $(ln_call 'agent start') -lt $(ln_call 'agent wait suhuynh-blocked') ]] \
-  && [[ $(ln_call 'agent wait suhuynh-blocked') -lt $(ln_call 'grid_ready=1') ]] \
+[[ $(ln_call 'agent start') -lt $(ln_call 'agent wait truonglao-blocked') ]] \
+  && [[ $(ln_call 'agent wait truonglao-blocked') -lt $(ln_call 'grid_ready=1') ]] \
   || fail "blocked start: bad order: $(cat "$T/calls")"
-grep -q "worker=suhuynh-blocked" "$T/out" || fail "blocked start: no success line"
+grep -q "worker=truonglao-blocked" "$T/out" || fail "blocked start: no success line"
 echo "ok: blocked claude start -> trust wait, idle wait, then grid_ready=1"
 
 # a dialog that never clears is a loud failure, never a stalled worker
 echo 1 > "$T/claude-dialog"
-spawn suhuynh-stuck suhuynh CLAUDE_DIALOG="$T/claude-dialog" \
+spawn truonglao-stuck truonglao CLAUDE_DIALOG="$T/claude-dialog" \
   PANE_TEXT='❯ No, exit
   Yes, I trust this folder'
 [[ $rc -eq 1 ]] || fail "stuck dialog: exit $rc, want 1: $(cat "$T/err")"
 grep -q 'workspace-trust dialog did not clear' "$T/err" \
   || fail "stuck dialog: no clear error: $(cat "$T/err")"
 grep -qF 'herdr pane close %1' "$T/calls" || fail "stuck dialog: pane not closed: $(cat "$T/calls")"
-! grep -q 'worker=suhuynh-stuck' "$T/out" || fail "stuck dialog: reported success anyway"
+! grep -q 'worker=truonglao-stuck' "$T/out" || fail "stuck dialog: reported success anyway"
 echo "ok: stuck trust dialog -> exit 1 with a clear error, pane closed"
 
 # ── --base <ref>: branch starts at <ref>, validated before any side effect ──

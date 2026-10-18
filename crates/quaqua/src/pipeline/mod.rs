@@ -13,7 +13,7 @@ use std::process::Command;
 pub const USAGE: &str = "\
 # Usage: pipeline.sh <task> <repo> --brief <file> [--builder sude] [--reviewer suhuynh]
 #                    [--review auto|always|skip] [--rounds 2] [--base <ref>]
-#        pipeline.sh --resume <task> <repo>
+#        pipeline.sh --resume <task> <repo> [--rounds 2]
 #   Build -> review -> fix loop on top of
 #   spawn-worker.sh / prompt-worker.sh / cleanup-worker.sh; counts as 2 workers
 #   toward the cap. <task> is a slug ([a-z0-9-]): builder <builder>-<task>, a
@@ -441,18 +441,50 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
     let pfile: PathBuf;
 
     if !args.is_empty() && args[0] == "--resume" {
-        if args.len() != 3 {
+        let mut resume_rounds: Option<u32> = None;
+        let mut pos = Vec::new();
+        let mut i = 1;
+        while i < args.len() {
+            let arg = &args[i];
+            if arg == "--rounds" {
+                if i + 1 >= args.len() {
+                    return Err((1, format!("{}\n", USAGE)));
+                }
+                let r: u32 = args[i + 1]
+                    .parse()
+                    .map_err(|_| (1, "--rounds must be an integer >= 1\n".to_string()))?;
+                if r < 1 {
+                    return Err((1, "--rounds must be an integer >= 1\n".to_string()));
+                }
+                resume_rounds = Some(r);
+                i += 2;
+            } else if let Some(v) = arg.strip_prefix("--rounds=") {
+                let r: u32 = v
+                    .parse()
+                    .map_err(|_| (1, "--rounds must be an integer >= 1\n".to_string()))?;
+                if r < 1 {
+                    return Err((1, "--rounds must be an integer >= 1\n".to_string()));
+                }
+                resume_rounds = Some(r);
+                i += 1;
+            } else if arg.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            } else {
+                pos.push(arg.clone());
+                i += 1;
+            }
+        }
+        if pos.len() != 2 {
             return Err((1, format!("{}\n", USAGE)));
         }
-        task = args[1].clone();
+        task = pos[0].clone();
         if !task.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
             return Err((1, format!("{}\n", USAGE)));
         }
-        let want_repo = match std::fs::canonicalize(&args[2]) {
+        let want_repo = match std::fs::canonicalize(&pos[1]) {
             Ok(p) => p,
-            Err(_) => PathBuf::from(&args[2]),
+            Err(_) => PathBuf::from(&pos[1]),
         };
-
         state_file = runs_dir.join(format!("pipeline-{task}.state"));
         pfile = runs_dir.join(format!("pipeline-{task}.md"));
 
@@ -472,6 +504,11 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
             return Err((1, format!("pipeline '{task}' already finished — see {}\n", pfile.display())));
         }
         state.pipeline_pid = std::process::id();
+        if let Some(r) = resume_rounds {
+            if r > state.rounds {
+                state.rounds = r;
+            }
+        }
         let _ = state.save(&state_file);
 
         let mut pcontent = std::fs::read_to_string(&pfile).unwrap_or_default();
@@ -1221,10 +1258,17 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     state.base_sha, state.brief, state.round, state.rounds
                 );
 
-                wait_file(&mut state, &revname, &review_prompt, review_budget)?;
+                let rev_report = runs_dir.join(format!("{revname}.md"));
+                let rev_already_delivered = rev_report.is_file() && {
+                    let content = std::fs::read_to_string(&rev_report).unwrap_or_default();
+                    content.lines().any(|l| l.trim_start().starts_with("Verdict:") || l.trim().starts_with("## Challenge"))
+                };
+
+                if !rev_already_delivered {
+                    wait_file(&mut state, &revname, &review_prompt, review_budget)?;
+                }
                 state.rounds_run = state.round;
 
-                let rev_report = runs_dir.join(format!("{revname}.md"));
                 let rev_content = std::fs::read_to_string(&rev_report).unwrap_or_default();
 
                 let cleanup_reviewer = || {

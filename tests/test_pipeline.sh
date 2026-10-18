@@ -169,9 +169,9 @@ reject "missing --brief"      'brief.*required' -- isl "$T/repo"
 reject "missing brief file"   'brief.*required' -- isl "$T/repo" --brief "$T/nope.md"
 printf 'just prose\n' > "$T/nobrief.md"
 reject "brief lacks headers"  'Goal.*Hard constraints.*Current design' -- isl "$T/repo" --brief "$T/nobrief.md"
-reject "same harness"         'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder suhuynh --reviewer truonglao
+reject "same harness"         'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder tieude --reviewer suhuynh
 reject "same kind"            'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder suhuynh --reviewer suhuynh
-reject "non-claude reviewer"  'claude kind' -- isl "$T/repo" --brief "$T/brief.md" --builder ni --reviewer sude
+reject "non-reviewer kind"    'can_review = false in team.toml' -- isl "$T/repo" --brief "$T/brief.md" --builder ni --reviewer sude
 reject "bad --review"         'auto|always|skip' -- isl "$T/repo" --brief "$T/brief.md" --review maybe
 reject "--rounds 0"           'integer >= 1' -- isl "$T/repo" --brief "$T/brief.md" --rounds 0
 reject "builder name >20"     'exceeds 20 chars' -- abcdefghijklmnopq "$T/repo" --brief "$T/brief.md"
@@ -210,8 +210,8 @@ grep -q 'worktree add -b quaqua/suhuynh-islr1 .* c0ffee1deadbeef' "$T/calls" \
   || fail "isl resume: reviewer not based on the gated head sha: $(cat "$T/calls")"
 grep -q 'commit c0ffee1' "$runsdir/pipeline-isl.md" \
   || fail "isl resume: committed head sha not recorded in the report"
-grep -q -- '--permission-mode dontAsk' "$T/calls" \
-  || fail "isl resume: reviewer spawned without read-only profile"
+grep -qF 'agent start suhuynh-islr1 --kind opencode' "$T/calls" \
+  || fail "isl resume: reviewer not spawned as opencode: $(cat "$T/calls")"
 ! grep -q 'agent start sude-isl' "$T/calls" || fail "isl resume: builder respawned"
 grep -q 'pane close' "$T/calls" || fail "isl resume: reviewer pane not closed"
 grep -q 'worktree remove' "$T/calls" || fail "isl resume: reviewer worktree kept"
