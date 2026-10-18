@@ -30,58 +30,6 @@ pub fn default_runs_dir() -> PathBuf {
     home_quaqua_runs()
 }
 
-/// Locate an engine script (a `scripts/` shim) by name, in the same order the
-/// grid script was historically found: `QUAQUA_SCRIPT_DIR`, its `../worker`
-/// and parent/`worker` siblings, the binary's own directory, the
-/// `QUAQUA_TEAM_TOML` sibling `scripts/worker`, the workspace root's
-/// `scripts/worker` (`QUAQUA_HOME`, else `$HOME/quaqua`), then
-/// `scripts/worker` under the cwd. Returns the file only when it exists.
-pub fn find_engine_script(name: &str) -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
-        let p = PathBuf::from(&dir);
-        let candidate = p.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        let candidate2 = p.join("../worker").join(name);
-        if candidate2.is_file() {
-            return Some(candidate2);
-        }
-        if let Some(parent) = p.parent() {
-            let candidate3 = parent.join("worker").join(name);
-            if candidate3.is_file() {
-                return Some(candidate3);
-            }
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    if let Ok(team_path) = std::env::var("QUAQUA_TEAM_TOML") {
-        if let Some(parent) = Path::new(&team_path).parent() {
-            let candidate = parent.join("scripts/worker").join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    let candidate = crate::workspace::workspace_root()
-        .join("scripts/worker")
-        .join(name);
-    if candidate.is_file() {
-        return Some(candidate);
-    }
-    let candidate = PathBuf::from("scripts/worker").join(name);
-    if candidate.is_file() {
-        return Some(candidate);
-    }
-    None
-}
 
 pub fn run_grid_hook(grid_tab: &str, owner: Option<&str>) -> Result<(), (i32, String)> {
     if std::env::var("GRID_SKIP").as_deref() == Ok("1") {
