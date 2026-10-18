@@ -3,7 +3,7 @@
 
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
-use crate::json::parse_json;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -120,7 +120,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
 
     // one Lead per slug check via herdr agent get
     if let Ok((_, get_json)) = herdr.agent_get(&name) {
-        if let Ok(parsed) = parse_json(&get_json) {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&get_json) {
             if parsed.get("result").and_then(|r| r.get("agent")).is_some() {
                 return Err((1, format!("a Lead for '{slug}' already exists: {name}\n")));
             }
@@ -269,16 +269,18 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
     let ws_out = herdr.run(&ws_args).map_err(|e| (1, format!("herdr workspace create failed: {e}\n")))?;
     let ws_str = String::from_utf8_lossy(&ws_out.stdout).to_string();
-    let ws_json = parse_json(&ws_str).map_err(|e| (1, format!("invalid workspace JSON: {e}\n")))?;
+    let ws_json: Value = serde_json::from_str(&ws_str).map_err(|e| (1, format!("invalid workspace JSON: {e}\n")))?;
     let pane = ws_json
         .get("result")
         .and_then(|r| r.get("root_pane"))
-        .and_then(|p| p.get_str("pane_id"))
+        .and_then(|p| p.get("pane_id"))
+        .and_then(|p| p.as_str())
         .ok_or_else(|| (1, "no root_pane.pane_id in workspace JSON\n".to_string()))?;
     let wsid = ws_json
         .get("result")
         .and_then(|r| r.get("workspace"))
-        .and_then(|w| w.get_str("workspace_id"))
+        .and_then(|w| w.get("workspace_id"))
+        .and_then(|w| w.as_str())
         .ok_or_else(|| (1, "no workspace.workspace_id in workspace JSON\n".to_string()))?;
 
     // Tag Lead pane as orchestrator
