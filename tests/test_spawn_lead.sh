@@ -108,7 +108,7 @@ grep -q 'r1 stay in the project' "$T/runs/coucou-island-lead.rules.md" \
   || fail "happy: rules file missing rules/_all content"
 grep -q 'agent prompt coucou-island-lead' "$T/calls" \
   || fail "happy: no brief prompt: $(cat "$T/calls")"
-for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'pipeline.sh' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ' 'reaches you through the CoS'; do
+for frag in 'Roles (SLP)' 'projects/coucou-island.md' 'quaqua pipeline' 'not counted toward the 4-worker cap' 'quaqua/coucou-island-integ' 'reaches you through the CoS'; do
   grep -qF "$frag" "$T/calls" || fail "happy: brief missing '$frag'"
 done
 ! grep -qF 'record steering from anh iu or CoS' "$T/calls" \
