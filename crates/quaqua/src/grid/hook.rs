@@ -1,6 +1,7 @@
 use super::apply::{apply_ops, CliHerdrDriver, HerdrDriver};
+use super::reconcile::filter_ops_for_check;
 use super::plan::{is_candidate_worker, plan_with_deferred};
-use super::types::{Op, Snapshot, Target};
+use super::types::{Op, Snapshot};
 use std::collections::{HashMap, HashSet};
 use std::fs::{create_dir, create_dir_all, remove_dir, remove_file, OpenOptions};
 use std::io::Write;
@@ -284,10 +285,6 @@ pub fn reconcile_step<D: HerdrDriver>(
     }
 
     let ops = plan_with_deferred(&snap, deferred_statuses)?;
-    if ops.is_empty() {
-        let _ = remove_file(&failed_ops_file);
-        let _ = remove_file(&failed_snap_file);
-    }
 
     let shadow_mode = is_shadow_mode(sdir);
     if shadow_mode {
@@ -297,52 +294,22 @@ pub fn reconcile_step<D: HerdrDriver>(
         return Ok(());
     }
 
-    // Live mode: filter non-deferred ops and dependent ops
-    let pane_group = |pid: &str| -> String {
-        snap.panes
-            .iter()
-            .find(|p| p.pane_id == pid)
-            .and_then(|p| p.tokens.as_ref())
-            .and_then(|t| t.grid_group.as_deref())
-            .unwrap_or("workers")
-            .to_string()
-    };
-    let mut deferred_panes: HashSet<String> = HashSet::new();
-    let mut deferred_tabs: HashSet<(String, String)> = HashSet::new();
-    let mut group_new_tab_count: HashMap<String, usize> = HashMap::new();
-    let mut non_deferred: Vec<Op> = Vec::new();
-
-    for op in ops {
-        let grp = pane_group(&op.pane);
-        if op.deferred {
-            deferred_panes.insert(op.pane.clone());
-            if matches!(op.target, Target::NewTab { .. }) {
-                let cnt = group_new_tab_count.entry(grp.clone()).or_insert(0);
-                let tab_ref = if *cnt == 0 { "@workers" } else { "@workers-2" };
-                deferred_tabs.insert((grp.clone(), tab_ref.to_string()));
-                *cnt += 1;
-            }
-        } else if matches!(op.target, Target::NewTab { .. }) {
-            let cnt = group_new_tab_count.entry(grp.clone()).or_insert(0);
-            *cnt += 1;
-            non_deferred.push(op);
-        } else if let Target::Split { tab, anchor, .. } = &op.target {
-            let tab_def = if tab == "@workers" || tab == "@workers-2" {
-                deferred_tabs.contains(&(grp.clone(), tab.clone()))
-            } else {
-                false
-            };
-            if deferred_panes.contains(anchor.as_str()) || tab_def {
-                deferred_panes.insert(op.pane.clone());
-            } else {
-                non_deferred.push(op);
-            }
-        } else {
-            non_deferred.push(op);
-        }
-    }
+    // Live mode: filter runnable ops using the shared convergence engine from reconcile.rs
+    let owner_env = std::env::var("QUAQUA_OWNER").ok();
+    let mut non_deferred: Vec<Op> = filter_ops_for_check(
+        &ops,
+        &snap,
+        owner_env.as_deref(),
+        None,
+        None,
+    )
+    .into_iter()
+    .cloned()
+    .collect();
 
     if non_deferred.is_empty() {
+        let _ = remove_file(&failed_ops_file);
+        let _ = remove_file(&failed_snap_file);
         return Ok(());
     }
 
