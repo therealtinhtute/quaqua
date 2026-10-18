@@ -28,9 +28,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 unset HERDR_PANE_ID HERDR_STUB_SNAPSHOT
 
 # ── sandbox: stub git/herdr that log every call, temp HOME, dummy repo ───────
-mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/scripts/worker"
-cp "$src/worker/spawn-worker.sh" "$T/scripts/worker/spawn-worker.sh"
-cp -R "$src/lib" "$T/scripts/"
+mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs"
 cat > "$T/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
@@ -149,7 +147,7 @@ spawn() {  # spawn <name> <kind> [VAR=val...]; script opts via array $spawn_args
   : > "$T/calls"; : > "$T/gridcalls"
   rc=0
   CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" LC_ALL="${SPAWN_LC_ALL:-C}" QUAQUA_OWNER=cos \
-    env "$@" bash "$T/scripts/worker/spawn-worker.sh" ${spawn_args+"${spawn_args[@]}"} "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
+    env "$@" "${QUAQUA_BIN:-quaqua}" worker spawn ${spawn_args+"${spawn_args[@]}"} "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 ln_call() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }
@@ -589,7 +587,7 @@ echo "ok: --base= empty -> exit 1, no git/herdr"
 : > "$T/calls"; : > "$T/gridcalls"
 rc=0
 CALLS="$T/calls" GRID_CALLS="$T/gridcalls" HOME="$T/home" PATH="$T/bin:$PATH" LC_ALL=C \
-  bash "$T/scripts/worker/spawn-worker.sh" tieude-noval tieude "$T/repo" --base >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn tieude-noval tieude "$T/repo" --base >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "trailing --base: exit $rc, want 1"
 grep -q '^# Usage:' "$T/err" || fail "trailing --base: no usage on stderr"
 [[ ! -s "$T/calls" ]] || fail "trailing --base: git/herdr called: $(cat "$T/calls")"
@@ -664,7 +662,7 @@ chmod +x "$T/bin2/herdr"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 spawn: exit $rc: $(cat "$T/err")"
 [[ -d $T/.wt/sude-rw1 ]] || fail "rw1: no worktree created"
 
@@ -673,7 +671,7 @@ rm -f "$T/failed-sude-rw1"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 respawn: exit $rc, want 0: $(cat "$T/err")"
 grep -q 'reusing it' "$T/err" || fail "rw1 respawn: no reuse note: $(cat "$T/err")"
 grep -q 'agent start sude-rw1' "$T/calls" || fail "rw1 respawn: agent start not retried"
@@ -684,7 +682,7 @@ mkdir -p "$T/.wt/sude-rw2"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-rw2 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-rw2 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "rw2 foreign dir: exit $rc, want 1"
 grep -q 'not a git worktree' "$T/err" || fail "rw2: no refusal message: $(cat "$T/err")"
 ! grep -q 'agent start' "$T/calls" || fail "rw2: agent started over a foreign dir"
@@ -702,7 +700,7 @@ git -C "$T/rgrepo" worktree remove --force "$T/.wt/sude-rw1"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 retry: exit $rc, want 0: $(cat "$T/err")"
 grep -q 'branch quaqua/sude-rw1 already exists' "$T/err" \
   || fail "rw1 retry: no reuse note: $(cat "$T/err")"
@@ -721,7 +719,7 @@ echo "ok: real git -> retry after cleanup reuses the kept branch (marker commit 
   || fail "rw1: pushurl not blocked on a reused worktree: $(git -C "$T/.wt/sude-rw1" remote get-url --push origin)"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-nopush sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-nopush sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "nopush spawn: exit $rc: $(cat "$T/err")"
 wt_np="$T/.wt/sude-nopush"
 [[ $(git -C "$wt_np" remote get-url --push origin) == 'PUSH DISABLED - task workers never push (AGENTS.md handoff rule)' ]] \
@@ -754,7 +752,7 @@ git -C "$T/rgpushurl" config remote.origin.pushurl "$shared"
 : > "$T/calls"
 rc=0
 CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-  bash "$T/scripts/worker/spawn-worker.sh" sude-inherit sude "$T/rgpushurl" >"$T/out" 2>"$T/err" || rc=$?
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-inherit sude "$T/rgpushurl" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "inherit spawn: exit $rc: $(cat "$T/err")"
 wt_inh="$T/.wt/sude-inherit"
 rc=0
@@ -782,7 +780,7 @@ for guard_case in bare worktree; do
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
-    bash "$T/scripts/worker/spawn-worker.sh" "sude-g$guard_case" sude "$gr" >"$T/out" 2>"$T/err" || rc=$?
+    "${QUAQUA_BIN:-quaqua}" worker spawn "sude-g$guard_case" sude "$gr" >"$T/out" 2>"$T/err" || rc=$?
   [[ $rc -eq 1 ]] || fail "guard $guard_case: exit $rc, want 1: $(cat "$T/err")"
   grep -q 'core.bare=true or core.worktree' "$T/err" \
     || fail "guard $guard_case: no clear message: $(cat "$T/err")"

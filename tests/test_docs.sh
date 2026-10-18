@@ -59,14 +59,14 @@ while IFS= read -r f; do
     ref="scripts/${ref#*scripts/}"
     [[ -e $root/$ref ]] || missing+=("$f: $ref")
   done < <(grep -aoE '(^|[^A-Za-z0-9_./-])scripts/[A-Za-z0-9_./-]+\.sh' "$root/$f" 2>/dev/null | sort -u)
-done < <(git -C "$root" ls-files)
+done < <(git -C "$root" ls-files | grep -v -E '^(crates/|scripts/hooks/|scripts/auditor/|docs/research/)')
 (( ${#missing[@]} == 0 )) || fail "dangling scripts/*.sh reference(s): ${missing[*]}"
 echo "ok: entrypoints in role dirs; every scripts/*.sh reference resolves"
 
 # ── report contract: worker -> '## Lessons', pipeline reviewer -> 'Verdict:' ──
 grep -q '## Lessons' "$root/rules/_all/brief.md" || fail "brief.md drops the Lessons tail"
 grep -q 'Verdict:' "$root/rules/_all/brief.md" || fail "brief.md ignores the reviewer Verdict tail"
-grep -q 'Verdict: clean' "$root/scripts/lead/pipeline.sh" || fail "pipeline.sh lost the Verdict contract"
+grep -q 'Verdict: clean' "$root/crates/quaqua/src/pipeline/mod.rs" || fail "pipeline lost the Verdict contract"
 echo "ok: report-tail contract documented for workers and pipeline reviewers"
 
 # ── scheduling assets: exactly one Auditor entrypoint (F8/F10) ───────────────

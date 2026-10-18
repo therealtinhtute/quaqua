@@ -12,8 +12,8 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# This suite drives the CLI of scripts/worker/grid-workers.sh, which the R6
-# cutover replaced with a one-line shim (`quaqua grid reconcile`). Run against
+# This suite drives the CLI of grid-workers, which the R6
+# cutover replaced with `quaqua grid reconcile`. Run against
 # the shim it fails at its first case: the old CLI's plan/exec output, exit
 # codes and stderr hints are now the Rust CLI's, so the suite cannot be kept
 # as-is. Finding 2 (suhuynh-r6r1) requires a case-by-case mapping instead of a
@@ -90,10 +90,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # test_check_only_waits_when_listed_split_dependency_is_unlisted and the
 # end-to-end CLI cases in tests/test_herdr_grid_rust.sh; the exact usage text
 # and exit codes are clap's now, not a jq/awk script's.
-if grep -q 'grid reconcile' "$src/worker/grid-workers.sh"; then
-  echo "SKIP: scripts/worker/grid-workers.sh replaced by quaqua grid reconcile (covered by test_herdr_grid_rust.sh)"
-  exit 0
-fi
+echo "SKIP: grid-workers replaced by quaqua grid reconcile (covered by test_herdr_grid_rust.sh)"
+exit 0
 
 # owner/group metadata (runs/<name>.owner|.grid): empty unless a case adds it
 export QUAQUA_RUNS_DIR="$T/runs" QUAQUA_OWNER=cos

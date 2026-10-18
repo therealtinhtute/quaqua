@@ -150,7 +150,7 @@ run_pipe() {
   CALLS="$T/calls" GITN="$T/gitn" HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
-    env "${vars[@]}" bash "$src/lead/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" "${QUAQUA_BIN:-quaqua}" pipeline "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── arg validation: refused before any spawn/prompt ─────────────────────────
@@ -313,11 +313,12 @@ echo "ok: --base -> builder worktree starts at quaqua/integ"
 # grid check is observable. The check is in-process: one `herdr api snapshot`
 # per check (the inner spawn/cleanup hooks are skipped by GRID_SKIP, so an
 # `agent list`-free extra snapshot would mean a leak).
-mkdir -p "$T/p2/scripts/lead" "$T/p2/scripts/worker"
-cp "$src/lead/pipeline.sh" "$T/p2/scripts/lead/"
-cp -R "$src/lib" "$T/p2/scripts/"
-cp "$src/worker/prompt-worker.sh" "$src/worker/spawn-worker.sh" \
-   "$src/worker/cleanup-worker.sh" "$T/p2/scripts/worker/"
+mkdir -p "$T/p2/scripts/worker"
+cat > "$T/p2/scripts/worker/spawn-worker.sh" << 'EOF'
+#!/usr/bin/env bash
+exec "${QUAQUA_BIN:-quaqua}" worker spawn "$@"
+EOF
+chmod +x "$T/p2/scripts/worker/spawn-worker.sh"
 
 run_pipe2() {  # like run_pipe, but against $T/p2/scripts and without GRID_SKIP
   local vars=()
@@ -329,7 +330,7 @@ run_pipe2() {  # like run_pipe, but against $T/p2/scripts and without GRID_SKIP
     HERDR_BIN_PATH="$T/bin/herdr" QUAQUA_OWNER=cos \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 \
-    env "${vars[@]}" bash "$T/p2/scripts/lead/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    QUAQUA_SCRIPT_DIR="$T/p2/scripts/lead" env "${vars[@]}" "${QUAQUA_BIN:-quaqua}" pipeline "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 # The pipeline's grid check is in-process now (one `herdr api snapshot` per
 # check); the --only/--tab scoping is covered in crates/quaqua/tests/grid.rs.
@@ -689,7 +690,7 @@ run_rg() {  # real-git run (only herdr stubbed); sets rc, $T/out, $T/err, $T/cal
   CALLS="$T/calls" HOME="$T/home" PATH="$T/rgbin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
     PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
     PROMPT_WORKER_IDLE_SEC=9999 PROMPT_WORKER_MAX_SEC=3600 T="$T" \
-    env "${vars[@]}" bash "$src/lead/pipeline.sh" "$@" >"$T/out" 2>"$T/err" || rc=$?
+    env "${vars[@]}" "${QUAQUA_BIN:-quaqua}" pipeline "$@" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # F2: the reviewer worktree is created at exactly the committed tip the gate saw

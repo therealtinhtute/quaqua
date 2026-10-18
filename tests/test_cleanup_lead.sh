@@ -15,9 +15,7 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-mkdir -p "$T/bin" "$T/scripts/lead" "$T/projects" "$T/runs"
-cp "$src/lead/cleanup-lead.sh" "$T/scripts/lead/cleanup-lead.sh"
-cp -R "$src/lib" "$T/scripts/"
+mkdir -p "$T/bin" "$T/projects" "$T/runs"
 cat > "$T/INDEX.orig" <<'EOF'
 | slug | repo | owner | status | one-line goal |
 |------|------|-------|--------|---------------|
@@ -57,8 +55,8 @@ run() {  # run <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   cp "$T/INDEX.orig" "$T/projects/INDEX.md"
   printf '# rules\n' > "$T/runs/baro-lead.rules.md"
   rc=0
-  CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1 env "$@" \
-    bash "$T/scripts/lead/cleanup-lead.sh" "$slug" >"$T/out" 2>"$T/err" || rc=$?
+  CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1 QUAQUA_ROOT="$T" env "$@" \
+    "${QUAQUA_BIN:-quaqua}" lead cleanup "$slug" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── team workspace: closed, owner -> cos, rules dump removed ────────────────
@@ -164,12 +162,12 @@ chmod +x "$T/bin/awk"
 
 mkdir -p "$T/barrier"; : > "$T/calls"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
-ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1
+ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1 QUAQUA_ROOT="$T"
     HERDR_LIVE="baro-lead baro-web-lead" REAL_AWK="$(command -v awk)" BARRIER_DIR="$T/barrier")
-env "${ce[@]}" bash "$T/scripts/lead/cleanup-lead.sh" baro >"$T/out1" 2>"$T/err1" & p1=$!
+env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead cleanup baro >"$T/out1" 2>"$T/err1" & p1=$!
 for _ in $(seq 1 500); do [[ -e $T/barrier/ready.baro ]] && break; sleep 0.01; done
 [[ -e $T/barrier/ready.baro ]] || fail "concurrent: first cleanup never reached the INDEX update"
-env "${ce[@]}" bash "$T/scripts/lead/cleanup-lead.sh" baro-web >"$T/out2" 2>"$T/err2" & p2=$!
+env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead cleanup baro-web >"$T/out2" 2>"$T/err2" & p2=$!
 for _ in $(seq 1 400); do [[ -e $T/barrier/ready.baro-web ]] && break; sleep 0.01; done
 touch "$T/barrier/go"
 rc1=0 rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?
