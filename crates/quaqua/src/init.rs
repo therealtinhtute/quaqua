@@ -301,7 +301,7 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
-/// herdr-grid: tag the CoS orchestrator pane (R5) — but ONLY that pane. The
+/// herdr-quaqua: tag the CoS orchestrator pane (R5) — but ONLY that pane. The
 /// caller's pane is checked against herdr, not assumed: the CoS is the unnamed
 /// Claude agent in this checkout. Anything else (another harness, a named
 /// agent, another directory, a herdr that cannot answer) fails closed and is
@@ -332,7 +332,7 @@ fn tag_cos_pane(root: &Path) {
             "report-metadata",
             &pane,
             "--source",
-            "herdr-grid",
+            "herdr-quaqua",
             "--token",
             "grid_role=orchestrator",
             "--token",

@@ -354,12 +354,12 @@ spawn tieude-gridfail tieude GRID_FAIL=1 GRID_CHECK_TIMEOUT_SEC=0
 grep -qE "grid repair failed|grid check failed" "$T/err" || fail "grid failure: no error: $(cat "$T/err")"
 echo "ok: grid failure -> non-zero exit, spawn fails"
 
-# ── herdr-grid pane tokens (R5): role/group/owner on split, grid_ready=1 last ─
+# ── herdr-quaqua pane tokens (R5): role/group/owner on split, grid_ready=1 last ─
 spawn tieude-tokens tieude
 [[ $rc -eq 0 ]] || fail "tokens: exit $rc, want 0: $(cat "$T/err")"
-grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=cos --token grid_tab=repo-workers' "$T/calls" \
+grep -qF 'herdr pane report-metadata %1 --source herdr-quaqua --token grid_role=worker --token grid_group=repo --token grid_owner=cos --token grid_tab=repo-workers' "$T/calls" \
   || fail "tokens: initial tokens missing: $(cat "$T/calls")"
-grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_ready=1' "$T/calls" \
+grep -qF 'herdr pane report-metadata %1 --source herdr-quaqua --token grid_ready=1' "$T/calls" \
   || fail "tokens: grid_ready=1 missing: $(cat "$T/calls")"
 [[ $(ln_call 'pane split') -lt $(ln_call 'grid_role=worker') ]] \
   && [[ $(ln_call 'grid_role=worker') -lt $(ln_call 'agent start') ]] \
@@ -371,7 +371,7 @@ echo "ok: pane tokens -> grid_role=worker/grid_group/grid_owner on split, grid_r
 # to `<slug>-workers` (the Lead's project tab), not the repo-derived label
 spawn tieude-customowner tieude QUAQUA_OWNER=custom-lead
 [[ $rc -eq 0 ]] || fail "custom owner: exit $rc, want 0: $(cat "$T/err")"
-grep -qF 'herdr pane report-metadata %1 --source herdr-grid --token grid_role=worker --token grid_group=repo --token grid_owner=custom-lead --token grid_tab=custom-workers' "$T/calls" \
+grep -qF 'herdr pane report-metadata %1 --source herdr-quaqua --token grid_role=worker --token grid_group=repo --token grid_owner=custom-lead --token grid_tab=custom-workers' "$T/calls" \
   || fail "custom owner: tokens not custom-lead/custom-workers: $(cat "$T/calls")"
 echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER, lead owner -> <slug>-workers grid tab"
 

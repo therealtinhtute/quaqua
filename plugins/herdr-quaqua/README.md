@@ -1,10 +1,10 @@
-# herdr-grid
+# herdr-quaqua
 
 Automatic agent grid layout reconciler for Herdr.
 
 ## Overview
 
-`herdr-grid` is an event-driven Herdr plugin that arranges worker panes into an organized grid layout according to the grid formula:
+`herdr-quaqua` is an event-driven Herdr plugin that arranges worker panes into an organized grid layout according to the grid formula:
 - 1 worker total per owner: split beside owner pane (2/5 owner, 3/5 worker).
 - Multiple workers: dedicated `<group>-workers` tab per project/group:
   - 1 worker: full tab
@@ -24,9 +24,10 @@ Automatic agent grid layout reconciler for Herdr.
   - Detects closed panes via snapshot diff against the last observed snapshot (handles cascaded pane closures from tab and workspace closing where `pane.closed` is not emitted).
   - Early-exits on `pane.agent_status_changed` events when the status change does not affect layout execution (e.g. non-worker panes or transitions between non-working states `idle`, `done`, `unknown`).
   - Runs in **shadow mode** by default: calculates layout ops using the Rust planner and logs them without modifying panes.
-  - When shadow mode is disabled (`HERDR_GRID_SHADOW=0`), applies non-deferred moves itself (was `apply.sh`).
+  - When shadow mode is disabled (`HERDR_QUAQUA_SHADOW=0`), applies non-deferred moves itself (was `apply.sh`).
 
 ## Configuration
 
-- `HERDR_GRID_SHADOW`: Set to `1` (default) for dry-run observation or `0` for live execution. Can also be set in `$STATE_DIR/shadow`.
-- State directory defaults to `$HERDR_PLUGIN_STATE_DIR` or `~/.local/state/herdr/plugins/herdr-grid`.
+- `HERDR_QUAQUA_SHADOW`: Set to `1` (default) for dry-run observation or `0` for live execution. Can also be set in `$STATE_DIR/shadow`.
+- `HERDR_GRID_SHADOW`: legacy name still honoured as a fallback when `HERDR_QUAQUA_SHADOW` is unset.
+- State directory defaults to `$HERDR_PLUGIN_STATE_DIR` or `~/.local/state/herdr/plugins/herdr-quaqua`. The previous name was `herdr-grid`; old state (`~/.local/state/herdr/plugins/herdr-grid`) is not migrated automatically.

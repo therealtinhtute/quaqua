@@ -1,5 +1,5 @@
-id = "herdr-grid"
-name = "herdr-grid"
+id = "herdr-quaqua"
+name = "herdr-quaqua"
 version = "1.0.0"
 description = "Automatic agent grid layout reconciler for Herdr"
 min_herdr_version = "0.9.0"

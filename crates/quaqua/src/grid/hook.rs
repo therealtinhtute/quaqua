@@ -13,17 +13,17 @@ pub fn state_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("HERDR_PLUGIN_STATE_DIR") {
         PathBuf::from(dir)
     } else if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
-        PathBuf::from(xdg).join("herdr/plugins/herdr-grid")
+        PathBuf::from(xdg).join("herdr/plugins/herdr-quaqua")
     } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/state/herdr/plugins/herdr-grid")
+        PathBuf::from(home).join(".local/state/herdr/plugins/herdr-quaqua")
     } else {
-        PathBuf::from(".herdr-grid-state")
+        PathBuf::from(".herdr-quaqua-state")
     }
 }
 
 pub fn is_shadow_mode(state_dir: &Path) -> bool {
     let mut shadow_mode = true;
-    if let Ok(v) = std::env::var("HERDR_GRID_SHADOW") {
+    if let Ok(v) = std::env::var("HERDR_QUAQUA_SHADOW").or_else(|_| std::env::var("HERDR_GRID_SHADOW")) {
         let lower = v.trim().to_lowercase();
         if lower == "0" || lower == "false" || lower == "off" {
             shadow_mode = false;
@@ -88,7 +88,7 @@ pub fn acquire_lock(lock_dir: &Path, pid_file: &Path) -> Result<LockGuard, Strin
         attempts += 1;
     }
 
-    Err("[herdr-grid] could not acquire lock after timeout".to_string())
+    Err("[herdr-quaqua] could not acquire lock after timeout".to_string())
 }
 
 /// Early exit check on pane.agent_status_changed events that change nothing

@@ -289,7 +289,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         "report-metadata",
         pane,
         "--source",
-        "herdr-grid",
+        "herdr-quaqua",
         "--token",
         "grid_role=orchestrator",
         "--token",

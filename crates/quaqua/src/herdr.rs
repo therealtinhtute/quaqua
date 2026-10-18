@@ -113,7 +113,7 @@ impl HerdrOps for Herdr {
 
     fn pane_report_metadata(&self, pane: &str, tokens: &[&str]) -> std::io::Result<Output> {
         let mut cmd = Command::new(&self.bin);
-        cmd.args(["pane", "report-metadata", pane, "--source", "herdr-grid"]);
+        cmd.args(["pane", "report-metadata", pane, "--source", "herdr-quaqua"]);
         for token in tokens {
             cmd.args(["--token", token]);
         }
