@@ -2372,3 +2372,218 @@ fn test_parse_prompt_args() {
     let bad_brief = vec!["sude-w4a".to_string(), "just do this".to_string()];
     assert!(parse_prompt_args(&bad_brief).is_err());
 }
+
+#[test]
+fn test_worktree_paths_and_branch_naming() {
+    use quaqua::worker::worktree::{
+        canonicalize_repo_path, resolve_paths, resolve_worktree_path, worker_branch_name,
+    };
+
+    assert_eq!(worker_branch_name("sude-w4b"), "quaqua/sude-w4b");
+
+    let repo = Path::new("/path/to/myrepo");
+    let wt = resolve_worktree_path(repo, "sude-task1");
+    assert_eq!(wt, PathBuf::from("/path/to/.wt/sude-task1"));
+
+    let no_parent = Path::new("repo");
+    let wt_no_parent = resolve_worktree_path(no_parent, "sude-task1");
+    assert_eq!(wt_no_parent, PathBuf::from(".wt/sude-task1"));
+
+    let (r, w) = resolve_paths(repo, "sude-task1");
+    assert_eq!(r, canonicalize_repo_path(repo));
+    assert_eq!(w, resolve_worktree_path(&r, "sude-task1"));
+}
+
+#[test]
+fn test_worktree_validate_base_ref() {
+    use quaqua::worker::worktree::validate_base_ref;
+
+    struct BaseRefTestGit(bool);
+    impl GitOps for BaseRefTestGit {
+        fn run_in(&self, _dir: &Path, _args: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn run(&self, _args: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool { self.0 }
+        fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> { unimplemented!() }
+        fn worktree_add(&self, _repo: &Path, _branch: &str, _wt: &Path, _base: Option<&str>) -> std::io::Result<Output> { unimplemented!() }
+        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool { unimplemented!() }
+        fn worktree_add_existing(&self, _repo: &Path, _branch: &str, _wt: &Path) -> std::io::Result<Output> { unimplemented!() }
+        fn worktree_remove(&self, _repo: &Path, _wt: &Path) -> std::io::Result<Output> { unimplemented!() }
+        fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> { unimplemented!() }
+        fn is_core_bare(&self, _repo: &Path) -> bool { unimplemented!() }
+        fn has_core_worktree(&self, _repo: &Path) -> bool { unimplemented!() }
+        fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<Output> { unimplemented!() }
+        fn set_worktree_pushurl_blocked(&self, _wt: &Path, _remote: &str) -> std::io::Result<()> { unimplemented!() }
+        fn is_git_dir(&self, _cwd: &Path) -> bool { unimplemented!() }
+        fn diff_and_status(&self, _cwd: &Path) -> (String, String) { unimplemented!() }
+    }
+
+    let repo = Path::new("/test/repo");
+    assert!(validate_base_ref(&BaseRefTestGit(true), repo, "main").is_ok());
+
+    let err = validate_base_ref(&BaseRefTestGit(false), repo, "badref").expect_err("must error on invalid ref");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("error: --base 'badref' is not a known commit-ish"));
+}
+
+#[test]
+fn test_worktree_prepare_and_guards() {
+    use quaqua::worker::worktree::{apply_push_block, is_worktree_dirty, prepare_worktree, remove_worktree};
+
+    struct WtMockGit {
+        branch_exists_val: bool,
+        porcelain_wts: Vec<String>,
+        bare: bool,
+        wt_config: bool,
+        dirty_output: String,
+        remotes: Vec<String>,
+        pushurl_blocked: std::cell::RefCell<Vec<String>>,
+        removed: std::cell::RefCell<bool>,
+    }
+
+    impl GitOps for WtMockGit {
+        fn run_in(&self, _dir: &Path, args: &[&str]) -> std::io::Result<Output> {
+            let out_str = if args.contains(&"status") {
+                self.dirty_output.clone()
+            } else {
+                String::new()
+            };
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: out_str.into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+        fn run(&self, _args: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool { true }
+        fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            Ok(self.porcelain_wts.clone())
+        }
+        fn worktree_add(&self, _repo: &Path, _branch: &str, wt: &Path, _base: Option<&str>) -> std::io::Result<Output> {
+            let _ = std::fs::create_dir_all(wt);
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
+            self.branch_exists_val
+        }
+        fn worktree_add_existing(&self, _repo: &Path, _branch: &str, wt: &Path) -> std::io::Result<Output> {
+            let _ = std::fs::create_dir_all(wt);
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn worktree_remove(&self, _repo: &Path, wt: &Path) -> std::io::Result<Output> {
+            let _ = std::fs::remove_dir_all(wt);
+            *self.removed.borrow_mut() = true;
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            Ok(self.remotes.clone())
+        }
+        fn is_core_bare(&self, _repo: &Path) -> bool { self.bare }
+        fn has_core_worktree(&self, _repo: &Path) -> bool { self.wt_config }
+        fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn set_worktree_pushurl_blocked(&self, _wt: &Path, remote: &str) -> std::io::Result<()> {
+            self.pushurl_blocked.borrow_mut().push(remote.to_string());
+            Ok(())
+        }
+        fn is_git_dir(&self, _cwd: &Path) -> bool { true }
+        fn diff_and_status(&self, _cwd: &Path) -> (String, String) { ("".to_string(), "".to_string()) }
+    }
+
+    let temp = std::env::temp_dir().join(format!("quaqua-wt-unit-{}", std::process::id()));
+    let repo = temp.join("repo");
+    let wt = temp.join(".wt").join("sude-testwt");
+    let _ = std::fs::create_dir_all(&repo);
+
+    // 1. Bare guard triggers error
+    let git_bare = WtMockGit {
+        branch_exists_val: false,
+        porcelain_wts: vec![],
+        bare: true,
+        wt_config: false,
+        dirty_output: "".to_string(),
+        remotes: vec!["origin".to_string()],
+        pushurl_blocked: std::cell::RefCell::new(Vec::new()),
+        removed: std::cell::RefCell::new(false),
+    };
+    let err = apply_push_block(&git_bare, &repo, &wt).expect_err("bare must fail");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("core.bare=true or core.worktree"));
+
+    // 2. Foreign dir at wt path rejected
+    let _ = std::fs::create_dir_all(&wt);
+    let git_foreign = WtMockGit {
+        branch_exists_val: false,
+        porcelain_wts: vec![], // wt is not in porcelain worktree list!
+        bare: false,
+        wt_config: false,
+        dirty_output: "".to_string(),
+        remotes: vec!["origin".to_string()],
+        pushurl_blocked: std::cell::RefCell::new(Vec::new()),
+        removed: std::cell::RefCell::new(false),
+    };
+    let err = prepare_worktree(&git_foreign, &repo, &wt, "sude-testwt", None).expect_err("foreign dir must fail");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("exists but is not a git worktree"));
+
+    // 3. Registered dir reused
+    let git_reg = WtMockGit {
+        branch_exists_val: false,
+        porcelain_wts: vec![wt.to_string_lossy().to_string()],
+        bare: false,
+        wt_config: false,
+        dirty_output: "".to_string(),
+        remotes: vec!["origin".to_string(), "upstream".to_string()],
+        pushurl_blocked: std::cell::RefCell::new(Vec::new()),
+        removed: std::cell::RefCell::new(false),
+    };
+    assert!(prepare_worktree(&git_reg, &repo, &wt, "sude-testwt", None).is_ok());
+    assert_eq!(git_reg.pushurl_blocked.borrow().len(), 2);
+
+    // 4. Dirty check
+    let git_clean = WtMockGit {
+        branch_exists_val: false,
+        porcelain_wts: vec![],
+        bare: false,
+        wt_config: false,
+        dirty_output: "".to_string(),
+        remotes: vec![],
+        pushurl_blocked: std::cell::RefCell::new(Vec::new()),
+        removed: std::cell::RefCell::new(false),
+    };
+    assert_eq!(is_worktree_dirty(&git_clean, &wt), Ok(false));
+
+    let git_dirty = WtMockGit {
+        branch_exists_val: false,
+        porcelain_wts: vec![],
+        bare: false,
+        wt_config: false,
+        dirty_output: " M file.rs\n?? new.rs\n".to_string(),
+        remotes: vec![],
+        pushurl_blocked: std::cell::RefCell::new(Vec::new()),
+        removed: std::cell::RefCell::new(false),
+    };
+    assert_eq!(is_worktree_dirty(&git_dirty, &wt), Ok(true));
+
+    // 5. Worktree remove
+    assert!(remove_worktree(&git_clean, &repo, &wt).is_ok());
+    assert!(*git_clean.removed.borrow());
+
+    let _ = std::fs::remove_dir_all(&temp);
+}

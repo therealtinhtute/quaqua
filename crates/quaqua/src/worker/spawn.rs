@@ -10,6 +10,10 @@ use serde_json::Value;
 use crate::worker::cleanup::run_grid_hook;
 use std::path::PathBuf;
 pub use crate::launch::{build_launch_cmd, claude_trust_dialog_up, resolve_launch, Launch, LaunchCmd};
+pub use crate::worker::worktree::{
+    apply_push_block, canonicalize_repo_path, prepare_worktree, remove_worktree, resolve_paths,
+    resolve_worktree_path, setup_worktree, validate_base_ref,
+};
 use std::process::{Command, Output};
 
 pub const USAGE: &str = "\
@@ -199,23 +203,11 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let primary_launch = resolve_launch(kind_info, &opts.kind)?;
     let primary_fallback = kind_info.fallback.clone();
 
-    let repo = match std::fs::canonicalize(&opts.repo_path) {
-        Ok(p) => p,
-        Err(_) => opts.repo_path.clone(),
-    };
-
-    let wt = match repo.parent() {
-        Some(p) => p.join(".wt").join(&opts.name),
-        None => PathBuf::from(".wt").join(&opts.name),
-    };
+    let repo = canonicalize_repo_path(&opts.repo_path);
+    let wt = resolve_worktree_path(&repo, &opts.name);
 
     if let Some(base_ref) = &opts.base {
-        if !git.rev_parse_commit(&repo, base_ref) {
-            return Err((
-                1,
-                format!("error: --base '{base_ref}' is not a known commit-ish in {}\n", repo.display()),
-            ));
-        }
+        validate_base_ref(git, &repo, base_ref)?;
     }
 
     let owner = std::env::var("QUAQUA_OWNER").unwrap_or_else(|_| "cos".to_string());
@@ -236,65 +228,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         }
     }
 
-    if wt.is_dir() {
-        let porcelain_wts = git.worktree_list_porcelain(&repo).unwrap_or_default();
-        let wt_str = wt.to_string_lossy().to_string();
-        if porcelain_wts.iter().any(|w| w == &wt_str) {
-            eprintln!("note: {} already a registered worktree — reusing it (resumed spawn)", wt.display());
-        } else {
-            return Err((
-                1,
-                format!(
-                    "error: {} exists but is not a git worktree of {} — remove it or pick another name\n",
-                    wt.display(),
-                    repo.display()
-                ),
-            ));
-        }
-    } else {
-        let branch = format!("quaqua/{}", opts.name);
-        let add_out = if git.branch_exists(&repo, &branch) {
-            // cleanup-worker.sh drops the worktree but keeps the branch for the
-            // Lead to merge, so a same-name retry after a failed (or cleaned)
-            // spawn would die on `worktree add -b` with "a branch named
-            // 'quaqua/<name>' already exists". Reuse the kept branch — the
-            // retry resumes that task, commits included — and say so: a --base
-            // cannot apply to a branch that already exists.
-            let base_note = match &opts.base {
-                Some(b) => format!("; --base {b} ignored"),
-                None => String::new(),
-            };
-            eprintln!(
-                "note: branch {branch} already exists — reusing it (same-name retry){base_note}"
-            );
-            git.worktree_add_existing(&repo, &branch, &wt)
-        } else {
-            git.worktree_add(&repo, &branch, &wt, opts.base.as_deref())
-        }
-        .map_err(|e| (1, format!("error: failed to add worktree: {e}\n")))?;
-        if !add_out.status.success() {
-            let err_text = String::from_utf8_lossy(&add_out.stderr).to_string();
-            return Err((1, err_text));
-        }
-    }
-
-    // Push block check
-    if git.is_core_bare(&repo) || git.has_core_worktree(&repo) {
-        return Err((
-            1,
-            format!(
-                "error: {} has core.bare=true or core.worktree in its common config; enabling extensions.worktreeConfig for the push block would break every worktree of it. Move those keys to the main worktree's config.worktree (see git-worktree(1), CONFIGURATION FILE) or spawn from another clone.\n",
-                repo.display()
-            ),
-        ));
-    }
-
-    let _ = git.enable_worktree_config(&repo);
-    if let Ok(remotes) = git.remote_list(&repo) {
-        for remote in remotes {
-            let _ = git.set_worktree_pushurl_blocked(&wt, &remote);
-        }
-    }
+    prepare_worktree(git, &repo, &wt, &opts.name, opts.base.as_deref())?;
 
     // Worker rules dump
     let rules_dir = crate::workspace::workspace_root().join("rules");
