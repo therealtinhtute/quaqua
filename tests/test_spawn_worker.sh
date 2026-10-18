@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sandbox test for the spawn-worker.sh shim (-> `quaqua worker spawn`) name
+# Sandbox test for `quaqua worker spawn` name
 # validation (models.md Naming: <kind>-<task>, ascii [a-z0-9-], <=20 chars),
 # the optional --base <ref> worktree start point, the same-name retry that
 # reuses a branch kept by cleanup, the --review read-only mode for the claude
@@ -532,8 +532,8 @@ grep -q "worktree add -b quaqua/tieude-nobase .*/tieude-nobase\$" "$T/calls" \
 echo "ok: no --base -> worktree add <wt> only (HEAD), no rev-parse"
 
 # ── same-name retry: a branch kept by a cleanup is reused, not re-created ────
-# cleanup-worker.sh removes the worker's worktree but keeps quaqua/<name> for
-# the Lead to merge, so `worktree add -b` would die on
+# `quaqua worker cleanup` removes the worker's worktree but keeps
+# quaqua/<name> for the Lead to merge, so `worktree add -b` would die on
 # "a branch named 'quaqua/<name>' already exists" — the retry must reuse it.
 spawn tieude-branchfix tieude FAKE_BRANCH='quaqua/tieude-branchfix'
 [[ $rc -eq 0 ]] || fail "same-name retry: exit $rc, want 0: $(cat "$T/err")"

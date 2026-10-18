@@ -24,7 +24,7 @@
 # `--no-prefix` + `core.quotePath=false` make the "+++" line the literal path
 # (a trailing TAB is added when the name contains a space, hence the strip).
 #
-# Installed by scripts/workspace/init-workspace.sh via `core.hooksPath`.
+# Installed by `quaqua init` via `core.hooksPath`.
 # Exit 1 with each offending file:line on stderr; 0 when clean.
 set -uo pipefail
 
