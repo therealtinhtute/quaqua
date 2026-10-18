@@ -2076,3 +2076,106 @@ fn test_state_atomic_write_and_metadata_roundtrip() {
     assert_eq!(ExecutionState::load(&adv_file), None);
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn test_report_lessons_heading_matcher_and_numbered_headings() {
+    use quaqua::worker::prompt::{is_lessons_heading, validate_report_content};
+
+    // 1. Heading line matcher: exact and numbered
+    assert!(is_lessons_heading("## Lessons"));
+    assert!(is_lessons_heading("## Lessons\n"));
+    assert!(is_lessons_heading("## Lessons - none"));
+    assert!(is_lessons_heading("## Lessons:"));
+    assert!(is_lessons_heading("## 5. Lessons"));
+    assert!(is_lessons_heading("## 5. Lessons\n"));
+    assert!(is_lessons_heading("## 5. Lessons:"));
+    assert!(is_lessons_heading("## 12. Lessons"));
+    assert!(is_lessons_heading("## 1.  Lessons"));
+    assert!(is_lessons_heading("## 5) Lessons"));
+    assert!(is_lessons_heading("  ## 5. Lessons"));
+
+    // Non-matching lines
+    assert!(!is_lessons_heading("## Blockers"));
+    assert!(!is_lessons_heading("## 5. Blockers"));
+    assert!(!is_lessons_heading("## Summary"));
+    assert!(!is_lessons_heading("### 5. Lessons")); // h3, not h2
+    assert!(!is_lessons_heading("# 5. Lessons"));   // h1, not h2
+    assert!(!is_lessons_heading("## 5."));
+    assert!(!is_lessons_heading("## LessonsLearned"));
+    assert!(!is_lessons_heading("Just text with ## 5. Lessons in body"));
+
+    // 2. Full report validation: standard worker report
+    let report_exact = "# run report\n\n## Blockers\nnone\n\n## Lessons\n- none\n";
+    assert_eq!(validate_report_content(report_exact, false), Ok(()));
+
+    let report_numbered = "# run report\n\n## 1. Summary\nDone\n\n## 2. Blockers\nnone\n\n## 5. Lessons\n- lesson learned\n";
+    assert_eq!(validate_report_content(report_numbered, false), Ok(()));
+
+    let report_missing_lessons = "# run report\n\n## Blockers\nnone\n\n## Summary\nNo lessons section\n";
+    assert_eq!(
+        validate_report_content(report_missing_lessons, false),
+        Err("'## Lessons' section")
+    );
+
+    let report_h3_only = "# run report\n\n## Blockers\nnone\n\n### 5. Lessons\n- sub-heading only\n";
+    assert_eq!(
+        validate_report_content(report_h3_only, false),
+        Err("'## Lessons' section")
+    );
+
+    // 3. Reviewer report validation: requires Verdict:
+    let reviewer_valid = "# review report\n\nVerdict: approved\n";
+    assert_eq!(validate_report_content(reviewer_valid, true), Ok(()));
+
+    let reviewer_missing = "# review report\n\n## Lessons\n- none\n";
+    assert_eq!(
+        validate_report_content(reviewer_missing, true),
+        Err("'Verdict:' line")
+    );
+}
+
+#[test]
+fn test_parse_prompt_args() {
+    use quaqua::worker::prompt::{parse_prompt_args, PromptAction};
+
+    // --check-brief
+    let cb = vec!["--check-brief".to_string(), "Goal: g\nHard constraints: none\nCurrent design: d".to_string()];
+    assert_eq!(
+        parse_prompt_args(&cb),
+        Ok(PromptAction::CheckBrief("Goal: g\nHard constraints: none\nCurrent design: d".to_string()))
+    );
+
+    // --resume without extend
+    let res = vec!["--resume".to_string(), "sude-w4a".to_string()];
+    assert_eq!(
+        parse_prompt_args(&res),
+        Ok(PromptAction::Resume {
+            name: "sude-w4a".to_string(),
+            extend: None,
+        })
+    );
+
+    // --resume with extend
+    let res_ext = vec!["--resume".to_string(), "sude-w4a".to_string(), "--extend".to_string(), "600".to_string()];
+    assert_eq!(
+        parse_prompt_args(&res_ext),
+        Ok(PromptAction::Resume {
+            name: "sude-w4a".to_string(),
+            extend: Some(600),
+        })
+    );
+
+    // Normal prompt
+    let norm = vec!["sude-w4a".to_string(), "Goal: g\nHard constraints: none\nCurrent design: d".to_string()];
+    assert_eq!(
+        parse_prompt_args(&norm),
+        Ok(PromptAction::Prompt {
+            name: "sude-w4a".to_string(),
+            task: "Goal: g\nHard constraints: none\nCurrent design: d".to_string(),
+        })
+    );
+
+    // Missing brief headers
+    let bad_brief = vec!["sude-w4a".to_string(), "just do this".to_string()];
+    assert!(parse_prompt_args(&bad_brief).is_err());
+}
