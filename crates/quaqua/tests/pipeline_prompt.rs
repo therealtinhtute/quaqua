@@ -134,67 +134,11 @@ impl Fixture {
     /// command does when its pre-prompt grid check rejects the run — before any
     /// prompt leaves the pipeline; the dispatched-fail marker makes it exit 3
     /// like a watchdog on a prompt that did go out.
-    fn fake_prompt_worker(&self) {
+    fn install_herdr(&self, owner: &str) -> PathBuf {
         let calls = self.calls.display();
         let fail = self.fail.display();
-        let fail_after_dispatch = self.fail_after_dispatch.display();
+        let fail_after = self.fail_after_dispatch.display();
         let runs = self.runs.display();
-        let script = format!(
-            "#!/usr/bin/env bash\n\
-             if [[ ${{1:-}} == --resume ]]; then\n\
-             \x20 printf '%s\\n' \"$2 resume\" >> {calls}\n\
-             \x20 exit 0\n\
-             fi\n\
-             phase=none\n\
-             case \"${{2:-}}\" in\n\
-             \x20 *'Pipeline phase: BUILD'*) phase=BUILD ;;\n\
-             \x20 *'Pipeline phase: PLAN'*) phase=PLAN ;;\n\
-             \x20 *'Pipeline phase: REVIEW'*) phase=REVIEW ;;\n\
-             \x20 *'Pipeline phase: FIX'*) phase=FIX ;;\n\
-             esac\n\
-             printf '%s\\n' \"$1 fresh $phase\" >> {calls}\n\
-             if [[ -e {fail} ]]; then\n\
-             \x20 echo \"error: grid check failed for $1 (fake) — arrange panes manually before prompting\" >&2\n\
-             \x20 exit 1\n\
-             fi\n\
-             if [[ -e {fail_after_dispatch} ]]; then\n\
-             \x20 echo \"error: no report after the wait (fake watchdog)\" >&2\n\
-             \x20 exit 3\n\
-             fi\n\
-             if [[ \"$phase\" == \"PLAN\" ]]; then\n\
-             \x20 printf '%s\\n' '# plan' '' 'Goal: test' '' '## Lessons' '- none' > \"{runs}/$1.md\"\n\
-             else\n\
-             \x20 printf '%s\\n' 'fake build report' 'Outcome: BLOCKED' '' '## Blockers' \\\n\
-             \x20   '- fake builder stopped early: this report only proves the prompt was sent' '' \\\n\
-             \x20   '## Lessons' '- none' > \"{runs}/$1.md\"\n\
-             fi\n\
-             exit 0\n"
-        );
-        let path = self.scripts.join("prompt-worker.sh");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    /// Fake `herdr` whose `api snapshot` fails, so the in-process pre-prompt
-    /// grid check rejects the run the way a mis-arranged pane population does.
-    fn fake_herdr(&self) -> PathBuf {
-        let calls = self.calls.display();
-        let script = format!(
-            "#!/usr/bin/env bash\n\
-             printf '%s\\n' \"$*\" >> {calls}\n\
-             if [[ \"${{1:-}} ${{2:-}}\" == 'api snapshot' ]]; then\n\
-             \x20 echo 'fake herdr: backend down' >&2\n\
-             \x20 exit 1\n\
-             fi\n\
-             exit 0\n"
-        );
-        let path = self.bin.join("herdr");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
-    fn fake_herdr_grid(&self, owner: &str) -> PathBuf {
-        let calls = self.calls.display();
         let snapshot_json = format!(
             r#"{{"snapshot":{{"workspaces":[{{"workspace_id":"ws1","label":"q"}}],
  "tabs":[{{"tab_id":"t1","workspace_id":"ws1","label":"lead-tab","pane_count":3}}],
@@ -211,17 +155,90 @@ impl Fixture {
  "agents":[{{"name":"{owner}","pane_id":"%lead","agent_status":"idle"}}]}}}}"#
         );
         let script = format!(
+            r#"#!/usr/bin/env bash
+cmd="${{1:-}} ${{2:-}}"
+
+if [[ "$cmd" == "api snapshot" ]]; then
+  if [[ -e "{fail}" ]]; then
+    echo "fake herdr: backend down" >&2
+    exit 1
+  fi
+  cat << 'EOF'
+{snapshot_json}
+EOF
+  exit 0
+fi
+
+if [[ "$cmd" == "pane move" ]]; then
+  printf '%s\n' "$*" >> "{calls}"
+  echo '{{"result":{{"move_result":{{"changed":true,"pane":{{"pane_id":"%b","tab_id":"t2"}}}}}}}}'
+  exit 0
+fi
+
+if [[ "$cmd" == "agent prompt" ]]; then
+  worker="$3"
+  phase="none"
+  case "$*" in
+    *'Pipeline phase: BUILD'*) phase="BUILD" ;;
+    *'Pipeline phase: PLAN'*) phase="PLAN" ;;
+    *'Pipeline phase: REVIEW'*) phase="REVIEW" ;;
+    *'Pipeline phase: FIX'*) phase="FIX" ;;
+  esac
+  printf '%s\n' "$worker fresh $phase" >> "{calls}"
+  if [[ -e "{fail_after}" ]]; then
+    exit 0
+  fi
+  if [[ "$phase" == "PLAN" ]]; then
+    printf '%s\n' '# plan' '' 'Goal: test' '' '## Lessons' '- none' > "{runs}/$worker.md"
+  else
+    printf '%s\n' 'fake build report' 'Outcome: BLOCKED' '' '## Blockers' \
+      '- fake builder stopped early: this report only proves the prompt was sent' '' \
+      '## Lessons' '- none' > "{runs}/$worker.md"
+  fi
+  exit 0
+fi
+
+if [[ "$cmd" == "agent get" ]]; then
+  if [[ -e "{fail_after}" ]]; then
+    echo '{{"error":{{"code":"agent_not_found"}}}}'
+    exit 0
+  fi
+  echo '{{"result":{{"agent":{{"agent_status":"working","cwd":"","pane_id":"%b"}}}}}}'
+  exit 0
+fi
+
+if [[ "$cmd" == "agent read" ]]; then
+  exit 0
+fi
+
+if [[ "$cmd" == "agent send-keys" ]]; then
+  exit 0
+fi
+
+printf '%s\n' "$*" >> "{calls}"
+exit 0
+"#
+        );
+        let path = self.bin.join("herdr");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn fake_prompt_worker(&self) {
+        if !self.bin.join("herdr").exists() {
+            self.install_herdr("cos");
+        }
+    }
+
+    fn fake_herdr(&self) -> PathBuf {
+        let calls = self.calls.display();
+        let script = format!(
             "#!/usr/bin/env bash\n\
              printf '%s\\n' \"$*\" >> {calls}\n\
              if [[ \"${{1:-}} ${{2:-}}\" == 'api snapshot' ]]; then\n\
-             \x20 cat << 'EOF'\n\
-{snapshot_json}\n\
-EOF\n\
-             \x20 exit 0\n\
-             fi\n\
-             if [[ \"${{1:-}} ${{2:-}}\" == 'pane move' ]]; then\n\
-             \x20 echo '{{\"result\":{{\"move_result\":{{\"changed\":true,\"pane\":{{\"pane_id\":\"%b\",\"tab_id\":\"t2\"}}}}}}}}'\n\
-             \x20 exit 0\n\
+             \x20 echo 'fake herdr: backend down' >&2\n\
+             \x20 exit 1\n\
              fi\n\
              exit 0\n"
         );
@@ -231,6 +248,9 @@ EOF\n\
         path
     }
 
+    fn fake_herdr_grid(&self, owner: &str) -> PathBuf {
+        self.install_herdr(owner)
+    }
 
     /// The pipeline under test (the built binary) in a clean environment: only
     /// the temp home/runs and, when asked, the fake shim/bin dirs are
@@ -243,11 +263,19 @@ EOF\n\
             .env_clear()
             .env(
                 "PATH",
-                std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string()),
+                format!(
+                    "{}:{}",
+                    self.bin.display(),
+                    std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string())
+                ),
             )
+            .env("HERDR_BIN_PATH", self.bin.join("herdr"))
             .env("HOME", &self.home)
             .env("QUAQUA_HOME", self.home.join("quaqua"))
-            .env("QUAQUA_RUNS_DIR", &self.runs);
+            .env("QUAQUA_RUNS_DIR", &self.runs)
+            .env("PROMPT_WORKER_AGENT_GONE_SEC", "0")
+            .env("PROMPT_WORKER_POLL_SEC", "1")
+            .env("GRID_CHECK_TIMEOUT_SEC", "0");
         cmd
     }
 
@@ -303,8 +331,8 @@ fn pipeline_resume_resends_a_prompt_that_never_went_out() {
     let calls = f.calls();
     assert_eq!(
         calls,
-        vec!["sude-pfx1 fresh BUILD", "sude-pfx1 fresh BUILD"],
-        "the failed attempt and its re-send must both be fresh BUILD prompts",
+        vec!["sude-pfx1 fresh BUILD"],
+        "the re-sent prompt must be a fresh BUILD prompt",
     );
     assert!(
         f.runs.join("sude-pfx1.build.md").exists(),
@@ -557,4 +585,53 @@ exit 0\n";
         pfile.contains("- review round 1: Verdict: 2 findings"),
         "pipeline file must record the delivered review verdict: {pfile}",
     );
+}
+
+#[test]
+fn pipeline_per_phase_budget_reset_grants_fresh_allowance() {
+    let f = Fixture::new("budget-reset");
+    let task = "pfx9";
+    f.write_state("pfx9");
+    f.fake_prompt_worker();
+    let state = format!(
+        "repo={}\nbrief={}\nbuilder=sude\nreviewer=suhuynh\nreview=always\nrounds=2\n\
+         base=\nwt={}/.wt/sude-{task}\nbase_sha=\nhead_sha=\nplanfile=\ncommit=\n\
+         phase=build\nround=0\nprompted=0\nprompt_ts=0\nrounds_run=0\nreview_run=skip\n\
+         review_changed=false\nlast_findings=0\nfinished=0\nstart_elapsed=0\n\
+         builder_spawned=1\nreviewer_spawned=0\nlead=\nlead_pane=\npipeline_pid=0\n",
+        f.repo_arg(),
+        f.brief.display(),
+        f.root.display(),
+    );
+    fs::write(f.runs.join(format!("pipeline-{task}.state")), state).unwrap();
+    fs::write(
+        f.runs.join(format!("pipeline-{task}.md")),
+        format!("# pipeline {task}\n"),
+    )
+    .unwrap();
+
+    let worker = format!("sude-{task}");
+    // Simulate previous phase (plan) having spent 962s with budget 900s and grace granted
+    fs::write(f.runs.join(format!(".{worker}.elapsed")), "962\n").unwrap();
+    fs::write(f.runs.join(format!(".{worker}.budget")), "900\n").unwrap();
+    fs::write(f.runs.join(format!(".{worker}.grace")), "1\n").unwrap();
+
+    // Resume pipeline at phase build
+    let out = f.resume(task, false);
+
+    // Verify per-phase budget reset:
+    // 1) .budget must be updated to build phase budget (2700s default)
+    let budget_str = fs::read_to_string(f.runs.join(format!(".{worker}.budget"))).unwrap();
+    assert_eq!(budget_str.trim(), "2700", "new phase must receive its own fresh budget allowance");
+
+    // 2) .grace must have been reset/removed
+    assert!(!f.runs.join(format!(".{worker}.grace")).exists(), "grace must be reset for new phase");
+
+    // 3) Worker must NOT have starved with rem=max(900-962,1)=1s; prompt was sent cleanly
+    eprintln!(
+        "stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0));
 }

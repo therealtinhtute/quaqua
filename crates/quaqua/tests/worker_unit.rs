@@ -790,6 +790,13 @@ fn test_pipeline_blockers_none_exemption() {
     assert!(!has_real_blockers("## Blockers\n* none…\n"));
     assert!(!has_real_blockers("## Blockers\n\n- none\n\n## Lessons\n- none\n"));
     assert!(!has_real_blockers("Just plan text\n\n## Lessons\n- none\n"));
+    // Informational notes after None must not be treated as blockers
+    assert!(!has_real_blockers("## Blockers\n- None. All done...\n"));
+    assert!(!has_real_blockers("## Blockers\n- None. All 9 tests passed.\n"));
+    assert!(!has_real_blockers("## Blockers\n- **None**. All done\n"));
+    assert!(!has_real_blockers("## Blockers\n**None**. All done...\n"));
+    assert!(!has_real_blockers("## Blockers\n- None: all tests pass\n"));
+    assert!(!has_real_blockers("## Blockers\n- None — no blockers encountered\n"));
 
     // Real blockers must return true
     assert!(has_real_blockers("## Blockers\n- cannot plan without the spec\n"));
@@ -873,8 +880,10 @@ max_workers_per_orchestrator = 3
 
 #[test]
 fn test_sude_harness_mapped_to_omp() {
-    use quaqua::pipeline::harness_of;
-    assert_eq!(harness_of("sude"), Some("omp"));
+    use quaqua::config::load_team_config;
+    use quaqua::pipeline::harness_of_kind;
+    let cfg = load_team_config().unwrap();
+    assert_eq!(harness_of_kind("sude", &cfg), Some("omp"));
 }
 
 #[test]
