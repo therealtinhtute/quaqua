@@ -1931,3 +1931,148 @@ fn test_cleanup_worker_removes_per_worker_opencode_state() {
 
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-clean-all-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    let worker_name = "sude-cleanall";
+    let wt = temp.join(".wt").join(worker_name);
+    std::fs::create_dir_all(&wt).unwrap();
+
+    let files_to_create = [
+        runs_dir.join(format!("{worker_name}.owner")),
+        runs_dir.join(format!("{worker_name}.grid")),
+        runs_dir.join(format!("{worker_name}.pipeline")),
+        runs_dir.join(format!("{worker_name}.srt.json")),
+        runs_dir.join(format!(".{worker_name}.provider_retry")),
+        runs_dir.join(format!(".{worker_name}.autoext")),
+        runs_dir.join(format!(".{worker_name}.cost80")),
+        runs_dir.join(format!(".{worker_name}.cost100")),
+        runs_dir.join(format!(".{worker_name}.budget")),
+        runs_dir.join(format!(".{worker_name}.grace")),
+        runs_dir.join(format!(".{worker_name}.progress")),
+        runs_dir.join(format!(".{worker_name}.elapsed")),
+        runs_dir.join(format!(".{worker_name}.nudged")),
+        runs_dir.join(format!(".{worker_name}.submit.log")),
+    ];
+
+    for f in &files_to_create {
+        std::fs::write(f, "test").unwrap();
+        assert!(f.exists());
+    }
+
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    struct MockHerdr;
+    impl HerdrOps for MockHerdr {
+        fn run(&self, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
+        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
+            Ok((true, r#"{"result":{"agent":{"pane_id":"w1:p3"}}}"#.to_string()))
+        }
+        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
+            Ok(Output { status: std::process::ExitStatus::default(), stdout: vec![], stderr: vec![] })
+        }
+        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
+        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool { unimplemented!() }
+        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
+        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
+        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
+    }
+
+    let git = SpawnTestGit;
+    let herdr = MockHerdr;
+    let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
+    assert!(res.is_ok(), "cleanup_worker failed: {:?}", res);
+
+    for f in &files_to_create {
+        assert!(!f.exists(), "file must be cleaned up: {}", f.display());
+    }
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_state_atomic_write_and_metadata_roundtrip() {
+    use quaqua::state::{atomic_write, ExecutionState, WorkerMetadata};
+
+    let temp = std::env::temp_dir().join(format!("quaqua-state-test-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).unwrap();
+
+    // 1. atomic_write
+    let p = temp.join("test_atomic.txt");
+    atomic_write(&p, "hello atomic").unwrap();
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello atomic");
+
+    // 2. WorkerMetadata load/save
+    WorkerMetadata::save_owner(&temp, "worker1", "mylead").unwrap();
+    assert_eq!(WorkerMetadata::load_owner(&temp, "worker1"), "mylead");
+    assert_eq!(WorkerMetadata::load_owner(&temp, "nonexistent"), "cos");
+
+    WorkerMetadata::save_grid(&temp, "worker1", "my-tab").unwrap();
+    assert_eq!(WorkerMetadata::load_grid(&temp, "worker1"), Some("my-tab".to_string()));
+    assert_eq!(WorkerMetadata::load_grid(&temp, "nonexistent"), None);
+
+    WorkerMetadata::save_budget(&temp, "worker1", 1800).unwrap();
+    assert_eq!(WorkerMetadata::load_budget(&temp, "worker1"), Some(1800));
+    assert_eq!(WorkerMetadata::load_budget(&temp, "nonexistent"), None);
+
+    assert!(!WorkerMetadata::has_grace(&temp, "worker1"));
+    WorkerMetadata::record_grace(&temp, "worker1").unwrap();
+    assert!(WorkerMetadata::has_grace(&temp, "worker1"));
+
+    assert_eq!(WorkerMetadata::load_autoext(&temp, "worker1"), 0);
+    WorkerMetadata::save_autoext(&temp, "worker1", 600).unwrap();
+    assert_eq!(WorkerMetadata::load_autoext(&temp, "worker1"), 600);
+
+    assert_eq!(WorkerMetadata::load_elapsed(&temp, "worker1"), 0);
+    WorkerMetadata::save_elapsed(&temp, "worker1", 120).unwrap();
+    assert_eq!(WorkerMetadata::load_elapsed(&temp, "worker1"), 120);
+
+    assert_eq!(WorkerMetadata::load_progress(&temp, "worker1"), 0);
+    WorkerMetadata::save_progress(&temp, "worker1", 12345).unwrap();
+    assert_eq!(WorkerMetadata::load_progress(&temp, "worker1"), 12345);
+
+    assert!(!WorkerMetadata::has_nudged(&temp, "worker1"));
+    WorkerMetadata::record_nudged(&temp, "worker1").unwrap();
+    assert!(WorkerMetadata::has_nudged(&temp, "worker1"));
+
+    // 3. ExecutionState
+    let pipe_file = temp.join("pipeline-myfeature.state");
+    std::fs::write(&pipe_file, "lead=lead1\nbuilder=sude\nfinished=0\n").unwrap();
+    let es = ExecutionState::load(&pipe_file).expect("must parse pipeline state");
+    assert!(!es.is_finished());
+    assert_eq!(es.owner(), "lead1");
+
+    // A file without finished=0 counts as finished (exact base cap.rs parity)
+    let pipe_no_fin = temp.join("pipeline-nofin.state");
+    std::fs::write(&pipe_no_fin, "lead=lead1\nbuilder=sude\n").unwrap();
+    let es_no_fin = ExecutionState::load(&pipe_no_fin).expect("must parse pipeline state");
+    assert!(es_no_fin.is_finished(), "missing finished=0 must be considered finished");
+
+    let tf_file = temp.join("taskforce-eval.state");
+    std::fs::write(&tf_file, "task=eval\nowner=cos\nfinished=1\n").unwrap();
+    let es_tf = ExecutionState::load(&tf_file).expect("must parse taskforce state");
+    assert!(es_tf.is_finished());
+    assert_eq!(es_tf.owner(), "cos");
+
+    // advisor- is not part of taskforce state files
+    let adv_file = temp.join("advisor-test.state");
+    std::fs::write(&adv_file, "task=eval\nowner=cos\nfinished=0\n").unwrap();
+    assert_eq!(ExecutionState::load(&adv_file), None);
+    let _ = std::fs::remove_dir_all(&temp);
+}

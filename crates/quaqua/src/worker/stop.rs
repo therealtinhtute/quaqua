@@ -6,7 +6,7 @@
 //! No rule path is cited: the esc rule is not committed to the repo yet.
 
 use crate::herdr::HerdrOps;
-use crate::json::parse_json;
+use serde_json::Value;
 
 pub const USAGE: &str = "\
 # Usage: quaqua worker stop <name>
@@ -30,8 +30,8 @@ pub fn stop_keys(harness: &str) -> Option<&'static [&'static str]> {
 /// does not carry a harness — herdr I/O failures are reported by the caller,
 /// not folded into this.
 pub fn harness_from_info(body: &str) -> Option<String> {
-    let json = parse_json(body).ok()?;
-    let harness = json.get("result")?.get("agent")?.get_str("agent")?;
+    let json = serde_json::from_str::<Value>(body).ok()?;
+    let harness = json.get("result")?.get("agent")?.get("agent")?.as_str()?;
     if harness.is_empty() {
         None
     } else {

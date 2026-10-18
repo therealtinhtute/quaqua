@@ -5,7 +5,8 @@ use crate::cap::count_owner_slots;
 use crate::config::{Config, Kind};
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
-use crate::json::parse_json;
+use crate::state::WorkerMetadata;
+use serde_json::Value;
 use crate::worker::cleanup::run_grid_hook;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -269,8 +270,8 @@ pub fn start_failure_reason(out: &Output) -> String {
     } else {
         stdout.into_owned()
     };
-    if let Ok(j) = parse_json(&text) {
-        if let Some(code) = j.get("error").and_then(|e| e.get_str("code")) {
+    if let Ok(j) = serde_json::from_str::<Value>(&text) {
+        if let Some(code) = j.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_str()) {
             if !code.is_empty() {
                 return code.to_string();
             }
@@ -493,10 +494,10 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
 
     let grid_tab =
         std::env::var("GRID_TAB").unwrap_or_else(|_| default_grid_tab(&owner, repo_name));
-    let _ = std::fs::write(runs_dir.join(format!("{}.owner", opts.name)), format!("{owner}\n"));
-    let _ = std::fs::write(runs_dir.join(format!("{}.grid", opts.name)), format!("{grid_tab}\n"));
+    let _ = WorkerMetadata::save_owner(&runs_dir, &opts.name, &owner);
+    let _ = WorkerMetadata::save_grid(&runs_dir, &opts.name, &grid_tab);
     if let Ok(pt) = std::env::var("PIPELINE_TASK") {
-        let _ = std::fs::write(runs_dir.join(format!("{}.pipeline", opts.name)), format!("{pt}\n"));
+        let _ = WorkerMetadata::save_pipeline(&runs_dir, &opts.name, &pt);
     }
 
     let rf_str = rf.to_string_lossy().to_string();
@@ -526,9 +527,9 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         if !split_out.status.success() {
             return Err((1, String::from_utf8_lossy(&split_out.stderr).to_string()));
         }
-        let pane = parse_json(&String::from_utf8_lossy(&split_out.stdout))
+        let pane = serde_json::from_str::<Value>(&String::from_utf8_lossy(&split_out.stdout))
             .ok()
-            .and_then(|j| j.get("result").and_then(|r| r.get("pane")).and_then(|p| p.get_str("pane_id")).map(String::from))
+            .and_then(|j| j.get("result").and_then(|r| r.get("pane")).and_then(|p| p.get("pane_id")).and_then(|p| p.as_str()).map(String::from))
             .unwrap_or_default();
         if pane.is_empty() {
             return Err((1, "error: herdr pane split returned no pane_id\n".to_string()));
@@ -671,7 +672,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
             opts.name, opts.kind, running_kind, running_harness, running_harness, iso_now, owner, opts.review
         ),
     };
-    let _ = std::fs::write(runs_dir.join(format!("{}.srt.json", opts.name)), srt_json);
+    let _ = WorkerMetadata::save_srt(&runs_dir, &opts.name, &srt_json);
 
     println!("worker={} kind={} pane={} worktree={}", opts.name, opts.kind, pane_id, wt.display());
     if let Err((code, msg)) = run_grid_hook(&grid_tab, Some(&owner)) {

@@ -4,7 +4,8 @@
 use crate::git::GitOps;
 use crate::hash::md5_hex;
 use crate::herdr::HerdrOps;
-use crate::json::parse_json;
+use crate::state::WorkerMetadata;
+use serde_json::Value;
 use crate::worker::cleanup::default_runs_dir;
 use std::path::Path;
 use std::process::Command;
@@ -243,11 +244,11 @@ pub fn nap(sec: u64) {
 /// The `fallback: <from>→<to> (<reason>)` header line a fallback spawn recorded
 /// in the run metadata (`runs/<name>.srt.json`), if any.
 pub fn fallback_header_line(srt_json: &str) -> Option<String> {
-    let j = parse_json(srt_json).ok()?;
+    let j = serde_json::from_str::<Value>(srt_json).ok()?;
     let fb = j.get("fallback")?;
-    let from = fb.get_str("from").unwrap_or("");
-    let to = fb.get_str("to").unwrap_or("");
-    let reason = fb.get_str("reason").unwrap_or("start-failed");
+    let from = fb.get("from").and_then(|s| s.as_str()).unwrap_or("");
+    let to = fb.get("to").and_then(|s| s.as_str()).unwrap_or("");
+    let reason = fb.get("reason").and_then(|s| s.as_str()).unwrap_or("start-failed");
     if from.is_empty() || to.is_empty() {
         return None;
     }
@@ -440,18 +441,18 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
     let mut harness = String::new();
     let mut session_id = String::new();
     let (_ok, get_info) = herdr.agent_get(name).unwrap_or((false, String::new()));
-    if let Ok(json) = parse_json(&get_info) {
+    if let Ok(json) = serde_json::from_str::<Value>(&get_info) {
         if let Some(agent) = json.get("result").and_then(|r| r.get("agent")) {
-            status = agent.get_str("agent_status").unwrap_or("unknown").to_string();
-            cwd = agent.get_str("cwd").unwrap_or("").to_string();
-            watcher_pane = agent.get_str("pane_id").unwrap_or("").to_string();
-            hook_active = agent.get_bool("screen_detection_skipped").unwrap_or(false);
-            harness = agent.get_str("agent").unwrap_or("").to_string();
+            status = agent.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
+            cwd = agent.get("cwd").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            watcher_pane = agent.get("pane_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            hook_active = agent.get("screen_detection_skipped").and_then(|b| b.as_bool()).unwrap_or(false);
+            harness = agent.get("agent").and_then(|s| s.as_str()).unwrap_or("").to_string();
             if let Some(session) = agent.get("agent_session") {
-                session_id = session.get_str("value").unwrap_or("").to_string();
+                session_id = session.get("value").and_then(|s| s.as_str()).unwrap_or("").to_string();
             }
         } else if let Some(err) = json.get("error") {
-            if err.get_str("code") == Some("agent_not_found") {
+            if err.get("code").and_then(|c| c.as_str()) == Some("agent_not_found") {
                 status = "gone".to_string();
             }
         }
@@ -461,8 +462,8 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
     }
     if harness.is_empty() {
         if let Ok(c) = std::fs::read_to_string(default_runs_dir().join(format!("{name}.srt.json"))) {
-            if let Ok(j) = parse_json(&c) {
-                if let Some(h) = j.get_str("running_harness").or_else(|| j.get_str("harness")) {
+            if let Ok(j) = serde_json::from_str::<Value>(&c) {
+                if let Some(h) = j.get("running_harness").and_then(|s| s.as_str()).or_else(|| j.get("harness").and_then(|s| s.as_str())) {
                     harness = h.to_string();
                 }
             }
@@ -583,20 +584,11 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let _ = std::fs::create_dir_all(&runs_dir);
 
     let out = runs_dir.join(format!("{name}.md"));
-    let submit_log = runs_dir.join(format!(".{name}.submit.log"));
-    let elapsed_file = runs_dir.join(format!(".{name}.elapsed"));
-    let sentinel = runs_dir.join(format!(".{name}.nudged"));
-    let budget_file = runs_dir.join(format!(".{name}.budget"));
-    let grace_file = runs_dir.join(format!(".{name}.grace"));
-    let progress_file = runs_dir.join(format!(".{name}.progress"));
-    let srt = runs_dir.join(format!("{name}.srt.json"));
-    let provider_retry_file = runs_dir.join(format!(".{name}.provider_retry"));
-    let autoext_file = runs_dir.join(format!(".{name}.autoext"));
-    let cost80_sentinel = runs_dir.join(format!(".{name}.cost80"));
-    let cost100_sentinel = runs_dir.join(format!(".{name}.cost100"));
+    let submit_log = WorkerMetadata::submit_log_path(&runs_dir, name);
+    let srt = WorkerMetadata::srt_path(&runs_dir, name);
     let cost_budget: Option<f64> = resolve_cost_budget(task.unwrap_or(""));
-    let mut cost80_warned = cost80_sentinel.exists();
-    let mut cost100_warned = cost100_sentinel.exists();
+    let mut cost80_warned = WorkerMetadata::has_cost80(&runs_dir, name);
+    let mut cost100_warned = WorkerMetadata::has_cost100(&runs_dir, name);
 
     let max: u64 = std::env::var("PROMPT_WORKER_MAX_SEC")
         .ok()
@@ -645,36 +637,21 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let mut autoext_total: u64 = 0;
 
     if resume {
-        prev_elapsed = std::fs::read_to_string(&elapsed_file)
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0);
-        let saved_budget = std::fs::read_to_string(&budget_file)
-            .ok()
-            .and_then(|s| s.trim().parse().ok());
+        prev_elapsed = WorkerMetadata::load_elapsed(&runs_dir, name);
+        let saved_budget = WorkerMetadata::load_budget(&runs_dir, name);
         budget = saved_budget.unwrap_or_else(|| resolve_budget_sec("").0);
         if let Some(ext) = extend {
             budget += ext;
-            let _ = std::fs::write(&budget_file, format!("{budget}\n"));
+            let _ = WorkerMetadata::save_budget(&runs_dir, name, budget);
             eprintln!("WATCHDOG extend +{ext}s (allowance {budget}s, cap {max}s)");
         }
-        autoext_total = std::fs::read_to_string(&autoext_file)
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0);
+        autoext_total = WorkerMetadata::load_autoext(&runs_dir, name);
     } else {
         let task_str = task.unwrap_or("");
         prev_elapsed = 0;
         budget = resolve_budget_sec(task_str).0;
-        let _ = std::fs::write(&budget_file, format!("{budget}\n"));
-        let _ = std::fs::remove_file(&elapsed_file);
-        let _ = std::fs::remove_file(&sentinel);
-        let _ = std::fs::remove_file(&grace_file);
-        let _ = std::fs::remove_file(&progress_file);
-        let _ = std::fs::remove_file(&provider_retry_file);
-        let _ = std::fs::remove_file(&autoext_file);
-        let _ = std::fs::remove_file(&cost80_sentinel);
-        let _ = std::fs::remove_file(&cost100_sentinel);
+        let _ = WorkerMetadata::save_budget(&runs_dir, name, budget);
+        WorkerMetadata::reset_prompt_state(&runs_dir, name);
 
 
         if out.exists() {
@@ -719,7 +696,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
 
     let save_elapsed = |now: u64| {
         let el = prev_elapsed + now.saturating_sub(start);
-        let _ = std::fs::write(&elapsed_file, format!("{el}\n"));
+        let _ = WorkerMetadata::save_elapsed(&runs_dir, name, el);
     };
 
     let watchdog_exit = |code: i32, reason: &str, obs: &Option<Observation>, change_ts: u64| -> (i32, String) {
@@ -749,8 +726,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let mut change_ts = start;
     let mut idle_since = 0;
     let mut last_hb = start;
-    let mut nudged = sentinel.exists();
-    let mut grace_used = grace_file.exists();
+    let mut nudged = WorkerMetadata::has_nudged(&runs_dir, name);
+    let mut grace_used = WorkerMetadata::has_grace(&runs_dir, name);
     let mut gone_since = 0;
     let mut blind_warned = false;
     // Prompt-landing state (fresh prompts only; reset by --resume).
@@ -759,10 +736,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let mut prompt_recovered = false;
     let mut recover_at: u64 = 0;
     let mut recover_deadline: u64 = 0;
-    let mut last_progress: u64 = std::fs::read_to_string(&progress_file)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
+    let mut last_progress: u64 = WorkerMetadata::load_progress(&runs_dir, name);
 
     eprintln!(
         "waiting for {} (poll {}s, stall {}s, idle {}s, budget {}s, cap {}s)",
@@ -789,12 +763,12 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 if !cost100_warned || !cost80_warned {
                     if let Some(current_cost) = read_worker_cost(name, &obs.session_id, &obs.cwd, &obs.harness) {
                         if !cost80_warned && current_cost >= budget_val * 0.8 {
-                            let _ = std::fs::write(&cost80_sentinel, format!("{current_cost}\n"));
+                            let _ = WorkerMetadata::record_cost80(&runs_dir, name, current_cost);
                             cost80_warned = true;
                             eprintln!("WATCHDOG cost 80% | name={name} cost=${current_cost:.4} budget=${budget_val:.4}");
                         }
                         if !cost100_warned && current_cost >= budget_val {
-                            let _ = std::fs::write(&cost100_sentinel, format!("{current_cost}\n"));
+                            let _ = WorkerMetadata::record_cost100(&runs_dir, name, current_cost);
                             cost100_warned = true;
                             eprintln!("WATCHDOG cost 100% | name={name} cost=${current_cost:.4} budget=${budget_val:.4}");
                         }
@@ -814,10 +788,10 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 gone_since = 0;
             }
             if (st == "idle" || st == "done")
-                && !provider_retry_file.exists()
+                && !WorkerMetadata::has_provider_retry(&runs_dir, name)
                 && is_provider_timeout(&obs.pane_text)
             {
-                let _ = std::fs::write(&provider_retry_file, format!("{now}\n"));
+                let _ = WorkerMetadata::record_provider_retry(&runs_dir, name, now);
                 let _ = herdr.agent_prompt_nowait(name, "continue");
                 eprintln!("WATCHDOG provider timeout detected | name={name} — re-prompted session with 'continue'");
                 idle_since = 0;
@@ -870,7 +844,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                     change_ts = now;
                     last_progress = now;
                     idle_since = 0;
-                    let _ = std::fs::write(&progress_file, format!("{now}\n"));
+                    let _ = WorkerMetadata::save_progress(&runs_dir, name, now);
                 }
                 fp_seen = true;
             }
@@ -888,7 +862,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                     if grace > 0 {
                         budget_deadline += grace;
                         grace_used = true;
-                        let _ = std::fs::write(&grace_file, "");
+                        let _ = WorkerMetadata::record_grace(&runs_dir, name);
                         eprintln!("WATCHDOG grace +{grace}s (progressing)");
                     }
                 }
@@ -906,7 +880,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                         budget_deadline += ext;
                         autoext_total += ext;
                         last_autoext_dh = obs.diff_hash.clone();
-                        let _ = std::fs::write(&autoext_file, format!("{autoext_total}\n"));
+                        let _ = WorkerMetadata::save_autoext(&runs_dir, name, autoext_total);
                         eprintln!("WATCHDOG auto-extend +{ext}s (diff progressing, cap {max}s, total +{autoext_total}s/+{max_autoext}s)");
                     }
                 }
@@ -959,7 +933,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 "Time check: you are past {nudge_pct}% of this task's time budget. Wrap up now: finish the current step, commit your work, and write ~/quaqua/runs/{name}.md (via a temp file + rename) with what is done plus a Blockers section for the rest. Reply only the path."
             );
             let _ = herdr.agent_prompt_nowait(name, &nudge_msg);
-            let _ = std::fs::write(&sentinel, "");
+            let _ = WorkerMetadata::record_nudged(&runs_dir, name);
             nudged = true;
             eprintln!("WATCHDOG nudge sent (once, at {nudge_pct}% of {budget}s budget)");
         }
@@ -983,8 +957,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let mut fallback_line: Option<String> = None;
     if srt.is_file() {
         if let Ok(c) = std::fs::read_to_string(&srt) {
-            if let Ok(j) = parse_json(&c) {
-                if j.get_bool("review") == Some(true) {
+            if let Ok(j) = serde_json::from_str::<Value>(&c) {
+                if j.get("review").and_then(|b| b.as_bool()) == Some(true) {
                     expect_verdict = true;
                 }
             }
