@@ -3,7 +3,7 @@
 Every spawn/fanout of task workers MUST end with the workers arranged in the agent grid before any `herdr agent prompt`:
 - `quaqua worker spawn` / `quaqua worker cleanup` run the grid themselves; run `quaqua grid reconcile --tab <repo>-workers` by hand only to repair a layout.
 - The harness decides placement, not the agent: `quaqua worker spawn` records `runs/<name>.owner` (`QUAQUA_OWNER`) and `runs/<name>.grid` (`GRID_TAB`, default `<repo>-workers`); the grid only moves the caller's own workers, grouped by project.
-- An orchestrator with exactly 1 worker in total → split beside it. Otherwise each project gets its own `<repo>-workers` tab (e.g. `monotinhtute-workers`) in a grid (1 = full, 2 = left|right, 3 = A|B + C below, 4 = 2x2); the orchestrator tab keeps only the orchestrator.
+- An orchestrator with exactly 1 worker in total → split beside it. Otherwise each project gets its own `<repo>-workers` tab (e.g. `monotinhtute-workers`) in a grid (1 = full, 2 = left|right, 3 = A|B + C below, 4 = 2x2; 5–8 overflow into `<repo>-workers-2` with the same layout, max 4 per tab); a Lead's workers default to `<slug>-workers`; the orchestrator tab keeps only the orchestrator.
 - Each SLP team gets its own herdr workspace `<slug>` (`quaqua lead spawn <slug>`): the Lead and its Peers' tabs live there; the CoS (the one Supervisor) stays in its own workspace and reaches Leads by agent name. `quaqua lead cleanup <slug>` closes it when the project is done.
 - Enforced: `.claude/settings.json` runs `quaqua gate` (`scripts/hooks/herdr-gate.sh`), which blocks a direct `herdr pane split|move`, `herdr tab create`, `herdr workspace create|close` or `herdr agent start` from the CoS/Leads. On unparseable stdin, `quaqua gate` fails closed with exit 2 (intended difference from bash jq error, anh iu decision 2026-10-16).
 - One project per workers tab; never mix projects or owners, or put 2+ workers in the CoS tab.
@@ -11,3 +11,4 @@ Every spawn/fanout of task workers MUST end with the workers arranged in the age
 - Label each pane with the worker name. Never move a pane while its agent is working or during `--wait`.
 
 Why: 2026-10-11 — the Lead split into the CoS tab put its Peer there too (3 panes in one tab), and a CoS worker was stranded alone in a project tab. anh iu, 2026-10-02 — workers left scattered had to be moved by hand (tieude-pillfix + tieude-ccresearch → w4:t3 "coucou-workers"). 2026-10-11 — CoS spawned probes with `GRID_SKIP=1`, piling 3 panes into the CoS tab.
+- A pipeline that spawns with GRID_SKIP=1 must repair (not only --check) across all of the owner's workers; a per-worker --check passes on a layout that is wrong in total — 2026-10-16, quaqua-rs-lead wP:t1

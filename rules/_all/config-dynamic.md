@@ -1,0 +1,27 @@
+# Cấu hình động & profile của quaqua
+
+Cấu hình đổi **không cần sửa code**: mọi giá trị nằm trong `team.toml`, đọc lại mỗi lần spawn.
+
+## Đọc ở đâu, khi nào
+- Thứ tự resolve (`config.rs:load_team_config`): `$QUAQUA_TEAM_TOML` → `./team.toml` (cwd) → `workspace_root()/team.toml` → bản **nhúng trong binary** (`include_str!`).
+- **Hệ quả:** sửa `team.toml` có tác dụng ngay cho spawn kế tiếp (worker, pipeline, lead — không rebuild). NHƯNG nếu không tìm thấy file lúc chạy, binary rơi về bản nhúng lúc build — muốn đổi giá trị nhúng phải rebuild.
+- `[projects.<slug>]` merge đè lên default theo project (`config::resolve`).
+
+## Kind = một profile
+`[kinds.<name>]` gói `harness` (opencode/omp/claude) · `model` · `effort` (bắt buộc; opencode: variant `#effort`) · `fallback` (1 hop khi start fail) · `can_review`.
+- Đổi model/effort của một kind = sửa 1 dòng trong team.toml; spawn kế tiếp dùng giá trị mới.
+- Reviewer: bất kỳ kind `can_review = true` — pipeline không còn allowlist cứng (2026-10-17, runs/sude-guard.md); fallback của reviewer cũng phải `can_review = true`.
+- Builder/reviewer khác nhau: `strategy.builder_reviewer_differ` — giá trị `kind` hiện **chưa được pipeline enforce** (pipeline vẫn so harness; ghi nhận 2026-10-17).
+- Lead: `strategy.lead_kind` (override `LEAD_KIND`), đi qua cùng `build_launch_cmd` như worker.
+
+## Một lần, không đổi file
+- `LEAD_KIND=<kind>` cho lead spawn.
+- `QUAQUA_TEAM_TOML=<path>` trỏ file config khác (test/experiment).
+- `GRID_TAB`, `QUAQUA_OWNER` — định vị grid.
+
+## Profile "Claude out" (mẫu đã chạy)
+Khi hết token Claude: `suhuynh` → `opencode · opencode-go/deepseek-v4.1-flash · max`; `ni`/`truonglao` pause; builder = `sude` (omp) để reviewer khác harness; CoS chạy trên opencode. Quay lại bảng gốc = sửa lại kind, không build lại.
+
+## Kiểm tra nhanh
+- `quaqua config get kinds.suhuynh.model` — đọc giá trị hiệu lực.
+- `quaqua config validate` — so doc↔doc (models.md ↔ team.toml); chưa so runtime.

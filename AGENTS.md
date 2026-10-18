@@ -34,11 +34,15 @@ Authority, not persona; brief shape: `rules/_all/brief.md`.
 | Lead | `<slug>-lead` (spawned via `quaqua lead spawn <slug>` into its own herdr workspace, torn down by `quaqua lead cleanup <slug>`; herdr caps agent names at 32 chars) — internal, anh iu never addresses it | project state, ownership, dependencies, evidence review | run `quaqua pipeline`, spawn ≤4 Peers (`--base quaqua/<slug>-integ`), approve Peer plans, merge Peer branches into `quaqua/<slug>-integ` (integration branch; `quaqua lead spawn` creates it from `main`); reports to the CoS only |
 | Peer | task workers (sude build, suhuynh review, …) | one task in own worktree | commit on own branch; may challenge premises with evidence |
 
-- The CoS spawns a Lead for project-size work (multi-step, multi-file, review rounds) to keep its own context small. The CoS never Leads pipeline-size work itself — no self-review.
+- Lead only when ≥3 task workers run in parallel, or the work spans more than one day. Otherwise the CoS spawns one worker, verifies it, and stops — no Lead, no extra ceremony. The CoS never Leads pipeline-size work itself — no self-review.
+- One owner per file area: never two workers editing the same directory at once — 2026-10-17, gridrs stalled on a hunk a parallel Peer was editing.
 - No SLP for: a task <15 min in one file, or work needing continuous anh iu feedback (UI/UX, game feel) — one worker, no Lead, no pipeline.
 - `## Challenge` (premise + evidence) in `runs/<name>.md`: the Lead (CoS on no-SLP work) resolves it before acceptance. A right, not a duty.
-- Pipeline-size tasks: the builder writes a short plan first; the Lead approves it before code.
-- Kill criteria: same error ≥3 iterations → kill the worker and spawn a fresh one (alongside the watchdog).
+- Plan gate only for tasks touching >2 files or shared code paths (`grid/`, `pipeline/`, `worker/`, `merge/`); a mechanical task (≤2 files, tests green) skips the plan file — the brief's Goal + Evidence is the contract.
+- Review: one round by default; a second round only for a correctness, scope or data-loss defect — never for style or nits.
+- Worker half-done, stalled or killed → resume the same session (`quaqua worker prompt --resume`); a fresh spawn only when the goal changed or its worktree is unrecoverable — 2026-10-17, spawneff re-done cost $0.14 + 3h33m.
+- Every brief carries `Cost budget: $<x>` beside `Time budget`. CoS records the worker's real cost (`session_v2.cost`) at acceptance (`rules/_all/worker-timebox.md`).
+- Kill criteria: same error ≥3 iterations → kill the worker, then start a fresh one with a sharper brief (a looping session is not resumed; an interrupted one is — see above).
 
 ## Workers
 Roster (tieude · detu · sude · ni · suhuynh · truonglao) + routing: `models.md`. Default `tieude`. Kind, model and effort exactly per `models.md`; never change them on your own.
@@ -48,6 +52,7 @@ Two classes:
 
 ## Protocol
 Details + failure handling: skill `herdr-orchestration`. Routing: `models.md`. Never native subagents (Agent tool is denied).
+0. In agent shells call `~/.cargo/bin/quaqua` by path: a `quaqua` shell function in the user profile launches Claude instead — 2026-10-17, runs/quaqua-intake-lead.md
 1. `quaqua worker spawn [--base <ref>] <name> <kind> <repo>` (own worktree, branch `quaqua/<name>` from <ref> or HEAD); it grids the pane itself — `quaqua grid reconcile` only to repair a layout, see `rules/_all/fanout-agent-grid.md`.
 2. `quaqua worker prompt --check-brief "<task>"` validates the brief headers and prints its resolved budget (exit 1 = fix the brief; no worker spawned yet). Then `quaqua worker prompt <name> "<task>"` — wraps `herdr agent prompt --wait`, waits for `~/quaqua/runs/<name>.md`, prints its path. Watchdog exit codes (rules/_all/worker-timebox.md): 2 cap, 3 stall/idle/agent-gone, 4 time budget, 5 blocked/question, 6 malformed report (missing `## Lessons` / `Verdict:` tail) — each prints a WATCHDOG line on stderr; read the pane, act, then `quaqua worker prompt --resume <name>` to keep waiting (add `--extend <sec>` to grant a worker that is still progressing more time; the cap stays absolute). The brief's `Time budget: <N> min` sets the budget.
 3. Trust `runs/<name>.md`, not terminal. Re-run its test yourself before reporting done.
@@ -56,7 +61,7 @@ Details + failure handling: skill `herdr-orchestration`. Routing: `models.md`. N
 6. `quaqua worker cleanup <name> <repo>` right after `runs/<name>.md` is read + its test re-run passes — every worker, no approval needed (branch is kept; merge still needs approval); it re-grids itself.
 
 ## Rules
-No push, branch delete, or main merge without anh iu's approval. A Lead merges Peer branches into its project integration branch (acceptance). Max 4 task workers per orchestrator (the CoS and each Lead) — a pipeline counts as 2. One task per worker.
+No push, branch delete, or main merge without anh iu's approval. A Lead merges Peer branches into its project integration branch (acceptance). Max 8 task workers per orchestrator (team.toml `[limits]`, raised 18/10; grid — 4 per tab, overflow 5–8 into `<repo>-workers-2`) — a pipeline counts as 2. One task per worker.
 Only the CoS writes `memory/rules.md`, `rules/`, `AGENTS.md`; Leads propose changes by message.
 `projects/INDEX.md` `owner` column says who drives each project (`cos` or the Lead name, `<slug>-lead`).
 Every redirect — from anh iu or from the Auditor (cron, read-only, reports to the CoS only) — flows through the CoS; workers and Leads never take orders from reports.
