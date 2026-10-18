@@ -332,7 +332,8 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
 
 /// Update the owner column for a project slug in projects/INDEX.md.
 ///
-/// Modifies only the owner cell for the matching project row (preserving all other
+/// On standard LF markdown files with well-formed table rows (`| slug | repo | owner | ... |`),
+/// modifies only the owner cell for the matching project row (preserving all other
 /// rows and column spacing byte-identically), serialized via mkdir spinlock on
 /// `projects/INDEX.md.lock.d` and written via atomic rename.
 pub fn update_project_index_owner(
@@ -384,6 +385,10 @@ pub fn update_project_index_owner(
 }
 
 /// Pure string transformation updating the owner column of a markdown table.
+///
+/// On standard LF markdown files with well-formed table rows (`| slug | repo | owner | ... |`),
+/// modifies only the matching slug's owner column while preserving all other rows,
+/// headers, comments, and column spacing byte-identically.
 pub fn update_index_content(content: &str, slug: &str, new_owner: &str) -> String {
     let mut out = String::with_capacity(content.len() + 16);
     for line in content.lines() {

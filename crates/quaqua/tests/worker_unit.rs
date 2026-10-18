@@ -7,9 +7,7 @@ use quaqua::worker::prompt::{
     brief_budget_sec, brief_headers_ok, fallback_header_line, prepend_header,
     validate_env_budget_val,
 };
-use quaqua::launch::{
-    build_launch_cmd, claude_trust_dialog_up, resolve_launch, Launch, LaunchCmd,
-};
+use quaqua::launch::{build_launch_cmd, resolve_launch, Launch};
 use quaqua::lead::spawn::{update_index_content, update_project_index_owner};
 use quaqua::worker::spawn::{fallback_kind, parse_spawn_args, start_failure_reason};
 use quaqua::workspace::resolve_workspace_root;
@@ -1969,6 +1967,10 @@ fn test_update_index_content_markdown_table() {
     // Updating non-existent slug returns byte-identical content
     let untouched = update_index_content(original, "unknown-slug", "random-lead");
     assert_eq!(untouched, original);
+
+    // Rows with fewer than 4 fields are preserved as-is without crashing or modifying
+    let malformed = "| short | row\n";
+    assert_eq!(update_index_content(malformed, "short", "lead"), "| short | row\n");
 }
 
 #[test]
