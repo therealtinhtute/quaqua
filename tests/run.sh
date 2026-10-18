@@ -28,9 +28,9 @@ pass=0 fail=0 failed=() skipped=()
 slow_cover() {
   case "$1" in
     test_prompt_worker.sh)
-      printf '%s' 'tests/test_prompt_worker.sh scripts/worker/prompt-worker.sh scripts/worker/grid-workers.sh scripts/lib/' ;;
+      printf '%s' 'tests/test_prompt_worker.sh crates/quaqua/src/worker/prompt.rs' ;;
     test_pipeline.sh)
-      printf '%s' 'tests/test_pipeline.sh scripts/lead/pipeline.sh scripts/lib/ scripts/worker/prompt-worker.sh scripts/worker/spawn-worker.sh scripts/worker/cleanup-worker.sh scripts/worker/grid-workers.sh' ;;
+      printf '%s' 'tests/test_pipeline.sh crates/quaqua/src/pipeline/' ;;
   esac
 }
 

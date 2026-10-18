@@ -5,13 +5,13 @@
 ## Command recipes
 
 ```bash
-# Normally use spawn-worker.sh (own worktree, rules injection, rollback on failure).
+# Normally use quaqua worker spawn (own worktree, rules injection, rollback on failure).
 herdr pane split --current --direction right --cwd <owned-worktree> --no-focus
 # Read .result.pane.pane_id; never reuse a pane rooted in someone else's checkout.
 herdr agent start <name> --kind <kind> --pane <pane_id> -- <launch args from models.md>
 
-# Always use prompt-worker.sh (never raw herdr agent prompt) for the watchdog and file-only stdout contract.
-scripts/worker/prompt-worker.sh <name> "<brief>"
+# Always use quaqua worker prompt (never raw herdr agent prompt) for the watchdog and file-only stdout contract.
+quaqua worker prompt <name> "<brief>"
 herdr agent get <name>
 herdr agent read <name> --source recent-unwrapped --lines 150
 herdr agent read <name> --source visible --lines 80
