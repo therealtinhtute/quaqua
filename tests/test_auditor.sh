@@ -91,6 +91,7 @@ cat > "$T/expected" <<'EXP'
 [Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*)]
 [--disallowedTools]
 [Bash(git *--output*)]
+[--]
 EXP
 cmp -s "$T/expected" "$T/args.head" || {
   echo "--- expected"; cat "$T/expected"
@@ -117,6 +118,26 @@ run AUDITOR_MODEL=other-model AUDITOR_OUT="$T/custom.md"
 grep -q -- '--model other-model' "$T/calls" || fail "overrides: AUDITOR_MODEL ignored"
 [[ ! -d $T/repo/reports ]] || fail "overrides: default reports dir still used"
 echo "ok: overrides -> model + output path honored"
+
+# ── opencode harness sandbox test ───────────────────────────────────────────
+cat > "$T/bin/opencode" <<'OCOP'
+#!/usr/bin/env bash
+echo "opencode $*" >> "$CALLS"
+echo "cwd=$PWD" >> "$CALLS"
+if [ "${FAKE_RC:-0}" = 0 ]; then
+  printf '## Drift\n- none\n\n## Stale docs\n- none\n\nVerdict: clean\n'
+fi
+exit "${FAKE_RC:-0}"
+OCOP
+chmod +x "$T/bin/opencode"
+rm -rf "$T/repo/reports"
+run AUDITOR_HARNESS=opencode
+[[ $rc -eq 0 ]] || fail "opencode: exit $rc: $(cat "$T/err")"
+report=$(printf '%s\n' "$T"/repo/reports/audit-????-??-??-??.md)
+[[ -f $report && $report != *\** ]] || fail "opencode: no reports/audit-YYYY-MM-DD-HH.md in repo"
+grep -q 'opencode run --standalone --auto -m opencode-go/deepseek-v4.1-flash#low' "$T/calls" \
+  || fail "opencode: unexpected invocation: $(cat "$T/calls")"
+echo "ok: opencode harness -> runs headless with standalone auto flags and writes report"
 
 # ── claude failure: nonzero exit, failure report, stderr passthrough ────────
 run FAKE_RC=3

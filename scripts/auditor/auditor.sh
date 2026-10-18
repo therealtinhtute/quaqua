@@ -130,7 +130,7 @@ for f in "$root"/*.md "$root"/rules/*/*.md "$root"/projects/*.md "$root"/memory/
   fi
 done
 
-prompt=$(cat <<'EOF'
+read -r -d '' prompt <<'EOF' || true
 You are the Auditor for the quaqua repo. READ-ONLY: inspect and report only.
 Do not edit, create, or delete any file; do not run mutating commands; do not
 contact, prompt, or instruct any agent. If a redirect is needed, flag it in the
@@ -184,29 +184,52 @@ sections, each `- file: finding + evidence` (cite path/commit), one line each.
 No findings in a section → write `- none`. End with one line
 `Verdict: clean | N findings`. Terse, technical.
 EOF
-)
 pc=${precheck%$'\n'}
 prompt=${prompt//__PRECHECK__/"${pc:-- none}"}
 
-auditor_model=${AUDITOR_MODEL:-claude-opus-5-5}
-# Read-only by tool whitelist, not only by prompt (finding 3, suhuynh-r6r1):
-#   - no Write/Edit tool is granted and Bash is limited to three read-only git
-#     commands;
-#   - --disallowedTools removes those tools' own file-writing flag,
-#     `git ... --output=<file>`, which the allow pattern would otherwise match;
-#   - --setting-sources '' loads no user/project/local settings files, so no
-#     ambient allow rule can re-widen the whitelist under dontAsk.
-# cwd is the repo root so the agent's relative paths resolve there.
+auditor_harness=${AUDITOR_HARNESS:-}
+if [[ -z $auditor_harness ]]; then
+  if command -v claude >/dev/null 2>&1; then
+    auditor_harness=claude
+  elif command -v opencode >/dev/null 2>&1; then
+    auditor_harness=opencode
+  else
+    auditor_harness=claude
+  fi
+fi
+
 rc=0
-(cd "$root" && claude -p --model "$auditor_model" --permission-mode dontAsk \
-  --setting-sources "" \
-  --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*)" \
-  --disallowedTools "Bash(git *--output*)" \
-  "$prompt") >"$out" 2>"$log" || rc=$?
+case "$auditor_harness" in
+  opencode)
+    auditor_model=${AUDITOR_MODEL:-opencode-go/deepseek-v4.1-flash#low}
+    (cd "$root" && opencode run --standalone --auto \
+      -m "$auditor_model" \
+      "$prompt") >"$out" 2>"$log" || rc=$?
+    ;;
+  claude|*)
+    auditor_model=${AUDITOR_MODEL:-claude-opus-5-5}
+    # Read-only by tool whitelist, not only by prompt (finding 3, suhuynh-r6r1):
+    #   - no Write/Edit tool is granted and Bash is limited to three read-only git
+    #     commands;
+    #   - --disallowedTools removes those tools' own file-writing flag,
+    #     `git ... --output=<file>`, which the allow pattern would otherwise match;
+    #   - --setting-sources '' loads no user/project/local settings files, so no
+    #     ambient allow rule can re-widen the whitelist under dontAsk.
+    #   - `--` explicitly marks the end of options so variadic --disallowedTools
+    #     does not swallow the positional prompt argument.
+    # cwd is the repo root so the agent's relative paths resolve there.
+    (cd "$root" && claude -p --model "$auditor_model" --permission-mode dontAsk \
+      --setting-sources "" \
+      --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*)" \
+      --disallowedTools "Bash(git *--output*)" \
+      -- \
+      "$prompt") >"$out" 2>"$log" || rc=$?
+    ;;
+esac
 if (( rc != 0 )); then
   cat "$log" >&2
-  [[ -s $out ]] || printf '# Auditor %s — FAILED\n\n`claude -p` exited %d; see scheduler stderr logs (journal or Library/Logs/quaqua-auditor.log).\n' \
-    "$(date '+%F %H:%M')" "$rc" > "$out"
+  [[ -s $out ]] || printf '# Auditor %s — FAILED\n\n`%s` exited %d; see scheduler stderr logs (journal or Library/Logs/quaqua-auditor.log).\n' \
+    "$(date '+%F %H:%M')" "$auditor_harness" "$rc" > "$out"
   exit "$rc"
 fi
 printf '%s\n' "$out"

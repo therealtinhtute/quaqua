@@ -16,8 +16,14 @@ case $(uname -s) in
       exit 1
     fi
     bash_bin="$(cd "$(dirname "$bash_bin")" && pwd -P)/$(basename "$bash_bin")"
-    claude=$(command -v claude) \
-      || { echo 'error: claude must be on PATH before installing the auditor' >&2; exit 1; }
+    claude=$(command -v claude || true)
+    if [[ -z $claude ]]; then
+      claude=$(command -v opencode || true)
+    fi
+    if [[ -z $claude ]]; then
+      echo 'error: claude must be on PATH before installing the auditor' >&2
+      exit 1
+    fi
     claude="$(cd "$(dirname "$claude")" && pwd -P)/$(basename "$claude")"
     # launchd does not source shell profiles. Keep the install-time toolchain
     # (e.g. node/mise) as well as Bash and the directory containing claude.

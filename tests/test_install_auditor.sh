@@ -14,7 +14,15 @@ mkdir -p "$root/scripts/auditor" "$T/bin" "$T/claude & tools" "$T/home"
 cp "$src/auditor/install-auditor.sh" "$root/scripts/auditor/"
 cp -R "$here/../scripts/auditor/systemd" "$root/scripts/auditor/"
 if [[ -d $here/../scripts/auditor/launchd ]]; then cp -R "$here/../scripts/auditor/launchd" "$root/scripts/auditor/"; fi
-ln -s "$BASH" "$T/bin/bash"  # proves the installer discovers, rather than hardcodes, Bash
+modern_bash=""
+for b in "$BASH" "$(command -v bash)" /opt/homebrew/bin/bash /opt/zerobrew/bin/bash /usr/local/bin/bash; do
+  if [[ -x $b ]] && "$b" -c '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))' 2>/dev/null; then
+    modern_bash="$b"
+    break
+  fi
+done
+[[ -n $modern_bash ]] || fail "no Bash >= 4.4 found on system for test harness"
+ln -s "$modern_bash" "$T/bin/bash"  # proves the installer discovers, rather than hardcodes, Bash
 cat > "$T/bin/uname" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$TEST_OS"
@@ -119,7 +127,7 @@ fi
 
 # No claude on the install PATH: checked before any destination is created.
 rm "$T/bin/bash" "$T/claude & tools/claude"
-ln -s "$BASH" "$T/bin/bash"
+ln -s "$modern_bash" "$T/bin/bash"
 # Only essential native tools are visible; no user's claude can leak in.
 rc=0
 TEST_OS=Darwin CALLS="$T/calls" HOME="$T/missing-claude-home" \
