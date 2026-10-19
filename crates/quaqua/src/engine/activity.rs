@@ -61,6 +61,9 @@ pub enum HerdrRequest {
         name: String,
         lines: usize,
     },
+    AgentInfo {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +74,12 @@ pub enum HerdrResult {
     KeysSent { name: String },
     Stopped { name: String },
     AgentOutput { content: String },
+    AgentInfo {
+        name: String,
+        status: String,
+        harness: Option<String>,
+        hook_active: bool,
+    },
 }
 
 // ----------------------------------------------------------------------------
@@ -87,6 +96,9 @@ pub enum HerdrEventRequest {
         agent: String,
     },
     PollEvents,
+    PollEventsFor {
+        agent: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,6 +106,10 @@ pub enum HerdrEventResult {
     Subscribed { agent: String },
     Unsubscribed { agent: String },
     Events(Vec<String>),
+    ScopedEvents {
+        agent: String,
+        events: Vec<String>,
+    },
 }
 
 // ----------------------------------------------------------------------------
@@ -121,6 +137,9 @@ pub enum GitRequest {
         branch: String,
     },
     CurrentSha,
+    DiffHash {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,6 +150,10 @@ pub enum GitResult {
     Committed { sha: String },
     Merged { sha: String },
     Sha(String),
+    DiffHash {
+        hash: String,
+        stat: String,
+    },
 }
 
 // ----------------------------------------------------------------------------

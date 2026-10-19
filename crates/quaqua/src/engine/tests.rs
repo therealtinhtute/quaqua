@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::activity::{
     ActivityRequest, ActivityResult, GitRequest, GitResult,
 };
+use crate::engine::activity::{HerdrEventRequest, HerdrEventResult, HerdrRequest, HerdrResult};
 use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
 use crate::engine::guard::{
     scan_directory_for_determinism_violations, scan_source_for_determinism_violations,
@@ -621,4 +622,306 @@ fn test_virtual_clock_advance_and_mock_defaults() {
     let expired_later = clock.advance(Duration::from_millis(100));
     assert_eq!(expired_later, vec!["timer_1"], "timer should expire by 1200ms");
     assert_eq!(clock.now_ms(), 1200);
+}
+
+// ----------------------------------------------------------------------------
+// Additive Engine Extension Variants Verification (Option A)
+// ----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct GitDiffHashState {
+    received_hash: Option<String>,
+    received_stat: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct GitDiffHashWorkflow;
+
+impl Workflow for GitDiffHashWorkflow {
+    type Input = ();
+    type State = GitDiffHashState;
+    type Output = (String, String);
+
+    fn step(
+        &self,
+        state: &mut Self::State,
+        ctx: &mut WorkflowContext,
+        event: Option<WorkflowEvent>,
+    ) -> StepDecision<Self::Output> {
+        match event {
+            None => {
+                ctx.schedule_activity(
+                    "act_git_diff_hash",
+                    ActivityRequest::Git(GitRequest::DiffHash {
+                        path: "/path/to/worktree".to_string(),
+                    }),
+                );
+                StepDecision::Continue
+            }
+            Some(WorkflowEvent::ActivityCompleted { id, result }) => {
+                assert_eq!(id, "act_git_diff_hash");
+                match result {
+                    ActivityResult::Git(GitResult::DiffHash { hash, stat }) => {
+                        state.received_hash = Some(hash.clone());
+                        state.received_stat = Some(stat.clone());
+                        StepDecision::Complete((hash, stat))
+                    }
+                    other => StepDecision::Fail {
+                        code: 1,
+                        reason: format!("unexpected activity result: {other:?}"),
+                    },
+                }
+            }
+            _ => StepDecision::Fail {
+                code: 2,
+                reason: "unexpected event".to_string(),
+            },
+        }
+    }
+}
+
+#[test]
+fn test_testkit_git_diff_hash_flows_through_mock_activities() {
+    let workflow = GitDiffHashWorkflow;
+    let mut clock = VirtualClock::new(0);
+    let mut activities = MockActivities::new();
+    activities.register(
+        "act_git_diff_hash",
+        ActivityResult::Git(GitResult::DiffHash {
+            hash: "canned_hash_12345".to_string(),
+            stat: "3 files changed".to_string(),
+        }),
+    );
+    let mut journal = InMemoryJournal::new();
+
+    let initial_state = GitDiffHashState {
+        received_hash: None,
+        received_stat: None,
+    };
+
+    let result = run_to_completion(
+        &workflow,
+        "wf-git-diff-hash",
+        initial_state,
+        &mut clock,
+        &mut activities,
+        &mut journal,
+    );
+
+    assert_eq!(
+        result,
+        Ok(("canned_hash_12345".to_string(), "3 files changed".to_string()))
+    );
+    assert_eq!(activities.call_count(), 1);
+    assert_eq!(
+        activities.calls()[0],
+        (
+            "act_git_diff_hash".to_string(),
+            ActivityRequest::Git(GitRequest::DiffHash {
+                path: "/path/to/worktree".to_string(),
+            })
+        )
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct HerdrAgentInfoState {
+    status: Option<String>,
+    harness: Option<Option<String>>,
+    hook_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct HerdrAgentInfoWorkflow;
+
+impl Workflow for HerdrAgentInfoWorkflow {
+    type Input = ();
+    type State = HerdrAgentInfoState;
+    type Output = (String, Option<String>, bool);
+
+    fn step(
+        &self,
+        state: &mut Self::State,
+        ctx: &mut WorkflowContext,
+        event: Option<WorkflowEvent>,
+    ) -> StepDecision<Self::Output> {
+        match event {
+            None => {
+                ctx.schedule_activity(
+                    "act_agent_info",
+                    ActivityRequest::Herdr(HerdrRequest::AgentInfo {
+                        name: "worker-sude-1".to_string(),
+                    }),
+                );
+                StepDecision::Continue
+            }
+            Some(WorkflowEvent::ActivityCompleted { id, result }) => {
+                assert_eq!(id, "act_agent_info");
+                match result {
+                    ActivityResult::Herdr(HerdrResult::AgentInfo {
+                        name,
+                        status,
+                        harness,
+                        hook_active,
+                    }) => {
+                        assert_eq!(name, "worker-sude-1");
+                        state.status = Some(status.clone());
+                        state.harness = Some(harness.clone());
+                        state.hook_active = Some(hook_active);
+                        StepDecision::Complete((status, harness, hook_active))
+                    }
+                    other => StepDecision::Fail {
+                        code: 1,
+                        reason: format!("unexpected activity result: {other:?}"),
+                    },
+                }
+            }
+            _ => StepDecision::Fail {
+                code: 2,
+                reason: "unexpected event".to_string(),
+            },
+        }
+    }
+}
+
+#[test]
+fn test_testkit_herdr_agent_info_flows_through_mock_activities() {
+    let workflow = HerdrAgentInfoWorkflow;
+    let mut clock = VirtualClock::new(0);
+    let mut activities = MockActivities::new();
+    activities.register(
+        "act_agent_info",
+        ActivityResult::Herdr(HerdrResult::AgentInfo {
+            name: "worker-sude-1".to_string(),
+            status: "working".to_string(),
+            harness: Some("omp".to_string()),
+            hook_active: true,
+        }),
+    );
+    let mut journal = InMemoryJournal::new();
+
+    let initial_state = HerdrAgentInfoState {
+        status: None,
+        harness: None,
+        hook_active: None,
+    };
+
+    let result = run_to_completion(
+        &workflow,
+        "wf-agent-info",
+        initial_state,
+        &mut clock,
+        &mut activities,
+        &mut journal,
+    );
+
+    assert_eq!(
+        result,
+        Ok(("working".to_string(), Some("omp".to_string()), true))
+    );
+    assert_eq!(activities.call_count(), 1);
+    assert_eq!(
+        activities.calls()[0],
+        (
+            "act_agent_info".to_string(),
+            ActivityRequest::Herdr(HerdrRequest::AgentInfo {
+                name: "worker-sude-1".to_string(),
+            })
+        )
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct HerdrScopedEventsState {
+    events: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct HerdrScopedEventsWorkflow;
+
+impl Workflow for HerdrScopedEventsWorkflow {
+    type Input = ();
+    type State = HerdrScopedEventsState;
+    type Output = Vec<String>;
+
+    fn step(
+        &self,
+        state: &mut Self::State,
+        ctx: &mut WorkflowContext,
+        event: Option<WorkflowEvent>,
+    ) -> StepDecision<Self::Output> {
+        match event {
+            None => {
+                ctx.schedule_activity(
+                    "act_poll_events_for",
+                    ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
+                        agent: "worker-sude-1".to_string(),
+                    }),
+                );
+                StepDecision::Continue
+            }
+            Some(WorkflowEvent::ActivityCompleted { id, result }) => {
+                assert_eq!(id, "act_poll_events_for");
+                match result {
+                    ActivityResult::HerdrEvents(HerdrEventResult::ScopedEvents {
+                        agent,
+                        events,
+                    }) => {
+                        assert_eq!(agent, "worker-sude-1");
+                        state.events = events.clone();
+                        StepDecision::Complete(events)
+                    }
+                    other => StepDecision::Fail {
+                        code: 1,
+                        reason: format!("unexpected activity result: {other:?}"),
+                    },
+                }
+            }
+            _ => StepDecision::Fail {
+                code: 2,
+                reason: "unexpected event".to_string(),
+            },
+        }
+    }
+}
+
+#[test]
+fn test_testkit_herdr_scoped_events_flows_through_mock_activities() {
+    let workflow = HerdrScopedEventsWorkflow;
+    let mut clock = VirtualClock::new(0);
+    let mut activities = MockActivities::new();
+    activities.register(
+        "act_poll_events_for",
+        ActivityResult::HerdrEvents(HerdrEventResult::ScopedEvents {
+            agent: "worker-sude-1".to_string(),
+            events: vec!["blocked".to_string(), "idle".to_string()],
+        }),
+    );
+    let mut journal = InMemoryJournal::new();
+
+    let initial_state = HerdrScopedEventsState { events: Vec::new() };
+
+    let result = run_to_completion(
+        &workflow,
+        "wf-scoped-events",
+        initial_state,
+        &mut clock,
+        &mut activities,
+        &mut journal,
+    );
+
+    assert_eq!(
+        result,
+        Ok(vec!["blocked".to_string(), "idle".to_string()])
+    );
+    assert_eq!(activities.call_count(), 1);
+    assert_eq!(
+        activities.calls()[0],
+        (
+            "act_poll_events_for".to_string(),
+            ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
+                agent: "worker-sude-1".to_string(),
+            })
+        )
+    );
 }
