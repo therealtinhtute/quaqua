@@ -52,7 +52,7 @@ Two classes:
 
 ## Protocol
 Details + failure handling: skill `herdr-orchestration`. Routing: `models.md`. Never native subagents (Agent tool is denied).
-0. In agent shells call `~/.cargo/bin/quaqua` by path: a `quaqua` shell function in the user profile launches Claude instead — 2026-10-17, runs/quaqua-intake-lead.md
+0. In agent shells call `~/.cargo/bin/quaqua` by path: a `quaqua` shell function in the user profile launches Claude instead — 2026-10-17, docs/research/evidence/quaqua-intake-lead.md
 1. `quaqua worker spawn [--base <ref>] <name> <kind> <repo>` (own worktree, branch `quaqua/<name>` from <ref> or HEAD); it grids the pane itself — `quaqua grid reconcile` only to repair a layout, see `rules/_all/fanout-agent-grid.md`.
 2. `quaqua worker prompt --check-brief "<task>"` validates the brief headers and prints its resolved budget (exit 1 = fix the brief; no worker spawned yet). Then `quaqua worker prompt <name> "<task>"` — wraps `herdr agent prompt --wait`, waits for `~/quaqua/runs/<name>.md`, prints its path. Watchdog exit codes (rules/_all/worker-timebox.md): 2 cap, 3 stall/idle/agent-gone, 4 time budget, 5 blocked/question, 6 malformed report (missing `## Lessons` / `Verdict:` tail) — each prints a WATCHDOG line on stderr; read the pane, act, then `quaqua worker prompt --resume <name>` to keep waiting (add `--extend <sec>` to grant a worker that is still progressing more time; the cap stays absolute). The brief's `Time budget: <N> min` sets the budget.
 3. Trust `runs/<name>.md`, not terminal. Re-run its test yourself before reporting done.
