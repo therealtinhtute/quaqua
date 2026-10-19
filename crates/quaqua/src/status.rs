@@ -59,27 +59,32 @@ pub struct OrchestrationRow {
     pub agent_status: String,
     pub report_status: ReportStatus,
     pub phase: String,
-    pub idle_time: String,
+    pub wait_time: String,
     pub flags: Vec<WarningFlag>,
 }
 
 /// Query workflow rows from `<workspace_root>/runs/quaqua.db`.
 ///
-/// Missing or empty DB yields `Ok(Vec::new())` cleanly without error.
+/// Missing or empty DB yields `Ok(Vec::new())` cleanly.
+/// An existing but corrupted, unreadable, or schema-drifted DB returns `Err("db error: ...")`.
 pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String> {
     if !db_path.exists() {
         return Ok(Vec::new());
     }
 
-    let conn = match rusqlite::Connection::open_with_flags(
+    let conn = rusqlite::Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(_) => return Ok(Vec::new()),
-    };
+    )
+    .map_err(|e| format!("db error: cannot open {}: {e}", db_path.display()))?;
 
-    let _ = conn.busy_timeout(Duration::from_millis(5000));
+    conn.busy_timeout(Duration::from_millis(5000))
+        .map_err(|e| {
+            format!(
+                "db error: failed to set busy timeout on {}: {e}",
+                db_path.display()
+            )
+        })?;
 
     let has_events: bool = conn
         .query_row(
@@ -87,7 +92,7 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
             [],
             |r| r.get(0),
         )
-        .unwrap_or(false);
+        .map_err(|e| format!("db error: checking events table: {e}"))?;
 
     let has_snapshots: bool = conn
         .query_row(
@@ -95,7 +100,7 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
             [],
             |r| r.get(0),
         )
-        .unwrap_or(false);
+        .map_err(|e| format!("db error: checking snapshots table: {e}"))?;
 
     if !has_events && !has_snapshots {
         return Ok(Vec::new());
@@ -114,7 +119,7 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
                      GROUP BY workflow_id \
                  ) m ON e.workflow_id = m.workflow_id AND e.seq = m.max_seq;",
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("db error: preparing events query: {e}"))?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -124,10 +129,11 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
                 let kind: String = row.get(3)?;
                 Ok((wf, seq as u64, ts_ms as u64, kind))
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("db error: executing events query: {e}"))?;
 
-        for r in rows.flatten() {
-            let (wf, seq, ts_ms, kind) = r;
+        for r in rows {
+            let (wf, seq, ts_ms, kind) =
+                r.map_err(|e| format!("db error: decoding event row: {e}"))?;
             let entry = map.entry(wf.clone()).or_insert_with(|| WorkflowStatusRow {
                 workflow_id: wf,
                 snap_seq: None,
@@ -153,7 +159,7 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
                      GROUP BY workflow_id \
                  ) m ON s.workflow_id = m.workflow_id AND s.seq = m.max_seq;",
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("db error: preparing snapshots query: {e}"))?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -162,10 +168,11 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
                 let state_json: String = row.get(2)?;
                 Ok((wf, seq as u64, state_json))
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("db error: executing snapshots query: {e}"))?;
 
-        for r in rows.flatten() {
-            let (wf, seq, state_json) = r;
+        for r in rows {
+            let (wf, seq, state_json) =
+                r.map_err(|e| format!("db error: decoding snapshot row: {e}"))?;
             let entry = map.entry(wf.clone()).or_insert_with(|| WorkflowStatusRow {
                 workflow_id: wf,
                 snap_seq: None,
@@ -241,6 +248,10 @@ pub fn scan_orchestration<H: HerdrOps>(
         let report_path = runs_dir.join(format!("{name}.md"));
         let report_exists = report_path.is_file();
 
+        // Heuristic: check if report file access time is at or before modified time.
+        // Assumption: requires filesystem with atime tracking enabled (not `noatime`).
+        // Note: incidental reads (e.g. auditor scans) can cause false negatives.
+        // Durable solution: quaqua-owned `.read` marker planned for W2.
         let atime_unread = if report_exists {
             if let Ok(meta) = std::fs::metadata(&report_path) {
                 if let (Ok(atime), Ok(mtime)) = (meta.accessed(), meta.modified()) {
@@ -268,8 +279,11 @@ pub fn scan_orchestration<H: HerdrOps>(
             _ => false,
         };
 
+        // WAITER-LOST:
+        // 1. Orchestrator is inactive while its worker is still running.
+        // 2. Report exists and nobody has read it (atime <= mtime).
         let waiter_lost_running = worker_running && owner_inactive;
-        let waiter_lost_report = report_exists && (atime_unread || owner_inactive);
+        let waiter_lost_report = report_exists && atime_unread;
 
         if waiter_lost_running || waiter_lost_report {
             flags.push(WarningFlag::WaiterLost);
@@ -296,7 +310,7 @@ pub fn scan_orchestration<H: HerdrOps>(
 
         let report_status = if !report_exists {
             ReportStatus::None
-        } else if flags.contains(&WarningFlag::WaiterLost) || atime_unread {
+        } else if atime_unread {
             ReportStatus::Unread
         } else {
             ReportStatus::Present
@@ -309,7 +323,7 @@ pub fn scan_orchestration<H: HerdrOps>(
             .unwrap_or_else(|| "-".to_string());
 
         let elapsed = WorkerMetadata::load_elapsed(runs_dir, &name);
-        let idle_time = if elapsed > 0 {
+        let wait_time = if elapsed > 0 {
             if elapsed >= 60 {
                 format!("{}m", elapsed / 60)
             } else {
@@ -328,7 +342,7 @@ pub fn scan_orchestration<H: HerdrOps>(
             agent_status,
             report_status,
             phase,
-            idle_time,
+            wait_time,
             flags,
         });
     }
@@ -338,38 +352,44 @@ pub fn scan_orchestration<H: HerdrOps>(
 
 /// Format workflow and orchestration status as a clean text table.
 pub fn format_status_report(
-    workflows: &[WorkflowStatusRow],
+    workflows: Result<&[WorkflowStatusRow], &str>,
     orch_rows: &[OrchestrationRow],
 ) -> String {
     let mut out = String::new();
 
     out.push_str("=== Workflows (runs/quaqua.db) ===\n");
-    if workflows.is_empty() {
-        out.push_str("no workflows\n");
-    } else {
-        out.push_str(&format!(
-            "{:<20} {:<10} {:<20} {:<10} {:<12} {:<10}\n",
-            "WORKFLOW_ID", "SNAP_SEQ", "LAST_EVENT", "EVENT_SEQ", "LAST_TS", "PHASE"
-        ));
-        for wf in workflows {
-            let snap = wf
-                .snap_seq
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let ev_kind = wf.last_event_kind.as_deref().unwrap_or("-");
-            let ev_seq = wf
-                .last_event_seq
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let ev_ts = wf
-                .last_event_ts_ms
-                .map(|t| format!("{t}ms"))
-                .unwrap_or_else(|| "-".to_string());
-            let phase = wf.phase.as_deref().unwrap_or("-");
+    match workflows {
+        Ok(wfs) if wfs.is_empty() => {
+            out.push_str("no workflows\n");
+        }
+        Ok(wfs) => {
             out.push_str(&format!(
                 "{:<20} {:<10} {:<20} {:<10} {:<12} {:<10}\n",
-                wf.workflow_id, snap, ev_kind, ev_seq, ev_ts, phase
+                "WORKFLOW_ID", "SNAP_SEQ", "LAST_EVENT", "EVENT_SEQ", "LAST_TS", "PHASE"
             ));
+            for wf in wfs {
+                let snap = wf
+                    .snap_seq
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                let ev_kind = wf.last_event_kind.as_deref().unwrap_or("-");
+                let ev_seq = wf
+                    .last_event_seq
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                let ev_ts = wf
+                    .last_event_ts_ms
+                    .map(|t| format!("{t}ms"))
+                    .unwrap_or_else(|| "-".to_string());
+                let phase = wf.phase.as_deref().unwrap_or("-");
+                out.push_str(&format!(
+                    "{:<20} {:<10} {:<20} {:<10} {:<12} {:<10}\n",
+                    wf.workflow_id, snap, ev_kind, ev_seq, ev_ts, phase
+                ));
+            }
+        }
+        Err(err) => {
+            out.push_str(&format!("{err}\n"));
         }
     }
 
@@ -379,7 +399,7 @@ pub fn format_status_report(
     } else {
         out.push_str(&format!(
             "{:<18} {:<16} {:<10} {:<8} {:<10} {:<8} {}\n",
-            "NAME", "OWNER", "STATUS", "REPORT", "PHASE", "IDLE", "WARNINGS"
+            "NAME", "OWNER", "STATUS", "REPORT", "PHASE", "WAIT", "WARNINGS"
         ));
         for r in orch_rows {
             let rep_str = match r.report_status {
@@ -398,7 +418,7 @@ pub fn format_status_report(
             };
             out.push_str(&format!(
                 "{:<18} {:<16} {:<10} {:<8} {:<10} {:<8} {}\n",
-                r.name, r.owner, r.agent_status, rep_str, r.phase, r.idle_time, flags_str
+                r.name, r.owner, r.agent_status, rep_str, r.phase, r.wait_time, flags_str
             ));
         }
     }
@@ -412,9 +432,12 @@ pub fn render_status<H: HerdrOps>(
     runs_dir: &Path,
     herdr: &H,
 ) -> Result<String, String> {
-    let workflows = query_workflows(db_path)?;
+    let wf_res = query_workflows(db_path);
     let orch_rows = scan_orchestration(runs_dir, herdr)?;
-    Ok(format_status_report(&workflows, &orch_rows))
+    Ok(format_status_report(
+        wf_res.as_deref().map_err(|e| e.as_str()),
+        &orch_rows,
+    ))
 }
 
 /// CLI entrypoint for `quaqua status`.
@@ -555,7 +578,7 @@ mod tests {
         let workflows = res.unwrap();
         assert!(workflows.is_empty(), "expected empty workflows");
 
-        let report = format_status_report(&workflows, &[]);
+        let report = format_status_report(Ok(&workflows), &[]);
         assert!(
             report.contains("no workflows"),
             "must contain 'no workflows'"
@@ -597,7 +620,7 @@ mod tests {
         let workflows = res.unwrap();
         assert!(workflows.is_empty(), "expected 0 workflows in empty db");
 
-        let report = format_status_report(&workflows, &[]);
+        let report = format_status_report(Ok(&workflows), &[]);
         assert!(report.contains("no workflows"));
     }
 
@@ -695,7 +718,7 @@ mod tests {
         let tmp = temp_test_dir("waiter-lost-2");
         let _cleaner = TempDirCleaner(tmp.clone());
 
-        // arch-lead is idle; worker sude-e1 finished and submitted report
+        // arch-lead is idle; worker sude-e1 finished and submitted report (atime <= mtime)
         let mock_json = r#"{
             "result": {
                 "agents": [
@@ -707,11 +730,21 @@ mod tests {
         let mock = MockHerdr::new(mock_json);
 
         fs::write(tmp.join("sude-e1.owner"), "arch-lead\n").unwrap();
+        let report_path = tmp.join("sude-e1.md");
         fs::write(
-            tmp.join("sude-e1.md"),
+            &report_path,
             "Goal: done\n## Blockers\nnone\n## Lessons\nnone\n",
         )
         .unwrap();
+
+        // Explicitly set atime <= mtime (accessed before modified -> unread)
+        let file = fs::File::open(&report_path).unwrap();
+        let now = std::time::SystemTime::now();
+        let mut times = fs::FileTimes::new();
+        times = times
+            .set_modified(now)
+            .set_accessed(now - Duration::from_secs(5));
+        file.set_times(times).unwrap();
 
         let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
         let e1 = rows
@@ -720,13 +753,153 @@ mod tests {
             .expect("sude-e1 found");
         assert!(
             e1.flags.contains(&WarningFlag::WaiterLost),
-            "must raise WAITER-LOST when report exists with idle lead"
+            "must raise WAITER-LOST when report exists unread"
         );
         assert!(
             e1.flags.contains(&WarningFlag::DoneNotCleaned),
             "must raise DONE-NOT-CLEANED"
         );
         assert_eq!(e1.report_status, ReportStatus::Unread);
+    }
+
+    #[test]
+    fn test_status_negative_report_read_with_idle_owner_does_not_raise_waiter_lost() {
+        let tmp = temp_test_dir("neg-report-read");
+        let _cleaner = TempDirCleaner(tmp.clone());
+
+        // arch-lead is idle; worker sude-e1 has a report that HAS been read (atime > mtime)
+        let mock_json = r#"{
+            "result": {
+                "agents": [
+                    {"name": "arch-lead", "agent_status": "idle"},
+                    {"name": "sude-e1", "agent_status": "done"}
+                ]
+            }
+        }"#;
+        let mock = MockHerdr::new(mock_json);
+
+        fs::write(tmp.join("sude-e1.owner"), "arch-lead\n").unwrap();
+        let report_path = tmp.join("sude-e1.md");
+        fs::write(&report_path, "Goal: done\n## Lessons\nnone\n").unwrap();
+
+        // Set atime > mtime (accessed 10s after modified -> read)
+        let file = fs::File::open(&report_path).unwrap();
+        let now = std::time::SystemTime::now();
+        let mtime = now - Duration::from_secs(10);
+        let atime = now;
+        let mut times = fs::FileTimes::new();
+        times = times.set_modified(mtime).set_accessed(atime);
+        file.set_times(times).unwrap();
+
+        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let e1 = rows
+            .iter()
+            .find(|r| r.name == "sude-e1")
+            .expect("sude-e1 found");
+
+        assert!(
+            !e1.flags.contains(&WarningFlag::WaiterLost),
+            "read report must NOT raise WAITER-LOST even if owner is idle"
+        );
+        assert_eq!(e1.report_status, ReportStatus::Present);
+        assert!(e1.flags.contains(&WarningFlag::DoneNotCleaned));
+    }
+
+    #[test]
+    fn test_status_negative_working_owner_with_working_worker_does_not_raise_waiter_lost() {
+        let tmp = temp_test_dir("neg-working");
+        let _cleaner = TempDirCleaner(tmp.clone());
+
+        // arch-lead is actively working; worker sude-e1 is working; no report
+        let mock_json = r#"{
+            "result": {
+                "agents": [
+                    {"name": "arch-lead", "agent_status": "working"},
+                    {"name": "sude-e1", "agent_status": "working"}
+                ]
+            }
+        }"#;
+        let mock = MockHerdr::new(mock_json);
+
+        fs::write(tmp.join("sude-e1.owner"), "arch-lead\n").unwrap();
+
+        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let e1 = rows
+            .iter()
+            .find(|r| r.name == "sude-e1")
+            .expect("sude-e1 found");
+
+        assert!(
+            !e1.flags.contains(&WarningFlag::WaiterLost),
+            "working worker under working owner must NOT raise WAITER-LOST"
+        );
+        assert!(
+            e1.flags.is_empty(),
+            "expected 0 flags on healthy working worker"
+        );
+    }
+
+    #[test]
+    fn test_status_corrupted_or_unreadable_db_surfaces_db_error() {
+        let tmp = temp_test_dir("corrupt");
+        let _cleaner = TempDirCleaner(tmp.clone());
+
+        let db_path = tmp.join("corrupt.db");
+        fs::write(&db_path, b"not a sqlite database file at all").unwrap();
+
+        let res = query_workflows(&db_path);
+        assert!(res.is_err(), "corrupt db must return Err");
+        let err_msg = res.unwrap_err();
+        assert!(
+            err_msg.starts_with("db error:"),
+            "error message must start with 'db error:' but got: {err_msg}"
+        );
+
+        let report = format_status_report(Err(&err_msg), &[]);
+        assert!(
+            report.contains("db error:"),
+            "rendered report must show db error"
+        );
+        assert!(
+            !report.contains("no workflows"),
+            "rendered report must NOT claim 'no workflows' when DB is corrupted"
+        );
+    }
+
+    #[test]
+    fn test_status_schema_drifted_undecodable_row_surfaces_db_error() {
+        let tmp = temp_test_dir("schema-drift");
+        let _cleaner = TempDirCleaner(tmp.clone());
+
+        let db_path = tmp.join("drift.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("create db");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE events (
+                    workflow_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    ts_ms TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, seq)
+                );
+                INSERT INTO events VALUES ('wf-drift', 1, 'not_an_integer_timestamp', 'kind', '{}');
+                "#,
+            )
+            .expect("init drift schema");
+        }
+
+        let res = query_workflows(&db_path);
+        assert!(
+            res.is_err(),
+            "schema drift / decoding failure must return Err"
+        );
+        let err_msg = res.unwrap_err();
+        assert!(
+            err_msg.contains("db error: decoding event row"),
+            "must report decoding error, got: {err_msg}"
+        );
     }
 
     #[test]
@@ -820,5 +993,6 @@ mod tests {
         assert!(out.contains("=== Orchestration ==="));
         assert!(out.contains("arch-lead"));
         assert!(out.contains("sude-w1"));
+        assert!(out.contains("WAIT"));
     }
 }
