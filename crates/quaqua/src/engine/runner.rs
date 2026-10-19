@@ -428,7 +428,7 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
     let mut history_activity_completed: HashMap<String, usize> = HashMap::new();
     let mut history_timer_scheduled: HashMap<String, usize> = HashMap::new();
     let mut history_child_started: HashMap<String, usize> = HashMap::new();
-    let mut has_paused_for_approval = false;
+    let mut history_pause_for_approval_count = 0usize;
     let mut history_continue_count = 0usize;
 
     for rec in &events_since_snapshot_rec {
@@ -490,7 +490,7 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                 });
             }
             "pause_for_approval" => {
-                has_paused_for_approval = true;
+                history_pause_for_approval_count += 1;
             }
             "continue" => {
                 history_continue_count += 1;
@@ -505,6 +505,7 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
     let mut replayed_timer_counts: HashMap<String, usize> = HashMap::new();
     let mut replayed_child_counts: HashMap<String, usize> = HashMap::new();
     let mut replayed_continue_count = 0usize;
+    let mut replayed_pause_for_approval_count = 0usize;
 
     let mut pending_replay_effects: Vec<ReplayEffect<W::Output>> = Vec::new();
 
@@ -633,7 +634,8 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                 }));
             }
             StepDecision::PauseForApproval { reason } => {
-                if !has_paused_for_approval {
+                replayed_pause_for_approval_count += 1;
+                if replayed_pause_for_approval_count > history_pause_for_approval_count {
                     pending_replay_effects.push(ReplayEffect::DispatchDecision(
                         StepDecision::PauseForApproval { reason },
                     ));
@@ -2988,5 +2990,185 @@ mod tests {
                 "event {i} payload mismatch"
             );
         }
+    }
+    // ------------------------------------------------------------------------
+    // Review Round 1 Finding 1: Pause For Approval Reconciliation by Occurrence Count
+    // ------------------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct MultiPauseState {
+        pause_count: usize,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct MultiPauseWorkflow;
+
+    impl Workflow for MultiPauseWorkflow {
+        type Input = ();
+        type State = MultiPauseState;
+        type Output = String;
+
+        fn step(
+            &self,
+            state: &mut Self::State,
+            _ctx: &mut WorkflowContext,
+            event: Option<WorkflowEvent>,
+        ) -> StepDecision<Self::Output> {
+            match event {
+                None => {
+                    state.pause_count += 1;
+                    StepDecision::PauseForApproval {
+                        reason: "pause_1".to_string(),
+                    }
+                }
+                Some(WorkflowEvent::ApprovalResolved { approved, .. }) => {
+                    if !approved {
+                        return StepDecision::Fail {
+                            code: 1,
+                            reason: "rejected".to_string(),
+                        };
+                    }
+                    if state.pause_count == 1 {
+                        state.pause_count += 1;
+                        StepDecision::PauseForApproval {
+                            reason: "pause_2".to_string(),
+                        }
+                    } else {
+                        StepDecision::Complete(format!("pauses: {}", state.pause_count))
+                    }
+                }
+                _ => StepDecision::Fail {
+                    code: 2,
+                    reason: "unexpected event".to_string(),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn test_kill_on_second_pause_for_approval_with_snapshots_disabled_resumes_cleanly() {
+        let workflow = MultiPauseWorkflow;
+        let initial_state = MultiPauseState { pause_count: 0 };
+        let options = RunnerOptions {
+            max_steps: 100,
+            snapshot_interval: 0,
+            snapshot_at_blocked: false,
+        };
+
+        // --- Run 1: Uninterrupted Reference Run to Pause 2 ---
+        let mut journal_ref = InMemoryJournal::new();
+        let mut activities_ref = MockActivityRegistry::new();
+        let mut clock_ref = VirtualClock::new(1000);
+
+        // First step blocks on pause_1
+        let outcome_1 = run_until_blocked(
+            &workflow,
+            "multi_pause_ref",
+            Some(initial_state.clone()),
+            &mut journal_ref,
+            &mut activities_ref,
+            &mut clock_ref,
+            &options,
+            Vec::new(),
+        )
+        .expect("step to pause 1");
+        assert_eq!(
+            outcome_1,
+            RunnerOutcome::Blocked("pause_for_approval: pause_1".to_string())
+        );
+
+        // Resume with approval for pause 1, advances to pause_2
+        let outcome_ref = run_until_blocked(
+            &workflow,
+            "multi_pause_ref",
+            Some(initial_state.clone()),
+            &mut journal_ref,
+            &mut activities_ref,
+            &mut clock_ref,
+            &options,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: None,
+            }],
+        )
+        .expect("step to pause 2");
+        assert_eq!(
+            outcome_ref,
+            RunnerOutcome::Blocked("pause_for_approval: pause_2".to_string())
+        );
+
+        let ref_events = journal_ref
+            .load_events("multi_pause_ref", 1)
+            .expect("load ref events");
+        assert_eq!(ref_events.len(), 3);
+        assert_eq!(ref_events[0].kind, "pause_for_approval");
+        assert_eq!(ref_events[1].kind, "approval_resolved");
+        assert_eq!(ref_events[2].kind, "pause_for_approval");
+
+        // --- Run 2: Interrupted Run ---
+        // Pre-populate with first 2 events:
+        // seq 1: pause_for_approval (pause_1)
+        // seq 2: approval_resolved
+        // Kill lands right after approval_resolved, BEFORE pause_for_approval #2 is recorded!
+        let mut journal_int = InMemoryJournal::new();
+        let mut activities_int = MockActivityRegistry::new();
+        let mut clock_int = VirtualClock::new(1000);
+
+        for ev in ref_events.iter().take(2) {
+            journal_int.append_event("multi_pause_int", ev).unwrap();
+        }
+
+        // Resumed runner: must NOT suppress pause_2 due to a single boolean flag!
+        // Occurrence count: pause #1 <= 1 (already journaled), pause #2 > 1 (unjournaled -> dispatched!)
+        let outcome_resumed = run_until_blocked(
+            &workflow,
+            "multi_pause_int",
+            Some(initial_state.clone()),
+            &mut journal_int,
+            &mut activities_int,
+            &mut clock_int,
+            &options,
+            Vec::new(),
+        )
+        .expect("resumed run should dispatch pause 2 and block");
+
+        assert_eq!(outcome_resumed, outcome_ref);
+
+        let int_events = journal_int
+            .load_events("multi_pause_int", 1)
+            .expect("load int events");
+        assert_eq!(
+            int_events.len(),
+            ref_events.len(),
+            "event count mismatch between resumed and reference run"
+        );
+        for (i, (int_ev, ref_ev)) in int_events.iter().zip(ref_events.iter()).enumerate() {
+            assert_eq!(int_ev.kind, ref_ev.kind, "event {i} kind mismatch");
+            assert_eq!(int_ev.seq, ref_ev.seq, "event {i} seq mismatch");
+            assert_eq!(
+                int_ev.payload_json, ref_ev.payload_json,
+                "event {i} payload mismatch"
+            );
+        }
+
+        // Final check: resume with approval for pause 2 should complete to prove end-to-end correctness
+        let outcome_final = run_until_blocked(
+            &workflow,
+            "multi_pause_int",
+            Some(initial_state),
+            &mut journal_int,
+            &mut activities_int,
+            &mut clock_int,
+            &options,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: None,
+            }],
+        )
+        .expect("resume to completion");
+        assert_eq!(
+            outcome_final,
+            RunnerOutcome::Completed("pauses: 2".to_string())
+        );
     }
 }
