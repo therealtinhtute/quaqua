@@ -3,10 +3,10 @@
 Status: locked, awaiting approval → to-plan
 
 ## Goal
-The Rust engine lives in its own repo `~/Lab/quaqua-rs`. `~/quaqua` holds only the workspace and uses the installed `quaqua` binary. The workspace is the md files, memory, runs, rules, team.toml and the hooks.
+The Rust engine lives in its own checkout `~/Lab/quaqua`. `~/quaqua` holds only the workspace and uses the installed `quaqua` binary. The workspace is the md files, memory, runs, rules, team.toml and the hooks.
 
 ## Decisions (anh iu, 2026-10-16)
-- Repo: `~/Lab/quaqua-rs` is a local checkout only; upstream stays `therealtinhtute/quaqua` — the engine lives on its own branch `engine` there, the workspace on `main` (anh iu, 2026-10-19).
+- Repo (anh iu, 2026-10-19): one upstream `therealtinhtute/quaqua` — engine on branch `engine`, workspace on `main`. Locally two dirs: the codebase checkout `~/Lab/quaqua` (named `~/Lab/quaqua` on other machines; per-machine path lives in `projects/INDEX.md`, never hardcoded) and the consuming workspace `~/quaqua`.
 - History: keep it with `git subtree split` (blame and PR #42 stay traceable)
 - Grid: port `grid-workers.sh` to Rust before the split
 - Order: lock the plan and run to-plan for both phases first, then build
@@ -23,15 +23,15 @@ The Rust engine lives in its own repo `~/Lab/quaqua-rs`. `~/quaqua` holds only t
   - cargo tests pass, and the grid tests and the targeted bash suites pass
 
 ## Phase 2: split the repo
-- `git subtree split` `crates/`, `Cargo.*` and the engine tests into a new branch `engine` (history kept), push it to the same upstream `therealtinhtute/quaqua`, and clone that branch to `~/Lab/quaqua-rs`. No new GitHub repo.
-- Install from the new repo with `cargo install --path ~/Lab/quaqua-rs/crates/quaqua`.
+- `git subtree split` `crates/`, `Cargo.*` and the engine tests into a new branch `engine` (history kept), push it to the same upstream `therealtinhtute/quaqua`, and clone that branch to `~/Lab/quaqua`. No new GitHub repo.
+- Install from the new repo with `cargo install --path ~/Lab/quaqua/crates/quaqua`.
 - In `~/quaqua`:
   - `.claude/settings.json` calls `quaqua gate` directly
   - `scripts/*` become thin shims or are removed
   - `crates/` is removed in a reviewed commit
 - Split tests by owner: engine tests go with the code, workspace and docs tests stay in `~/quaqua`.
-- Register `quaqua-rs` in `projects/INDEX.md` with path `~/Lab/quaqua-rs`.
-- Done when a fresh `cargo install` from `~/Lab/quaqua-rs` plus `~/quaqua` with no `crates/` passes:
+- Register `quaqua-rs` in `projects/INDEX.md` with path `~/Lab/quaqua`.
+- Done when a fresh `cargo install` from `~/Lab/quaqua` plus `~/quaqua` with no `crates/` passes:
   - a worker spawn → prompt → cleanup smoke run
   - the gate hook
 
@@ -66,14 +66,14 @@ Driver: the Lead `quaqua-rs-lead` (`quaqua lead spawn quaqua-rs`) runs the pipel
 ### P2: split the repo
 5. **subtree**
    - Run `git subtree split --prefix=crates -b quaqua-rs-export` on main.
-   - Create `~/Lab/quaqua-rs`: root `Cargo.toml` (workspace), `crates/quaqua` from the export, `.github/workflows/ci.yml`, the engine shell tests.
+   - Create `~/Lab/quaqua`: root `Cargo.toml` (workspace), `crates/quaqua` from the export, `.github/workflows/ci.yml`, the engine shell tests.
    - Verify:
      - `git log --follow` on one file shows history from before PR #42
      - `cargo test --locked` passes in the new repo
 6. **remote**
    - Create a GitHub repo for quaqua-rs and push. This step is outward-facing: ask anh iu for the name, private/public, and approval to push.
 7. **consume**
-   - `cargo install --path ~/Lab/quaqua-rs/crates/quaqua --locked`.
+   - `cargo install --path ~/Lab/quaqua/crates/quaqua --locked`.
    - In `~/quaqua`: `.claude/settings.json` calls `quaqua gate` directly.
    - `scripts/*` stay as shims onto the binary.
    - Verify: the gate hook still blocks a direct `herdr pane split` and allows `quaqua worker spawn`.
@@ -84,8 +84,8 @@ Driver: the Lead `quaqua-rs-lead` (`quaqua lead spawn quaqua-rs`) runs the pipel
      - `bash tests/run.sh` (the workspace suites) is green
      - a spawn → prompt → cleanup smoke run of a small worker succeeds
 9. **register**
-   - `projects/INDEX.md`: point quaqua-rs at path `~/Lab/quaqua-rs`.
-   - Update `AGENTS.md`, `rules/_all/fanout-agent-grid.md` and `rules/_all/hooks.md`: say the binary comes from `~/Lab/quaqua-rs`, and drop the `scripts/*.sh` names where nothing uses them any more.
+   - `projects/INDEX.md`: point quaqua-rs at path `~/Lab/quaqua`.
+   - Update `AGENTS.md`, `rules/_all/fanout-agent-grid.md` and `rules/_all/hooks.md`: say the binary comes from `~/Lab/quaqua`, and drop the `scripts/*.sh` names where nothing uses them any more.
    - Rollback: `cargo install` from a `~/quaqua` commit taken before step 8.
 
 ## Fragile assumption
