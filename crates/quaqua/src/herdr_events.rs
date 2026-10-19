@@ -1037,10 +1037,7 @@ mod tests {
 
     #[test]
     fn test_env_resolution_missing() {
-        let client = HerdrEvents::new();
-        let orig = std::env::var_os("HERDR_SOCKET_PATH");
-        std::env::remove_var("HERDR_SOCKET_PATH");
-
+        let client = HerdrEvents::with_socket_path("/tmp/nonexistent_herdr_socket_path.sock");
         let sub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Subscribe {
             agent: "w1:p1".to_string(),
             event_types: vec![],
@@ -1048,10 +1045,6 @@ mod tests {
         let res = client.execute(&sub_req);
         assert!(res.is_err());
         assert!(matches!(res.err().unwrap(), ActivityError::NotFound(_)));
-
-        if let Some(val) = orig {
-            std::env::set_var("HERDR_SOCKET_PATH", val);
-        }
     }
 
     #[test]
