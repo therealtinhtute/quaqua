@@ -119,7 +119,7 @@ Critical path: W0 (~1h) → anh iu approves → W1 (12 pipelines, longest ~2h) �
 - Verify: `cargo test --locked` green; toy workflow runs on the testkit; determinism-guard test fails on `std::(fs|process|net)` in any `*Workflow` impl. **Gate: anh iu reviews `engine/` API before W1.**
 
 ### W1: 12 pipelines in parallel
-Peers verify only their own module: `cargo test --locked --lib <module>::` (testkit, no herdr, no bash suites, no full `cargo test`). Integration and live checks belong to the test team in W2.
+Every W1 brief names its acceptance tests up front; W1 Peers skip the plan gate (the W0 contract is the plan). Peers verify only their own module: `cargo test --locked --lib <module>::` (testkit, no herdr, no bash suites, no full `cargo test`). Integration and live checks belong to the test team in W2.
 **engine-lead** (`src/engine/`)
 - E1 `journal_sqlite.rs`: `rusqlite` (`bundled`, pinned `=`), WAL, `busy_timeout=5000`. Verify: 2 concurrent writers, crash between append and snapshot recovers.
 - E2 `runner.rs`: load snapshot → replay → step → run activity → append → exit when blocked. Verify: kill mid-run → resume = same state; 7200 s timer <50 ms on `VirtualClock`.
