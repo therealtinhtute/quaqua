@@ -162,7 +162,7 @@ pub fn report_ready(path: &Path) -> bool {
 
 pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option<Observation> {
     let mut status = "unknown".to_string();
-    let ctx = "?".to_string();
+    let mut ctx = "?".to_string();
     let mut last_tool = String::new();
     let mut diffstat = String::new();
     let mut watcher_pane = String::new();
@@ -249,6 +249,23 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
     let body_text = body_lines.join("\n");
     let body_hash = md5_hex(body_text.as_bytes());
 
+    for line in pane_text.lines() {
+        if let Some(idx) = line.find('%') {
+            let mut num = String::new();
+            for c in line[..idx].chars().rev() {
+                if c.is_ascii_digit() {
+                    num.push(c);
+                } else {
+                    break;
+                }
+            }
+            if !num.is_empty() {
+                let n: String = num.chars().rev().collect();
+                ctx = format!("{n}%");
+                break;
+            }
+        }
+    }
 
     for line in pane_text.lines().rev() {
         if line.contains('▸') || line.contains('⏺') {

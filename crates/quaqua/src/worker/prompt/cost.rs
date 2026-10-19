@@ -260,16 +260,12 @@ pub enum ReportState {
 
 /// Checks whether builder report content contains a valid `## Lessons` section.
 pub fn is_builder_report_valid(content: &str) -> bool {
-    content
-        .lines()
-        .any(crate::worker::prompt::watchdog::is_lessons_heading)
+    crate::worker::prompt::watchdog::validate_report_content(content, false).is_ok()
 }
 
 /// Checks whether reviewer report content contains a valid `Verdict:` line.
 pub fn is_reviewer_report_valid(content: &str) -> bool {
-    content
-        .lines()
-        .any(|l| l.trim_start().starts_with("Verdict:"))
+    crate::worker::prompt::watchdog::validate_report_content(content, true).is_ok()
 }
 
 /// Pure helper: evaluates report state using builder validation (`## Lessons`).
@@ -288,32 +284,23 @@ pub fn report_state_validated(
     content: Option<&str>,
     expect_verdict: bool,
 ) -> ReportState {
-    let validate_fn = if expect_verdict {
-        is_reviewer_report_valid
-    } else {
-        is_builder_report_valid
-    };
-    let missing_desc = if expect_verdict {
-        "missing 'Verdict:' line"
-    } else {
-        "missing '## Lessons' section"
+    let validate = |c: &str| -> ReportState {
+        if c.trim().is_empty() {
+            ReportState::Pending
+        } else {
+            match crate::worker::prompt::watchdog::validate_report_content(c, expect_verdict) {
+                Ok(()) => ReportState::Ready,
+                Err(missing) => ReportState::Malformed(format!("missing {missing}")),
+            }
+        }
     };
 
     match next_result {
         ReportFileResult::Exists(false) => ReportState::Pending,
-        ReportFileResult::Exists(true) => {
-            if let Some(c) = content {
-                if c.trim().is_empty() {
-                    ReportState::Pending
-                } else if validate_fn(c) {
-                    ReportState::Ready
-                } else {
-                    ReportState::Malformed(missing_desc.to_string())
-                }
-            } else {
-                ReportState::Pending
-            }
-        }
+        ReportFileResult::Exists(true) => match content {
+            Some(c) => validate(c),
+            None => ReportState::Pending,
+        },
         ReportFileResult::MtimeMs(mtime) => {
             if *mtime == 0 {
                 return ReportState::Pending;
@@ -325,27 +312,12 @@ pub fn report_state_validated(
             if !is_stable {
                 return ReportState::Pending;
             }
-            if let Some(c) = content {
-                if c.trim().is_empty() {
-                    ReportState::Pending
-                } else if validate_fn(c) {
-                    ReportState::Ready
-                } else {
-                    ReportState::Malformed(missing_desc.to_string())
-                }
-            } else {
-                ReportState::Ready
+            match content {
+                Some(c) => validate(c),
+                None => ReportState::Pending,
             }
         }
-        ReportFileResult::Content(c) => {
-            if c.trim().is_empty() {
-                ReportState::Pending
-            } else if validate_fn(c) {
-                ReportState::Ready
-            } else {
-                ReportState::Malformed(missing_desc.to_string())
-            }
-        }
+        ReportFileResult::Content(c) => validate(c),
         ReportFileResult::Written => ReportState::Pending,
     }
 }
@@ -448,6 +420,38 @@ mod tests {
         let other = ActivityResult::ReportFile(ReportFileResult::Exists(true));
         assert_eq!(cost_warning_from_activity(&mut state, &other, 3.0), None);
     }
+    #[test]
+    fn test_cost_warning_budget_exceeded() {
+        let mut state = CostState::new();
+
+        // BudgetExceeded(false) does not trigger warning
+        let not_exceeded = ActivityResult::Cost(CostResult::BudgetExceeded(false));
+        assert_eq!(
+            cost_warning_from_activity(&mut state, &not_exceeded, 3.0),
+            None
+        );
+        assert!(!state.warned_80);
+        assert!(!state.warned_100);
+
+        // BudgetExceeded(true) triggers Cost100 once and marks both 80 and 100 warned
+        let exceeded = ActivityResult::Cost(CostResult::BudgetExceeded(true));
+        assert_eq!(
+            cost_warning_from_activity(&mut state, &exceeded, 3.0),
+            Some(CostWarning::Cost100)
+        );
+        assert!(state.warned_80);
+        assert!(state.warned_100);
+
+        // Second call with BudgetExceeded(true) returns None (once-only)
+        assert_eq!(cost_warning_from_activity(&mut state, &exceeded, 3.0), None);
+
+        // Subsequent Spend after BudgetExceeded returns None
+        let later_spend = ActivityResult::Cost(CostResult::Spend(3.5));
+        assert_eq!(
+            cost_warning_from_activity(&mut state, &later_spend, 3.0),
+            None
+        );
+    }
 
     #[test]
     fn test_report_state_mtime_stability() {
@@ -460,15 +464,33 @@ mod tests {
         let res2 = ReportFileResult::MtimeMs(1200);
         assert_eq!(report_state(prev1, &res2, None), ReportState::Pending);
 
-        // Third sample, mtime equal (stable)
+        // Third sample, mtime equal (stable) but no content yet -> still Pending
         let prev2 = Some(ReportSample::new(1200));
         let res3 = ReportFileResult::MtimeMs(1200);
-        assert_eq!(report_state(prev2, &res3, None), ReportState::Ready);
+        assert_eq!(report_state(prev2, &res3, None), ReportState::Pending);
+
+        // Stable mtime + empty content -> Pending
+        assert_eq!(report_state(prev2, &res3, Some("")), ReportState::Pending);
+
+        // Stable mtime + valid content -> Ready
+        let valid = "## Lessons\nnone";
+        assert_eq!(report_state(prev2, &res3, Some(valid)), ReportState::Ready);
+
+        // Stable mtime + malformed content -> Malformed
+        let invalid = "## Summary\nDone";
+        assert_eq!(
+            report_state(prev2, &res3, Some(invalid)),
+            ReportState::Malformed("missing '## Lessons' section".to_string())
+        );
 
         // Mtime 0 is never ready
         let prev0 = Some(ReportSample::new(0));
         let res0 = ReportFileResult::MtimeMs(0);
         assert_eq!(report_state(prev0, &res0, None), ReportState::Pending);
+        assert_eq!(
+            report_state(prev0, &res0, Some(valid)),
+            ReportState::Pending
+        );
     }
 
     #[test]
