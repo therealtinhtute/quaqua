@@ -3,6 +3,8 @@
 
 pub mod phases;
 pub mod state;
+pub mod gate;
+pub use gate::{decide_build_gate, BuildFacts, BuildGate};
 
 use crate::engine::activities::SystemActivities;
 use crate::engine::activity::{
