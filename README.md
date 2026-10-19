@@ -67,6 +67,7 @@ them. Bootstrap the skeleton — the dirs plus `memory/rules.md`,
 
 ```bash
 git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
+cargo install --path crates/quaqua --locked   # installs the quaqua binary to ~/.cargo/bin
 quaqua init
 ```
 
