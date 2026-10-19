@@ -10,6 +10,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::herdr::{Herdr, HerdrOps};
+
 const INSTALL_LINE: &str = "cargo install --path crates/quaqua";
 
 const PRE_COMMIT_TEMPLATE: &str = r#"#!/usr/bin/env bash
@@ -326,21 +328,7 @@ fn tag_cos_pane(root: &Path) {
     if !is_cos_pane(&pane, root) {
         return;
     }
-    let _ = Command::new("herdr")
-        .args([
-            "pane",
-            "report-metadata",
-            &pane,
-            "--source",
-            "herdr-quaqua",
-            "--token",
-            "grid_role=orchestrator",
-            "--token",
-            "grid_owner=cos",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = Herdr::new().pane_report_metadata(&pane, &["grid_role=orchestrator", "grid_owner=cos"]);
 }
 
 /// is_cos_pane <pane>: true only for the CoS pane itself — a `claude` agent, in
@@ -383,24 +371,25 @@ fn is_cos_pane(pane: &str, root: &Path) -> bool {
 }
 
 fn herdr_json(args: &[&str]) -> Option<serde_json::Value> {
-    let out = Command::new("herdr")
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let out = Herdr::new().run(args).ok()?;
     if !out.status.success() {
         return None;
     }
     serde_json::from_slice(&out.stdout).ok()
 }
 
-/// `command -v herdr`, without invoking it (no side effects for a stubbed test
-/// `herdr` on PATH).
+/// `command -v` on the herdr binary the exec sites resolve (see
+/// `herdr::bin_path`): `HERDR_BIN_PATH` when set, else the first `herdr` on
+/// `PATH` — checked, never invoked (no side effects for a stubbed test
+/// `herdr`).
 fn herdr_available() -> bool {
+    let bin = crate::herdr::bin_path();
+    if bin.contains('/') {
+        return Path::new(&bin).is_file();
+    }
     if let Ok(path) = std::env::var("PATH") {
         for dir in path.split(':') {
-            if !dir.is_empty() && Path::new(dir).join("herdr").is_file() {
+            if !dir.is_empty() && Path::new(dir).join(&bin).is_file() {
                 return true;
             }
         }

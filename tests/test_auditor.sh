@@ -319,6 +319,28 @@ grep -qF "live worker 'sude-unsandboxed': not started through sandbox wrapper (m
   || fail "sandbox check: working herdr reported as failed"
 echo "ok: live worker sandbox audit -> unsandboxed worker flagged; sandboxed worker and Lead silent"
 
+# ── HERDR_BIN_PATH, never PATH, picks the herdr the precheck runs ───────────
+# A decoy herdr sits FIRST on PATH and reports a different worker; HERDR_BIN_PATH
+# names the stub above. A PATH lookup would flag sude-decoy and never see the
+# stub's agents — only the variable-bound binary may run.
+mkdir -p "$T/decoy"
+cat > "$T/decoy/herdr" <<'DECOY'
+#!/usr/bin/env bash
+: > "$DECOY_MARKER"
+echo '{"result":{"agents":[{"name":"sude-decoy","agent_status":"idle","pane_id":"p9"}]}}'
+exit 0
+DECOY
+chmod +x "$T/decoy/herdr"
+rm -f "$T/decoy.ran"
+run PATH="$T/decoy:$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" DECOY_MARKER="$T/decoy.ran"
+[[ $rc -eq 0 ]] || fail "herdr bin path: exit $rc: $(cat "$T/err")"
+calls=$(cat "$T/calls")
+grep -qF "live worker 'sude-unsandboxed': not started through sandbox wrapper" <<<"$calls" \
+  || fail "herdr bin path: HERDR_BIN_PATH stub not used: $(cat "$T/calls")"
+! grep -qF 'sude-decoy' <<<"$calls" || fail "herdr bin path: the PATH decoy was consulted"
+[[ ! -e $T/decoy.ran ]] || fail "herdr bin path: the PATH herdr was executed"
+echo "ok: herdr resolution -> HERDR_BIN_PATH binds the precheck; PATH herdr untouched"
+
 # ── herdr agent list failure is reported, never silently 'none' ─────────────
 # Under launchd the herdr socket call can fail (EPERM). A silent skip
 # reads as "no live workers" — the failure itself must become a finding.
