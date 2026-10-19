@@ -193,6 +193,83 @@ impl SystemActivities {
             HerdrRequest::Cleanup { .. } => Err(ActivityError::ExecutionFailed(
                 "HerdrRequest::Cleanup deferred to W2 pipeline orchestration (P1/K1)".to_string(),
             )),
+            HerdrRequest::AgentInfo { name } => {
+                let (_ok, output) = Self::run_with_etxtbusy_retry(|| self.herdr.agent_get(name))
+                    .map_err(|e| {
+                        ActivityError::ExecutionFailed(format!("herdr agent get io error: {e}"))
+                    })?;
+
+                let mut status = "unknown".to_string();
+                let mut hook_active = false;
+                let mut harness_str = String::new();
+
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&output) {
+                    if let Some(agent) = json.get("result").and_then(|r| r.get("agent")) {
+                        status = agent
+                            .get("agent_status")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        hook_active = agent
+                            .get("screen_detection_skipped")
+                            .and_then(|b| b.as_bool())
+                            .unwrap_or(false);
+                        harness_str = agent
+                            .get("agent")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                    } else if let Some(err) = json.get("error") {
+                        if err.get("code").and_then(|c| c.as_str()) == Some("agent_not_found") {
+                            status = "gone".to_string();
+                        }
+                    }
+                }
+                if status == "unknown" && output.contains("agent_not_found") {
+                    status = "gone".to_string();
+                }
+
+                if harness_str.is_empty() {
+                    let runs_dir = crate::worker::cleanup::default_runs_dir();
+                    let srt_path = runs_dir.join(format!("{name}.srt.json"));
+                    let srt_content = std::fs::read_to_string(&srt_path).or_else(|_| {
+                        std::fs::read_to_string(
+                            self.repo_dir.join("runs").join(format!("{name}.srt.json")),
+                        )
+                    });
+                    if let Ok(c) = srt_content {
+                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&c) {
+                            if let Some(h) = j
+                                .get("running_harness")
+                                .and_then(|s| s.as_str())
+                                .or_else(|| j.get("harness").and_then(|s| s.as_str()))
+                            {
+                                harness_str = h.to_string();
+                            }
+                        }
+                    }
+                    if harness_str.is_empty() {
+                        if name.starts_with("tieude-") {
+                            harness_str = "opencode".to_string();
+                        } else if name.starts_with("sude-") || name.starts_with("detu-") {
+                            harness_str = "omp".to_string();
+                        }
+                    }
+                }
+
+                let harness = if harness_str.is_empty() {
+                    None
+                } else {
+                    Some(harness_str)
+                };
+
+                Ok(ActivityResult::Herdr(HerdrResult::AgentInfo {
+                    name: name.clone(),
+                    status,
+                    harness,
+                    hook_active,
+                }))
+            }
         }
     }
 
@@ -320,6 +397,35 @@ impl SystemActivities {
                 }
                 let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 Ok(ActivityResult::Git(GitResult::Sha(sha)))
+            }
+            GitRequest::DiffHash { path } => {
+                let target = Path::new(path);
+                if !target.exists() {
+                    return Err(ActivityError::NotFound(format!("path not found: {path}")));
+                }
+                if !target.is_dir() {
+                    return Err(ActivityError::ExecutionFailed(format!(
+                        "path is not a directory: {path}"
+                    )));
+                }
+                let check = self
+                    .git
+                    .run_in(target, &["rev-parse", "--is-inside-work-tree"]);
+                match check {
+                    Ok(out)
+                        if out.status.success()
+                            && String::from_utf8_lossy(&out.stdout).trim() == "true" =>
+                    {
+                        let (hash, stat) = self.git.diff_and_status(target);
+                        Ok(ActivityResult::Git(GitResult::DiffHash { hash, stat }))
+                    }
+                    Ok(_) => Err(ActivityError::ExecutionFailed(format!(
+                        "path is not a git work tree: {path}"
+                    ))),
+                    Err(e) => Err(ActivityError::ExecutionFailed(format!(
+                        "git rev-parse --is-inside-work-tree io error: {e}"
+                    ))),
+                }
             }
         }
     }
@@ -478,6 +584,12 @@ case "$1" in
       get)
         if [ "$3" = "e3-stub-agent" ]; then
           echo '{{"result": {{"agent": {{"name": "e3-stub-agent", "pane_id": "e3-pane-42"}}}}}}'
+          exit 0
+        elif [ "$3" = "e3-info-agent" ]; then
+          echo '{{"result": {{"agent": {{"name": "e3-info-agent", "pane_id": "e3-pane-42", "agent_status": "working", "screen_detection_skipped": true, "agent": "omp"}}}}}}'
+          exit 0
+        elif [ "$3" = "tieude-stub-agent" ]; then
+          echo '{{"result": {{"agent": {{"name": "tieude-stub-agent", "pane_id": "e3-pane-43", "agent_status": "idle"}}}}}}'
           exit 0
         elif [ "$3" = "e3-nopane-agent" ]; then
           exit 0
@@ -962,6 +1074,147 @@ esac
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+    #[test]
+    fn test_git_diff_hash() {
+        let _lock = HERDR_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let pid = std::process::id();
+        let temp_dir = std::env::temp_dir().join(format!("quaqua-act-diffhash-{}", pid));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("create git test dir");
+
+        let run_cmd = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&temp_dir)
+                .args(args)
+                .output()
+                .expect("run git command");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+
+        let activities = SystemActivities::with_repo_dir(&temp_dir);
+
+        // 1. Before git init: must return ExecutionFailed (not a git work tree)
+        let err_pre_init = activities
+            .execute(&ActivityRequest::Git(GitRequest::DiffHash {
+                path: temp_dir.to_string_lossy().to_string(),
+            }))
+            .expect_err("must fail on non-git dir");
+        assert!(matches!(err_pre_init, ActivityError::ExecutionFailed(_)));
+
+        // 2. Non-existent path: must return NotFound
+        let not_found_path = temp_dir.join("nonexistent_sub_dir");
+        let err_not_found = activities
+            .execute(&ActivityRequest::Git(GitRequest::DiffHash {
+                path: not_found_path.to_string_lossy().to_string(),
+            }))
+            .expect_err("must return NotFound for nonexistent path");
+        assert!(matches!(err_not_found, ActivityError::NotFound(_)));
+
+        // 3. Initialize git repo
+        run_cmd(&["init"]);
+        run_cmd(&["config", "user.email", "test@quaqua.local"]);
+        run_cmd(&["config", "user.name", "Quaqua Test"]);
+
+        let dummy_file = temp_dir.join("init.txt");
+        fs::write(&dummy_file, "init commit").unwrap();
+        run_cmd(&["add", "init.txt"]);
+        run_cmd(&["commit", "-m", "init"]);
+
+        // 4. Clean worktree DiffHash
+        let res_clean = activities
+            .execute(&ActivityRequest::Git(GitRequest::DiffHash {
+                path: temp_dir.to_string_lossy().to_string(),
+            }))
+            .expect("clean diffhash");
+        let (clean_hash, clean_stat) = match res_clean {
+            ActivityResult::Git(GitResult::DiffHash { hash, stat }) => (hash, stat),
+            other => panic!("expected DiffHash, got {other:?}"),
+        };
+        assert_eq!(clean_stat, "clean");
+        assert_eq!(clean_hash.len(), 32);
+
+        // 5. Add uncommitted file -> dirty worktree
+        let dirty_file = temp_dir.join("dirty.txt");
+        fs::write(&dirty_file, "dirty content").unwrap();
+
+        let res_dirty = activities
+            .execute(&ActivityRequest::Git(GitRequest::DiffHash {
+                path: temp_dir.to_string_lossy().to_string(),
+            }))
+            .expect("dirty diffhash");
+        let (dirty_hash, dirty_stat) = match res_dirty {
+            ActivityResult::Git(GitResult::DiffHash { hash, stat }) => (hash, stat),
+            other => panic!("expected DiffHash, got {other:?}"),
+        };
+        assert_ne!(dirty_hash, clean_hash);
+        assert!(dirty_stat.contains("untracked"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_herdr_agent_info_via_stub() {
+        with_herdr_stub(|activities, _log_file| {
+            // 1. Stub agent with full agent_info
+            let req = ActivityRequest::Herdr(HerdrRequest::AgentInfo {
+                name: "e3-info-agent".to_string(),
+            });
+            let res = activities.execute(&req).expect("agent info must succeed");
+            assert_eq!(
+                res,
+                ActivityResult::Herdr(HerdrResult::AgentInfo {
+                    name: "e3-info-agent".to_string(),
+                    status: "working".to_string(),
+                    harness: Some("omp".to_string()),
+                    hook_active: true,
+                })
+            );
+
+            // 2. Nonexistent agent -> gone, hook_active false, harness None
+            let req_gone = ActivityRequest::Herdr(HerdrRequest::AgentInfo {
+                name: "live-agent-nonexistent".to_string(),
+            });
+            let res_gone = activities
+                .execute(&req_gone)
+                .expect("agent info gone must succeed");
+            assert_eq!(
+                res_gone,
+                ActivityResult::Herdr(HerdrResult::AgentInfo {
+                    name: "live-agent-nonexistent".to_string(),
+                    status: "gone".to_string(),
+                    harness: None,
+                    hook_active: false,
+                })
+            );
+
+            // 3. Agent with tieude- prefix fallback -> opencode
+            let req_prefix = ActivityRequest::Herdr(HerdrRequest::AgentInfo {
+                name: "tieude-stub-agent".to_string(),
+            });
+            let res_prefix = activities
+                .execute(&req_prefix)
+                .expect("agent info prefix fallback");
+            assert_eq!(
+                res_prefix,
+                ActivityResult::Herdr(HerdrResult::AgentInfo {
+                    name: "tieude-stub-agent".to_string(),
+                    status: "idle".to_string(),
+                    harness: Some("opencode".to_string()),
+                    hook_active: false,
+                })
+            );
+        });
+    }
 
     #[test]
     fn test_cost_check_budget() {
@@ -1007,6 +1260,9 @@ esac
                 agent: "a".to_string(),
             }),
             ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents),
+            ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
+                agent: "a".to_string(),
+            }),
             ActivityRequest::Grid(GridRequest::Reconcile {
                 tab: None,
                 only: None,
