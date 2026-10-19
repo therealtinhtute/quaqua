@@ -143,9 +143,15 @@ impl SystemActivities {
                         ActivityError::ExecutionFailed(format!("herdr agent get io error: {e}"))
                     })?;
 
-                if !ok || output.contains("agent_not_found") {
+                if output.contains("agent_not_found") {
                     return Err(ActivityError::NotFound(format!(
                         "agent {name} not found: {output}"
+                    )));
+                }
+
+                if !ok {
+                    return Err(ActivityError::ExecutionFailed(format!(
+                        "herdr agent get failed for {name}: {output}"
                     )));
                 }
 
@@ -474,8 +480,10 @@ case "$1" in
           echo '{{"result": {{"agent": {{"name": "e3-stub-agent", "pane_id": "e3-pane-42"}}}}}}'
           exit 0
         elif [ "$3" = "e3-nopane-agent" ]; then
-          echo '{{"result": {{"agent": {{"name": "e3-nopane-agent"}}}}}}'
           exit 0
+        elif [ "$3" = "e3-crash-agent" ]; then
+          echo '{{"error": {{"code": "daemon_unreachable", "message": "connection refused"}}}}' >&2
+          exit 1
         else
           echo '{{"error": {{"code": "agent_not_found"}}}}' >&2
           exit 1
@@ -659,6 +667,26 @@ esac
                 .execute(&req)
                 .expect_err("stopping missing agent must error");
             assert!(matches!(err, ActivityError::NotFound(_)));
+        });
+    }
+
+    #[test]
+    fn test_herdr_stop_generic_failure_returns_execution_failed() {
+        with_herdr_stub(|activities, _log_file| {
+            let req = ActivityRequest::Herdr(HerdrRequest::Stop {
+                name: "e3-crash-agent".to_string(),
+            });
+            let err = activities
+                .execute(&req)
+                .expect_err("daemon failure without agent_not_found must return ExecutionFailed");
+            match err {
+                ActivityError::ExecutionFailed(msg) => {
+                    assert!(
+                        msg.contains("daemon_unreachable") || msg.contains("connection refused")
+                    );
+                }
+                other => panic!("expected ExecutionFailed, got: {other:?}"),
+            }
         });
     }
 
