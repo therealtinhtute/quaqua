@@ -255,11 +255,25 @@ pub fn scan_orchestration<H: HerdrOps>(
         let report_exists = report_path.is_file();
 
         // Check quaqua-owned `.read` marker first.
-        // If the marker exists (`runs/.<name>.read`), report has been consumed (is_unread = false).
+        // The marker is only valid if its mtime >= report file mtime (not stale).
         // Fallback: check if report file access time is at or before modified time.
         let read_marker_path = runs_dir.join(format!(".{name}.read"));
         let is_unread = if report_exists {
-            if read_marker_path.exists() {
+            let marker_valid = if read_marker_path.is_file() {
+                if let (Ok(m_meta), Ok(r_meta)) = (read_marker_path.metadata(), report_path.metadata()) {
+                    if let (Ok(m_mtime), Ok(r_mtime)) = (m_meta.modified(), r_meta.modified()) {
+                        m_mtime >= r_mtime
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+
+            if marker_valid {
                 false
             } else if let Ok(meta) = std::fs::metadata(&report_path) {
                 if let (Ok(atime), Ok(mtime)) = (meta.accessed(), meta.modified()) {
@@ -849,15 +863,20 @@ mod tests {
         // Force atime <= mtime (unaccessed heuristic)
         let file = fs::File::open(&report_path).unwrap();
         let now = std::time::SystemTime::now();
+        let report_mtime = now - Duration::from_secs(5);
         let mut times = fs::FileTimes::new();
         times = times
-            .set_modified(now)
+            .set_modified(report_mtime)
             .set_accessed(now - Duration::from_secs(10));
         file.set_times(times).unwrap();
 
-        // Write .read marker
-        fs::write(tmp.join(".sude-e1.read"), "").unwrap();
-
+        // Write .read marker with mtime >= report mtime
+        let marker_path = tmp.join(".sude-e1.read");
+        fs::write(&marker_path, "").unwrap();
+        let marker_file = fs::File::open(&marker_path).unwrap();
+        let mut marker_times = fs::FileTimes::new();
+        marker_times = marker_times.set_modified(now);
+        marker_file.set_times(marker_times).unwrap();
         let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
         let e1 = rows
             .iter()
@@ -869,6 +888,53 @@ mod tests {
             ".read marker must override atime heuristic and not flag WAITER-LOST"
         );
         assert_eq!(e1.report_status, ReportStatus::Present);
+    }
+    #[test]
+    fn test_status_stale_read_marker_treated_as_unread() {
+        let tmp = temp_test_dir("stale-read-marker");
+        let _cleaner = TempDirCleaner(tmp.clone());
+
+        let mock_json = r#"{
+            "result": {
+                "agents": [
+                    {"name": "arch-lead", "agent_status": "idle"},
+                    {"name": "sude-e1", "agent_status": "done"}
+                ]
+            }
+        }"#;
+        let mock = MockHerdr::new(mock_json);
+
+        fs::write(tmp.join("sude-e1.owner"), "arch-lead\n").unwrap();
+        let marker_path = tmp.join(".sude-e1.read");
+        fs::write(&marker_path, "").unwrap();
+
+        let report_path = tmp.join("sude-e1.md");
+        fs::write(&report_path, "Goal: done\n## Lessons\nnone\n").unwrap();
+
+        let now = std::time::SystemTime::now();
+        let marker_file = fs::File::open(&marker_path).unwrap();
+        let mut marker_times = fs::FileTimes::new();
+        marker_times = marker_times.set_modified(now - Duration::from_secs(20));
+        marker_file.set_times(marker_times).unwrap();
+
+        let report_file = fs::File::open(&report_path).unwrap();
+        let mut report_times = fs::FileTimes::new();
+        report_times = report_times
+            .set_modified(now)
+            .set_accessed(now - Duration::from_secs(10));
+        report_file.set_times(report_times).unwrap();
+
+        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let e1 = rows
+            .iter()
+            .find(|r| r.name == "sude-e1")
+            .expect("sude-e1 found");
+
+        assert!(
+            e1.flags.contains(&WarningFlag::WaiterLost),
+            "stale .read marker must NOT suppress WAITER-LOST"
+        );
+        assert_eq!(e1.report_status, ReportStatus::Unread);
     }
 
     #[test]

@@ -195,6 +195,8 @@ pub struct PipelineInput {
     pub review_budget_sec: u64,
     #[serde(default = "default_fix_budget")]
     pub fix_budget_sec: u64,
+    #[serde(default)]
+    pub base_sha: Option<String>,
 }
 
 impl PipelineInput {
@@ -219,6 +221,7 @@ impl PipelineInput {
             build_budget_sec: 2700,
             review_budget_sec: 900,
             fix_budget_sec: 1200,
+            base_sha: None,
         }
     }
 }
