@@ -3,7 +3,11 @@ use super::plan::{
     accepts_workers_tab, group_expected_tab, is_candidate_worker, plan_with_deferred,
 };
 use super::types::{Op, Snapshot, Target};
+use crate::engine::activity::{
+    Activity, ActivityError, ActivityRequest, ActivityResult, GridRequest, GridResult,
+};
 use std::collections::HashSet;
+use std::sync::Mutex;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -66,11 +70,17 @@ pub fn filter_ops_for_check<'a>(
             }
 
             let pane = snapshot.panes.iter().find(|p| p.pane_id == op.pane);
-            let agent = snapshot.agents.iter().find(|a| a.pane_id.as_deref() == Some(&op.pane));
+            let agent = snapshot
+                .agents
+                .iter()
+                .find(|a| a.pane_id.as_deref() == Some(&op.pane));
 
             let name = agent
                 .and_then(|a| a.name.as_deref())
-                .or_else(|| pane.and_then(|p| p.tokens.as_ref()).and_then(|t| t.grid_name.as_deref()))
+                .or_else(|| {
+                    pane.and_then(|p| p.tokens.as_ref())
+                        .and_then(|t| t.grid_name.as_deref())
+                })
                 .or_else(|| pane.and_then(|p| p.label.as_deref()))
                 .unwrap_or("");
 
@@ -111,15 +121,20 @@ pub fn filter_ops_for_check<'a>(
                         return false;
                     }
                     let base = pgtab.unwrap_or(pgroup);
-                    let is_chunk_1_filter = tab == super::plan::chunk_tab_label(base, 1) || tab == format!("{pgroup}-workers-2");
+                    let is_chunk_1_filter = tab == super::plan::chunk_tab_label(base, 1)
+                        || tab == format!("{pgroup}-workers-2");
                     if is_chunk_1_filter {
                         let op_matches = match &op.target {
                             Target::NewTab { label } => label == tab,
-                            Target::Split { tab: target_tab, .. } => {
+                            Target::Split {
+                                tab: target_tab, ..
+                            } => {
                                 if target_tab == "@workers-2" {
                                     true
                                 } else {
-                                    snapshot.tabs.iter().any(|t| t.tab_id == *target_tab && t.label.as_deref() == Some(tab))
+                                    snapshot.tabs.iter().any(|t| {
+                                        t.tab_id == *target_tab && t.label.as_deref() == Some(tab)
+                                    })
                                 }
                             }
                         };
@@ -141,6 +156,15 @@ pub fn run_reconcile<D: HerdrDriver>(
     default_tab: &str,
     deferred_statuses: Option<&[&str]>,
 ) -> Result<(), String> {
+    reconcile_core(driver, opts, default_tab, deferred_statuses).map(|_| ())
+}
+
+pub fn reconcile_core<D: HerdrDriver>(
+    driver: &mut D,
+    opts: &ReconcileOptions,
+    default_tab: &str,
+    deferred_statuses: Option<&[&str]>,
+) -> Result<bool, String> {
     let tab = opts.tab.as_deref().unwrap_or(default_tab);
     let requested = opts.tab.clone().filter(|t| !t.is_empty());
     let owner_env = opts
@@ -167,7 +191,9 @@ pub fn run_reconcile<D: HerdrDriver>(
                 Err(e) => {
                     let elapsed = now_sec().saturating_sub(start_ts);
                     if elapsed >= timeout_sec {
-                        return Err(format!("grid check snapshot failed after {timeout_sec}s: {e}"));
+                        return Err(format!(
+                            "grid check snapshot failed after {timeout_sec}s: {e}"
+                        ));
                     }
                     sleep(poll);
                     continue;
@@ -187,14 +213,14 @@ pub fn run_reconcile<D: HerdrDriver>(
                 let serialized = serde_json::to_string(&rem_ops).map_err(|e| e.to_string())?;
                 println!("{serialized}");
                 if rem_ops.is_empty() {
-                    return Ok(());
+                    return Ok(false);
                 } else {
                     return Err(format!("grid check pending ops: {}", rem_ops.len()));
                 }
             }
 
             if rem_ops.is_empty() {
-                return Ok(());
+                return Ok(false);
             }
 
             let elapsed = now_sec().saturating_sub(start_ts);
@@ -229,7 +255,11 @@ pub fn run_reconcile<D: HerdrDriver>(
             if !is_candidate_worker(p) {
                 return false;
             }
-            let powner = p.tokens.as_ref().and_then(|t| t.grid_owner.as_deref()).unwrap_or("cos");
+            let powner = p
+                .tokens
+                .as_ref()
+                .and_then(|t| t.grid_owner.as_deref())
+                .unwrap_or("cos");
             owner_env.is_empty() || powner == owner_env
         })
         .collect();
@@ -237,11 +267,12 @@ pub fn run_reconcile<D: HerdrDriver>(
     let total_workers = owner_workers.len();
     if total_workers == 0 {
         eprintln!("no workers to arrange");
-        return Ok(());
+        return Ok(false);
     }
 
     let owner_ws = owner_workers[0].workspace_id.as_deref().unwrap_or("");
-    let anchor_pane_id = super::plan::find_owner_pane(&owner_env, &snap.panes, &snap.agents, owner_ws);
+    let anchor_pane_id =
+        super::plan::find_owner_pane(&owner_env, &snap.panes, &snap.agents, owner_ws);
     let anchor_pane = anchor_pane_id
         .as_ref()
         .and_then(|id| snap.panes.iter().find(|p| &p.pane_id == id));
@@ -269,7 +300,9 @@ pub fn run_reconcile<D: HerdrDriver>(
         let mut gws: Vec<&super::types::Pane> = owner_workers
             .iter()
             .copied()
-            .filter(|w| w.tokens.as_ref().and_then(|t| t.grid_group.as_deref()) == Some(group.as_str()))
+            .filter(|w| {
+                w.tokens.as_ref().and_then(|t| t.grid_group.as_deref()) == Some(group.as_str())
+            })
             .collect();
 
         gws.sort_by(|a, b| {
@@ -384,10 +417,15 @@ pub fn run_reconcile<D: HerdrDriver>(
                     .tabs
                     .iter()
                     .filter(|t| {
-                        let ws_ok = t.workspace_id.as_deref() == Some(owner_ws) || owner_ws.is_empty();
+                        let ws_ok =
+                            t.workspace_id.as_deref() == Some(owner_ws) || owner_ws.is_empty();
                         let anchor_ok = anchor_tab.map(|at| t.tab_id != at).unwrap_or(true);
-                        let group_ok =
-                            super::plan::accepts_chunk_tab(group, expected_tab.as_deref(), chunk_idx, t.label.as_deref());
+                        let group_ok = super::plan::accepts_chunk_tab(
+                            group,
+                            expected_tab.as_deref(),
+                            chunk_idx,
+                            t.label.as_deref(),
+                        );
                         if !(ws_ok && anchor_ok && group_ok) {
                             return false;
                         }
@@ -399,14 +437,19 @@ pub fn run_reconcile<D: HerdrDriver>(
                         if occ.is_empty() {
                             return false;
                         }
-                        occ.iter().all(|p| gws.iter().any(|gw| gw.pane_id == p.pane_id))
+                        occ.iter()
+                            .all(|p| gws.iter().any(|gw| gw.pane_id == p.pane_id))
                     })
                     .collect();
 
                 matching_tabs.sort_by_key(|t| {
                     let l = t.label.as_deref().unwrap_or("");
                     let exact = l == chunk_label;
-                    if exact { 0 } else { 1 }
+                    if exact {
+                        0
+                    } else {
+                        1
+                    }
                 });
 
                 let valid_tab = matching_tabs.first().copied();
@@ -430,7 +473,10 @@ pub fn run_reconcile<D: HerdrDriver>(
                     let is_movable = movable_workers.iter().any(|(p, _)| p.pane_id == w.pane_id);
 
                     if !is_movable {
-                        if valid_tab.map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id)).unwrap_or(false) {
+                        if valid_tab
+                            .map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id))
+                            .unwrap_or(false)
+                        {
                             if !present.contains(&w.pane_id) {
                                 present.push(w.pane_id.clone());
                             }
@@ -438,7 +484,9 @@ pub fn run_reconcile<D: HerdrDriver>(
                         continue;
                     }
 
-                    let in_place = valid_tab.map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id)).unwrap_or(false)
+                    let in_place = valid_tab
+                        .map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id))
+                        .unwrap_or(false)
                         && (present.contains(&w.pane_id) || present.len() == m);
 
                     if in_place {
@@ -453,11 +501,19 @@ pub fn run_reconcile<D: HerdrDriver>(
                     } else if m == 2 {
                         ("split", 0, "right", 0.5)
                     } else if m == 3 {
-                        if idx == 2 { ("split", 0, "down", 0.5) } else { ("split", 0, "right", 0.5) }
+                        if idx == 2 {
+                            ("split", 0, "down", 0.5)
+                        } else {
+                            ("split", 0, "right", 0.5)
+                        }
                     } else {
-                        if idx == 2 { ("split", 0, "down", 0.5) }
-                        else if idx == 1 { ("split", 0, "right", 0.5) }
-                        else { ("split", 2, "right", 0.5) }
+                        if idx == 2 {
+                            ("split", 0, "down", 0.5)
+                        } else if idx == 1 {
+                            ("split", 0, "right", 0.5)
+                        } else {
+                            ("split", 2, "right", 0.5)
+                        }
                     };
 
                     if mode == "new-tab" {
@@ -477,17 +533,17 @@ pub fn run_reconcile<D: HerdrDriver>(
                                 .or_else(|| present.iter().find(|p| *p != &w.pane_id))
                                 .cloned();
                             if let Some(anchor) = anchor_target {
-                                 repair_ops.push(Op {
-                                     op: "move".to_string(),
-                                     pane: w.pane_id.clone(),
-                                     deferred: is_deferred(w.agent_status.as_deref()),
-                                     target: Target::Split {
-                                         tab: target_tab_ref.clone(),
-                                         anchor,
-                                         direction: "right".to_string(),
-                                         ratio: 0.5,
-                                     },
-                                 });
+                                repair_ops.push(Op {
+                                    op: "move".to_string(),
+                                    pane: w.pane_id.clone(),
+                                    deferred: is_deferred(w.agent_status.as_deref()),
+                                    target: Target::Split {
+                                        tab: target_tab_ref.clone(),
+                                        anchor,
+                                        direction: "right".to_string(),
+                                        ratio: 0.5,
+                                    },
+                                });
                             } else {
                                 repair_ops.push(Op {
                                     op: "move".to_string(),
@@ -505,14 +561,14 @@ pub fn run_reconcile<D: HerdrDriver>(
                             .iter()
                             .find(|p| *p != &w.pane_id && !deferred_ids.contains(p.as_str()))
                             .cloned();
-                        let any_in_tab = present
-                            .iter()
-                            .find(|p| *p != &w.pane_id)
-                            .cloned();
+                        let any_in_tab = present.iter().find(|p| *p != &w.pane_id).cloned();
                         // Never anchor on a deferred (working) pane: it is not in
                         // the tab yet, and propagate_deferrals would cancel the
                         // idle pane's split too (n>=3, pivot != gws[0]).
-                        if present.contains(want_anchor) && want_anchor != &w.pane_id && !deferred_ids.contains(want_anchor.as_str()) {
+                        if present.contains(want_anchor)
+                            && want_anchor != &w.pane_id
+                            && !deferred_ids.contains(want_anchor.as_str())
+                        {
                             repair_ops.push(Op {
                                 op: "move".to_string(),
                                 pane: w.pane_id.clone(),
@@ -573,9 +629,10 @@ pub fn run_reconcile<D: HerdrDriver>(
     if opts.dry_run {
         let serialized = serde_json::to_string(&repair_ops).map_err(|e| e.to_string())?;
         println!("{serialized}");
-        return Ok(());
+        return Ok(false);
     }
 
+    let moves_applied = repair_ops.iter().any(|op| !op.deferred);
     let pane_map = apply_ops(driver, &repair_ops, Some(&snap))?;
 
     // A working pane is never moved; say so instead of exiting 0 silently.
@@ -591,12 +648,23 @@ pub fn run_reconcile<D: HerdrDriver>(
     }
 
     // Finding 1 remainder: Rename failure is NOT swallowed; matches bash set -e!
+    let mut renames_applied = false;
     for (w, target_name) in movable_workers {
-        let cur_pane = pane_map.get(&w.pane_id).cloned().unwrap_or_else(|| w.pane_id.clone());
+        let cur_pane = pane_map
+            .get(&w.pane_id)
+            .cloned()
+            .unwrap_or_else(|| w.pane_id.clone());
+        if !is_deferred(w.agent_status.as_deref())
+            && !target_name.is_empty()
+            && w.label.as_deref() != Some(target_name.as_str())
+        {
+            renames_applied = true;
+        }
         driver.rename_pane(&cur_pane, &target_name)?;
     }
 
-    Ok(())
+    let changed = moves_applied || renames_applied;
+    Ok(changed)
 }
 
 /// In-process grid repair: the owner-wide arrange used by the pipeline after a
@@ -633,4 +701,522 @@ pub fn run_grid_check(tab: &str, only: Option<&str>, owner: Option<&str>) -> Res
     };
     let mut driver = CliHerdrDriver::new();
     run_reconcile(&mut driver, &opts, tab, None)
+}
+
+/// Deterministic engine activity executing agent grid operations.
+pub struct GridActivity<D = CliHerdrDriver> {
+    driver: Mutex<D>,
+    default_tab: String,
+    owner: Option<String>,
+    deferred_statuses: Option<Vec<String>>,
+}
+
+impl GridActivity<CliHerdrDriver> {
+    pub fn new() -> Self {
+        Self {
+            driver: Mutex::new(CliHerdrDriver::new()),
+            default_tab: "workers".to_string(),
+            owner: None,
+            deferred_statuses: None,
+        }
+    }
+}
+
+impl Default for GridActivity<CliHerdrDriver> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<D: HerdrDriver> GridActivity<D> {
+    pub fn with_driver(driver: D) -> Self {
+        Self {
+            driver: Mutex::new(driver),
+            default_tab: "workers".to_string(),
+            owner: None,
+            deferred_statuses: None,
+        }
+    }
+
+    pub fn with_default_tab(mut self, tab: impl Into<String>) -> Self {
+        self.default_tab = tab.into();
+        self
+    }
+
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = Some(owner.into());
+        self
+    }
+
+    pub fn with_deferred_statuses(mut self, statuses: Vec<String>) -> Self {
+        self.deferred_statuses = Some(statuses);
+        self
+    }
+}
+
+impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
+    fn execute(&self, req: &ActivityRequest) -> Result<ActivityResult, ActivityError> {
+        match req {
+            ActivityRequest::Grid(GridRequest::Reconcile { tab, only }) => {
+                let mut driver = self
+                    .driver
+                    .lock()
+                    .map_err(|e| ActivityError::ExecutionFailed(e.to_string()))?;
+                let opts = ReconcileOptions {
+                    check: false,
+                    repair: true,
+                    tab: tab.clone(),
+                    only: only.clone(),
+                    owner: self.owner.clone(),
+                    dry_run: false,
+                    timeout_sec: None,
+                };
+                let def_slices = self
+                    .deferred_statuses
+                    .as_ref()
+                    .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+                let target_tab = tab.as_deref().unwrap_or(&self.default_tab);
+                let changed =
+                    reconcile_core(&mut *driver, &opts, target_tab, def_slices.as_deref())
+                        .map_err(ActivityError::ExecutionFailed)?;
+                Ok(ActivityResult::Grid(GridResult::Reconciled { changed }))
+            }
+            ActivityRequest::Grid(GridRequest::Plan { tab }) => {
+                let mut driver = self
+                    .driver
+                    .lock()
+                    .map_err(|e| ActivityError::ExecutionFailed(e.to_string()))?;
+                let snap = driver.snapshot().map_err(ActivityError::ExecutionFailed)?;
+                let def_slices = self
+                    .deferred_statuses
+                    .as_ref()
+                    .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+                let ops = plan_with_deferred(&snap, def_slices.as_deref())
+                    .map_err(ActivityError::ExecutionFailed)?;
+                let filtered_ops: Vec<Op> = if let Some(t) = tab {
+                    if !t.is_empty() {
+                        filter_ops_for_check(&ops, &snap, self.owner.as_deref(), None, Some(t))
+                            .into_iter()
+                            .cloned()
+                            .collect()
+                    } else {
+                        ops
+                    }
+                } else {
+                    ops
+                };
+                let json = serde_json::to_string(&filtered_ops)
+                    .map_err(|e| ActivityError::ExecutionFailed(e.to_string()))?;
+                Ok(ActivityResult::Grid(GridResult::PlanJson(json)))
+            }
+            other => Err(ActivityError::ExecutionFailed(format!(
+                "unsupported activity request for GridActivity: {other:?}"
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::activity::{
+        Activity, ActivityError, ActivityRequest, ActivityResult, CostRequest, GridRequest,
+        GridResult,
+    };
+    use crate::grid::types::{Agent, Op, Pane, Snapshot, Tab, Target, Tokens};
+    use crate::grid::MoveResult;
+
+    fn make_worker(id: &str, group: &str, tab_id: Option<&str>, status: Option<&str>) -> Pane {
+        Pane {
+            pane_id: id.to_string(),
+            tab_id: tab_id.map(str::to_string),
+            workspace_id: Some("ws1".to_string()),
+            agent: Some(id.to_string()),
+            agent_status: status.map(str::to_string),
+            tokens: Some(Tokens {
+                grid_role: Some("worker".to_string()),
+                grid_owner: Some("cos".to_string()),
+                grid_group: Some(group.to_string()),
+                grid_tab: Some(format!("{group}-workers")),
+                grid_ready: Some(serde_json::json!(1)),
+                grid_name: Some(id.to_string()),
+            }),
+            label: Some(id.to_string()),
+        }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct MockHerdrDriver {
+        pub snapshot: Snapshot,
+        pub move_calls: Vec<(String, Target)>,
+        pub rename_calls: Vec<(String, String)>,
+    }
+
+    impl HerdrDriver for MockHerdrDriver {
+        fn snapshot(&mut self) -> Result<Snapshot, String> {
+            Ok(self.snapshot.clone())
+        }
+
+        fn move_pane(&mut self, pane: &str, target: &Target) -> Result<MoveResult, String> {
+            self.move_calls.push((pane.to_string(), target.clone()));
+            match target {
+                Target::NewTab { label } => {
+                    let tid = format!("tab:{label}");
+                    if let Some(p) = self.snapshot.panes.iter_mut().find(|p| p.pane_id == pane) {
+                        p.tab_id = Some(tid.clone());
+                    }
+                    if !self.snapshot.tabs.iter().any(|t| t.tab_id == tid) {
+                        self.snapshot.tabs.push(Tab {
+                            tab_id: tid.clone(),
+                            workspace_id: Some("ws1".to_string()),
+                            label: Some(label.clone()),
+                            pane_count: Some(1),
+                        });
+                    }
+                    Ok(MoveResult {
+                        pane_id: pane.to_string(),
+                        tab_id: tid,
+                        previous_pane_id: None,
+                    })
+                }
+                Target::Split { tab, .. } => {
+                    let resolved_tab = if tab == "@workers" {
+                        "tab:grp-workers".to_string()
+                    } else if tab == "@workers-2" {
+                        "tab:grp-workers-2".to_string()
+                    } else {
+                        tab.clone()
+                    };
+                    if let Some(p) = self.snapshot.panes.iter_mut().find(|p| p.pane_id == pane) {
+                        p.tab_id = Some(resolved_tab.clone());
+                    }
+                    Ok(MoveResult {
+                        pane_id: pane.to_string(),
+                        tab_id: resolved_tab,
+                        previous_pane_id: None,
+                    })
+                }
+            }
+        }
+
+        fn rename_pane(&mut self, pane: &str, label: &str) -> Result<(), String> {
+            self.rename_calls
+                .push((pane.to_string(), label.to_string()));
+            if let Some(p) = self.snapshot.panes.iter_mut().find(|p| p.pane_id == pane) {
+                p.label = Some(label.to_string());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_plan_arrangements_1_to_4_workers() {
+        // 1 worker: full / single window placement in target tab
+        let snap1 = Snapshot {
+            panes: vec![make_worker("w1:t1:p1", "grp", None, None)],
+            ..Default::default()
+        };
+        let ops1 = plan_with_deferred(&snap1, None).unwrap();
+        assert_eq!(ops1.len(), 1);
+        assert_eq!(
+            ops1[0].target,
+            Target::NewTab {
+                label: "grp-workers".to_string()
+            }
+        );
+
+        // 2 workers: left | right (horizontal 50% split)
+        let snap2 = Snapshot {
+            panes: vec![
+                make_worker("w1:t1:p1", "grp", None, None),
+                make_worker("w1:t1:p2", "grp", None, None),
+            ],
+            ..Default::default()
+        };
+        let ops2 = plan_with_deferred(&snap2, None).unwrap();
+        assert_eq!(ops2.len(), 2);
+        assert_eq!(
+            ops2[0].target,
+            Target::NewTab {
+                label: "grp-workers".to_string()
+            }
+        );
+        assert_eq!(
+            ops2[1].target,
+            Target::Split {
+                tab: "@workers".to_string(),
+                anchor: "w1:t1:p1".to_string(),
+                direction: "right".to_string(),
+                ratio: 0.5,
+            }
+        );
+
+        // 3 workers: A | B top + C below (50% down split)
+        let snap3 = Snapshot {
+            panes: vec![
+                make_worker("w1:t1:p1", "grp", None, None),
+                make_worker("w1:t1:p2", "grp", None, None),
+                make_worker("w1:t1:p3", "grp", None, None),
+            ],
+            ..Default::default()
+        };
+        let ops3 = plan_with_deferred(&snap3, None).unwrap();
+        assert_eq!(ops3.len(), 3);
+        assert_eq!(ops3[1].pane, "w1:t1:p3");
+        assert_eq!(
+            ops3[1].target,
+            Target::Split {
+                tab: "@workers".to_string(),
+                anchor: "w1:t1:p1".to_string(),
+                direction: "down".to_string(),
+                ratio: 0.5,
+            }
+        );
+        assert_eq!(ops3[2].pane, "w1:t1:p2");
+        assert_eq!(
+            ops3[2].target,
+            Target::Split {
+                tab: "@workers".to_string(),
+                anchor: "w1:t1:p1".to_string(),
+                direction: "right".to_string(),
+                ratio: 0.5,
+            }
+        );
+
+        // 4 workers: 2x2 grid
+        let snap4 = Snapshot {
+            panes: vec![
+                make_worker("w1:t1:p1", "grp", None, None),
+                make_worker("w1:t1:p2", "grp", None, None),
+                make_worker("w1:t1:p3", "grp", None, None),
+                make_worker("w1:t1:p4", "grp", None, None),
+            ],
+            ..Default::default()
+        };
+        let ops4 = plan_with_deferred(&snap4, None).unwrap();
+        assert_eq!(ops4.len(), 4);
+        assert_eq!(ops4[1].pane, "w1:t1:p3");
+        assert_eq!(
+            ops4[1].target,
+            Target::Split {
+                tab: "@workers".to_string(),
+                anchor: "w1:t1:p1".to_string(),
+                direction: "down".to_string(),
+                ratio: 0.5,
+            }
+        );
+        assert_eq!(ops4[2].pane, "w1:t1:p2");
+        assert_eq!(
+            ops4[2].target,
+            Target::Split {
+                tab: "@workers".to_string(),
+                anchor: "w1:t1:p1".to_string(),
+                direction: "right".to_string(),
+                ratio: 0.5,
+            }
+        );
+        assert_eq!(ops4[3].pane, "w1:t1:p4");
+        assert_eq!(
+            ops4[3].target,
+            Target::Split {
+                tab: "@workers".to_string(),
+                anchor: "w1:t1:p3".to_string(),
+                direction: "right".to_string(),
+                ratio: 0.5,
+            }
+        );
+    }
+
+    #[test]
+    fn test_plan_overflow_tab_5_to_8_workers() {
+        let snap = Snapshot {
+            panes: vec![
+                make_worker("w1:t1:p1", "grp", None, None),
+                make_worker("w1:t1:p2", "grp", None, None),
+                make_worker("w1:t1:p3", "grp", None, None),
+                make_worker("w1:t1:p4", "grp", None, None),
+                make_worker("w1:t1:p5", "grp", None, None),
+                make_worker("w1:t1:p6", "grp", None, None),
+            ],
+            ..Default::default()
+        };
+        let ops = plan_with_deferred(&snap, None).unwrap();
+        assert_eq!(ops.len(), 6);
+
+        // Chunk 0: workers 1-4 targeted to @workers (grp-workers)
+        assert_eq!(
+            ops[0].target,
+            Target::NewTab {
+                label: "grp-workers".to_string()
+            }
+        );
+        for op in &ops[1..4] {
+            if let Target::Split { tab, .. } = &op.target {
+                assert_eq!(tab, "@workers");
+            } else {
+                panic!("expected split target for chunk 0");
+            }
+        }
+
+        // Chunk 1: workers 5-6 targeted to @workers-2 (grp-workers-2)
+        assert_eq!(
+            ops[4].target,
+            Target::NewTab {
+                label: "grp-workers-2".to_string()
+            }
+        );
+        assert_eq!(
+            ops[5].target,
+            Target::Split {
+                tab: "@workers-2".to_string(),
+                anchor: "w1:t1:p5".to_string(),
+                direction: "right".to_string(),
+                ratio: 0.5,
+            }
+        );
+    }
+
+    #[test]
+    fn test_plan_deferred_working_panes() {
+        let snap = Snapshot {
+            panes: vec![
+                make_worker("w1:t1:p1", "grp", None, Some("working")),
+                make_worker("w1:t1:p2", "grp", None, Some("idle")),
+            ],
+            ..Default::default()
+        };
+        let mut ops = plan_with_deferred(&snap, None).unwrap();
+        assert_eq!(ops.len(), 2);
+        assert!(ops[0].deferred, "working pane must be marked deferred");
+
+        // Propagating deferrals marks dependent child splits deferred too
+        super::super::plan::propagate_deferrals(&mut ops, &snap.panes);
+        assert!(
+            ops[1].deferred,
+            "split anchored on deferred pane must also be deferred"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_activity_changed_when_moves_applied() {
+        let mock = MockHerdrDriver {
+            snapshot: Snapshot {
+                panes: vec![
+                    make_worker("w1:t1:p1", "grp", Some("tab:other"), None),
+                    make_worker("w1:t1:p2", "grp", Some("tab:other"), None),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let activity = GridActivity::with_driver(mock).with_owner("cos");
+        let req = ActivityRequest::Grid(GridRequest::Reconcile {
+            tab: Some("grp-workers".to_string()),
+            only: None,
+        });
+        let res = activity.execute(&req).unwrap();
+        assert_eq!(
+            res,
+            ActivityResult::Grid(GridResult::Reconciled { changed: true })
+        );
+    }
+
+    #[test]
+    fn test_reconcile_activity_unchanged_when_already_in_place() {
+        let mock = MockHerdrDriver {
+            snapshot: Snapshot {
+                tabs: vec![Tab {
+                    tab_id: "tab:grp-workers".to_string(),
+                    workspace_id: Some("ws1".to_string()),
+                    label: Some("grp-workers".to_string()),
+                    pane_count: Some(2),
+                }],
+                panes: vec![
+                    make_worker("w1:t1:p1", "grp", Some("tab:grp-workers"), None),
+                    make_worker("w1:t1:p2", "grp", Some("tab:grp-workers"), None),
+                ],
+                agents: vec![
+                    Agent {
+                        name: Some("w1:t1:p1".to_string()),
+                        pane_id: Some("w1:t1:p1".to_string()),
+                        agent_status: None,
+                    },
+                    Agent {
+                        name: Some("w1:t1:p2".to_string()),
+                        pane_id: Some("w1:t1:p2".to_string()),
+                        agent_status: None,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let activity = GridActivity::with_driver(mock).with_owner("cos");
+        let req = ActivityRequest::Grid(GridRequest::Reconcile {
+            tab: Some("grp-workers".to_string()),
+            only: None,
+        });
+        let res = activity.execute(&req).unwrap();
+        assert_eq!(
+            res,
+            ActivityResult::Grid(GridResult::Reconciled { changed: false })
+        );
+    }
+
+    #[test]
+    fn test_reconcile_activity_unchanged_when_all_deferred() {
+        let mock = MockHerdrDriver {
+            snapshot: Snapshot {
+                panes: vec![
+                    make_worker("w1:t1:p1", "grp", Some("tab:other"), Some("working")),
+                    make_worker("w1:t1:p2", "grp", Some("tab:other"), Some("working")),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let activity = GridActivity::with_driver(mock).with_owner("cos");
+        let req = ActivityRequest::Grid(GridRequest::Reconcile {
+            tab: Some("grp-workers".to_string()),
+            only: None,
+        });
+        let res = activity.execute(&req).unwrap();
+        assert_eq!(
+            res,
+            ActivityResult::Grid(GridResult::Reconciled { changed: false })
+        );
+    }
+
+    #[test]
+    fn test_grid_activity_plan_json() {
+        let mock = MockHerdrDriver {
+            snapshot: Snapshot {
+                panes: vec![
+                    make_worker("w1:t1:p1", "grp", None, None),
+                    make_worker("w1:t1:p2", "grp", None, None),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let activity = GridActivity::with_driver(mock).with_owner("cos");
+        let req = ActivityRequest::Grid(GridRequest::Plan { tab: None });
+        let res = activity.execute(&req).unwrap();
+        if let ActivityResult::Grid(GridResult::PlanJson(json)) = res {
+            let ops: Vec<Op> = serde_json::from_str(&json).unwrap();
+            assert_eq!(ops.len(), 2);
+        } else {
+            panic!("expected PlanJson result, got {:?}", res);
+        }
+    }
+
+    #[test]
+    fn test_grid_activity_rejects_unsupported_request() {
+        let activity = GridActivity::new();
+        let req = ActivityRequest::Cost(CostRequest::QuerySpend {
+            session_pattern: "session".to_string(),
+        });
+        let res = activity.execute(&req);
+        assert!(matches!(res, Err(ActivityError::ExecutionFailed(_))));
+    }
 }
