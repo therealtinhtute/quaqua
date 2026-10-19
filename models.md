@@ -8,7 +8,7 @@ Pick by task shape. Name = kind passed to `quaqua worker spawn`. Update "Seen" a
 | detu | omp · google-antigravity/gemini-3.8-flash · high | quick lookup, research, read-only scan | implementation | cleanexport |
 | sude | omp · google-antigravity/gemini-3.8-flash · high | hard multi-file impl, audits (on request) | – | bpdeps, bpdocs, bpga |
 | ni | claude · opus-5.5 · low | small Claude edits, quick answers | design, long work | – |
-| suhuynh | claude · opus-5.5 · medium | refactor, review of intent | long mechanical edits | r0r1, pbslim, dashstyle |
+| suhuynh | opencode · opencode-go/deepseek-v4.1-flash · max | refactor, review of intent | long mechanical edits | r0r1, pbslim, dashstyle |
 | truonglao | claude · opus-5.5 · high | design, architecture, hard trade-offs | anything a cheaper tier can do | gridplan, bpaudit, pbglobal |
 
 ## Naming
