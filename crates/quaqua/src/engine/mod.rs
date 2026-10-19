@@ -5,12 +5,14 @@
 //! deterministic in-memory testkit.
 
 pub mod workflow;
+pub mod activities;
 pub mod activity;
 pub mod journal;
 pub mod journal_sqlite;
 pub mod telemetry;
 pub mod telemetry_otel;
 pub mod child;
+pub mod clock;
 pub mod testkit;
 pub mod guard;
 
