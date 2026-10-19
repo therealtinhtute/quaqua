@@ -1,10 +1,40 @@
 //! `quaqua init` smoke tests: boot temp skeleton roots through the built binary
 //! with `QUAQUA_SCRIPT_DIR` pointing at the shim layout
 //! (`<root>/scripts/workspace`). `PATH` is pointed at a controlled dir so no real
-//! `git`/`herdr` is ever touched unless a test deliberately links `git` in.
+//! `git`/`herdr` is ever touched unless a test deliberately links `git` in; an
+//! ambient `HERDR_BIN_PATH` cannot leak either — every invocation pins it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+/// Stub `herdr` for `HERDR_BIN_PATH`: logs argv, answers the pane queries as an
+/// unregistered `claude` agent in this checkout (the pane the CoS tag is for).
+const HERDR_STUB: &str = r#"#!/bin/sh
+echo "$*" >> @LOG@
+case "$1 $2" in
+  "pane current") echo '{"result":{"pane":{"pane_id":"w1:p1"}}}' ;;
+  "pane get") echo '{"result":{"pane":{"pane_id":"w1:p1","agent":"claude","cwd":"@CWD@"}}}' ;;
+  "agent list") echo '{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude"}]}}' ;;
+esac
+exit 0
+"#;
+
+/// Decoy `herdr` for `PATH`: records that it ran and reports an agent, so a
+/// PATH lookup is visible in the audit prompt instead of silently passing.
+const HERDR_DECOY: &str = r#"#!/bin/sh
+: > "@MARKER@"
+echo '{"result":{"agents":[{"name":"sude-decoy","agent_status":"idle","pane_id":"p9"}]}}'
+exit 0
+"#;
+
+fn write_script(path: &Path, body: &str) {
+    std::fs::write(path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
 
 fn temp_root(tag: &str) -> PathBuf {
     let pid = std::process::id();
@@ -39,12 +69,20 @@ struct Invocation {
 
 impl Invocation {
     fn new(root: &Path) -> Self {
-        Invocation {
+        let mut inv = Invocation {
             script_dir: root.join("scripts/workspace"),
             cwd: PathBuf::from("/"),
             path: root.join("nobin"),
             extra: Vec::new(),
-        }
+        };
+        // Pin herdr resolution to a path that does not exist, so an ambient
+        // HERDR_BIN_PATH (a real herdr on the driving machine) is never exec'd
+        // by a test that is not about herdr resolution.
+        inv.extra.push((
+            "HERDR_BIN_PATH".to_string(),
+            root.join("nobin/herdr").to_string_lossy().to_string(),
+        ));
+        inv
     }
     fn run(&self) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
@@ -333,6 +371,83 @@ fn init_wires_embedded_hook_and_migrates_legacy() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("migrated"), "re-run logged migration: {stdout}");
     assert!(!stdout.contains("core.hooksPath="), "re-run logged core.hooksPath: {stdout}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Every herdr exec `quaqua init` makes — the pane queries (pane current/get,
+/// agent list) and the CoS tag (`pane report-metadata`) — must run the binary
+/// `HERDR_BIN_PATH` names, not one found through `PATH`.
+#[test]
+fn init_resolves_herdr_through_herdr_bin_path_only() {
+    let root = temp_root("herdrbin");
+    skeleton(&root);
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+
+    let stub = root.join("stub/herdr");
+    std::fs::create_dir_all(stub.parent().unwrap()).unwrap();
+    let log = root.join("stub.calls");
+    write_script(
+        &stub,
+        &HERDR_STUB
+            .replace("@LOG@", &log.display().to_string())
+            .replace("@CWD@", &root.display().to_string()),
+    );
+
+    // 1. No herdr on PATH at all: only HERDR_BIN_PATH can answer, so every
+    //    query and the tag itself must have gone through the stub.
+    let mut inv = Invocation::new(&root);
+    inv.extra
+        .push(("HERDR_BIN_PATH".to_string(), stub.display().to_string()));
+    let out = inv.run();
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    for want in [
+        "pane current",
+        "pane get w1:p1",
+        "agent list",
+        "pane report-metadata w1:p1 --source herdr-quaqua \
+         --token grid_role=orchestrator --token grid_owner=cos",
+    ] {
+        assert!(
+            calls.contains(want),
+            "HERDR_BIN_PATH binary missed '{want}': {calls}",
+        );
+    }
+
+    // 2. A decoy herdr FIRST on PATH: with HERDR_BIN_PATH set it must never be
+    //    executed, and the tag must still come from the stub.
+    let marker = root.join("decoy.ran");
+    let decoy_dir = root.join("decoy");
+    std::fs::create_dir_all(&decoy_dir).unwrap();
+    write_script(
+        &decoy_dir.join("herdr"),
+        &HERDR_DECOY.replace("@MARKER@", &marker.display().to_string()),
+    );
+    std::fs::remove_file(&log).unwrap();
+    let mut inv = Invocation::new(&root);
+    inv.path = decoy_dir;
+    inv.extra
+        .push(("HERDR_BIN_PATH".to_string(), stub.display().to_string()));
+    let out = inv.run();
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        !marker.exists(),
+        "the PATH herdr was executed despite HERDR_BIN_PATH",
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.contains("pane report-metadata w1:p1"),
+        "the HERDR_BIN_PATH binary did not tag the CoS pane: {calls}",
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
