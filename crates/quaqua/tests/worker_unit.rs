@@ -1,19 +1,21 @@
 use quaqua::cap::{count_owner_slots, is_task_worker_name, matches_pipeline_reviewer};
 use quaqua::config;
+use quaqua::engine::activity::{ActivityRequest, ActivityResult, HerdrRequest, HerdrResult};
+use quaqua::engine::testkit::MockActivities;
 use quaqua::git::GitOps;
 use quaqua::herdr::HerdrOps;
+use quaqua::launch::{build_launch_cmd, resolve_launch, Launch};
+use quaqua::lead::spawn::{update_index_content, update_project_index_owner};
 use quaqua::worker::cleanup::{resolve_default_runs_dir, resolve_home_quaqua_runs};
 use quaqua::worker::prompt::{
     brief_budget_sec, brief_headers_ok, fallback_header_line, prepend_header,
     validate_env_budget_val,
 };
-use quaqua::launch::{build_launch_cmd, resolve_launch, Launch};
-use quaqua::lead::spawn::{update_index_content, update_project_index_owner};
 use quaqua::worker::spawn::{fallback_kind, parse_spawn_args, start_failure_reason};
 use quaqua::workspace::resolve_workspace_root;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 #[test]
 fn test_task_worker_name_validation() {
@@ -34,7 +36,8 @@ fn test_task_worker_name_validation() {
 
 #[test]
 fn test_brief_headers() {
-    let valid = "Goal: accomplish task\nHard constraints: none\nCurrent design (open to challenge): plan";
+    let valid =
+        "Goal: accomplish task\nHard constraints: none\nCurrent design (open to challenge): plan";
     assert!(brief_headers_ok(valid));
 
     let valid_alt = "Goal: accomplish task\nHard constraints: none\nCurrent design: direct";
@@ -105,109 +108,477 @@ fn test_pipeline_reviewer_prefix_matching_n2() {
     assert!(!matches_pipeline_reviewer("sude-testreview", "test"));
 }
 
-struct MockHerdr {
-    agents_json: String,
+/// Provisional adapter (W2 rewire) driving HerdrOps through MockActivities.
+///
+/// NOTE on W2 rewire: The current W0 testkit `HerdrRequest` enum does not have variants
+/// for pane split, agent list, metadata reporting, or waiting. Consequently, this adapter
+/// provisionally maps those operations onto available `HerdrRequest` variants (e.g. `Spawn`,
+/// `ReadAgent`, `Prompt`) and custom activity IDs (`"herdr.pane_split"`, `"herdr.agent_list"`,
+/// etc.) as a temporary bridge until W2 updates the activity contract.
+struct MockActivitiesHerdr {
+    pub activities: Mutex<MockActivities>,
 }
 
-impl HerdrOps for MockHerdr {
-    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
-        unimplemented!()
+impl MockActivitiesHerdr {
+    pub fn new(activities: MockActivities) -> Self {
+        Self {
+            activities: Mutex::new(activities),
+        }
     }
+
+    pub fn with_agent_list(json: &str) -> Self {
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.agent_list",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: json.to_string(),
+            }),
+        );
+        Self::new(mock)
+    }
+
+    pub fn with_agent_get(json: &str) -> Self {
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.agent_get",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: json.to_string(),
+            }),
+        );
+        Self::new(mock)
+    }
+    pub fn with_unreachable(io_message: &str) -> Self {
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.agent_get",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: format!("io_error:{io_message}"),
+            }),
+        );
+        Self::new(mock)
+    }
+
+    pub fn for_cleanup(pane_id: &str) -> Self {
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.agent_get",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: format!(r#"{{"result":{{"agent":{{"pane_id":"{pane_id}"}}}}}}"#),
+            }),
+        );
+        mock.register(
+            "herdr.pane_close",
+            ActivityResult::Herdr(HerdrResult::Cleaned {
+                name: pane_id.to_string(),
+            }),
+        );
+        Self::new(mock)
+    }
+
+    pub fn for_spawn() -> Self {
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.pane_split",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+            }),
+        );
+        mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+            name: String::new(),
+        }));
+        Self::new(mock)
+    }
+
+    pub fn calls(&self) -> Vec<(String, ActivityRequest)> {
+        self.activities.lock().unwrap().calls().to_vec()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.activities.lock().unwrap().call_count()
+    }
+
+    pub fn has_call(&self, activity_id: &str) -> bool {
+        self.activities
+            .lock()
+            .unwrap()
+            .calls()
+            .iter()
+            .any(|(id, _)| id == activity_id)
+    }
+
+    pub fn agent_starts(&self) -> Vec<(String, String)> {
+        self.activities
+            .lock()
+            .unwrap()
+            .calls()
+            .iter()
+            .filter(|(id, _)| id.starts_with("herdr.agent_start"))
+            .filter_map(|(_, req)| {
+                if let ActivityRequest::Herdr(HerdrRequest::Spawn { name, kind, .. }) = req {
+                    Some((name.clone(), kind.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub fn send_keys_calls(&self) -> Vec<(String, String)> {
+        self.activities
+            .lock()
+            .unwrap()
+            .calls()
+            .iter()
+            .filter(|(id, _)| id == "herdr.agent_send_keys")
+            .filter_map(|(_, req)| {
+                if let ActivityRequest::Herdr(HerdrRequest::SendKeys { name, keys }) = req {
+                    Some((name.clone(), keys.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+impl HerdrOps for MockActivitiesHerdr {
+    fn run(&self, args: &[&str]) -> std::io::Result<Output> {
+        let req = ActivityRequest::Herdr(HerdrRequest::Prompt {
+            name: args.join(" "),
+            task: String::new(),
+        });
+        let mut acts = self.activities.lock().unwrap();
+        match acts.execute("herdr.run", &req) {
+            Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: content.into_bytes(),
+                stderr: Vec::new(),
+            }),
+            Ok(_) => Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: b"{\"snapshot\":{\"workspaces\":[],\"tabs\":[],\"panes\":[],\"layouts\":[],\"agents\":[]}}".to_vec(),
+                stderr: Vec::new(),
+            }),
+            Err(err) => Err(std::io::Error::new(std::io::ErrorKind::Other, err.to_string())),
+        }
+    }
+
     fn agent_list(&self) -> std::io::Result<String> {
-        Ok(self.agents_json.clone())
+        let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
+            name: String::new(),
+            lines: 0,
+        });
+        let mut acts = self.activities.lock().unwrap();
+        match acts.execute("herdr.agent_list", &req) {
+            Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(content),
+            Ok(_) => Ok(r#"{"result":{"agents":[]}}"#.to_string()),
+            Err(err) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err.to_string(),
+            )),
+        }
     }
-    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
-        unimplemented!()
+
+    fn agent_get(&self, name: &str) -> std::io::Result<(bool, String)> {
+        let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
+            name: name.to_string(),
+            lines: 0,
+        });
+        let mut acts = self.activities.lock().unwrap();
+        match acts.execute("herdr.agent_get", &req) {
+            Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => {
+                if let Some(msg) = content.strip_prefix("io_error:") {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        msg.to_string(),
+                    ))
+                } else {
+                    Ok((true, content))
+                }
+            }
+            Ok(_) => Ok((false, String::new())),
+            Err(err) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err.to_string(),
+            )),
+        }
     }
-    fn agent_read(&self, _name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
-        unimplemented!()
+
+    fn agent_read(&self, name: &str, _source: &str, lines: u32) -> std::io::Result<String> {
+        let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
+            name: name.to_string(),
+            lines: lines as usize,
+        });
+        let mut acts = self.activities.lock().unwrap();
+        match acts.execute("herdr.agent_read", &req) {
+            Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(content),
+            Ok(_) => Ok(String::new()),
+            Err(err) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err.to_string(),
+            )),
+        }
     }
-    fn agent_start(&self, _name: &str, _kind: &str, _pane: &str, _timeout_ms: u32, _extra_args: &[&str]) -> std::io::Result<Output> {
-        unimplemented!()
+
+    fn agent_start(
+        &self,
+        name: &str,
+        kind: &str,
+        pane: &str,
+        _timeout_ms: u32,
+        _extra_args: &[&str],
+    ) -> std::io::Result<Output> {
+        let req = ActivityRequest::Herdr(HerdrRequest::Spawn {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            repo: pane.to_string(),
+        });
+        let mut acts = self.activities.lock().unwrap();
+        match acts.execute(&format!("herdr.agent_start:{kind}"), &req) {
+            Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => {
+                if content.contains("\"error\"") || !content.is_empty() {
+                    Ok(Output {
+                        status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
+                        stdout: content.into_bytes(),
+                        stderr: Vec::new(),
+                    })
+                } else {
+                    Ok(Output {
+                        status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    })
+                }
+            }
+            Ok(_) => Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            Err(err) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err.to_string(),
+            )),
+        }
     }
-    fn pane_split(&self, _cwd: &str, _owner: &str, _envs: &[(&str, &str)]) -> std::io::Result<Output> {
-        unimplemented!()
+
+    fn pane_split(
+        &self,
+        cwd: &str,
+        owner: &str,
+        _envs: &[(&str, &str)],
+    ) -> std::io::Result<Output> {
+        let req = ActivityRequest::Herdr(HerdrRequest::Spawn {
+            name: owner.to_string(),
+            kind: "split".to_string(),
+            repo: cwd.to_string(),
+        });
+        let mut acts = self.activities.lock().unwrap();
+        match acts.execute("herdr.pane_split", &req) {
+            Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: content.into_bytes(),
+                stderr: Vec::new(),
+            }),
+            Ok(_) => Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: b"{\"result\":{\"pane\":{\"pane_id\":\"%1\"}}}".to_vec(),
+                stderr: Vec::new(),
+            }),
+            Err(err) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err.to_string(),
+            )),
+        }
     }
-    fn pane_close(&self, _pane: &str) -> std::io::Result<Output> {
-        unimplemented!()
+
+    fn pane_close(&self, pane: &str) -> std::io::Result<Output> {
+        let req = ActivityRequest::Herdr(HerdrRequest::Cleanup {
+            name: pane.to_string(),
+            repo: String::new(),
+        });
+        let mut acts = self.activities.lock().unwrap();
+        match acts.execute("herdr.pane_close", &req) {
+            Ok(_) => Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            Err(err) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err.to_string(),
+            )),
+        }
     }
-    fn pane_report_metadata(&self, _pane: &str, _tokens: &[&str]) -> std::io::Result<Output> {
-        unimplemented!()
+
+    fn pane_report_metadata(&self, pane: &str, tokens: &[&str]) -> std::io::Result<Output> {
+        let req = ActivityRequest::Herdr(HerdrRequest::SendKeys {
+            name: pane.to_string(),
+            keys: tokens.join(" "),
+        });
+        let mut acts = self.activities.lock().unwrap();
+        let _ = acts.execute("herdr.pane_report_metadata", &req);
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
     }
-    fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
-        unimplemented!()
+
+    fn pane_wait_output(&self, pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
+        let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
+            name: pane.to_string(),
+            lines: 0,
+        });
+        let mut acts = self.activities.lock().unwrap();
+        let _ = acts.execute("herdr.pane_wait_output", &req);
+        false
     }
-    fn pane_read(&self, _pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
-        unimplemented!()
+
+    fn pane_read(&self, pane: &str, _source: &str, lines: u32) -> std::io::Result<String> {
+        let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
+            name: pane.to_string(),
+            lines: lines as usize,
+        });
+        let mut acts = self.activities.lock().unwrap();
+        match acts.execute("herdr.pane_read", &req) {
+            Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(content),
+            Ok(_) => Ok(String::new()),
+            Err(err) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err.to_string(),
+            )),
+        }
     }
-    fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
-        unimplemented!()
+
+    fn pane_send_keys(&self, pane: &str, key: &str) -> std::io::Result<Output> {
+        let req = ActivityRequest::Herdr(HerdrRequest::SendKeys {
+            name: pane.to_string(),
+            keys: key.to_string(),
+        });
+        let mut acts = self.activities.lock().unwrap();
+        let _ = acts.execute("herdr.pane_send_keys", &req);
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
     }
-    fn agent_send_keys(&self, _name: &str, _key: &str) -> std::io::Result<Output> {
-        unimplemented!()
+
+    fn agent_send_keys(&self, name: &str, key: &str) -> std::io::Result<Output> {
+        let req = ActivityRequest::Herdr(HerdrRequest::SendKeys {
+            name: name.to_string(),
+            keys: key.to_string(),
+        });
+        let mut acts = self.activities.lock().unwrap();
+        let _ = acts.execute("herdr.agent_send_keys", &req);
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
     }
-    fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
-        unimplemented!()
+
+    fn agent_wait_idle(&self, name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
+        let req = ActivityRequest::Herdr(HerdrRequest::Prompt {
+            name: name.to_string(),
+            task: String::new(),
+        });
+        let mut acts = self.activities.lock().unwrap();
+        match acts.execute("herdr.agent_wait_idle", &req) {
+            Ok(ActivityResult::Herdr(HerdrResult::Prompted { .. })) => Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            _ => Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+        }
     }
-    fn agent_prompt_nowait(&self, _name: &str, _prompt: &str) -> std::io::Result<Output> {
-        unimplemented!()
+
+    fn agent_prompt_nowait(&self, name: &str, prompt: &str) -> std::io::Result<Output> {
+        let req = ActivityRequest::Herdr(HerdrRequest::Prompt {
+            name: name.to_string(),
+            task: prompt.to_string(),
+        });
+        let mut acts = self.activities.lock().unwrap();
+        let _ = acts.execute("herdr.agent_prompt_nowait", &req);
+        Ok(Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
     }
-    fn agent_prompt_wait_background(&self, _name: &str, _prompt: &str, _timeout_ms: u32, _log_file: std::fs::File) -> std::io::Result<Child> {
+
+    fn agent_prompt_wait_background(
+        &self,
+        _name: &str,
+        _prompt: &str,
+        _timeout_ms: u32,
+        _log_file: std::fs::File,
+    ) -> std::io::Result<Child> {
         unimplemented!()
     }
 }
 
-struct SpyHerdr {
-    split_called: AtomicBool,
-}
+#[test]
+fn test_mock_activities_herdr_contract() {
+    let mut acts = MockActivities::new();
+    acts.register(
+        "herdr.agent_list",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"agents":[]}}"#.to_string(),
+        }),
+    );
+    acts.register(
+        "herdr.agent_get",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"agent":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    acts.register(
+        "herdr.pane_split",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    acts.register(
+        "herdr.agent_start:omp",
+        ActivityResult::Herdr(HerdrResult::Spawned {
+            name: "sude-1".to_string(),
+        }),
+    );
+    acts.register(
+        "herdr.agent_send_keys",
+        ActivityResult::Herdr(HerdrResult::KeysSent {
+            name: "sude-1".to_string(),
+        }),
+    );
+    let herdr = MockActivitiesHerdr::new(acts);
 
-impl HerdrOps for SpyHerdr {
-    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn agent_list(&self) -> std::io::Result<String> {
-        unimplemented!()
-    }
-    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
-        unimplemented!()
-    }
-    fn agent_read(&self, _name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
-        unimplemented!()
-    }
-    fn agent_start(&self, _name: &str, _kind: &str, _pane: &str, _timeout_ms: u32, _extra_args: &[&str]) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn pane_split(&self, _cwd: &str, _owner: &str, _envs: &[(&str, &str)]) -> std::io::Result<Output> {
-        self.split_called.store(true, Ordering::SeqCst);
-        unimplemented!()
-    }
-    fn pane_close(&self, _pane: &str) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn pane_report_metadata(&self, _pane: &str, _tokens: &[&str]) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
-        unimplemented!()
-    }
-    fn pane_read(&self, _pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
-        unimplemented!()
-    }
-    fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn agent_send_keys(&self, _name: &str, _key: &str) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn agent_prompt_nowait(&self, _name: &str, _prompt: &str) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn agent_prompt_wait_background(&self, _name: &str, _prompt: &str, _timeout_ms: u32, _log_file: std::fs::File) -> std::io::Result<Child> {
-        unimplemented!()
-    }
+    assert_eq!(herdr.agent_list().unwrap(), r#"{"result":{"agents":[]}}"#);
+    let (_ok, info) = herdr.agent_get("sude-1").unwrap();
+    assert!(info.contains("%1"));
+    let split_out = herdr.pane_split("/cwd", "cos", &[]).unwrap();
+    assert!(split_out.status.success());
+    let start_out = herdr.agent_start("sude-1", "omp", "%1", 1000, &[]).unwrap();
+    assert!(start_out.status.success());
+    let keys_out = herdr.agent_send_keys("sude-1", "esc").unwrap();
+    assert!(keys_out.status.success());
+
+    assert_eq!(herdr.call_count(), 5);
+    assert!(herdr.has_call("herdr.pane_split"));
+    assert_eq!(
+        herdr.agent_starts(),
+        vec![("sude-1".to_string(), "omp".to_string())]
+    );
+    assert_eq!(
+        herdr.send_keys_calls(),
+        vec![("sude-1".to_string(), "esc".to_string())]
+    );
 }
 
 struct DummyGit;
@@ -225,13 +596,24 @@ impl GitOps for DummyGit {
     fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
         Ok(vec![])
     }
-    fn worktree_add(&self, _repo: &Path, _branch: &str, _wt: &Path, _base: Option<&str>) -> std::io::Result<Output> {
+    fn worktree_add(
+        &self,
+        _repo: &Path,
+        _branch: &str,
+        _wt: &Path,
+        _base: Option<&str>,
+    ) -> std::io::Result<Output> {
         unimplemented!()
     }
     fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
         false
     }
-    fn worktree_add_existing(&self, _repo: &Path, _branch: &str, _wt: &Path) -> std::io::Result<Output> {
+    fn worktree_add_existing(
+        &self,
+        _repo: &Path,
+        _branch: &str,
+        _wt: &Path,
+    ) -> std::io::Result<Output> {
         unimplemented!()
     }
     fn worktree_remove(&self, _repo: &Path, _wt: &Path) -> std::io::Result<Output> {
@@ -262,84 +644,93 @@ impl GitOps for DummyGit {
 
 #[test]
 fn test_unknown_harness_rejected_before_split_n4() {
-    let spy = SpyHerdr {
-        split_called: AtomicBool::new(false),
-    };
+    let spy = MockActivitiesHerdr::new(MockActivities::new());
     let dummy_git = DummyGit;
 
     let mut cfg = config::Config::default();
-    cfg.kinds.insert("badkind".to_string(), config::Kind {
-        harness: "unsupported_harness".to_string(),
-        model: "m".to_string(),
-        effort: None,
-        fallback: None,
-        can_review: false,
-    });
+    cfg.kinds.insert(
+        "badkind".to_string(),
+        config::Kind {
+            harness: "unsupported_harness".to_string(),
+            model: "m".to_string(),
+            effort: None,
+            fallback: None,
+            can_review: false,
+        },
+    );
 
     let opts = parse_spawn_args(&[
         "badkind-task1".to_string(),
         "badkind".to_string(),
         "/repo".to_string(),
-    ]).unwrap();
+    ])
+    .unwrap();
 
     let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &dummy_git, &spy);
     assert!(res.is_err());
     // N4: pane_split must NEVER have been called!
-    assert!(!spy.split_called.load(Ordering::SeqCst));
+    assert!(!spy.has_call("herdr.pane_split"));
+    assert_eq!(spy.call_count(), 0);
 }
 
 #[test]
 fn test_missing_effort_rejected_before_split() {
-    let spy = SpyHerdr {
-        split_called: AtomicBool::new(false),
-    };
+    let spy = MockActivitiesHerdr::new(MockActivities::new());
     let dummy_git = DummyGit;
 
     let mut cfg = config::Config::default();
-    cfg.kinds.insert("tieude".to_string(), config::Kind {
-        harness: "opencode".to_string(),
-        model: "m".to_string(),
-        effort: None,
-        fallback: None,
-        can_review: false,
-    });
+    cfg.kinds.insert(
+        "tieude".to_string(),
+        config::Kind {
+            harness: "opencode".to_string(),
+            model: "m".to_string(),
+            effort: None,
+            fallback: None,
+            can_review: false,
+        },
+    );
 
     let opts = parse_spawn_args(&[
         "tieude-task1".to_string(),
         "tieude".to_string(),
         "/repo".to_string(),
-    ]).unwrap();
+    ])
+    .unwrap();
 
     let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &dummy_git, &spy);
     assert!(res.is_err());
-    assert!(!spy.split_called.load(Ordering::SeqCst));
+    assert!(!spy.has_call("herdr.pane_split"));
+    assert_eq!(spy.call_count(), 0);
 }
 
 #[test]
 fn test_unsupported_effort_rejected_before_split() {
-    let spy = SpyHerdr {
-        split_called: AtomicBool::new(false),
-    };
+    let spy = MockActivitiesHerdr::new(MockActivities::new());
     let dummy_git = DummyGit;
 
     let mut cfg = config::Config::default();
-    cfg.kinds.insert("tieude".to_string(), config::Kind {
-        harness: "opencode".to_string(),
-        model: "m".to_string(),
-        effort: Some("banana".to_string()),
-        fallback: None,
-        can_review: false,
-    });
+    cfg.kinds.insert(
+        "tieude".to_string(),
+        config::Kind {
+            harness: "opencode".to_string(),
+            model: "m".to_string(),
+            effort: Some("banana".to_string()),
+            fallback: None,
+            can_review: false,
+        },
+    );
 
     let opts = parse_spawn_args(&[
         "tieude-task1".to_string(),
         "tieude".to_string(),
         "/repo".to_string(),
-    ]).unwrap();
+    ])
+    .unwrap();
 
     let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &dummy_git, &spy);
     assert!(res.is_err());
-    assert!(!spy.split_called.load(Ordering::SeqCst));
+    assert!(!spy.has_call("herdr.pane_split"));
+    assert_eq!(spy.call_count(), 0);
 }
 
 #[test]
@@ -358,9 +749,9 @@ fn test_cap_pipeline_slot_reservation_mock() {
     .unwrap();
 
     // Agents list has sude-feature (alive builder) + tieude-prompt
-    let mock = MockHerdr {
-        agents_json: r#"{"result":{"agents":[{"name":"sude-feature","agent_status":"working"},{"name":"tieude-prompt","agent_status":"working"}]}}"#.to_string(),
-    };
+    let mock = MockActivitiesHerdr::with_agent_list(
+        r#"{"result":{"agents":[{"name":"sude-feature","agent_status":"working"},{"name":"tieude-prompt","agent_status":"working"}]}}"#,
+    );
     std::fs::write(temp_dir.join("sude-feature.owner"), "cos\n").unwrap();
     std::fs::write(temp_dir.join("sude-feature.pipeline"), "feature\n").unwrap();
 
@@ -390,9 +781,9 @@ fn test_cap_pipeline_rust_state_without_task_line() {
     )
     .unwrap();
 
-    let mock = MockHerdr {
-        agents_json: r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#.to_string(),
-    };
+    let mock = MockActivitiesHerdr::with_agent_list(
+        r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#,
+    );
 
     // 1 live builder + (2 - 1 already counted) reserved = 2, not 1 + 2 = 3.
     let count = count_owner_slots(&temp_dir, owner, None, &mock);
@@ -410,17 +801,25 @@ fn test_cap_pipeline_rust_state_review_round() {
 
     std::fs::write(temp_dir.join("sude-blockedfix.owner"), format!("{owner}\n")).unwrap();
     std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
-    std::fs::write(temp_dir.join("suhuynh-blockedfixr1.owner"), format!("{owner}\n")).unwrap();
-    std::fs::write(temp_dir.join("suhuynh-blockedfixr1.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(
+        temp_dir.join("suhuynh-blockedfixr1.owner"),
+        format!("{owner}\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        temp_dir.join("suhuynh-blockedfixr1.pipeline"),
+        "blockedfix\n",
+    )
+    .unwrap();
     std::fs::write(
         temp_dir.join("pipeline-blockedfix.state"),
         format!("repo=/repo\nbuilder=sude\nreviewer=suhuynh\nphase=review\nround=1\nfinished=0\nlead=quaqua-intake-lead\npipeline_pid={}\n", std::process::id()),
     )
     .unwrap();
 
-    let mock = MockHerdr {
-        agents_json: r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"},{"name":"suhuynh-blockedfixr1","agent_status":"working"}]}}"#.to_string(),
-    };
+    let mock = MockActivitiesHerdr::with_agent_list(
+        r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"},{"name":"suhuynh-blockedfixr1","agent_status":"working"}]}}"#,
+    );
 
     let count = count_owner_slots(&temp_dir, owner, None, &mock);
     assert_eq!(count, 2);
@@ -439,25 +838,31 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
     std::fs::write(temp_dir.join("sude-other.pipeline"), "other\n").unwrap();
     std::fs::write(
         temp_dir.join("pipeline-blockedfix.state"),
-        format!("task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n", std::process::id()),
+        format!(
+            "task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n",
+            std::process::id()
+        ),
     )
     .unwrap();
 
-    let mock = MockHerdr {
-        agents_json: r#"{"result":{"agents":[{"name":"sude-other","agent_status":"working"}]}}"#.to_string(),
-    };
+    let mock = MockActivitiesHerdr::with_agent_list(
+        r#"{"result":{"agents":[{"name":"sude-other","agent_status":"working"}]}}"#,
+    );
     assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock), 2);
 
     std::fs::write(temp_dir.join("sude-blockedfix.owner"), "cos\n").unwrap();
     std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
     std::fs::write(
         temp_dir.join("pipeline-blockedfix.state"),
-        format!("task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n", std::process::id()),
+        format!(
+            "task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n",
+            std::process::id()
+        ),
     )
     .unwrap();
-    let mock = MockHerdr {
-        agents_json: r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#.to_string(),
-    };
+    let mock = MockActivitiesHerdr::with_agent_list(
+        r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#,
+    );
     // Not part of pipeline 'other': 1 live + full 2 reservation.
     assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock), 3);
 
@@ -468,7 +873,8 @@ fn test_cap_pipeline_double_count_repro() {
     // Repro for Cause (c): pipeline gridown2 has a live builder tieude-gridown2
     // (e.g. after a fallback or non-default builder) without .pipeline sidecar.
     // Must count as 2 slots (the pipeline once), not 3 (builder 1 + reserve 2).
-    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-doublecount-{}", std::process::id()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("quaqua-cap-doublecount-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
     let owner = "quaqua-rs-lead";
 
@@ -480,12 +886,15 @@ fn test_cap_pipeline_double_count_repro() {
     )
     .unwrap();
 
-    let mock = MockHerdr {
-        agents_json: r#"{"result":{"agents":[{"name":"tieude-gridown2","agent_status":"working"}]}}"#.to_string(),
-    };
+    let mock = MockActivitiesHerdr::with_agent_list(
+        r#"{"result":{"agents":[{"name":"tieude-gridown2","agent_status":"working"}]}}"#,
+    );
 
     let count = count_owner_slots(&temp_dir, owner, None, &mock);
-    assert_eq!(count, 2, "a pipeline must count once (2 slots), never double-count to 3");
+    assert_eq!(
+        count, 2,
+        "a pipeline must count once (2 slots), never double-count to 3"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -515,24 +924,45 @@ fn test_cost_budget_parser_and_reader() {
     let _ = std::fs::remove_file(&tmp);
 
     // Non-opencode without fixture returns None
-    assert_eq!(read_worker_cost("sude-test", "ses_123", "/tmp", "omp"), None);
+    assert_eq!(
+        read_worker_cost("sude-test", "ses_123", "/tmp", "omp"),
+        None
+    );
 }
 
 #[test]
 fn test_runs_dir_resolution_n5() {
     // N5: no process-global set_var mutations
     let test_home = Path::new("target/test_home");
-    assert_eq!(resolve_home_quaqua_runs(Some(test_home)), test_home.join("quaqua/runs"));
-    assert_eq!(resolve_default_runs_dir(None, Some(test_home)), test_home.join("quaqua/runs"));
+    assert_eq!(
+        resolve_home_quaqua_runs(Some(test_home)),
+        test_home.join("quaqua/runs")
+    );
+    assert_eq!(
+        resolve_default_runs_dir(None, Some(test_home)),
+        test_home.join("quaqua/runs")
+    );
 
     let override_dir = Path::new("target/override_runs");
-    assert_eq!(resolve_default_runs_dir(Some(override_dir), Some(test_home)), override_dir.to_path_buf());
-    assert_eq!(resolve_home_quaqua_runs(Some(test_home)), test_home.join("quaqua/runs"));
+    assert_eq!(
+        resolve_default_runs_dir(Some(override_dir), Some(test_home)),
+        override_dir.to_path_buf()
+    );
+    assert_eq!(
+        resolve_home_quaqua_runs(Some(test_home)),
+        test_home.join("quaqua/runs")
+    );
 
     // workspace_root: QUAQUA_HOME wins, else $HOME/quaqua
     let quaqua_home = Path::new("target/quaqua_home");
-    assert_eq!(resolve_workspace_root(Some(quaqua_home), Some(test_home)), quaqua_home.to_path_buf());
-    assert_eq!(resolve_workspace_root(None, Some(test_home)), test_home.join("quaqua"));
+    assert_eq!(
+        resolve_workspace_root(Some(quaqua_home), Some(test_home)),
+        quaqua_home.to_path_buf()
+    );
+    assert_eq!(
+        resolve_workspace_root(None, Some(test_home)),
+        test_home.join("quaqua")
+    );
 }
 
 #[test]
@@ -547,7 +977,10 @@ fn test_team_toml_harness_routing() {
     assert!(!cfg.kinds["tieude"].can_review);
     // detu is omp at effort high (anh iu 2026-10-16, 03ed0a7)
     assert_eq!(cfg.kinds["detu"].harness, "omp");
-    assert_eq!(cfg.kinds["detu"].model, "google-antigravity/gemini-3.8-flash");
+    assert_eq!(
+        cfg.kinds["detu"].model,
+        "google-antigravity/gemini-3.8-flash"
+    );
     assert_eq!(cfg.kinds["detu"].effort.as_deref(), Some("high"));
     assert!(!cfg.kinds["detu"].can_review);
     // fallback seeds: tieude->detu, detu->tieude, sude->tieude; claude kinds none
@@ -560,7 +993,10 @@ fn test_team_toml_harness_routing() {
 
     // sude is omp with antigravity gemini high
     assert_eq!(cfg.kinds["sude"].harness, "omp");
-    assert_eq!(cfg.kinds["sude"].model, "google-antigravity/gemini-3.8-flash");
+    assert_eq!(
+        cfg.kinds["sude"].model,
+        "google-antigravity/gemini-3.8-flash"
+    );
     assert_eq!(cfg.kinds["sude"].effort.as_deref(), Some("high"));
     assert!(!cfg.kinds["sude"].can_review);
 
@@ -571,7 +1007,10 @@ fn test_team_toml_harness_routing() {
 
     // suhuynh is opencode with can_review=true (Claude out, anh iu 2026-10-17)
     assert_eq!(cfg.kinds["suhuynh"].harness, "opencode");
-    assert_eq!(cfg.kinds["suhuynh"].model, "opencode-go/deepseek-v4.1-flash");
+    assert_eq!(
+        cfg.kinds["suhuynh"].model,
+        "opencode-go/deepseek-v4.1-flash"
+    );
     assert_eq!(cfg.kinds["suhuynh"].effort.as_deref(), Some("max"));
     assert!(cfg.kinds["suhuynh"].can_review);
 
@@ -579,7 +1018,10 @@ fn test_team_toml_harness_routing() {
     assert_eq!(cfg.kinds["truonglao"].harness, "claude");
     assert!(cfg.kinds["truonglao"].can_review);
     assert_eq!(cfg.kinds.len(), 6, "only the six surviving kinds");
-    assert!(cfg.kinds.values().all(|k| ["opencode", "omp", "claude"].contains(&k.harness.as_str())));
+    assert!(cfg
+        .kinds
+        .values()
+        .all(|k| ["opencode", "omp", "claude"].contains(&k.harness.as_str())));
 
     // strategy.lead_kind defaults to tieude
     assert_eq!(cfg.strategy.lead_kind.as_deref(), Some("tieude"));
@@ -597,60 +1039,94 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     assert_eq!(launch.model, "opencode-go/deepseek-v4.1-flash");
     assert_eq!(launch.effort, "max");
 
-    let cmd = build_launch_cmd(&launch, "quaqua-rs-lead", "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
+    let cmd = build_launch_cmd(
+        &launch,
+        "quaqua-rs-lead",
+        "/runs/test.rules.md",
+        "/runs",
+        "/repo",
+        false,
+    )
+    .unwrap();
     assert_eq!(cmd.split_envs.len(), 2);
     assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
     assert!(cmd.split_envs[0].1.contains("\"variant\":\"max\""));
     assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
 
     // 2. LEAD_KIND env override switches lead to detu (omp)
-    let (kind_detu, launch_detu) = quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("detu")).expect("detu lead");
+    let (kind_detu, launch_detu) =
+        quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("detu")).expect("detu lead");
     assert_eq!(kind_detu, "detu");
     assert_eq!(launch_detu.harness, "omp");
     assert_eq!(launch_detu.model, "google-antigravity/gemini-3.8-flash");
     assert_eq!(launch_detu.effort, "high");
 
-    let cmd_detu = build_launch_cmd(&launch_detu, "quaqua-rs-lead", "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
-    assert!(cmd_detu.split_envs.is_empty());
-    assert_eq!(cmd_detu.agent_args, vec![
-        "--",
-        "--model",
-        "google-antigravity/gemini-3.8-flash",
-        "--thinking",
-        "high",
-        "--auto-approve",
-        "--append-system-prompt",
+    let cmd_detu = build_launch_cmd(
+        &launch_detu,
+        "quaqua-rs-lead",
         "/runs/test.rules.md",
-    ]);
+        "/runs",
+        "/repo",
+        false,
+    )
+    .unwrap();
+    assert!(cmd_detu.split_envs.is_empty());
+    assert_eq!(
+        cmd_detu.agent_args,
+        vec![
+            "--",
+            "--model",
+            "google-antigravity/gemini-3.8-flash",
+            "--thinking",
+            "high",
+            "--auto-approve",
+            "--append-system-prompt",
+            "/runs/test.rules.md",
+        ]
+    );
 
     // 3. LEAD_KIND env override switches lead to ni (claude)
-    let (kind_ni, launch_ni) = quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("ni")).expect("ni lead");
+    let (kind_ni, launch_ni) =
+        quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("ni")).expect("ni lead");
     assert_eq!(kind_ni, "ni");
     assert_eq!(launch_ni.harness, "claude");
     assert_eq!(launch_ni.model, "opus-5.5");
     assert_eq!(launch_ni.effort, "low");
 
-    let cmd_ni = build_launch_cmd(&launch_ni, "quaqua-rs-lead", "/runs/test.rules.md", "/runs", "/repo", false).unwrap();
-    assert!(cmd_ni.split_envs.is_empty());
-    assert_eq!(cmd_ni.agent_args, vec![
-        "--",
-        "--model",
-        "claude-opus-5-5",
-        "--effort",
-        "low",
-        "--append-system-prompt-file",
+    let cmd_ni = build_launch_cmd(
+        &launch_ni,
+        "quaqua-rs-lead",
         "/runs/test.rules.md",
-    ]);
+        "/runs",
+        "/repo",
+        false,
+    )
+    .unwrap();
+    assert!(cmd_ni.split_envs.is_empty());
+    assert_eq!(
+        cmd_ni.agent_args,
+        vec![
+            "--",
+            "--model",
+            "claude-opus-5-5",
+            "--effort",
+            "low",
+            "--append-system-prompt-file",
+            "/runs/test.rules.md",
+        ]
+    );
 
     // 4. Unknown LEAD_KIND falls back to tieude
-    let (kind_fallback, launch_fallback) = quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("nonexistent_kind")).expect("fallback");
+    let (kind_fallback, launch_fallback) =
+        quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("nonexistent_kind")).expect("fallback");
     assert_eq!(kind_fallback, "tieude");
     assert_eq!(launch_fallback.harness, "opencode");
 
     // 5. Missing lead_kind in Strategy defaults to tieude
     let mut cfg_no_lead = cfg.clone();
     cfg_no_lead.strategy.lead_kind = None;
-    let (kind_default, launch_default) = quaqua::lead::spawn::resolve_lead_launch(&cfg_no_lead, None).expect("default");
+    let (kind_default, launch_default) =
+        quaqua::lead::spawn::resolve_lead_launch(&cfg_no_lead, None).expect("default");
     assert_eq!(kind_default, "tieude");
     assert_eq!(launch_default.harness, "opencode");
 }
@@ -694,62 +1170,9 @@ fn test_cli_cap_smoke() {
 }
 #[test]
 fn test_taskforce_dual_lens_cap_reservation() {
-    struct MockHerdr;
-    impl HerdrOps for MockHerdr {
-        fn run(&self, _: &[&str]) -> std::io::Result<Output> {
-            Ok(Output {
-                status: std::os::unix::process::ExitStatusExt::from_raw(0),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-        fn agent_list(&self) -> std::io::Result<String> {
-            Ok(r#"{"result":{"agents":[]}}"#.to_string())
-        }
-        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
-            Ok((false, String::new()))
-        }
-        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> {
-            Ok(String::new())
-        }
-        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> {
-            self.run(&[])
-        }
-        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> {
-            self.run(&[])
-        }
-        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
-            self.run(&[])
-        }
-        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> {
-            self.run(&[])
-        }
-        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool {
-            true
-        }
-        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> {
-            Ok(String::new())
-        }
-        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> {
-            self.run(&[])
-        }
-        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> {
-            self.run(&[])
-        }
-        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> {
-            self.run(&[])
-        }
-        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> {
-            self.run(&[])
-        }
-        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<Child> {
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "mock"))
-        }
-    }
-
     let tmp = std::env::temp_dir().join(format!("quaqua-cap-tf-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
-    let mock = MockHerdr;
+    let mock = MockActivitiesHerdr::with_agent_list(r#"{"result":{"agents":[]}}"#);
 
     // Zero workers, no state -> 0
     assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 0);
@@ -758,16 +1181,24 @@ fn test_taskforce_dual_lens_cap_reservation() {
     let state_file = tmp.join("taskforce-mytest.state");
     std::fs::write(
         &state_file,
-        format!("task=mytest\nkind=dual-lens\nowner=cos\nfinished=0\ntaskforce_pid={}\n", std::process::id()),
-    ).unwrap();
+        format!(
+            "task=mytest\nkind=dual-lens\nowner=cos\nfinished=0\ntaskforce_pid={}\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
 
     assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 2);
 
     // Finished dual-lens -> 0 slots reserved
     std::fs::write(
         &state_file,
-        format!("task=mytest\nkind=dual-lens\nowner=cos\nfinished=1\ntaskforce_pid={}\n", std::process::id()),
-    ).unwrap();
+        format!(
+            "task=mytest\nkind=dual-lens\nowner=cos\nfinished=1\ntaskforce_pid={}\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
     assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 0);
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -787,22 +1218,36 @@ fn test_pipeline_blockers_none_exemption() {
     assert!(!has_real_blockers("## Blockers\nNone…\n"));
     assert!(!has_real_blockers("## Blockers\nNone.\n"));
     assert!(!has_real_blockers("## Blockers\n* none…\n"));
-    assert!(!has_real_blockers("## Blockers\n\n- none\n\n## Lessons\n- none\n"));
+    assert!(!has_real_blockers(
+        "## Blockers\n\n- none\n\n## Lessons\n- none\n"
+    ));
     assert!(!has_real_blockers("Just plan text\n\n## Lessons\n- none\n"));
     // Informational notes after None must not be treated as blockers
     assert!(!has_real_blockers("## Blockers\n- None. All done...\n"));
-    assert!(!has_real_blockers("## Blockers\n- None. All 9 tests passed.\n"));
+    assert!(!has_real_blockers(
+        "## Blockers\n- None. All 9 tests passed.\n"
+    ));
     assert!(!has_real_blockers("## Blockers\n- **None**. All done\n"));
     assert!(!has_real_blockers("## Blockers\n**None**. All done...\n"));
     assert!(!has_real_blockers("## Blockers\n- None... all clear\n"));
 
     // Real blockers must return true
-    assert!(has_real_blockers("## Blockers\n- cannot plan without the spec\n"));
-    assert!(has_real_blockers("## Blockers\n- implementation incomplete\n"));
-    assert!(has_real_blockers("## Blockers\n- none\n- also a real blocker\n"));
+    assert!(has_real_blockers(
+        "## Blockers\n- cannot plan without the spec\n"
+    ));
+    assert!(has_real_blockers(
+        "## Blockers\n- implementation incomplete\n"
+    ));
+    assert!(has_real_blockers(
+        "## Blockers\n- none\n- also a real blocker\n"
+    ));
     assert!(has_real_blockers("## Blockers\n- None of the tests pass\n"));
-    assert!(has_real_blockers("## Blockers\n- none: cannot connect to db\n"));
-    assert!(has_real_blockers("## Blockers\n- None - build compilation failed\n"));
+    assert!(has_real_blockers(
+        "## Blockers\n- none: cannot connect to db\n"
+    ));
+    assert!(has_real_blockers(
+        "## Blockers\n- None - build compilation failed\n"
+    ));
 }
 
 #[test]
@@ -830,7 +1275,10 @@ fn test_pipeline_rounds_raise_only_on_resume() {
             state.rounds = r;
         }
     }
-    assert_eq!(state.rounds, 3, "resuming with lower rounds must not lower the cap");
+    assert_eq!(
+        state.rounds, 3,
+        "resuming with lower rounds must not lower the cap"
+    );
 
     let resume_rounds_higher: Option<u32> = Some(5);
     if let Some(r) = resume_rounds_higher {
@@ -838,7 +1286,10 @@ fn test_pipeline_rounds_raise_only_on_resume() {
             state.rounds = r;
         }
     }
-    assert_eq!(state.rounds, 5, "resuming with higher rounds must raise the cap");
+    assert_eq!(
+        state.rounds, 5,
+        "resuming with higher rounds must raise the cap"
+    );
 }
 
 #[test]
@@ -846,9 +1297,14 @@ fn test_pipeline_outcome_no_changes_detection() {
     let content = "Outcome: no changes\n\n## Lessons\n- none\n";
     let is_no_changes = content.lines().any(|line| {
         let t = line.trim();
-        if let Some(rest) = t.strip_prefix("Outcome:").or_else(|| t.strip_prefix("outcome:")) {
+        if let Some(rest) = t
+            .strip_prefix("Outcome:")
+            .or_else(|| t.strip_prefix("outcome:"))
+        {
             let rest_upper = rest.trim().to_ascii_uppercase();
-            rest_upper.starts_with("NO CHANGES") || rest_upper.starts_with("NO-OP") || rest_upper.starts_with("NO OP")
+            rest_upper.starts_with("NO CHANGES")
+                || rest_upper.starts_with("NO-OP")
+                || rest_upper.starts_with("NO OP")
         } else {
             false
         }
@@ -858,9 +1314,14 @@ fn test_pipeline_outcome_no_changes_detection() {
     let content_changes = "Outcome: modified 2 files\n\n## Lessons\n- none\n";
     let is_no_changes = content_changes.lines().any(|line| {
         let t = line.trim();
-        if let Some(rest) = t.strip_prefix("Outcome:").or_else(|| t.strip_prefix("outcome:")) {
+        if let Some(rest) = t
+            .strip_prefix("Outcome:")
+            .or_else(|| t.strip_prefix("outcome:"))
+        {
             let rest_upper = rest.trim().to_ascii_uppercase();
-            rest_upper.starts_with("NO CHANGES") || rest_upper.starts_with("NO-OP") || rest_upper.starts_with("NO OP")
+            rest_upper.starts_with("NO CHANGES")
+                || rest_upper.starts_with("NO-OP")
+                || rest_upper.starts_with("NO OP")
         } else {
             false
         }
@@ -918,9 +1379,14 @@ max_workers_per_orchestrator = 3
     let resolved = quaqua::config::resolve(base_cfg.clone(), Some("zimage")).unwrap();
     assert_eq!(resolved.limits.max_workers_per_orchestrator, 3);
 
-    let pipe_weight = resolved.limits.weights.get("pipeline").copied().unwrap_or(2);
+    let pipe_weight = resolved
+        .limits
+        .weights
+        .get("pipeline")
+        .copied()
+        .unwrap_or(2);
     let slots_used = 2; // owner has 2 slots in use
-    // For standard project (cap 4): 2 + 2 <= 4 -> ok
+                        // For standard project (cap 4): 2 + 2 <= 4 -> ok
     assert!(slots_used + pipe_weight <= base_cfg.limits.max_workers_per_orchestrator);
     // For zimage (cap 3): 2 + 2 > 3 -> refused
     assert!(slots_used + pipe_weight > resolved.limits.max_workers_per_orchestrator);
@@ -986,8 +1452,15 @@ fn test_launch_args_carry_exact_model_and_effort() {
             effort: "max".into(),
         }
     );
-    let cmd = build_launch_cmd(&oc, "tieude-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
-        .unwrap();
+    let cmd = build_launch_cmd(
+        &oc,
+        "tieude-test",
+        "/r/x.rules.md",
+        "~/quaqua/runs",
+        "/repo/.wt/x",
+        false,
+    )
+    .unwrap();
     assert_eq!(cmd.split_envs.len(), 2);
     assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
     assert_eq!(
@@ -995,7 +1468,10 @@ fn test_launch_args_carry_exact_model_and_effort() {
         r#"{"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"max"},"instructions":["/r/x.rules.md"]}"#
     );
     assert_eq!(cmd.split_envs[1].0, "XDG_STATE_HOME");
-    assert_eq!(cmd.split_envs[1].1, "~/quaqua/runs/.opencode-state/tieude-test");
+    assert_eq!(
+        cmd.split_envs[1].1,
+        "~/quaqua/runs/.opencode-state/tieude-test"
+    );
 
     // opencode carries "low" variant as object
     let oc_low = resolve_launch(
@@ -1003,15 +1479,25 @@ fn test_launch_args_carry_exact_model_and_effort() {
         "tieude",
     )
     .unwrap();
-    let cmd_low = build_launch_cmd(&oc_low, "tieude-low", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
-        .unwrap();
+    let cmd_low = build_launch_cmd(
+        &oc_low,
+        "tieude-low",
+        "/r/x.rules.md",
+        "~/quaqua/runs",
+        "/repo/.wt/x",
+        false,
+    )
+    .unwrap();
     assert_eq!(
         cmd_low.split_envs[0].1,
         r#"{"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"low"},"instructions":["/r/x.rules.md"]}"#
     );
     assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
     assert_eq!(cmd_low.split_envs[1].0, "XDG_STATE_HOME");
-    assert_eq!(cmd_low.split_envs[1].1, "~/quaqua/runs/.opencode-state/tieude-low");
+    assert_eq!(
+        cmd_low.split_envs[1].1,
+        "~/quaqua/runs/.opencode-state/tieude-low"
+    );
 
     // omp: `--model` + `--thinking` (`omp --help`).
     let omp = resolve_launch(
@@ -1019,8 +1505,15 @@ fn test_launch_args_carry_exact_model_and_effort() {
         "sude",
     )
     .unwrap();
-    let cmd = build_launch_cmd(&omp, "sude-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", false)
-        .unwrap();
+    let cmd = build_launch_cmd(
+        &omp,
+        "sude-test",
+        "/r/x.rules.md",
+        "~/quaqua/runs",
+        "/repo/.wt/x",
+        false,
+    )
+    .unwrap();
     assert!(cmd.split_envs.is_empty(), "omp takes no pane env");
     let joined = cmd.agent_args.join(" ");
     assert!(
@@ -1031,8 +1524,15 @@ fn test_launch_args_carry_exact_model_and_effort() {
 
     // claude: `--model` (mapped to claude-*) + `--effort` (`claude --help`).
     let cl = resolve_launch(&kind("claude", "opus-5.5", Some("high")), "truonglao").unwrap();
-    let cmd = build_launch_cmd(&cl, "truonglao-test", "/r/x.rules.md", "~/quaqua/runs", "/repo/.wt/x", true)
-        .unwrap();
+    let cmd = build_launch_cmd(
+        &cl,
+        "truonglao-test",
+        "/r/x.rules.md",
+        "~/quaqua/runs",
+        "/repo/.wt/x",
+        true,
+    )
+    .unwrap();
     let joined = cmd.agent_args.join(" ");
     assert!(joined.contains("--model claude-opus-5-5"), "{joined}");
     assert!(joined.contains("--effort high"), "{joined}");
@@ -1054,7 +1554,11 @@ fn test_launch_fails_closed_without_model_or_effort() {
 
     // opencode model variant vocabulary is enforced per-model
     let e = resolve_launch(
-        &kind("opencode", "opencode-go/deepseek-v4.1-flash", Some("medium")),
+        &kind(
+            "opencode",
+            "opencode-go/deepseek-v4.1-flash",
+            Some("medium"),
+        ),
         "tieude",
     )
     .unwrap_err()
@@ -1063,7 +1567,11 @@ fn test_launch_fails_closed_without_model_or_effort() {
 
     // openrouter model variant vocabulary is matched on last segment
     let e = resolve_launch(
-        &kind("opencode", "openrouter/deepseek/deepseek-v4.1-flash", Some("medium")),
+        &kind(
+            "opencode",
+            "openrouter/deepseek/deepseek-v4.1-flash",
+            Some("medium"),
+        ),
         "tieude",
     )
     .unwrap_err()
@@ -1104,16 +1612,25 @@ fn test_fallback_header_line_and_stamping() {
         Some("fallback: sude→detu (agent_not_ready)")
     );
     // no fallback in the metadata -> no header
-    assert_eq!(fallback_header_line(r#"{"name":"x","kind":"tieude"}"#), None);
+    assert_eq!(
+        fallback_header_line(r#"{"name":"x","kind":"tieude"}"#),
+        None
+    );
     // malformed / incomplete -> no header (never a panic)
     assert_eq!(fallback_header_line("not json"), None);
-    assert_eq!(fallback_header_line(r#"{"fallback":{"from":"sude"}}"#), None);
+    assert_eq!(
+        fallback_header_line(r#"{"fallback":{"from":"sude"}}"#),
+        None
+    );
 
     let report = "# sude-x — report\n\n## Lessons\n- none\n";
     let stamped = prepend_header(report, "fallback: sude→detu (agent_not_ready)").unwrap();
     assert!(stamped.starts_with("fallback: sude→detu (agent_not_ready)\n# sude-x"));
     // idempotent: already present -> None (no rewrite)
-    assert_eq!(prepend_header(&stamped, "fallback: sude→detu (agent_not_ready)"), None);
+    assert_eq!(
+        prepend_header(&stamped, "fallback: sude→detu (agent_not_ready)"),
+        None
+    );
 }
 
 #[test]
@@ -1135,7 +1652,10 @@ fn test_start_failure_reason_reads_herdr_error_code() {
         start_failure_reason(&out(r#"{"error":{"code":"quota_exceeded"}}"#)),
         "quota_exceeded"
     );
-    assert_eq!(start_failure_reason(&out("plain text, not json")), "start-failed");
+    assert_eq!(
+        start_failure_reason(&out("plain text, not json")),
+        "start-failed"
+    );
 }
 
 #[test]
@@ -1170,7 +1690,9 @@ fn test_fallback_kind_resolution() {
     assert_eq!(fb_kind.harness, "opencode");
 
     // No fallback returns Ok(None)
-    assert!(fallback_kind(&cfg, &cfg.kinds["detu"], "detu").unwrap().is_none());
+    assert!(fallback_kind(&cfg, &cfg.kinds["detu"], "detu")
+        .unwrap()
+        .is_none());
 
     // Fallback naming a missing kind returns Err
     let mut bad_kind = cfg.kinds["tieude"].clone();
@@ -1210,7 +1732,12 @@ impl GitOps for SpawnTestGit {
     fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
         false
     }
-    fn worktree_add_existing(&self, _repo: &Path, _branch: &str, _wt: &Path) -> std::io::Result<Output> {
+    fn worktree_add_existing(
+        &self,
+        _repo: &Path,
+        _branch: &str,
+        _wt: &Path,
+    ) -> std::io::Result<Output> {
         self.run_in(_repo, &[])
     }
     fn worktree_remove(&self, _repo: &Path, wt: &Path) -> std::io::Result<Output> {
@@ -1237,129 +1764,6 @@ impl GitOps for SpawnTestGit {
     }
     fn diff_and_status(&self, _cwd: &Path) -> (String, String) {
         ("dh".to_string(), "clean".to_string())
-    }
-}
-
-struct FallbackSpyHerdr {
-    agent_starts: std::cell::RefCell<Vec<(String, String)>>,
-    fail_harness: Option<String>,
-}
-
-impl HerdrOps for FallbackSpyHerdr {
-    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
-        Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(0),
-            stdout: b"{\"snapshot\":{\"workspaces\":[],\"tabs\":[],\"panes\":[],\"layouts\":[],\"agents\":[]}}".to_vec(),
-            stderr: Vec::new(),
-        })
-    }
-    fn agent_list(&self) -> std::io::Result<String> {
-        Ok(r#"{"result":{"agents":[]}}"#.to_string())
-    }
-    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
-        Ok((false, String::new()))
-    }
-    fn agent_read(&self, _name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
-        Ok(String::new())
-    }
-    fn agent_start(
-        &self,
-        name: &str,
-        kind: &str,
-        _pane: &str,
-        _timeout_ms: u32,
-        _extra_args: &[&str],
-    ) -> std::io::Result<Output> {
-        self.agent_starts
-            .borrow_mut()
-            .push((name.to_string(), kind.to_string()));
-        let should_fail = match &self.fail_harness {
-            Some(fh) => fh == "*" || fh == kind,
-            None => false,
-        };
-        if should_fail {
-            Ok(Output {
-                status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
-                stdout: b"{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"blocked during startup\"}}".to_vec(),
-                stderr: Vec::new(),
-            })
-        } else {
-            Ok(Output {
-                status: std::os::unix::process::ExitStatusExt::from_raw(0),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-    fn pane_split(
-        &self,
-        _cwd: &str,
-        _owner: &str,
-        _envs: &[(&str, &str)],
-    ) -> std::io::Result<Output> {
-        Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(0),
-            stdout: b"{\"result\":{\"pane\":{\"pane_id\":\"%1\"}}}".to_vec(),
-            stderr: Vec::new(),
-        })
-    }
-    fn pane_close(&self, _pane: &str) -> std::io::Result<Output> {
-        Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        })
-    }
-    fn pane_report_metadata(&self, _pane: &str, _tokens: &[&str]) -> std::io::Result<Output> {
-        Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        })
-    }
-    fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
-        false
-    }
-    fn pane_read(&self, _pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
-        Ok(String::new())
-    }
-    fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
-        Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        })
-    }
-    fn agent_send_keys(&self, _name: &str, _key: &str) -> std::io::Result<Output> {
-        Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        })
-    }
-    fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
-        let code = if self.fail_harness.is_some() { 1 } else { 0 };
-        Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(code << 8),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        })
-    }
-    fn agent_prompt_nowait(&self, _name: &str, _prompt: &str) -> std::io::Result<Output> {
-        Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        })
-    }
-    fn agent_prompt_wait_background(
-        &self,
-        _name: &str,
-        _prompt: &str,
-        _timeout_ms: u32,
-        _log_file: std::fs::File,
-    ) -> std::io::Result<Child> {
-        unimplemented!()
     }
 }
 
@@ -1401,7 +1805,15 @@ fn test_cfg_with_fallback() -> config::Config {
 struct EnvLockGuard;
 static ENV_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn lock_env() -> EnvLockGuard {
-    while ENV_BUSY.compare_exchange_weak(false, true, std::sync::atomic::Ordering::Acquire, std::sync::atomic::Ordering::Relaxed).is_err() {
+    while ENV_BUSY
+        .compare_exchange_weak(
+            false,
+            true,
+            std::sync::atomic::Ordering::Acquire,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
         std::thread::yield_now();
     }
     EnvLockGuard
@@ -1434,10 +1846,25 @@ fn test_spawn_worker_fallback_scenarios() {
     {
         let cfg = test_cfg_with_fallback();
         let git = SpawnTestGit;
-        let herdr = FallbackSpyHerdr {
-            agent_starts: std::cell::RefCell::new(Vec::new()),
-            fail_harness: Some("omp".to_string()),
-        };
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.pane_split",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+            }),
+        );
+        mock.register(
+            "herdr.agent_start:omp",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content:
+                    r#"{"error":{"code":"agent_not_ready","message":"blocked during startup"}}"#
+                        .to_string(),
+            }),
+        );
+        mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+            name: String::new(),
+        }));
+        let herdr = MockActivitiesHerdr::new(mock);
 
         let opts = parse_spawn_args(&[
             "sude-fbtest".to_string(),
@@ -1453,8 +1880,12 @@ fn test_spawn_worker_fallback_scenarios() {
             res.err()
         );
 
-        let starts = herdr.agent_starts.borrow().clone();
-        assert_eq!(starts.len(), 2, "expected exactly 2 starts (primary, fallback)");
+        let starts = herdr.agent_starts();
+        assert_eq!(
+            starts.len(),
+            2,
+            "expected exactly 2 starts (primary, fallback)"
+        );
         assert_eq!(starts[0], ("sude-fbtest".to_string(), "omp".to_string()));
         assert_eq!(
             starts[1],
@@ -1465,7 +1896,8 @@ fn test_spawn_worker_fallback_scenarios() {
         assert!(srt_path.is_file(), "srt.json must be written");
         let srt_content = std::fs::read_to_string(&srt_path).unwrap();
         assert!(
-            srt_content.contains(r#""fallback":{"from":"sude","to":"detu","reason":"agent_not_ready"}"#),
+            srt_content
+                .contains(r#""fallback":{"from":"sude","to":"detu","reason":"agent_not_ready"}"#),
             "{srt_content}"
         );
         assert!(
@@ -1486,10 +1918,33 @@ fn test_spawn_worker_fallback_scenarios() {
     {
         let cfg = test_cfg_with_fallback();
         let git = SpawnTestGit;
-        let herdr = FallbackSpyHerdr {
-            agent_starts: std::cell::RefCell::new(Vec::new()),
-            fail_harness: Some("*".to_string()),
-        };
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.pane_split",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+            }),
+        );
+        mock.register(
+            "herdr.agent_start:omp",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content:
+                    r#"{"error":{"code":"agent_not_ready","message":"blocked during startup"}}"#
+                        .to_string(),
+            }),
+        );
+        mock.register(
+            "herdr.agent_start:opencode",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content:
+                    r#"{"error":{"code":"agent_not_ready","message":"blocked during startup"}}"#
+                        .to_string(),
+            }),
+        );
+        mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+            name: String::new(),
+        }));
+        let herdr = MockActivitiesHerdr::new(mock);
 
         let opts = parse_spawn_args(&[
             "sude-onehop".to_string(),
@@ -1501,7 +1956,7 @@ fn test_spawn_worker_fallback_scenarios() {
         let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
         assert!(res.is_err(), "must error when fallback fails");
 
-        let starts = herdr.agent_starts.borrow().clone();
+        let starts = herdr.agent_starts();
         assert_eq!(starts.len(), 2, "expected exactly 2 starts (one hop max)");
     }
 
@@ -1510,10 +1965,25 @@ fn test_spawn_worker_fallback_scenarios() {
         let mut cfg = test_cfg_with_fallback();
         cfg.kinds.get_mut("sude").unwrap().fallback = Some("ghost".to_string());
         let git = SpawnTestGit;
-        let herdr = FallbackSpyHerdr {
-            agent_starts: std::cell::RefCell::new(Vec::new()),
-            fail_harness: Some("omp".to_string()),
-        };
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.pane_split",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+            }),
+        );
+        mock.register(
+            "herdr.agent_start:omp",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content:
+                    r#"{"error":{"code":"agent_not_ready","message":"blocked during startup"}}"#
+                        .to_string(),
+            }),
+        );
+        mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+            name: String::new(),
+        }));
+        let herdr = MockActivitiesHerdr::new(mock);
 
         let opts = parse_spawn_args(&[
             "sude-fbmiss".to_string(),
@@ -1525,7 +1995,7 @@ fn test_spawn_worker_fallback_scenarios() {
         let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
         assert!(res.is_err(), "must error when fallback kind is missing");
 
-        let starts = herdr.agent_starts.borrow().clone();
+        let starts = herdr.agent_starts();
         assert_eq!(
             starts.len(),
             1,
@@ -1538,10 +2008,25 @@ fn test_spawn_worker_fallback_scenarios() {
         let mut cfg = test_cfg_with_fallback();
         cfg.kinds.get_mut("ni").unwrap().fallback = Some("detu".to_string());
         let git = SpawnTestGit;
-        let herdr = FallbackSpyHerdr {
-            agent_starts: std::cell::RefCell::new(Vec::new()),
-            fail_harness: Some("claude".to_string()),
-        };
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.pane_split",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+            }),
+        );
+        mock.register(
+            "herdr.agent_start:claude",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content:
+                    r#"{"error":{"code":"agent_not_ready","message":"blocked during startup"}}"#
+                        .to_string(),
+            }),
+        );
+        mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+            name: String::new(),
+        }));
+        let herdr = MockActivitiesHerdr::new(mock);
 
         let opts = parse_spawn_args(&[
             "--review".to_string(),
@@ -1556,7 +2041,7 @@ fn test_spawn_worker_fallback_scenarios() {
             res.is_err(),
             "must refuse fallback to non-review kind when in review mode"
         );
-        let starts = herdr.agent_starts.borrow().clone();
+        let starts = herdr.agent_starts();
         assert_eq!(
             starts.len(),
             1,
@@ -1587,10 +2072,7 @@ fn test_spawn_worker_default_grid_tab_from_owner() {
 
     let cfg = test_cfg_with_fallback();
     let git = SpawnTestGit;
-    let herdr = FallbackSpyHerdr {
-        agent_starts: std::cell::RefCell::new(Vec::new()),
-        fail_harness: None,
-    };
+    let herdr = MockActivitiesHerdr::for_spawn();
     let spawn_and_read_tab = |name: &str| -> String {
         let opts = parse_spawn_args(&[
             name.to_string(),
@@ -1635,8 +2117,14 @@ fn test_default_grid_tab_helper() {
     use quaqua::worker::spawn::default_grid_tab;
 
     // Lead owners (<slug>-lead) resolve to <slug>-workers
-    assert_eq!(default_grid_tab("quaqua-grid-lead", "myrepo"), "quaqua-grid-workers");
-    assert_eq!(default_grid_tab("quaqua-rs-lead", "quaqua"), "quaqua-rs-workers");
+    assert_eq!(
+        default_grid_tab("quaqua-grid-lead", "myrepo"),
+        "quaqua-grid-workers"
+    );
+    assert_eq!(
+        default_grid_tab("quaqua-rs-lead", "quaqua"),
+        "quaqua-rs-workers"
+    );
 
     // Non-lead owners (cos, arbitrary names) resolve to <repo>-workers
     assert_eq!(default_grid_tab("cos", "myrepo"), "myrepo-workers");
@@ -1666,10 +2154,7 @@ fn test_spawn_worker_grid_timeout_fails() {
 
     let cfg = test_cfg_with_fallback();
     let git = SpawnTestGit;
-    let herdr = FallbackSpyHerdr {
-        agent_starts: std::cell::RefCell::new(Vec::new()),
-        fail_harness: None,
-    };
+    let herdr = MockActivitiesHerdr::for_spawn();
 
     let opts = parse_spawn_args(&[
         "sude-gridfail".to_string(),
@@ -1690,7 +2175,11 @@ fn test_spawn_worker_grid_timeout_fails() {
     let err = res.expect_err("spawn_worker must fail when grid check times out");
     assert_eq!(err.0, 1);
     assert!(err.1.contains("grid"), "error must mention grid: {}", err.1);
-    assert!(err.1.contains("sude-gridfail"), "error must name the live worker: {}", err.1);
+    assert!(
+        err.1.contains("sude-gridfail"),
+        "error must name the live worker: {}",
+        err.1
+    );
 }
 
 #[test]
@@ -1714,31 +2203,17 @@ fn test_cleanup_worker_grid_timeout_fails() {
     std::env::set_var("HERDR_BIN_PATH", "/dev/null");
 
     let git = SpawnTestGit;
-    struct CleanupTestHerdr;
-    impl HerdrOps for CleanupTestHerdr {
-        fn run(&self, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
-        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
-            Ok((true, r#"{"result":{"agent":{"pane_id":"w1:p2"}}}"#.to_string()))
-        }
-        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
-        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> { unimplemented!() }
-        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
-            Ok(Output { status: std::process::ExitStatus::default(), stdout: vec![], stderr: vec![] })
-        }
-        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool { unimplemented!() }
-        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
-        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<Child> { unimplemented!() }
-    }
-    let herdr = CleanupTestHerdr;
+    let herdr = MockActivitiesHerdr::for_cleanup("w1:p2");
 
     let res = quaqua::worker::cleanup::cleanup_worker("sude-gridfail", &repo_dir, &git, &herdr);
+    assert_eq!(
+        herdr
+            .calls()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["herdr.agent_get", "herdr.pane_close"]
+    );
 
     let wt_exists = wt.exists();
     let owner_file_exists = owner_file.exists();
@@ -1752,110 +2227,24 @@ fn test_cleanup_worker_grid_timeout_fails() {
     let err = res.expect_err("cleanup_worker must fail when grid check times out");
     assert_eq!(err.0, 1);
     assert!(err.1.contains("grid"), "error must mention grid: {}", err.1);
-    assert!(!wt_exists, "worktree must be removed even when grid check fails");
-    assert!(!owner_file_exists, "metadata must be removed even when grid check fails");
+    assert!(
+        !wt_exists,
+        "worktree must be removed even when grid check fails"
+    );
+    assert!(
+        !owner_file_exists,
+        "metadata must be removed even when grid check fails"
+    );
 }
 
 // --- quaqua worker stop ---------------------------------------------------
 
 use quaqua::worker::stop::{harness_from_info, parse_stop_args, stop_keys, stop_worker};
-use std::sync::Mutex;
 
 fn agent_get_json(harness: &str) -> String {
     format!(
         "{{\"result\":{{\"agent\":{{\"agent\":\"{harness}\",\"name\":\"tieude-x\",\"pane_id\":\"w1:p2\"}}}}}}"
     )
-}
-
-/// Records the keys stop sends; everything else is unused by stop.
-/// `agent_get` is either an Ok body or an io failure (herdr unreachable).
-struct StopSpy {
-    agent_get: Result<String, String>,
-    sent: Mutex<Vec<(String, String)>>,
-}
-
-impl StopSpy {
-    fn new(agent_json: &str) -> Self {
-        StopSpy {
-            agent_get: Ok(agent_json.to_string()),
-            sent: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// herdr itself cannot be reached (binary missing, socket down).
-    fn new_unreachable(io_message: &str) -> Self {
-        StopSpy {
-            agent_get: Err(io_message.to_string()),
-            sent: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn calls(&self) -> Vec<(String, String)> {
-        self.sent.lock().unwrap().clone()
-    }
-
-    fn ok() -> std::io::Result<Output> {
-        Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        })
-    }
-}
-
-impl HerdrOps for StopSpy {
-    fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn agent_list(&self) -> std::io::Result<String> {
-        unimplemented!()
-    }
-    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
-        match &self.agent_get {
-            Ok(body) => Ok((true, body.clone())),
-            Err(message) => Err(std::io::Error::new(std::io::ErrorKind::Other, message.clone())),
-        }
-    }
-    fn agent_read(&self, _name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
-        unimplemented!()
-    }
-    fn agent_start(&self, _name: &str, _kind: &str, _pane: &str, _timeout_ms: u32, _extra_args: &[&str]) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn pane_split(&self, _cwd: &str, _owner: &str, _envs: &[(&str, &str)]) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn pane_close(&self, _pane: &str) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn pane_report_metadata(&self, _pane: &str, _tokens: &[&str]) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn pane_wait_output(&self, _pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
-        unimplemented!()
-    }
-    fn pane_read(&self, _pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
-        unimplemented!()
-    }
-    fn pane_send_keys(&self, _pane: &str, _key: &str) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn agent_send_keys(&self, name: &str, key: &str) -> std::io::Result<Output> {
-        self.sent
-            .lock()
-            .unwrap()
-            .push((name.to_string(), key.to_string()));
-        StopSpy::ok()
-    }
-    fn agent_wait_idle(&self, _name: &str, _timeout_ms: u32) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn agent_prompt_nowait(&self, _name: &str, _prompt: &str) -> std::io::Result<Output> {
-        unimplemented!()
-    }
-    fn agent_prompt_wait_background(&self, _name: &str, _prompt: &str, _timeout_ms: u32, _log_file: std::fs::File) -> std::io::Result<Child> {
-        unimplemented!()
-    }
 }
 
 #[test]
@@ -1871,10 +2260,10 @@ fn test_stop_keys_by_harness() {
 
 #[test]
 fn test_stop_opencode_sends_esc_twice_in_order() {
-    let spy = StopSpy::new(&agent_get_json("opencode"));
-    stop_worker("tieude-x", &spy).unwrap();
+    let herdr = MockActivitiesHerdr::with_agent_get(&agent_get_json("opencode"));
+    stop_worker("tieude-x", &herdr).unwrap();
     assert_eq!(
-        spy.calls(),
+        herdr.send_keys_calls(),
         vec![
             ("tieude-x".to_string(), "esc".to_string()),
             ("tieude-x".to_string(), "esc".to_string()),
@@ -1884,52 +2273,81 @@ fn test_stop_opencode_sends_esc_twice_in_order() {
 
 #[test]
 fn test_stop_omp_sends_esc_once() {
-    let spy = StopSpy::new(&agent_get_json("omp"));
-    stop_worker("sude-x", &spy).unwrap();
-    assert_eq!(spy.calls(), vec![("sude-x".to_string(), "esc".to_string())]);
+    let herdr = MockActivitiesHerdr::with_agent_get(&agent_get_json("omp"));
+    stop_worker("sude-x", &herdr).unwrap();
+    assert_eq!(
+        herdr.send_keys_calls(),
+        vec![("sude-x".to_string(), "esc".to_string())]
+    );
 }
 
 #[test]
 fn test_stop_unmapped_harness_fails_closed_and_sends_nothing() {
     for harness in ["claude", "aider"] {
-        let spy = StopSpy::new(&agent_get_json(harness));
-        let err = stop_worker("tieude-x", &spy).unwrap_err();
+        let herdr = MockActivitiesHerdr::with_agent_get(&agent_get_json(harness));
+        let err = stop_worker("tieude-x", &herdr).unwrap_err();
         assert_eq!(err.0, 1, "exit code for {harness}");
-        assert!(err.1.contains(harness), "error names harness {harness}: {}", err.1);
-        assert!(err.1.contains("tieude-x"), "error names the worker: {}", err.1);
-        assert!(spy.calls().is_empty(), "no keys for {harness}");
+        assert!(
+            err.1.contains(harness),
+            "error names harness {harness}: {}",
+            err.1
+        );
+        assert!(
+            err.1.contains("tieude-x"),
+            "error names the worker: {}",
+            err.1
+        );
+        assert!(herdr.send_keys_calls().is_empty(), "no keys for {harness}");
     }
 }
 
 #[test]
 fn test_stop_missing_agent_fails_closed_and_sends_nothing() {
-    let spy = StopSpy::new(r#"{"error":{"code":"agent_not_found","message":"no such agent"}}"#);
-    let err = stop_worker("tieude-gone", &spy).unwrap_err();
+    let herdr = MockActivitiesHerdr::with_agent_get(
+        r#"{"error":{"code":"agent_not_found","message":"no such agent"}}"#,
+    );
+    let err = stop_worker("tieude-gone", &herdr).unwrap_err();
     assert_eq!(err.0, 1);
     assert!(err.1.contains("tieude-gone"), "{}", err.1);
-    assert!(spy.calls().is_empty());
+    assert!(herdr.send_keys_calls().is_empty());
 }
 
 #[test]
 fn test_stop_harness_from_info_parses_only_a_real_agent() {
-    assert_eq!(harness_from_info(&agent_get_json("opencode")).as_deref(), Some("opencode"));
-    assert_eq!(harness_from_info(&agent_get_json("omp")).as_deref(), Some("omp"));
+    assert_eq!(
+        harness_from_info(&agent_get_json("opencode")).as_deref(),
+        Some("opencode")
+    );
+    assert_eq!(
+        harness_from_info(&agent_get_json("omp")).as_deref(),
+        Some("omp")
+    );
     // Agent gone, harness missing/empty, or garbage: no harness, nothing to send.
-    assert_eq!(harness_from_info(r#"{"error":{"code":"agent_not_found"}}"#), None);
-    assert_eq!(harness_from_info(r#"{"result":{"agent":{"agent":""}}}"#), None);
+    assert_eq!(
+        harness_from_info(r#"{"error":{"code":"agent_not_found"}}"#),
+        None
+    );
+    assert_eq!(
+        harness_from_info(r#"{"result":{"agent":{"agent":""}}}"#),
+        None
+    );
     assert_eq!(harness_from_info(r#"{"result":{}}"#), None);
     assert_eq!(harness_from_info("not json"), None);
 }
 
 #[test]
 fn test_stop_unreachable_herdr_is_reported_as_io_not_missing_agent() {
-    let spy = StopSpy::new_unreachable("No such file or directory (os error 2)");
-    let err = stop_worker("tieude-x", &spy).unwrap_err();
+    let herdr = MockActivitiesHerdr::with_unreachable("No such file or directory (os error 2)");
+    let err = stop_worker("tieude-x", &herdr).unwrap_err();
     assert_eq!(err.0, 1);
     assert!(err.1.contains("cannot reach herdr"), "{}", err.1);
     assert!(err.1.contains("No such file or directory"), "{}", err.1);
-    assert!(!err.1.contains("not running"), "herdr I/O is not a missing agent: {}", err.1);
-    assert!(spy.calls().is_empty());
+    assert!(
+        !err.1.contains("not running"),
+        "herdr I/O is not a missing agent: {}",
+        err.1
+    );
+    assert!(herdr.send_keys_calls().is_empty());
 }
 
 #[test]
@@ -1939,7 +2357,10 @@ fn test_stop_requires_exactly_one_valid_name() {
     assert!(parse_stop_args(&["a".to_string(), "b".to_string()]).is_err());
     assert!(parse_stop_args(&["Tieude-X".to_string()]).is_err());
     assert!(parse_stop_args(&["--force".to_string()]).is_err());
-    assert_eq!(parse_stop_args(&["tieude-x".to_string()]).unwrap(), "tieude-x");
+    assert_eq!(
+        parse_stop_args(&["tieude-x".to_string()]).unwrap(),
+        "tieude-x"
+    );
 }
 
 #[test]
@@ -1963,33 +2384,22 @@ fn test_cleanup_worker_removes_per_worker_opencode_state() {
     std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
     std::env::set_var("QUAQUA_TEST", "1");
     std::env::set_var("GRID_SKIP", "1");
-    struct CleanHerdr;
-    impl HerdrOps for CleanHerdr {
-        fn run(&self, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
-        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
-            Ok((true, r#"{"result":{"agent":{"pane_id":"w1:p2"}}}"#.to_string()))
-        }
-        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
-        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> { unimplemented!() }
-        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
-            Ok(Output { status: std::process::ExitStatus::default(), stdout: vec![], stderr: vec![] })
-        }
-        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool { unimplemented!() }
-        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
-        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
-    }
+    let herdr = MockActivitiesHerdr::for_cleanup("w1:p2");
     let git = SpawnTestGit;
-    let herdr = CleanHerdr;
     let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
     assert!(res.is_ok(), "cleanup_worker failed: {:?}", res);
-    assert!(!state_dir.exists(), "per-worker state dir must be removed on cleanup");
+    assert_eq!(
+        herdr
+            .calls()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["herdr.agent_get", "herdr.pane_close"]
+    );
+    assert!(
+        !state_dir.exists(),
+        "per-worker state dir must be removed on cleanup"
+    );
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -2007,11 +2417,14 @@ fn test_update_index_content_markdown_table() {
     // Update mono-desk owner to mono-desk-lead
     let updated = update_index_content(original, "mono-desk", "mono-desk-lead");
     assert!(
-        updated.contains("| mono-desk | ~/Lab/mono-desk | mono-desk-lead | Port zdesk UI | active |"),
+        updated
+            .contains("| mono-desk | ~/Lab/mono-desk | mono-desk-lead | Port zdesk UI | active |"),
         "mono-desk owner cell not updated: {updated}"
     );
     assert!(
-        updated.contains("| baroiplayer | ~/Personal/baroiplayer | baroiplayer-lead | Publish lib | active |"),
+        updated.contains(
+            "| baroiplayer | ~/Personal/baroiplayer | baroiplayer-lead | Publish lib | active |"
+        ),
         "other rows must be preserved: {updated}"
     );
     assert!(
@@ -2033,7 +2446,10 @@ fn test_update_index_content_markdown_table() {
 
     // Rows with fewer than 4 fields are preserved as-is without crashing or modifying
     let malformed = "| short | row\n";
-    assert_eq!(update_index_content(malformed, "short", "lead"), "| short | row\n");
+    assert_eq!(
+        update_index_content(malformed, "short", "lead"),
+        "| short | row\n"
+    );
 }
 
 #[test]
@@ -2062,7 +2478,10 @@ fn test_update_project_index_owner_fixture_atomic() {
     assert!(!temp.join("projects/INDEX.md.lock.d").exists());
     for entry in std::fs::read_dir(&projects_dir).unwrap().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        assert!(!name.starts_with("INDEX.md.tmp."), "leftover tmp file: {name}");
+        assert!(
+            !name.starts_with("INDEX.md.tmp."),
+            "leftover tmp file: {name}"
+        );
     }
 
     // 2. Reset baro to cos
@@ -2116,33 +2535,18 @@ fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
     std::env::set_var("QUAQUA_TEST", "1");
     std::env::set_var("GRID_SKIP", "1");
 
-    struct MockHerdr;
-    impl HerdrOps for MockHerdr {
-        fn run(&self, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
-        fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
-            Ok((true, r#"{"result":{"agent":{"pane_id":"w1:p3"}}}"#.to_string()))
-        }
-        fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
-        fn agent_start(&self, _: &str, _: &str, _: &str, _: u32, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn pane_split(&self, _: &str, _: &str, _: &[(&str, &str)]) -> std::io::Result<Output> { unimplemented!() }
-        fn pane_close(&self, _: &str) -> std::io::Result<Output> {
-            Ok(Output { status: std::process::ExitStatus::default(), stdout: vec![], stderr: vec![] })
-        }
-        fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool { unimplemented!() }
-        fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> { unimplemented!() }
-        fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_wait_idle(&self, _: &str, _: u32) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<Output> { unimplemented!() }
-        fn agent_prompt_wait_background(&self, _: &str, _: &str, _: u32, _: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
-    }
-
+    let herdr = MockActivitiesHerdr::for_cleanup("w1:p3");
     let git = SpawnTestGit;
-    let herdr = MockHerdr;
     let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
     assert!(res.is_ok(), "cleanup_worker failed: {:?}", res);
+    assert_eq!(
+        herdr
+            .calls()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["herdr.agent_get", "herdr.pane_close"]
+    );
 
     for f in &files_to_create {
         assert!(!f.exists(), "file must be cleaned up: {}", f.display());
@@ -2156,7 +2560,9 @@ fn test_update_project_index_owner_concurrency() {
     use std::sync::Arc;
     use std::thread;
 
-    let temp = Arc::new(std::env::temp_dir().join(format!("quaqua-test-index-race-{}", std::process::id())));
+    let temp = Arc::new(
+        std::env::temp_dir().join(format!("quaqua-test-index-race-{}", std::process::id())),
+    );
     let projects_dir = temp.join("projects");
     std::fs::create_dir_all(&projects_dir).unwrap();
     let index_file = projects_dir.join("INDEX.md");
@@ -2213,7 +2619,10 @@ fn test_state_atomic_write_and_metadata_roundtrip() {
     assert_eq!(WorkerMetadata::load_owner(&temp, "nonexistent"), "cos");
 
     WorkerMetadata::save_grid(&temp, "worker1", "my-tab").unwrap();
-    assert_eq!(WorkerMetadata::load_grid(&temp, "worker1"), Some("my-tab".to_string()));
+    assert_eq!(
+        WorkerMetadata::load_grid(&temp, "worker1"),
+        Some("my-tab".to_string())
+    );
     assert_eq!(WorkerMetadata::load_grid(&temp, "nonexistent"), None);
 
     WorkerMetadata::save_budget(&temp, "worker1", 1800).unwrap();
@@ -2251,7 +2660,10 @@ fn test_state_atomic_write_and_metadata_roundtrip() {
     let pipe_no_fin = temp.join("pipeline-nofin.state");
     std::fs::write(&pipe_no_fin, "lead=lead1\nbuilder=sude\n").unwrap();
     let es_no_fin = ExecutionState::load(&pipe_no_fin).expect("must parse pipeline state");
-    assert!(es_no_fin.is_finished(), "missing finished=0 must be considered finished");
+    assert!(
+        es_no_fin.is_finished(),
+        "missing finished=0 must be considered finished"
+    );
 
     let tf_file = temp.join("taskforce-eval.state");
     std::fs::write(&tf_file, "task=eval\nowner=cos\nfinished=1\n").unwrap();
@@ -2288,7 +2700,7 @@ fn test_report_lessons_heading_matcher_and_numbered_headings() {
     assert!(!is_lessons_heading("## 5. Blockers"));
     assert!(!is_lessons_heading("## Summary"));
     assert!(!is_lessons_heading("### 5. Lessons")); // h3, not h2
-    assert!(!is_lessons_heading("# 5. Lessons"));   // h1, not h2
+    assert!(!is_lessons_heading("# 5. Lessons")); // h1, not h2
     assert!(!is_lessons_heading("## 5."));
     assert!(!is_lessons_heading("## LessonsLearned"));
     assert!(!is_lessons_heading("Just text with ## 5. Lessons in body"));
@@ -2300,13 +2712,15 @@ fn test_report_lessons_heading_matcher_and_numbered_headings() {
     let report_numbered = "# run report\n\n## 1. Summary\nDone\n\n## 2. Blockers\nnone\n\n## 5. Lessons\n- lesson learned\n";
     assert_eq!(validate_report_content(report_numbered, false), Ok(()));
 
-    let report_missing_lessons = "# run report\n\n## Blockers\nnone\n\n## Summary\nNo lessons section\n";
+    let report_missing_lessons =
+        "# run report\n\n## Blockers\nnone\n\n## Summary\nNo lessons section\n";
     assert_eq!(
         validate_report_content(report_missing_lessons, false),
         Err("'## Lessons' section")
     );
 
-    let report_h3_only = "# run report\n\n## Blockers\nnone\n\n### 5. Lessons\n- sub-heading only\n";
+    let report_h3_only =
+        "# run report\n\n## Blockers\nnone\n\n### 5. Lessons\n- sub-heading only\n";
     assert_eq!(
         validate_report_content(report_h3_only, false),
         Err("'## Lessons' section")
@@ -2328,10 +2742,15 @@ fn test_parse_prompt_args() {
     use quaqua::worker::prompt::{parse_prompt_args, PromptAction};
 
     // --check-brief
-    let cb = vec!["--check-brief".to_string(), "Goal: g\nHard constraints: none\nCurrent design: d".to_string()];
+    let cb = vec![
+        "--check-brief".to_string(),
+        "Goal: g\nHard constraints: none\nCurrent design: d".to_string(),
+    ];
     assert_eq!(
         parse_prompt_args(&cb),
-        Ok(PromptAction::CheckBrief("Goal: g\nHard constraints: none\nCurrent design: d".to_string()))
+        Ok(PromptAction::CheckBrief(
+            "Goal: g\nHard constraints: none\nCurrent design: d".to_string()
+        ))
     );
 
     // --resume without extend
@@ -2345,7 +2764,12 @@ fn test_parse_prompt_args() {
     );
 
     // --resume with extend
-    let res_ext = vec!["--resume".to_string(), "sude-w4a".to_string(), "--extend".to_string(), "600".to_string()];
+    let res_ext = vec![
+        "--resume".to_string(),
+        "sude-w4a".to_string(),
+        "--extend".to_string(),
+        "600".to_string(),
+    ];
     assert_eq!(
         parse_prompt_args(&res_ext),
         Ok(PromptAction::Resume {
@@ -2355,7 +2779,10 @@ fn test_parse_prompt_args() {
     );
 
     // Normal prompt
-    let norm = vec!["sude-w4a".to_string(), "Goal: g\nHard constraints: none\nCurrent design: d".to_string()];
+    let norm = vec![
+        "sude-w4a".to_string(),
+        "Goal: g\nHard constraints: none\nCurrent design: d".to_string(),
+    ];
     assert_eq!(
         parse_prompt_args(&norm),
         Ok(PromptAction::Prompt {
@@ -2396,34 +2823,80 @@ fn test_worktree_validate_base_ref() {
 
     struct BaseRefTestGit(bool);
     impl GitOps for BaseRefTestGit {
-        fn run_in(&self, _dir: &Path, _args: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn run(&self, _args: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool { self.0 }
-        fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> { unimplemented!() }
-        fn worktree_add(&self, _repo: &Path, _branch: &str, _wt: &Path, _base: Option<&str>) -> std::io::Result<Output> { unimplemented!() }
-        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool { unimplemented!() }
-        fn worktree_add_existing(&self, _repo: &Path, _branch: &str, _wt: &Path) -> std::io::Result<Output> { unimplemented!() }
-        fn worktree_remove(&self, _repo: &Path, _wt: &Path) -> std::io::Result<Output> { unimplemented!() }
-        fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> { unimplemented!() }
-        fn is_core_bare(&self, _repo: &Path) -> bool { unimplemented!() }
-        fn has_core_worktree(&self, _repo: &Path) -> bool { unimplemented!() }
-        fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<Output> { unimplemented!() }
-        fn set_worktree_pushurl_blocked(&self, _wt: &Path, _remote: &str) -> std::io::Result<()> { unimplemented!() }
-        fn is_git_dir(&self, _cwd: &Path) -> bool { unimplemented!() }
-        fn diff_and_status(&self, _cwd: &Path) -> (String, String) { unimplemented!() }
+        fn run_in(&self, _dir: &Path, _args: &[&str]) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool {
+            self.0
+        }
+        fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn worktree_add(
+            &self,
+            _repo: &Path,
+            _branch: &str,
+            _wt: &Path,
+            _base: Option<&str>,
+        ) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
+            unimplemented!()
+        }
+        fn worktree_add_existing(
+            &self,
+            _repo: &Path,
+            _branch: &str,
+            _wt: &Path,
+        ) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn worktree_remove(&self, _repo: &Path, _wt: &Path) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn is_core_bare(&self, _repo: &Path) -> bool {
+            unimplemented!()
+        }
+        fn has_core_worktree(&self, _repo: &Path) -> bool {
+            unimplemented!()
+        }
+        fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn set_worktree_pushurl_blocked(&self, _wt: &Path, _remote: &str) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn is_git_dir(&self, _cwd: &Path) -> bool {
+            unimplemented!()
+        }
+        fn diff_and_status(&self, _cwd: &Path) -> (String, String) {
+            unimplemented!()
+        }
     }
 
     let repo = Path::new("/test/repo");
     assert!(validate_base_ref(&BaseRefTestGit(true), repo, "main").is_ok());
 
-    let err = validate_base_ref(&BaseRefTestGit(false), repo, "badref").expect_err("must error on invalid ref");
+    let err = validate_base_ref(&BaseRefTestGit(false), repo, "badref")
+        .expect_err("must error on invalid ref");
     assert_eq!(err.0, 1);
-    assert!(err.1.contains("error: --base 'badref' is not a known commit-ish"));
+    assert!(err
+        .1
+        .contains("error: --base 'badref' is not a known commit-ish"));
 }
 
 #[test]
 fn test_worktree_prepare_and_guards() {
-    use quaqua::worker::worktree::{apply_push_block, is_worktree_dirty, prepare_worktree, remove_worktree};
+    use quaqua::worker::worktree::{
+        apply_push_block, is_worktree_dirty, prepare_worktree, remove_worktree,
+    };
 
     struct WtMockGit {
         branch_exists_val: bool,
@@ -2449,12 +2922,22 @@ fn test_worktree_prepare_and_guards() {
                 stderr: Vec::new(),
             })
         }
-        fn run(&self, _args: &[&str]) -> std::io::Result<Output> { unimplemented!() }
-        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool { true }
+        fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool {
+            true
+        }
         fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
             Ok(self.porcelain_wts.clone())
         }
-        fn worktree_add(&self, _repo: &Path, _branch: &str, wt: &Path, _base: Option<&str>) -> std::io::Result<Output> {
+        fn worktree_add(
+            &self,
+            _repo: &Path,
+            _branch: &str,
+            wt: &Path,
+            _base: Option<&str>,
+        ) -> std::io::Result<Output> {
             let _ = std::fs::create_dir_all(wt);
             Ok(Output {
                 status: std::os::unix::process::ExitStatusExt::from_raw(0),
@@ -2465,7 +2948,12 @@ fn test_worktree_prepare_and_guards() {
         fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
             self.branch_exists_val
         }
-        fn worktree_add_existing(&self, _repo: &Path, _branch: &str, wt: &Path) -> std::io::Result<Output> {
+        fn worktree_add_existing(
+            &self,
+            _repo: &Path,
+            _branch: &str,
+            wt: &Path,
+        ) -> std::io::Result<Output> {
             let _ = std::fs::create_dir_all(wt);
             Ok(Output {
                 status: std::os::unix::process::ExitStatusExt::from_raw(0),
@@ -2485,8 +2973,12 @@ fn test_worktree_prepare_and_guards() {
         fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
             Ok(self.remotes.clone())
         }
-        fn is_core_bare(&self, _repo: &Path) -> bool { self.bare }
-        fn has_core_worktree(&self, _repo: &Path) -> bool { self.wt_config }
+        fn is_core_bare(&self, _repo: &Path) -> bool {
+            self.bare
+        }
+        fn has_core_worktree(&self, _repo: &Path) -> bool {
+            self.wt_config
+        }
         fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<Output> {
             Ok(Output {
                 status: std::os::unix::process::ExitStatusExt::from_raw(0),
@@ -2498,8 +2990,12 @@ fn test_worktree_prepare_and_guards() {
             self.pushurl_blocked.borrow_mut().push(remote.to_string());
             Ok(())
         }
-        fn is_git_dir(&self, _cwd: &Path) -> bool { true }
-        fn diff_and_status(&self, _cwd: &Path) -> (String, String) { ("".to_string(), "".to_string()) }
+        fn is_git_dir(&self, _cwd: &Path) -> bool {
+            true
+        }
+        fn diff_and_status(&self, _cwd: &Path) -> (String, String) {
+            ("".to_string(), "".to_string())
+        }
     }
 
     let temp = std::env::temp_dir().join(format!("quaqua-wt-unit-{}", std::process::id()));
@@ -2534,7 +3030,8 @@ fn test_worktree_prepare_and_guards() {
         pushurl_blocked: std::cell::RefCell::new(Vec::new()),
         removed: std::cell::RefCell::new(false),
     };
-    let err = prepare_worktree(&git_foreign, &repo, &wt, "sude-testwt", None).expect_err("foreign dir must fail");
+    let err = prepare_worktree(&git_foreign, &repo, &wt, "sude-testwt", None)
+        .expect_err("foreign dir must fail");
     assert_eq!(err.0, 1);
     assert!(err.1.contains("exists but is not a git worktree"));
 

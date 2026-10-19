@@ -22,3 +22,4 @@ pub mod state;
 pub mod usage;
 pub mod auditor;
 pub mod engine;
+pub mod status;
