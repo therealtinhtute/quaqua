@@ -7,6 +7,7 @@
 pub mod workflow;
 pub mod activity;
 pub mod journal;
+pub mod runner;
 pub mod telemetry;
 pub mod child;
 pub mod testkit;
