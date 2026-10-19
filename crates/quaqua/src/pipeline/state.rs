@@ -165,6 +165,9 @@ fn default_review_budget() -> u64 {
 fn default_fix_budget() -> u64 {
     1200
 }
+fn default_base() -> String {
+    "main".to_string()
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PipelineInput {
@@ -173,6 +176,8 @@ pub struct PipelineInput {
     pub builder: String,
     pub reviewer: String,
     pub brief: String,
+    #[serde(default = "default_base")]
+    pub base: String,
     #[serde(default = "default_review_strategy")]
     pub review_strategy: ReviewStrategy,
     #[serde(default = "default_max_rounds")]
@@ -201,6 +206,7 @@ impl PipelineInput {
             builder: builder.into(),
             reviewer: reviewer.into(),
             brief: brief.into(),
+            base: "main".to_string(),
             review_strategy: ReviewStrategy::Auto,
             max_rounds: 2,
             plan_budget_sec: 900,

@@ -7,7 +7,7 @@ pub mod state;
 use crate::engine::activity::{
     ActivityRequest, ActivityResult, ReportFileRequest, ReportFileResult,
 };
-use crate::engine::child::SingleWorkerInput;
+use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
 use crate::engine::workflow::{StepDecision, Workflow, WorkflowContext, WorkflowEvent};
 pub use phases::{
     blocked_outcome, harness_of_kind, has_real_blockers, pipeline_finished,
@@ -587,6 +587,17 @@ impl PipelineWorkflow {
         Self
     }
 
+    fn builder_worker_name(&self, state: &PipelineWorkflowState) -> String {
+        format!("{}-{}", state.input.builder, state.input.task)
+    }
+
+    fn reviewer_worker_name(&self, state: &PipelineWorkflowState) -> String {
+        format!(
+            "{}-{}r{}",
+            state.input.reviewer, state.input.task, state.round
+        )
+    }
+
     fn plan_child_id(&self, state: &PipelineWorkflowState) -> String {
         format!("{}-{}-plan", state.input.builder, state.input.task)
     }
@@ -611,12 +622,13 @@ impl PipelineWorkflow {
 
     fn build_plan_child(&self, state: &PipelineWorkflowState) -> (String, serde_json::Value) {
         let child_id = self.plan_child_id(state);
+        let worker_name = self.builder_worker_name(state);
         let plan_prompt = format!(
             "{}\n\nPipeline phase: PLAN — write only the implementation plan (steps, files to touch, risks) as your runs file; do not change code yet. The plan is approved before you build. If the premise is wrong, write '## Challenge' with evidence instead of planning around it.",
             state.input.brief
         );
         let worker_input = SingleWorkerInput::new(
-            &child_id,
+            &worker_name,
             &state.input.builder,
             &state.input.repo,
             &plan_prompt,
@@ -627,7 +639,7 @@ impl PipelineWorkflow {
         if let Some(map) = input_val.as_object_mut() {
             map.insert(
                 "report_path".to_string(),
-                serde_json::Value::String(format!("runs/{child_id}.md")),
+                serde_json::Value::String(format!("runs/{worker_name}.md")),
             );
         }
         (child_id, input_val)
@@ -635,12 +647,14 @@ impl PipelineWorkflow {
 
     fn build_build_child(&self, state: &PipelineWorkflowState) -> (String, serde_json::Value) {
         let child_id = self.build_child_id(state);
+        let worker_name = self.builder_worker_name(state);
+        let planfile = state.planfile.as_deref().unwrap_or("plan");
         let build_prompt = format!(
-            "{}\n\nPipeline phase: BUILD — implement the plan, run tests, commit.",
+            "Approved plan: {planfile}\n\n{}\n\nPipeline phase: BUILD — implement the plan, keep tests green, commit on quaqua/{worker_name}. A premise that is wrong is NOT built — dispute it under '## Challenge' in your runs file with evidence. If the task is already satisfied with no code changes needed, say 'Outcome: no changes' in your runs file.",
             state.input.brief
         );
         let worker_input = SingleWorkerInput::new(
-            &child_id,
+            &worker_name,
             &state.input.builder,
             &state.input.repo,
             &build_prompt,
@@ -651,7 +665,7 @@ impl PipelineWorkflow {
         if let Some(map) = input_val.as_object_mut() {
             map.insert(
                 "report_path".to_string(),
-                serde_json::Value::String(format!("runs/{child_id}.md")),
+                serde_json::Value::String(format!("runs/{worker_name}.md")),
             );
         }
         (child_id, input_val)
@@ -659,12 +673,14 @@ impl PipelineWorkflow {
 
     fn build_review_child(&self, state: &PipelineWorkflowState) -> (String, serde_json::Value) {
         let child_id = self.review_child_id(state);
+        let worker_name = self.reviewer_worker_name(state);
+        let bname = self.builder_worker_name(state);
         let review_prompt = format!(
-            "Goal: review changes for task '{}' (round {})\nPipeline phase: REVIEW",
-            state.input.task, state.round
+            "Goal: review changes for task '{}' (round {})\nHard constraints: review only diff between base {} and branch quaqua/{bname}; do not edit code; foreground tests only.\nCurrent design: brief in {}\nEvidence: runs file MUST end with exactly one line: 'Verdict: clean' or 'Verdict: <N> findings' (findings numbered under ## Findings; dispute with ## Challenge).\nPipeline phase: REVIEW (round {})",
+            state.input.task, state.round, state.input.base, state.input.repo, state.round
         );
         let worker_input = SingleWorkerInput::new(
-            &child_id,
+            &worker_name,
             &state.input.reviewer,
             &state.input.repo,
             &review_prompt,
@@ -675,7 +691,7 @@ impl PipelineWorkflow {
         if let Some(map) = input_val.as_object_mut() {
             map.insert(
                 "report_path".to_string(),
-                serde_json::Value::String(format!("runs/{child_id}.md")),
+                serde_json::Value::String(format!("runs/{worker_name}.md")),
             );
         }
         (child_id, input_val)
@@ -683,16 +699,14 @@ impl PipelineWorkflow {
 
     fn build_fix_child(&self, state: &PipelineWorkflowState) -> (String, serde_json::Value) {
         let child_id = self.fix_child_id(state);
-        let revname = format!(
-            "{}-{}r{}",
-            state.input.reviewer, state.input.task, state.round
-        );
+        let worker_name = self.builder_worker_name(state);
+        let revname = self.reviewer_worker_name(state);
         let fix_prompt = format!(
-            "Goal: resolve the {} review findings for task '{}' (reviewer {revname})\nPipeline phase: FIX (round {})",
-            state.last_findings, state.input.task, state.round
+            "Goal: resolve the {} review findings for task '{}'\nHard constraints: stay in your worktree on quaqua/{worker_name}; commit each fix; keep tests green. A finding that is wrong is NOT fixed — dispute it under '## Challenge' in your runs file with evidence.\nCurrent design (open to challenge): reviewer {revname} reported {} findings — full list in runs/{revname}.md (readable); your worktree and branch are unchanged.\nUnknowns: which findings are real — verify each against the code before changing anything.\nEvidence: committed fixes + test output, or '## Challenge' per wrong finding.\nPipeline phase: FIX (after review round {})",
+            state.last_findings, state.input.task, state.last_findings, state.round
         );
         let worker_input = SingleWorkerInput::new(
-            &child_id,
+            &worker_name,
             &state.input.builder,
             &state.input.repo,
             &fix_prompt,
@@ -703,7 +717,7 @@ impl PipelineWorkflow {
         if let Some(map) = input_val.as_object_mut() {
             map.insert(
                 "report_path".to_string(),
-                serde_json::Value::String(format!("runs/{child_id}.md")),
+                serde_json::Value::String(format!("runs/{worker_name}.md")),
             );
         }
         (child_id, input_val)
@@ -738,13 +752,14 @@ impl PipelineWorkflow {
 
         state.review_changed = true;
         if state.round >= state.input.max_rounds {
-            state.phase = PipelinePhase::Complete;
-            return StepDecision::Complete(PipelineOutput {
-                status: "findings".to_string(),
-                rounds: state.rounds_run,
-                review_changed: true,
-                commit: state.head_sha.clone(),
-            });
+            state.phase = PipelinePhase::Failed;
+            return StepDecision::Fail {
+                code: 5,
+                reason: format!(
+                    "review rounds exhausted ({} rounds, {} findings remain) — Lead decides how to proceed",
+                    state.round, state.last_findings
+                ),
+            };
         }
 
         state.phase = PipelinePhase::Fix;
@@ -857,7 +872,6 @@ impl Workflow for PipelineWorkflow {
                 }
             }
             Some(WorkflowEvent::ChildCompleted { id, output }) => {
-                // Check if this completion corresponds to the active child id
                 if let Some(active_id) = &state.active_child_id {
                     if id != *active_id {
                         return StepDecision::Continue;
@@ -879,199 +893,80 @@ impl Workflow for PipelineWorkflow {
                     };
                 }
 
+                let report_path = output
+                    .get("report_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
                 match state.phase {
                     PipelinePhase::Plan => {
-                        let report_path = output
-                            .get("report_path")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
                         if let Some(rp) = report_path {
                             state.planfile = Some(rp.clone());
-                            if let Some(challenge) =
-                                output.get("challenge").and_then(|v| v.as_bool())
-                            {
-                                if challenge {
-                                    state.phase = PipelinePhase::Disputed;
-                                    return StepDecision::Complete(PipelineOutput {
-                                        status: "disputed".to_string(),
-                                        rounds: 0,
-                                        review_changed: false,
-                                        commit: None,
-                                    });
-                                }
-                                state.phase = PipelinePhase::PlanReadyGate;
-                                return StepDecision::PauseForApproval {
-                                    reason: format!("approve {} then resume", rp),
-                                };
-                            }
                             state.pending_report_read = Some(rp.clone());
-                            return StepDecision::ScheduleActivity {
+                            StepDecision::ScheduleActivity {
                                 id: format!("read-plan-{id}"),
                                 activity: ActivityRequest::ReportFile(ReportFileRequest::Read {
                                     path: rp,
                                 }),
-                            };
-                        }
-
-                        // Fallback when no report_path was provided
-                        let challenge = output
-                            .get("challenge")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        if challenge {
-                            state.phase = PipelinePhase::Disputed;
-                            return StepDecision::Complete(PipelineOutput {
-                                status: "disputed".to_string(),
-                                rounds: 0,
-                                review_changed: false,
-                                commit: None,
-                            });
-                        }
-                        state.phase = PipelinePhase::PlanReadyGate;
-                        StepDecision::PauseForApproval {
-                            reason: format!(
-                                "approve {} then resume",
-                                state.planfile.as_deref().unwrap_or("plan")
-                            ),
+                            }
+                        } else {
+                            state.phase = PipelinePhase::Failed;
+                            StepDecision::Fail {
+                                code: 6,
+                                reason: format!("plan child worker {id} returned no report_path"),
+                            }
                         }
                     }
                     PipelinePhase::Build => {
-                        if let Some(c) = output.get("commit").and_then(|v| v.as_str()) {
-                            state.head_sha = Some(c.to_string());
-                        }
-
-                        let report_path = output
-                            .get("report_path")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
                         if let Some(rp) = report_path {
-                            if let Some(challenge) =
-                                output.get("challenge").and_then(|v| v.as_bool())
-                            {
-                                if challenge {
-                                    state.phase = PipelinePhase::Disputed;
-                                    return StepDecision::Complete(PipelineOutput {
-                                        status: "disputed".to_string(),
-                                        rounds: 0,
-                                        review_changed: false,
-                                        commit: None,
-                                    });
-                                }
-                            } else {
-                                state.pending_report_read = Some(rp.clone());
-                                return StepDecision::ScheduleActivity {
-                                    id: format!("read-build-{id}"),
-                                    activity: ActivityRequest::ReportFile(
-                                        ReportFileRequest::Read { path: rp },
-                                    ),
-                                };
+                            state.pending_report_read = Some(rp.clone());
+                            StepDecision::ScheduleActivity {
+                                id: format!("read-build-{id}"),
+                                activity: ActivityRequest::ReportFile(ReportFileRequest::Read {
+                                    path: rp,
+                                }),
                             }
-                        }
-
-                        if state.input.review_strategy == ReviewStrategy::Skip {
-                            state.phase = PipelinePhase::Complete;
-                            return StepDecision::Complete(PipelineOutput {
-                                status: "clean".to_string(),
-                                rounds: 0,
-                                review_changed: false,
-                                commit: state.head_sha.clone(),
-                            });
-                        }
-
-                        state.phase = PipelinePhase::Review;
-                        state.round = 1;
-                        let (child_id, input_val) = self.build_review_child(state);
-                        state.active_child_id = Some(child_id.clone());
-                        StepDecision::StartChild {
-                            id: child_id,
-                            workflow_type: "single_worker".to_string(),
-                            input: input_val,
+                        } else {
+                            state.phase = PipelinePhase::Failed;
+                            StepDecision::Fail {
+                                code: 6,
+                                reason: format!("build child worker {id} returned no report_path"),
+                            }
                         }
                     }
                     PipelinePhase::Review => {
                         state.rounds_run = state.round;
-
-                        if let Some(findings) = output.get("findings").and_then(|v| v.as_u64()) {
-                            let challenge = output
-                                .get("challenge")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            return self.handle_review_verdict(state, findings as u32, challenge);
-                        }
-
-                        if let Some(verdict) = output.get("verdict").and_then(|v| v.as_str()) {
-                            match parse_verdict_str(verdict) {
-                                Ok((findings, challenge)) => {
-                                    return self.handle_review_verdict(state, findings, challenge);
-                                }
-                                Err(reason) => {
-                                    state.phase = PipelinePhase::Failed;
-                                    return StepDecision::Fail { code: 6, reason };
-                                }
-                            }
-                        }
-
-                        if let Some(report_path) =
-                            output.get("report_path").and_then(|v| v.as_str())
-                        {
-                            state.pending_report_read = Some(report_path.to_string());
-                            return StepDecision::ScheduleActivity {
+                        if let Some(rp) = report_path {
+                            state.pending_report_read = Some(rp.clone());
+                            StepDecision::ScheduleActivity {
                                 id: format!("read-report-r{}", state.round),
                                 activity: ActivityRequest::ReportFile(ReportFileRequest::Read {
-                                    path: report_path.to_string(),
+                                    path: rp,
                                 }),
-                            };
-                        }
-
-                        // No findings, verdict, or report_path -> fail closed!
-                        state.phase = PipelinePhase::Failed;
-                        StepDecision::Fail {
-                            code: 6,
-                            reason: "review child completed without verdict or report_path"
-                                .to_string(),
+                            }
+                        } else {
+                            state.phase = PipelinePhase::Failed;
+                            StepDecision::Fail {
+                                code: 6,
+                                reason: format!("review child worker {id} returned no report_path"),
+                            }
                         }
                     }
                     PipelinePhase::Fix => {
-                        if let Some(c) = output.get("commit").and_then(|v| v.as_str()) {
-                            state.head_sha = Some(c.to_string());
-                        }
-
-                        let report_path = output
-                            .get("report_path")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
                         if let Some(rp) = report_path {
-                            if let Some(challenge) =
-                                output.get("challenge").and_then(|v| v.as_bool())
-                            {
-                                if challenge {
-                                    state.phase = PipelinePhase::Disputed;
-                                    return StepDecision::Complete(PipelineOutput {
-                                        status: "disputed".to_string(),
-                                        rounds: state.rounds_run,
-                                        review_changed: state.review_changed,
-                                        commit: state.head_sha.clone(),
-                                    });
-                                }
-                            } else {
-                                state.pending_report_read = Some(rp.clone());
-                                return StepDecision::ScheduleActivity {
-                                    id: format!("read-fix-{id}"),
-                                    activity: ActivityRequest::ReportFile(
-                                        ReportFileRequest::Read { path: rp },
-                                    ),
-                                };
+                            state.pending_report_read = Some(rp.clone());
+                            StepDecision::ScheduleActivity {
+                                id: format!("read-fix-{id}"),
+                                activity: ActivityRequest::ReportFile(ReportFileRequest::Read {
+                                    path: rp,
+                                }),
                             }
-                        }
-
-                        state.round += 1;
-                        state.phase = PipelinePhase::Review;
-                        let (child_id, input_val) = self.build_review_child(state);
-                        state.active_child_id = Some(child_id.clone());
-                        StepDecision::StartChild {
-                            id: child_id,
-                            workflow_type: "single_worker".to_string(),
-                            input: input_val,
+                        } else {
+                            state.phase = PipelinePhase::Failed;
+                            StepDecision::Fail {
+                                code: 6,
+                                reason: format!("fix child worker {id} returned no report_path"),
+                            }
                         }
                     }
                     _ => StepDecision::Continue,
@@ -1248,13 +1143,18 @@ fn parse_report_content(content: &str) -> Result<(u32, bool), String> {
     {
         return Ok((0, true));
     }
+    let mut last_verdict_line = None;
     for line in content.lines() {
         let t = line.trim();
         if t.starts_with("Verdict:") || t.starts_with("verdict:") {
-            return parse_verdict_str(t);
+            last_verdict_line = Some(t);
         }
     }
-    Err("review report has no 'Verdict: clean | <N> findings' line".to_string())
+    if let Some(v_line) = last_verdict_line {
+        parse_verdict_str(v_line)
+    } else {
+        Err("review report has no 'Verdict: clean | <N> findings' line".to_string())
+    }
 }
 
 fn extract_commit_from_report(content: &str) -> Option<String> {
@@ -1294,40 +1194,70 @@ mod tests {
         let mut state = PipelineWorkflowState::new(input);
         let mut ctx = WorkflowContext::new(1000);
 
-        // Step 1: Initial step triggers plan child with distinct plan id
+        // Step 1: Initial step triggers plan child with distinct plan id and builder worker name
         let d1 = wf.step(&mut state, &mut ctx, None);
         match d1 {
             StepDecision::StartChild {
-                id, workflow_type, ..
+                id,
+                workflow_type,
+                input,
             } => {
                 assert_eq!(id, "sude-task-plan-plan");
                 assert_eq!(workflow_type, "single_worker");
+                assert_eq!(input["name"], "sude-task-plan");
             }
             other => panic!("expected StartChild for plan, got {other:?}"),
         }
         assert_eq!(state.phase, PipelinePhase::Plan);
 
-        // Step 2: Plan child completes with exit 0 -> pause for approval gate
+        // Step 2: Plan child completes with SingleWorkerOutput { exit: 0, report_path: "runs/sude-task-plan.md" }
         let d2 = wf.step(
             &mut state,
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "sude-task-plan-plan".to_string(),
-                output: json!({ "exit": 0, "challenge": false, "report_path": "runs/plan.md" }),
+                output: serde_json::to_value(
+                    SingleWorkerOutput::new(0, "runs/sude-task-plan.md").unwrap(),
+                )
+                .unwrap(),
             }),
         );
         match d2 {
+            StepDecision::ScheduleActivity { id, activity } => {
+                assert_eq!(id, "read-plan-sude-task-plan-plan");
+                assert_eq!(
+                    activity,
+                    ActivityRequest::ReportFile(ReportFileRequest::Read {
+                        path: "runs/sude-task-plan.md".to_string()
+                    })
+                );
+            }
+            other => panic!("expected ScheduleActivity for plan report read, got {other:?}"),
+        }
+
+        // Deliver report content without challenge -> enters PlanReadyGate with PauseForApproval
+        let d3 = wf.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ActivityCompleted {
+                id: "read-plan-sude-task-plan-plan".to_string(),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(
+                    "# Implementation Plan\n- step 1\n## Lessons\nnone".to_string(),
+                )),
+            }),
+        );
+        match d3 {
             StepDecision::PauseForApproval { reason } => {
                 assert!(reason.contains("approve"));
-                assert!(reason.contains("runs/plan.md"));
+                assert!(reason.contains("runs/sude-task-plan.md"));
             }
             other => panic!("expected PauseForApproval, got {other:?}"),
         }
         assert_eq!(state.phase, PipelinePhase::PlanReadyGate);
-        assert_eq!(state.planfile.as_deref(), Some("runs/plan.md"));
+        assert_eq!(state.planfile.as_deref(), Some("runs/sude-task-plan.md"));
 
-        // Step 3: Approval resolved -> advances to build child with distinct build id
-        let d3 = wf.step(
+        // Step 4: Approval resolved -> advances to build child with distinct build id and same builder worker name
+        let d4 = wf.step(
             &mut state,
             &mut ctx,
             Some(WorkflowEvent::ApprovalResolved {
@@ -1335,9 +1265,14 @@ mod tests {
                 reason: None,
             }),
         );
-        match d3 {
-            StepDecision::StartChild { id, .. } => {
+        match d4 {
+            StepDecision::StartChild { id, input, .. } => {
                 assert_eq!(id, "sude-task-plan-build");
+                assert_eq!(input["name"], "sude-task-plan");
+                assert!(input["brief"]
+                    .as_str()
+                    .unwrap()
+                    .contains("runs/sude-task-plan.md"));
             }
             other => panic!("expected StartChild for build, got {other:?}"),
         }
@@ -1351,40 +1286,90 @@ mod tests {
         let mut state = PipelineWorkflowState::new(input);
         let mut ctx = WorkflowContext::new(2000);
 
-        // Jump to Build phase and start build child
         state.phase = PipelinePhase::Build;
         state.active_child_id = Some("sude-task-fix-build".to_string());
 
-        // Build completes -> launches reviewer child round 1
+        // 1. Build completes with SingleWorkerOutput { exit: 0, report_path: "runs/sude-task-fix.md" }
         let d1 = wf.step(
             &mut state,
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "sude-task-fix-build".to_string(),
-                output: json!({ "exit": 0, "commit": "abc1234", "challenge": false }),
+                output: serde_json::to_value(
+                    SingleWorkerOutput::new(0, "runs/sude-task-fix.md").unwrap(),
+                )
+                .unwrap(),
             }),
         );
         match d1 {
-            StepDecision::StartChild { id, .. } => {
+            StepDecision::ScheduleActivity { id, .. } => {
+                assert_eq!(id, "read-build-sude-task-fix-build");
+            }
+            other => panic!("expected ScheduleActivity for build report read, got {other:?}"),
+        }
+
+        // Deliver build report content with commit -> launches reviewer child round 1
+        let d2 = wf.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ActivityCompleted {
+                id: "read-build-sude-task-fix-build".to_string(),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(
+                    "# Build Report\nCommit: abc1234\n## Lessons\nnone".to_string(),
+                )),
+            }),
+        );
+        match d2 {
+            StepDecision::StartChild { id, input, .. } => {
                 assert_eq!(id, "suhuynh-task-fix-review-r1");
+                assert_eq!(input["name"], "suhuynh-task-fixr1");
+                assert!(input["brief"].as_str().unwrap().contains("Verdict: clean"));
             }
             other => panic!("expected StartChild for review r1, got {other:?}"),
         }
         assert_eq!(state.phase, PipelinePhase::Review);
         assert_eq!(state.round, 1);
+        assert_eq!(state.head_sha.as_deref(), Some("abc1234"));
 
-        // Reviewer child completes with 2 findings -> drives fix child
-        let d2 = wf.step(
+        // 2. Reviewer child completes with SingleWorkerOutput -> schedules report read
+        let d3 = wf.step(
             &mut state,
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "suhuynh-task-fix-review-r1".to_string(),
-                output: json!({ "exit": 0, "findings": 2 }),
+                output: serde_json::to_value(
+                    SingleWorkerOutput::new(0, "runs/suhuynh-task-fixr1.md").unwrap(),
+                )
+                .unwrap(),
             }),
         );
-        match d2 {
-            StepDecision::StartChild { id, .. } => {
+        match d3 {
+            StepDecision::ScheduleActivity { id, .. } => {
+                assert_eq!(id, "read-report-r1");
+            }
+            other => panic!("expected ScheduleActivity for review report read, got {other:?}"),
+        }
+
+        // Deliver review report with 2 findings -> drives fix child
+        let d4 = wf.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ActivityCompleted {
+                id: "read-report-r1".to_string(),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(
+                    "# Review\nVerdict: 2 findings\n- finding 1\n- finding 2\n## Lessons\nnone"
+                        .to_string(),
+                )),
+            }),
+        );
+        match d4 {
+            StepDecision::StartChild { id, input, .. } => {
                 assert_eq!(id, "sude-task-fix-fix-r1");
+                assert_eq!(input["name"], "sude-task-fix");
+                assert!(input["brief"]
+                    .as_str()
+                    .unwrap()
+                    .contains("runs/suhuynh-task-fixr1.md"));
             }
             other => panic!("expected StartChild for fix child, got {other:?}"),
         }
@@ -1392,38 +1377,83 @@ mod tests {
         assert_eq!(state.last_findings, 2);
         assert!(state.review_changed);
 
-        // Fix child completes -> launches fresh reviewer child round 2
-        let d3 = wf.step(
+        // 3. Fix child completes with SingleWorkerOutput -> schedules report read
+        let d5 = wf.step(
             &mut state,
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "sude-task-fix-fix-r1".to_string(),
-                output: json!({ "exit": 0, "challenge": false }),
+                output: serde_json::to_value(
+                    SingleWorkerOutput::new(0, "runs/sude-task-fix.md").unwrap(),
+                )
+                .unwrap(),
             }),
         );
-        match d3 {
-            StepDecision::StartChild { id, .. } => {
+        match d5 {
+            StepDecision::ScheduleActivity { id, .. } => {
+                assert_eq!(id, "read-fix-sude-task-fix-fix-r1");
+            }
+            other => panic!("expected ScheduleActivity for fix report read, got {other:?}"),
+        }
+
+        // Deliver fix report content with new commit -> launches fresh reviewer child round 2
+        let d6 = wf.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ActivityCompleted {
+                id: "read-fix-sude-task-fix-fix-r1".to_string(),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(
+                    "# Fix Report\nCommit: def5678\n## Lessons\nnone".to_string(),
+                )),
+            }),
+        );
+        match d6 {
+            StepDecision::StartChild { id, input, .. } => {
                 assert_eq!(id, "suhuynh-task-fix-review-r2");
+                assert_eq!(input["name"], "suhuynh-task-fixr2");
             }
             other => panic!("expected StartChild for review r2, got {other:?}"),
         }
         assert_eq!(state.phase, PipelinePhase::Review);
         assert_eq!(state.round, 2);
+        assert_eq!(state.head_sha.as_deref(), Some("def5678"));
 
-        // Round 2 reviewer child completes clean -> complete workflow
-        let d4 = wf.step(
+        // 4. Round 2 reviewer child completes with SingleWorkerOutput -> schedules report read
+        let d7 = wf.step(
             &mut state,
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "suhuynh-task-fix-review-r2".to_string(),
-                output: json!({ "exit": 0, "findings": 0 }),
+                output: serde_json::to_value(
+                    SingleWorkerOutput::new(0, "runs/suhuynh-task-fixr2.md").unwrap(),
+                )
+                .unwrap(),
             }),
         );
-        match d4 {
+        match d7 {
+            StepDecision::ScheduleActivity { id, .. } => {
+                assert_eq!(id, "read-report-r2");
+            }
+            other => panic!("expected ScheduleActivity for r2 report read, got {other:?}"),
+        }
+
+        // Deliver review r2 report with clean verdict -> complete workflow
+        let d8 = wf.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ActivityCompleted {
+                id: "read-report-r2".to_string(),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(
+                    "# Review r2\nVerdict: clean\n## Lessons\nnone".to_string(),
+                )),
+            }),
+        );
+        match d8 {
             StepDecision::Complete(output) => {
                 assert_eq!(output.status, "clean");
                 assert_eq!(output.rounds, 2);
                 assert!(output.review_changed);
+                assert_eq!(output.commit.as_deref(), Some("def5678"));
             }
             other => panic!("expected Complete, got {other:?}"),
         }
@@ -1441,14 +1471,8 @@ mod tests {
         // 1. Initial step emits plan child (seq 1)
         let d1 = wf.step(&mut state, &mut ctx, None);
         match d1 {
-            StepDecision::StartChild {
-                id,
-                workflow_type,
-                input,
-            } => {
+            StepDecision::StartChild { id, .. } => {
                 assert_eq!(id, "sude-task-resume-plan");
-                assert_eq!(workflow_type, "single_worker");
-                assert_eq!(input["report_path"], "runs/sude-task-resume-plan.md");
             }
             other => panic!("expected StartChild for plan, got {other:?}"),
         }
@@ -1459,13 +1483,16 @@ mod tests {
             )
             .unwrap();
 
-        // 2. Plan child completes -> PauseForApproval (seq 2)
+        // 2. Plan child completes with SingleWorkerOutput -> ScheduleActivity (seq 2)
         let _ = wf.step(
             &mut state,
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "sude-task-resume-plan".to_string(),
-                output: json!({ "exit": 0, "report_path": "runs/plan.md", "challenge": false }),
+                output: serde_json::to_value(
+                    SingleWorkerOutput::new(0, "runs/sude-task-resume.md").unwrap(),
+                )
+                .unwrap(),
             }),
         );
         journal
@@ -1475,7 +1502,25 @@ mod tests {
             )
             .unwrap();
 
-        // 3. Operator approves -> start build child (seq 3, 4)
+        // Plan report read returns content without challenge -> PauseForApproval (seq 3)
+        let _ = wf.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ActivityCompleted {
+                id: "read-plan-sude-task-resume-plan".to_string(),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(
+                    "# Plan\n- step 1\n## Lessons\nnone".to_string(),
+                )),
+            }),
+        );
+        journal
+            .append_event(
+                "pipe-task-resume",
+                &EventRecord::new(3, 1150, "pause_for_approval", "reason=plan-ready"),
+            )
+            .unwrap();
+
+        // 3. Operator approves -> start build child (seq 4, 5)
         let _ = wf.step(
             &mut state,
             &mut ctx,
@@ -1487,52 +1532,74 @@ mod tests {
         journal
             .append_event(
                 "pipe-task-resume",
-                &EventRecord::new(3, 1200, "approval_resolved", "approved=true"),
+                &EventRecord::new(4, 1200, "approval_resolved", "approved=true"),
             )
             .unwrap();
         journal
             .append_event(
                 "pipe-task-resume",
-                &EventRecord::new(4, 1200, "child_started", "id=sude-task-resume-build"),
+                &EventRecord::new(5, 1200, "child_started", "id=sude-task-resume-build"),
             )
             .unwrap();
 
-        // 4. Build child completes -> advances to Review round 1 (seq 5)
+        // 4. Build child completes with SingleWorkerOutput -> ScheduleActivity (seq 6)
         let _ = wf.step(
             &mut state,
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "sude-task-resume-build".to_string(),
-                output: json!({ "exit": 0, "commit": "deadbeef", "challenge": false }),
+                output: serde_json::to_value(
+                    SingleWorkerOutput::new(0, "runs/sude-task-resume.md").unwrap(),
+                )
+                .unwrap(),
             }),
         );
         journal
             .append_event(
                 "pipe-task-resume",
-                &EventRecord::new(5, 1300, "child_completed", "id=sude-task-resume-build"),
+                &EventRecord::new(6, 1300, "child_completed", "id=sude-task-resume-build"),
+            )
+            .unwrap();
+
+        // Build report read returns content with commit -> advances to Review round 1 (seq 7)
+        let _ = wf.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ActivityCompleted {
+                id: "read-build-sude-task-resume-build".to_string(),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(
+                    "# Build\nCommit: deadbeef\n## Lessons\nnone".to_string(),
+                )),
+            }),
+        );
+        journal
+            .append_event(
+                "pipe-task-resume",
+                &EventRecord::new(7, 1350, "child_started", "id=suhuynh-task-resume-review-r1"),
             )
             .unwrap();
 
         assert_eq!(state.phase, PipelinePhase::Review);
         assert_eq!(state.round, 1);
+        assert_eq!(state.head_sha.as_deref(), Some("deadbeef"));
 
-        // Snapshot the state at sequence 5
+        // Snapshot the state at sequence 7
         let snapshot_json = serde_json::to_string(&state).expect("serialize snapshot");
         journal
-            .append_snapshot("pipe-task-resume", &SnapshotRecord::new(5, snapshot_json))
+            .append_snapshot("pipe-task-resume", &SnapshotRecord::new(7, snapshot_json))
             .expect("append snapshot");
 
-        // 5. Append in-flight event occurring after snapshot (seq 6: review child completes with 1 finding)
+        // 5. Append in-flight event occurring after snapshot (seq 8: review child completes)
         journal
             .append_event(
                 "pipe-task-resume",
                 &EventRecord::new(
-                    6,
+                    8,
                     1400,
                     "child_completed",
                     json!({
                         "id": "suhuynh-task-resume-review-r1",
-                        "output": { "exit": 0, "findings": 1 }
+                        "output": SingleWorkerOutput::new(0, "runs/suhuynh-task-resumer1.md").unwrap(),
                     })
                     .to_string(),
                 ),
@@ -1544,7 +1611,7 @@ mod tests {
             .load_latest_snapshot("pipe-task-resume")
             .expect("load snapshot")
             .expect("snapshot exists");
-        assert_eq!(loaded_snapshot.seq, 5);
+        assert_eq!(loaded_snapshot.seq, 7);
 
         let mut restored_state: PipelineWorkflowState =
             serde_json::from_str(&loaded_snapshot.state_json).expect("deserialize snapshot");
@@ -1556,19 +1623,38 @@ mod tests {
             .expect("load subsequent events");
         assert_eq!(subsequent_events.len(), 1);
 
-        // Replay event seq 6 onto restored state
-        let event6_json: serde_json::Value =
+        // Replay event seq 8 onto restored state
+        let event8_json: serde_json::Value =
             serde_json::from_str(&subsequent_events[0].payload_json).unwrap();
         let replayed_event = WorkflowEvent::ChildCompleted {
-            id: event6_json["id"].as_str().unwrap().to_string(),
-            output: event6_json["output"].clone(),
+            id: event8_json["id"].as_str().unwrap().to_string(),
+            output: event8_json["output"].clone(),
         };
-        let decision = wf.step(&mut restored_state, &mut ctx, Some(replayed_event));
+        let d_after_replay = wf.step(&mut restored_state, &mut ctx, Some(replayed_event));
+        match d_after_replay {
+            StepDecision::ScheduleActivity { id, .. } => {
+                assert_eq!(id, "read-report-r1");
+            }
+            other => panic!("expected ScheduleActivity for review report, got {other:?}"),
+        }
+
+        // Deliver report content with 1 finding
+        let decision = wf.step(
+            &mut restored_state,
+            &mut ctx,
+            Some(WorkflowEvent::ActivityCompleted {
+                id: "read-report-r1".to_string(),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(
+                    "# Review\nVerdict: 1 findings\n- fix this\n## Lessons\nnone".to_string(),
+                )),
+            }),
+        );
 
         // Invariant: resumes at Fix child for round 1, without replaying plan or build child
         match decision {
-            StepDecision::StartChild { id, .. } => {
+            StepDecision::StartChild { id, input, .. } => {
                 assert_eq!(id, "sude-task-resume-fix-r1");
+                assert_eq!(input["name"], "sude-task-resume");
             }
             other => panic!("expected StartChild for fix r1, got {other:?}"),
         }
@@ -1608,7 +1694,7 @@ mod tests {
         let mut activities = MockActivities::new();
         let mut journal = InMemoryJournal::default();
 
-        // Register mock reports for each child
+        // Register mock reports for each child (worker names: sude-task-e2e, suhuynh-task-e2er1)
         activities.register(
             "read-plan-sude-task-e2e-plan",
             ActivityResult::ReportFile(ReportFileResult::Content(
@@ -1644,6 +1730,40 @@ mod tests {
     }
 
     #[test]
+    fn test_review_rounds_exhausted_fails_with_exit_5_blocked() {
+        let wf = PipelineWorkflow;
+        let mut input = PipelineInput::new("task-exhaust", "/repo", "sude", "suhuynh", "brief");
+        input.max_rounds = 1;
+        let mut state = PipelineWorkflowState::new(input);
+        state.phase = PipelinePhase::Review;
+        state.round = 1;
+        state.pending_report_read = Some("runs/suhuynh-task-exhaustr1.md".to_string());
+
+        let mut ctx = WorkflowContext::new(1000);
+
+        let decision = wf.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ActivityCompleted {
+                id: "read-report-r1".to_string(),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(
+                    "# Review\nVerdict: 3 findings\n- f1\n- f2\n- f3\n## Lessons\nnone".to_string(),
+                )),
+            }),
+        );
+
+        match decision {
+            StepDecision::Fail { code, reason } => {
+                assert_eq!(code, 5);
+                assert!(reason.contains("exhausted"));
+                assert!(reason.contains("3 findings remain"));
+            }
+            other => panic!("expected Fail code 5 (blocked), got {other:?}"),
+        }
+        assert_eq!(state.phase, PipelinePhase::Failed);
+    }
+
+    #[test]
     fn test_review_with_no_verdict_fails_closed() {
         let wf = PipelineWorkflow;
         let input = PipelineInput::new("task-noverdict", "/repo", "sude", "suhuynh", "brief");
@@ -1653,7 +1773,7 @@ mod tests {
 
         let mut ctx = WorkflowContext::new(1000);
 
-        // Case 1: ChildCompleted with no verdict and no report_path fails immediately with code 6
+        // Case 1: ChildCompleted with no report_path fails immediately with code 6
         let d1 = wf.step(
             &mut state,
             &mut ctx,
@@ -1665,7 +1785,7 @@ mod tests {
         match d1 {
             StepDecision::Fail { code, reason } => {
                 assert_eq!(code, 6);
-                assert!(reason.contains("without verdict or report_path"));
+                assert!(reason.contains("no report_path"));
             }
             other => panic!("expected Fail code 6, got {other:?}"),
         }
@@ -1710,6 +1830,7 @@ mod tests {
         let mut state = PipelineWorkflowState::new(input);
         state.phase = PipelinePhase::Review;
         state.round = 1;
+        state.pending_report_read = Some("runs/report.md".to_string());
 
         let mut ctx = WorkflowContext::new(1000);
 
@@ -1718,17 +1839,18 @@ mod tests {
         let decision = wf.step(
             &mut state,
             &mut ctx,
-            Some(WorkflowEvent::ChildCompleted {
-                id: "suhuynh-task-substr-review-r1".to_string(),
-                output: json!({
-                    "exit": 0,
-                    "verdict": "Verdict: 2 findings (not clean)"
-                }),
+            Some(WorkflowEvent::ActivityCompleted {
+                id: "read-report-r1".to_string(),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(
+                    "# Review\nVerdict: 2 findings (not clean)\n- f1\n- f2\n## Lessons\nnone"
+                        .to_string(),
+                )),
             }),
         );
         match decision {
-            StepDecision::StartChild { id, .. } => {
+            StepDecision::StartChild { id, input, .. } => {
                 assert_eq!(id, "sude-task-substr-fix-r1");
+                assert_eq!(input["name"], "sude-task-substr");
             }
             other => panic!("expected StartChild for fix, got {other:?}"),
         }
@@ -1781,7 +1903,10 @@ mod tests {
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "sude-task-chal-build".to_string(),
-                output: json!({ "exit": 0, "report_path": "runs/build-chal.md" }),
+                output: serde_json::to_value(
+                    SingleWorkerOutput::new(0, "runs/build-chal.md").unwrap(),
+                )
+                .unwrap(),
             }),
         );
         match d1 {
@@ -1827,7 +1952,10 @@ mod tests {
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "suhuynh-task-mismatch-review-r1".to_string(),
-                output: json!({ "exit": 0, "findings": 0 }),
+                output: serde_json::to_value(
+                    SingleWorkerOutput::new(0, "runs/suhuynh-task-mismatchr1.md").unwrap(),
+                )
+                .unwrap(),
             }),
         );
         assert_eq!(decision, StepDecision::Continue);
