@@ -570,11 +570,19 @@ impl SystemActivities {
                 let map = self.event_clients.lock().map_err(|_| {
                     ActivityError::ExecutionFailed("event_clients mutex poisoned".to_string())
                 })?;
-                let client = map.get(agent).ok_or_else(|| {
-                    ActivityError::NotFound(format!(
-                        "no active event subscription for agent '{agent}'"
-                    ))
-                })?;
+                let client = match map.get(agent) {
+                    Some(c) => c,
+                    None => {
+                        // Subscriptions are process-local and not durable across process restarts / resumes.
+                        // Return empty events rather than a fatal error so a resumed runner can continue polling.
+                        return Ok(ActivityResult::HerdrEvents(
+                            HerdrEventResult::ScopedEvents {
+                                agent: agent.clone(),
+                                events: Vec::new(),
+                            },
+                        ));
+                    }
+                };
                 let events = client.poll_events()?;
                 Ok(ActivityResult::HerdrEvents(
                     HerdrEventResult::ScopedEvents {
@@ -584,7 +592,7 @@ impl SystemActivities {
                 ))
             }
             HerdrEventRequest::PollEvents => {
-                let map = self.event_clients.lock().map_err(|_| {
+                let mut map = self.event_clients.lock().map_err(|_| {
                     ActivityError::ExecutionFailed("event_clients mutex poisoned".to_string())
                 })?;
                 if map.is_empty() {
@@ -593,16 +601,21 @@ impl SystemActivities {
                     )));
                 }
                 let mut all_events = Vec::new();
+                let mut dead_agents = Vec::new();
                 let mut first_err = None;
-                for client in map.values() {
+                for (agent, client) in map.iter() {
                     match client.poll_events() {
                         Ok(mut evs) => all_events.append(&mut evs),
                         Err(e) => {
+                            dead_agents.push(agent.clone());
                             if first_err.is_none() {
                                 first_err = Some(e);
                             }
                         }
                     }
+                }
+                for dead in dead_agents {
+                    map.remove(&dead);
                 }
                 if all_events.is_empty() {
                     if let Some(err) = first_err {
@@ -617,10 +630,19 @@ impl SystemActivities {
     }
 
     fn execute_grid(&self, req: &GridRequest) -> Result<ActivityResult, ActivityError> {
-        let repo_name = self
-            .repo_dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string());
+        let repo_name = std::env::var("PIPELINE_REPO")
+            .ok()
+            .map(|r| {
+                Path::new(&r)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or(r)
+            })
+            .or_else(|| {
+                self.repo_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+            });
         let mut grid_act = crate::grid::reconcile::GridActivity::with_driver(self.herdr.clone());
         if let Some(rn) = repo_name {
             grid_act = grid_act.with_repo(rn);
@@ -634,25 +656,6 @@ impl SystemActivities {
                 CostResult::BudgetExceeded(*spend > *budget),
             )),
             CostRequest::QuerySpend { session_pattern } => {
-                if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
-                    if let Ok(content) = std::fs::read_to_string(&cost_file) {
-                        if let Ok(val) = content.trim().parse::<f64>() {
-                            return Ok(ActivityResult::Cost(CostResult::Spend(val)));
-                        }
-                    }
-                    return Ok(ActivityResult::Cost(CostResult::Spend(0.0)));
-                }
-
-                // Check via existing cost reader entry point
-                if let Some(val) = crate::worker::prompt::cost::read_worker_cost(
-                    session_pattern,
-                    session_pattern,
-                    session_pattern,
-                    "opencode",
-                ) {
-                    return Ok(ActivityResult::Cost(CostResult::Spend(val)));
-                }
-
                 let mut db_candidates = Vec::new();
                 if let Ok(env_db) = std::env::var("QUAQUA_COST_DB_PATH") {
                     if !env_db.is_empty() {
@@ -1738,20 +1741,20 @@ esac
             panic!("expected ScopedEvents, got {poll_res:?}");
         }
 
-        // 3. PollEventsFor unknown agent preserves agent_not_found vocabulary
+        // 3. PollEventsFor unknown agent returns empty ScopedEvents (R2: not fatal, allows resumed runners to poll)
         let unk_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
             agent: "nonexistent-agent".to_string(),
         });
-        let unk_err = activities.execute(&unk_req).unwrap_err();
-        match unk_err {
-            ActivityError::NotFound(msg) => {
-                assert!(
-                    msg.contains("no active event subscription"),
-                    "must indicate no active subscription: {msg}"
-                );
-            }
-            other => panic!("expected NotFound, got {other:?}"),
-        }
+        let unk_res = activities
+            .execute(&unk_req)
+            .expect("unsubscribed poll returns empty events");
+        assert_eq!(
+            unk_res,
+            ActivityResult::HerdrEvents(HerdrEventResult::ScopedEvents {
+                agent: "nonexistent-agent".to_string(),
+                events: vec![],
+            })
+        );
         // 4. Unsubscribe
         let unsub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Unsubscribe {
             agent: "sude-ev".to_string(),
@@ -1793,9 +1796,10 @@ esac
         let sock_path = std::env::temp_dir().join(format!("quaqua-act-events-multi-{}.sock", pid));
         let _ = fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).expect("bind test unix socket");
-
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx_done, rx_done) = std::sync::mpsc::channel();
         let handle = thread::spawn(move || {
-            // Client 1 (agent-1)
+            // Client 1 (agent-1): healthy
             let (mut stream1, _) = listener.accept().expect("accept connection 1");
             let mut reader1 = BufReader::new(stream1.try_clone().expect("clone stream 1"));
             let mut line1 = String::new();
@@ -1810,7 +1814,7 @@ esac
                 .unwrap();
             stream1.flush().unwrap();
 
-            // Client 2 (agent-2)
+            // Client 2 (agent-2): delivers an event, then closes connection (EOF) to simulate dead client
             let (mut stream2, _) = listener.accept().expect("accept connection 2");
             let mut reader2 = BufReader::new(stream2.try_clone().expect("clone stream 2"));
             let mut line2 = String::new();
@@ -1824,6 +1828,20 @@ esac
                 .write_all(format!("{}\n{}\n", resp2, ev2).as_bytes())
                 .unwrap();
             stream2.flush().unwrap();
+
+            // Explicitly shutdown client 2 to generate EOF on subsequent reads
+            let _ = stream2.shutdown(std::net::Shutdown::Both);
+
+            // Wait for signal before sending second event from Client 1
+            let _ = rx.recv();
+            let ev1_second = serde_json::json!({ "event": "pane.agent_status_changed", "data": { "agent": "agent-1", "agent_status": "idle" } });
+            stream1
+                .write_all(format!("{}\n", ev1_second).as_bytes())
+                .unwrap();
+            stream1.flush().unwrap();
+
+            // Keep stream1 open until all polls complete
+            let _ = rx_done.recv();
         });
 
         let _guard_sock = EnvVarGuard::set("HERDR_SOCKET_PATH", &sock_path);
@@ -1847,9 +1865,7 @@ esac
             ))
             .expect("subscribe agent-2");
 
-        let _ = handle.join();
-
-        // Unscoped poll aggregates events from both subscribed clients
+        // 1. Initial poll aggregates events from both subscribed clients
         let poll_res = activities
             .execute(&ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents))
             .expect("poll all events");
@@ -1862,6 +1878,33 @@ esac
             panic!("expected Events, got {poll_res:?}");
         }
 
+        // Signal thread to send event 2 on client 1 while client 2 is dead
+        let _ = tx.send(());
+        // Small yield so the event buffer is flushed to the socket
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // 2. Second poll: agent-2 hits EOF (dead client) and is dropped from map;
+        // agent-1's second event is returned successfully despite agent-2's EOF (R3)
+        let poll_res2 = activities
+            .execute(&ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents))
+            .expect("second poll with dead client mix");
+        if let ActivityResult::HerdrEvents(HerdrEventResult::Events(events)) = poll_res2 {
+            assert_eq!(events.len(), 1);
+            assert!(events[0].contains("agent-1"));
+        } else {
+            panic!("expected 1 Event, got {poll_res2:?}");
+        }
+
+        // 3. Third poll: agent-2 was dropped from the map, so polling healthy agent-1 yields empty events without error
+        let poll_res3 = activities
+            .execute(&ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents))
+            .expect("third poll after dead client dropped");
+        if let ActivityResult::HerdrEvents(HerdrEventResult::Events(events)) = poll_res3 {
+            assert_eq!(events.len(), 0);
+        } else {
+            panic!("expected empty Events, got {poll_res3:?}");
+        }
+        let _ = tx_done.send(());
+        let _ = handle.join();
         let _ = fs::remove_file(&sock_path);
     }
 
@@ -1879,6 +1922,19 @@ esac
                 panic!("expected PlanJson, got {plan_res:?}");
             }
 
+            // Plan with PIPELINE_REPO set and tab: None (R4 verification: prefer basename)
+            {
+                let _guard_repo = EnvVarGuard::set("PIPELINE_REPO", "/home/user/work/my-project");
+                let plan_none = ActivityRequest::Grid(GridRequest::Plan { tab: None });
+                let plan_res_none = activities
+                    .execute(&plan_none)
+                    .expect("grid plan with PIPELINE_REPO succeeds");
+                if let ActivityResult::Grid(GridResult::PlanJson(json)) = plan_res_none {
+                    assert!(json.starts_with('[') && json.ends_with(']'));
+                } else {
+                    panic!("expected PlanJson, got {plan_res_none:?}");
+                }
+            }
             // Reconcile
             let rec_req = ActivityRequest::Grid(GridRequest::Reconcile {
                 tab: Some("quaqua-workers".to_string()),
@@ -1903,9 +1959,19 @@ esac
 
         let pid = std::process::id();
         let temp_dir = std::env::temp_dir().join(format!("quaqua-act-cost-db-{}", pid));
+        let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
-        let db_path = temp_dir.join("opencode.db");
 
+        let empty_path_dir = temp_dir.join("empty_bin");
+        let _ = fs::create_dir_all(&empty_path_dir);
+
+        let runs_dir = temp_dir.join("runs");
+        let _ = fs::create_dir_all(&runs_dir);
+
+        let home_dir = temp_dir.join("home");
+        let _ = fs::create_dir_all(&home_dir);
+
+        let db_path = temp_dir.join("opencode.db");
         {
             let conn = rusqlite::Connection::open(&db_path).expect("open temp sqlite db");
             conn.execute_batch(
@@ -1921,7 +1987,13 @@ esac
             .expect("populate session_v2 fixture");
         }
 
+        // Hermetic isolation: empty PATH (proves no external CLI invocation), isolated HOME, isolated RUNS_DIR, and point QUAQUA_COST_DB_PATH
+        let _guard_path = EnvVarGuard::set("PATH", empty_path_dir.to_str().unwrap());
+        let _guard_home = EnvVarGuard::set("HOME", home_dir.to_str().unwrap());
+        let _guard_runs = EnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
         let _guard_db = EnvVarGuard::set("QUAQUA_COST_DB_PATH", db_path.to_str().unwrap());
+
+        let start = std::time::Instant::now();
         let activities = SystemActivities::new();
 
         // 1. Exact session ID match
@@ -1954,11 +2026,25 @@ esac
         let res4 = activities.execute(&req4).expect("query spend nonexistent");
         assert_eq!(res4, ActivityResult::Cost(CostResult::Spend(0.0)));
 
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "cost query test took too long: {elapsed:?}"
+        );
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
-
     #[test]
     fn test_all_activity_arms_live_no_deferrals() {
+        let _lock = HERDR_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let pid = std::process::id();
+        let temp_dir = std::env::temp_dir().join(format!("quaqua-act-nodef-{}", pid));
+        let _ = fs::create_dir_all(&temp_dir);
+        let _guard_home = EnvVarGuard::set("HOME", temp_dir.to_str().unwrap());
+
         let activities = SystemActivities::new();
 
         // PollEvents returns empty vector rather than deferred error
@@ -1975,5 +2061,7 @@ esac
         });
         let cost_res = activities.execute(&cost_req).expect("query spend live");
         assert_eq!(cost_res, ActivityResult::Cost(CostResult::Spend(0.0)));
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
