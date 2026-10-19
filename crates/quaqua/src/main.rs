@@ -82,6 +82,11 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Show workflow and orchestration status overview.
+    Status {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -508,6 +513,15 @@ fn main() {
                     eprint!("{msg}");
                 }
                 code
+            }
+        },
+        Some(Command::Status { args }) => match quaqua::status::handle_status(&args, &Herdr::new()) {
+            Ok(code) => code,
+            Err(e) => {
+                if !e.is_empty() {
+                    eprintln!("{e}");
+                }
+                1
             }
         },
         None => 0,
