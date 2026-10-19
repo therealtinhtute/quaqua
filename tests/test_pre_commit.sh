@@ -24,6 +24,20 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# herdr stub + env pin: `quaqua init` below runs with HERDR_PANE_ID unset, so
+# it asks `herdr pane current` — and init resolves `herdr` via PATH, not
+# HERDR_BIN_PATH. Pin both so the real binary/server is unreachable from here.
+mkdir -p "$T/bin"
+cat > "$T/bin/herdr" <<'STUB'
+#!/usr/bin/env bash
+echo "herdr $*" >> "${CALLS:-/dev/null}"
+exit 0
+STUB
+chmod +x "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
+
 R="$T/repo"
 mkdir -p "$R"
 git -C "$R" init -q
