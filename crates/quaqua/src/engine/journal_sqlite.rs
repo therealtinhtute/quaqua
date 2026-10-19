@@ -15,12 +15,16 @@ pub struct SqliteJournal {
 }
 
 impl SqliteJournal {
+    /// Returns the default SQLite journal path at `<workspace_root>/runs/quaqua.db`.
+    pub fn default_path() -> PathBuf {
+        crate::workspace::workspace_root()
+            .join("runs")
+            .join("quaqua.db")
+    }
+
     /// Opens or creates the SQLite journal at `<workspace_root>/runs/quaqua.db`.
     pub fn new() -> Result<Self, JournalError> {
-        let path = crate::workspace::workspace_root()
-            .join("runs")
-            .join("quaqua.db");
-        Self::open(&path)
+        Self::open(&Self::default_path())
     }
 
     /// Opens or creates the SQLite journal at the specified path.
@@ -138,8 +142,10 @@ impl Journal for SqliteJournal {
 
         match insert_res {
             Ok(_) => {
-                conn.execute_batch("COMMIT;")
-                    .map_err(|e| JournalError::StorageError(e.to_string()))?;
+                if let Err(e) = conn.execute_batch("COMMIT;") {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(JournalError::StorageError(e.to_string()));
+                }
                 Ok(assigned_seq)
             }
             Err(e) => {
@@ -527,8 +533,12 @@ mod tests {
 
     #[test]
     fn test_sqlite_journal_creates_parent_directories() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir()
-            .join("quaqua-test-nested-dir")
+            .join(format!("quaqua-test-nested-dir-{nanos}"))
             .join("sub1")
             .join("sub2");
         let path = dir.join("test.db");
@@ -545,7 +555,6 @@ mod tests {
         let expected = crate::workspace::workspace_root()
             .join("runs")
             .join("quaqua.db");
-        let journal = SqliteJournal::new().expect("default journal");
-        assert_eq!(journal.path(), expected.as_path());
+        assert_eq!(SqliteJournal::default_path(), expected);
     }
 }
