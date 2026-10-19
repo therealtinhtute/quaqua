@@ -16,11 +16,12 @@ pub use crate::worker::worktree::{
 use std::process::{Command, Output};
 
 pub const USAGE: &str = "\
-# Usage: quaqua worker spawn [--base <ref>] [--review] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
+# Usage: quaqua worker spawn [--base <ref>] [--review] [--approve-kind <kind>] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — quaqua lead spawn <slug>)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
-#   --review      any kind with can_review = true: repo read-only, $HOME/quaqua/runs writable";
+#   --review      any kind with can_review = true: repo read-only, $HOME/quaqua/runs writable
+#   --approve-kind <kind>  approve a spawn when kinds.<kind>.spawn = \"approve\" (repeatable)";
 
 pub struct SpawnOptions {
     pub base: Option<String>,
@@ -28,11 +29,14 @@ pub struct SpawnOptions {
     pub name: String,
     pub kind: String,
     pub repo_path: PathBuf,
+    /// Kinds the Principal approved with `--approve-kind`.
+    pub approve_kinds: Vec<String>,
 }
 
 pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> {
     let mut base: Option<String> = None;
     let mut review = false;
+    let mut approve_kinds: Vec<String> = Vec::new();
     let mut pos = Vec::new();
 
     let mut i = 0;
@@ -40,6 +44,22 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
         let arg = &args[i];
         if arg == "--review" {
             review = true;
+            i += 1;
+        } else if arg == "--approve-kind" {
+            if i + 1 >= args.len() {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            let val = &args[i + 1];
+            if val.is_empty() || val.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            approve_kinds.push(val.clone());
+            i += 2;
+        } else if let Some(val) = arg.strip_prefix("--approve-kind=") {
+            if val.is_empty() || val.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            approve_kinds.push(val.to_string());
             i += 1;
         } else if arg == "--base" {
             if i + 1 >= args.len() {
@@ -75,6 +95,7 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
         name: pos[0].clone(),
         kind: pos[1].clone(),
         repo_path: PathBuf::from(&pos[2]),
+        approve_kinds,
     })
 }
 
@@ -188,6 +209,10 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         let lines: Vec<&str> = USAGE.lines().take(2).collect();
         return Err((1, format!("{}\n", lines.join("\n"))));
     }
+
+    // One spawn-policy gate for every spawn path: a kind with
+    // `spawn = "approve"` needs its own --approve-kind from the Principal.
+    crate::config::check_spawn_policy(&opts.kind, kind_info, &opts.approve_kinds)?;
 
     if opts.review && !kind_info.can_review {
         eprintln!(
@@ -410,6 +435,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
                     );
                     return Err((1, String::new()));
                 }
+                crate::config::check_spawn_policy(fb, fb_kind, &opts.approve_kinds)?;
                 let fb_launch = resolve_launch(fb_kind, fb)?;
                 eprintln!("WARN: fallback: {}→{fb} ({reason})", opts.kind);
                 fallback_record = Some((opts.kind.clone(), fb.to_string(), reason.clone()));

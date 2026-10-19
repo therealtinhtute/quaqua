@@ -71,6 +71,7 @@ harness = "claude"
 model = "opus-5.5"
 effort = "high"
 can_review = true
+spawn = "auto"                    # "auto" = spawn freely (anh iu, 2026-10-19); "approve" = needs --approve-kind truonglao
 [taskforce.advisor]
 members = ["suhuynh"]
 read_only = true

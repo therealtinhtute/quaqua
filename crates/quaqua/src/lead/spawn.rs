@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const USAGE: &str = "\
-# Usage: quaqua lead spawn <slug>
+# Usage: quaqua lead spawn <slug> [--approve-kind <kind>]
 #   Start the project Lead for <slug> (AGENTS.md '## Roles (SLP)'): an agent
 #   session named <slug>-lead running in the quaqua checkout this script
 #   belongs to (normally ~/quaqua). The Lead is not a worker — no worktree,
@@ -28,7 +28,8 @@ pub const USAGE: &str = "\
 #   <slug>-lead would exceed herdr's 32-char agent-name limit; on success
 #   the row's owner column becomes the Lead name (serialized with
 #   quaqua lead cleanup via projects/INDEX.md.lock.d, published by atomic rename).
-#   Env: LEAD_KIND (overrides strategy.lead_kind in team.toml).";
+#   Env: LEAD_KIND (overrides strategy.lead_kind in team.toml).
+#   --approve-kind <kind>  approve a lead kind whose team.toml spawn = \"approve\"";
 
 pub use crate::workspace::find_quaqua_root;
 
@@ -62,10 +63,40 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     git: &G,
     herdr: &H,
 ) -> Result<(), (i32, String)> {
-    if args.len() != 1 {
+    if args.is_empty() {
         return Err((1, format!("{}\n", USAGE)));
     }
-    let slug = &args[0];
+    let mut slug = String::new();
+    let mut approve_kinds: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--approve-kind" {
+            if i + 1 >= args.len() {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            let val = &args[i + 1];
+            if val.is_empty() || val.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            approve_kinds.push(val.clone());
+            i += 2;
+        } else if let Some(v) = arg.strip_prefix("--approve-kind=") {
+            if v.is_empty() || v.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            approve_kinds.push(v.to_string());
+            i += 1;
+        } else if arg.starts_with('-') || !slug.is_empty() {
+            return Err((1, format!("{}\n", USAGE)));
+        } else {
+            slug = arg.clone();
+            i += 1;
+        }
+    }
+    if slug.is_empty() {
+        return Err((1, format!("{}\n", USAGE)));
+    }
     if slug.starts_with('-') || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
         return Err((1, format!("{}\n", USAGE)));
     }
@@ -228,9 +259,13 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
 
     // Load config and resolve lead launch
     let base_cfg = crate::config::load_team_config()?;
-    let cfg = crate::config::resolve(base_cfg.clone(), Some(slug)).unwrap_or(base_cfg);
+    let cfg = crate::config::resolve(base_cfg.clone(), Some(&slug)).unwrap_or(base_cfg);
     let lead_env = std::env::var("LEAD_KIND").ok();
-    let (_lead_kind, launch) = resolve_lead_launch(&cfg, lead_env.as_deref())?;
+    let (lead_kind, launch) = resolve_lead_launch(&cfg, lead_env.as_deref())?;
+    let lead_kind_info = cfg.kinds.get(&lead_kind).ok_or_else(|| {
+        (1, format!("error: default lead kind '{lead_kind}' not found in team.toml\n"))
+    })?;
+    crate::config::check_spawn_policy(&lead_kind, lead_kind_info, &approve_kinds)?;
 
     let root_str = root.to_string_lossy().to_string();
     let runs_str = runs_dir.to_string_lossy().to_string();
@@ -250,7 +285,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         "workspace",
         "create",
         "--label",
-        slug,
+        &slug,
         "--no-focus",
         "--cwd",
         &root_str,
@@ -319,7 +354,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         return Err((1, String::from_utf8_lossy(&start_out.stderr).to_string()));
     }
     // Update projects/INDEX.md with mkdir lock
-    update_project_index_owner(&root, slug, &name)?;
+    update_project_index_owner(&root, &slug, &name)?;
 
     // Prompt Lead
     let prompt_text = format!(
