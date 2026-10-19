@@ -47,13 +47,32 @@ impl SystemActivities {
             repo_dir: repo_dir.into(),
         }
     }
+    fn run_with_etxtbusy_retry<F, T>(f: F) -> std::io::Result<T>
+    where
+        F: Fn() -> std::io::Result<T>,
+    {
+        let mut attempts = 0;
+        loop {
+            match f() {
+                Err(e) if e.raw_os_error() == Some(26) && attempts < 10 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                res => return res,
+            }
+        }
+    }
 
     fn execute_herdr(&self, req: &HerdrRequest) -> Result<ActivityResult, ActivityError> {
         match req {
             HerdrRequest::Prompt { name, task } => {
-                let out = self.herdr.agent_prompt_nowait(name, task).map_err(|e| {
-                    ActivityError::ExecutionFailed(format!("herdr agent prompt io error: {e}"))
-                })?;
+                let out =
+                    Self::run_with_etxtbusy_retry(|| self.herdr.agent_prompt_nowait(name, task))
+                        .map_err(|e| {
+                            ActivityError::ExecutionFailed(format!(
+                                "herdr agent prompt io error: {e}"
+                            ))
+                        })?;
                 if !out.status.success() {
                     let stderr = String::from_utf8_lossy(&out.stderr);
                     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -71,9 +90,12 @@ impl SystemActivities {
                 }))
             }
             HerdrRequest::SendKeys { name, keys } => {
-                let out = self.herdr.agent_send_keys(name, keys).map_err(|e| {
-                    ActivityError::ExecutionFailed(format!("herdr agent send-keys io error: {e}"))
-                })?;
+                let out = Self::run_with_etxtbusy_retry(|| self.herdr.agent_send_keys(name, keys))
+                    .map_err(|e| {
+                        ActivityError::ExecutionFailed(format!(
+                            "herdr agent send-keys io error: {e}"
+                        ))
+                    })?;
                 if !out.status.success() {
                     let stderr = String::from_utf8_lossy(&out.stderr);
                     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -92,14 +114,14 @@ impl SystemActivities {
             }
             HerdrRequest::ReadAgent { name, lines } => {
                 let lines_str = lines.to_string();
-                let out = self
-                    .herdr
-                    .run(&[
+                let out = Self::run_with_etxtbusy_retry(|| {
+                    self.herdr.run(&[
                         "agent", "read", name, "--source", "visible", "--lines", &lines_str,
                     ])
-                    .map_err(|e| {
-                        ActivityError::ExecutionFailed(format!("herdr agent read io error: {e}"))
-                    })?;
+                })
+                .map_err(|e| {
+                    ActivityError::ExecutionFailed(format!("herdr agent read io error: {e}"))
+                })?;
                 if !out.status.success() {
                     let stderr = String::from_utf8_lossy(&out.stderr);
                     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -116,9 +138,10 @@ impl SystemActivities {
                 Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content }))
             }
             HerdrRequest::Stop { name } => {
-                let (ok, output) = self.herdr.agent_get(name).map_err(|e| {
-                    ActivityError::ExecutionFailed(format!("herdr agent get io error: {e}"))
-                })?;
+                let (ok, output) = Self::run_with_etxtbusy_retry(|| self.herdr.agent_get(name))
+                    .map_err(|e| {
+                        ActivityError::ExecutionFailed(format!("herdr agent get io error: {e}"))
+                    })?;
 
                 if !ok || output.contains("agent_not_found") {
                     return Err(ActivityError::NotFound(format!(
@@ -143,10 +166,10 @@ impl SystemActivities {
                         "cannot stop agent {name}: no valid pane_id found in herdr output: {output}"
                     ))
                 })?;
-
-                let close_out = self.herdr.pane_close(&pane).map_err(|e| {
-                    ActivityError::ExecutionFailed(format!("herdr pane close io error: {e}"))
-                })?;
+                let close_out = Self::run_with_etxtbusy_retry(|| self.herdr.pane_close(&pane))
+                    .map_err(|e| {
+                        ActivityError::ExecutionFailed(format!("herdr pane close io error: {e}"))
+                    })?;
                 if !close_out.status.success() {
                     let err = String::from_utf8_lossy(&close_out.stderr);
                     return Err(ActivityError::ExecutionFailed(format!(
@@ -389,33 +412,28 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::LazyLock;
     use std::sync::Mutex;
-    static HERDR_TEST_MUTEX: Mutex<()> = Mutex::new(());
-    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    struct EnvRestorer {
-        prev: Option<String>,
-        temp_dir: PathBuf,
-    }
+    static HERDR_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct EnvRestorer(Option<String>);
 
     impl Drop for EnvRestorer {
         fn drop(&mut self) {
-            match &self.prev {
+            match &self.0 {
                 Some(val) => std::env::set_var("HERDR_BIN_PATH", val),
                 None => std::env::remove_var("HERDR_BIN_PATH"),
             }
-            let _ = fs::remove_dir_all(&self.temp_dir);
         }
     }
 
-    fn with_herdr_stub<F: FnOnce(&SystemActivities, &Path)>(f: F) {
+    static STUB_BIN: LazyLock<PathBuf> = LazyLock::new(|| {
         let pid = std::process::id();
-        let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let temp_dir = std::env::temp_dir().join(format!("quaqua-herdr-stub-{}-{}", pid, count));
+        let temp_dir = std::env::temp_dir().join(format!("quaqua-herdr-shared-{}", pid));
         let _ = fs::create_dir_all(&temp_dir);
         let stub_bin = temp_dir.join("herdr_stub.sh");
-        let log_file = temp_dir.join("herdr_stub.log");
+        let log_file = std::env::temp_dir().join(format!("quaqua-herdr-stub-{}.log", pid));
 
         let script = format!(
             r#"#!/bin/sh
@@ -499,15 +517,28 @@ esac
         let mut perms = fs::metadata(&stub_bin).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&stub_bin, perms).expect("chmod +x stub script");
+        stub_bin
+    });
+
+    fn with_herdr_stub<F: FnOnce(&SystemActivities, &Path)>(f: F) {
+        let _lock = HERDR_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let stub_bin = &*STUB_BIN;
+        let pid = std::process::id();
+        let log_file = std::env::temp_dir().join(format!("quaqua-herdr-stub-{}.log", pid));
+        let _ = fs::remove_file(&log_file);
 
         let stub_herdr = Herdr {
             bin: stub_bin.to_string_lossy().to_string(),
         };
+        let temp_dir = std::env::temp_dir().join(format!("quaqua-herdr-act-{}", pid));
         let activities = SystemActivities::with_adapters(stub_herdr, Git::new(), &temp_dir);
 
         f(&activities, &log_file);
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        let _ = fs::remove_file(&log_file);
     }
 
     #[test]
@@ -637,35 +668,14 @@ esac
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+        let stub_bin = &*STUB_BIN;
         let pid = std::process::id();
-        let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let temp_dir = std::env::temp_dir().join(format!("quaqua-herdr-env-{}-{}", pid, count));
-        let _ = fs::create_dir_all(&temp_dir);
-        let stub_bin = temp_dir.join("herdr_stub.sh");
-        let log_file = temp_dir.join("herdr_stub.log");
-
-        let script = format!(
-            r#"#!/bin/sh
-LOG="{}"
-if [ "$1" = "agent" ] && [ "$2" = "prompt" ] && [ "$3" = "e3-stub-agent" ]; then
-  echo "env-prompted:$4" >> "$LOG"
-  exit 0
-fi
-exit 1
-"#,
-            log_file.to_string_lossy()
-        );
-        fs::write(&stub_bin, script).expect("write stub script");
-        let mut perms = fs::metadata(&stub_bin).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&stub_bin, perms).expect("chmod +x stub script");
+        let log_file = std::env::temp_dir().join(format!("quaqua-herdr-stub-{}.log", pid));
+        let _ = fs::remove_file(&log_file);
 
         let prev = std::env::var("HERDR_BIN_PATH").ok();
-        std::env::set_var("HERDR_BIN_PATH", &stub_bin);
-        let restorer = EnvRestorer {
-            prev,
-            temp_dir: temp_dir.clone(),
-        };
+        std::env::set_var("HERDR_BIN_PATH", stub_bin);
+        let _restorer = EnvRestorer(prev);
 
         let activities = SystemActivities::new();
         let req = ActivityRequest::Herdr(HerdrRequest::Prompt {
@@ -682,8 +692,8 @@ exit 1
             })
         );
         let log_content = fs::read_to_string(&log_file).unwrap_or_default();
-        assert!(log_content.contains("env-prompted:verify env path"));
-        drop(restorer);
+        assert!(log_content.contains("prompted:verify env path"));
+        let _ = fs::remove_file(&log_file);
     }
 
     #[test]
@@ -767,6 +777,10 @@ exit 1
 
     #[test]
     fn test_git_operations() {
+        let _lock = HERDR_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let pid = std::process::id();
         let temp_dir = std::env::temp_dir().join(format!("quaqua-act-git-{}", pid));
         let _ = fs::remove_dir_all(&temp_dir);
