@@ -194,28 +194,34 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
 }
 
 /// Scan orchestration entities across `herdr.agent_list()` and `runs_dir`.
+///
+/// Propagates `herdr error: ...` on I/O or JSON decoding errors to avoid
+/// emitting misleading `missing` statuses and false `ORPHAN` flags.
 pub fn scan_orchestration<H: HerdrOps>(
     runs_dir: &Path,
     herdr: &H,
 ) -> Result<Vec<OrchestrationRow>, String> {
+    let json_str = herdr
+        .agent_list()
+        .map_err(|e| format!("herdr error: failed to query agent list: {e}"))?;
+
+    let v: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("herdr error: invalid agent list JSON: {e}"))?;
+
+    let arr = v
+        .get("result")
+        .and_then(|r| r.get("agents"))
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| "herdr error: missing result.agents array in response".to_string())?;
+
     let mut live_agents: BTreeMap<String, String> = BTreeMap::new();
-    if let Ok(json_str) = herdr.agent_list() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
-            if let Some(arr) = v
-                .get("result")
-                .and_then(|r| r.get("agents"))
-                .and_then(|a| a.as_array())
-            {
-                for agent in arr {
-                    if let Some(name) = agent.get("name").and_then(|n| n.as_str()) {
-                        let st = agent
-                            .get("agent_status")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("unknown");
-                        live_agents.insert(name.to_string(), st.to_string());
-                    }
-                }
-            }
+    for agent in arr {
+        if let Some(name) = agent.get("name").and_then(|n| n.as_str()) {
+            let st = agent
+                .get("agent_status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown");
+            live_agents.insert(name.to_string(), st.to_string());
         }
     }
 
@@ -353,7 +359,7 @@ pub fn scan_orchestration<H: HerdrOps>(
 /// Format workflow and orchestration status as a clean text table.
 pub fn format_status_report(
     workflows: Result<&[WorkflowStatusRow], &str>,
-    orch_rows: &[OrchestrationRow],
+    orchestration: Result<&[OrchestrationRow], &str>,
 ) -> String {
     let mut out = String::new();
 
@@ -394,32 +400,38 @@ pub fn format_status_report(
     }
 
     out.push_str("\n=== Orchestration ===\n");
-    if orch_rows.is_empty() {
-        out.push_str("no active agents or workers\n");
-    } else {
-        out.push_str(&format!(
-            "{:<18} {:<16} {:<10} {:<8} {:<10} {:<8} {}\n",
-            "NAME", "OWNER", "STATUS", "REPORT", "PHASE", "WAIT", "WARNINGS"
-        ));
-        for r in orch_rows {
-            let rep_str = match r.report_status {
-                ReportStatus::None => "none",
-                ReportStatus::Present => "present",
-                ReportStatus::Unread => "unread",
-            };
-            let flags_str = if r.flags.is_empty() {
-                "-".to_string()
-            } else {
-                r.flags
-                    .iter()
-                    .map(|f| f.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
+    match orchestration {
+        Ok(orch_rows) if orch_rows.is_empty() => {
+            out.push_str("no active agents or workers\n");
+        }
+        Ok(orch_rows) => {
             out.push_str(&format!(
                 "{:<18} {:<16} {:<10} {:<8} {:<10} {:<8} {}\n",
-                r.name, r.owner, r.agent_status, rep_str, r.phase, r.wait_time, flags_str
+                "NAME", "OWNER", "STATUS", "REPORT", "PHASE", "WAIT", "WARNINGS"
             ));
+            for r in orch_rows {
+                let rep_str = match r.report_status {
+                    ReportStatus::None => "none",
+                    ReportStatus::Present => "present",
+                    ReportStatus::Unread => "unread",
+                };
+                let flags_str = if r.flags.is_empty() {
+                    "-".to_string()
+                } else {
+                    r.flags
+                        .iter()
+                        .map(|f| f.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                out.push_str(&format!(
+                    "{:<18} {:<16} {:<10} {:<8} {:<10} {:<8} {}\n",
+                    r.name, r.owner, r.agent_status, rep_str, r.phase, r.wait_time, flags_str
+                ));
+            }
+        }
+        Err(err) => {
+            out.push_str(&format!("{err}\n"));
         }
     }
 
@@ -433,10 +445,10 @@ pub fn render_status<H: HerdrOps>(
     herdr: &H,
 ) -> Result<String, String> {
     let wf_res = query_workflows(db_path);
-    let orch_rows = scan_orchestration(runs_dir, herdr)?;
+    let orch_res = scan_orchestration(runs_dir, herdr);
     Ok(format_status_report(
         wf_res.as_deref().map_err(|e| e.as_str()),
-        &orch_rows,
+        orch_res.as_deref().map_err(|e| e.as_str()),
     ))
 }
 
@@ -459,13 +471,19 @@ mod tests {
     use std::process::{Child, Output};
 
     struct MockHerdr {
-        agent_list_json: String,
+        agent_list_result: std::io::Result<String>,
     }
 
     impl MockHerdr {
         fn new(json: impl Into<String>) -> Self {
             Self {
-                agent_list_json: json.into(),
+                agent_list_result: Ok(json.into()),
+            }
+        }
+
+        fn with_err(err: std::io::Error) -> Self {
+            Self {
+                agent_list_result: Err(err),
             }
         }
     }
@@ -476,7 +494,10 @@ mod tests {
         }
 
         fn agent_list(&self) -> std::io::Result<String> {
-            Ok(self.agent_list_json.clone())
+            match &self.agent_list_result {
+                Ok(s) => Ok(s.clone()),
+                Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+            }
         }
 
         fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
@@ -578,7 +599,7 @@ mod tests {
         let workflows = res.unwrap();
         assert!(workflows.is_empty(), "expected empty workflows");
 
-        let report = format_status_report(Ok(&workflows), &[]);
+        let report = format_status_report(Ok(&workflows), Ok(&[]));
         assert!(
             report.contains("no workflows"),
             "must contain 'no workflows'"
@@ -620,7 +641,7 @@ mod tests {
         let workflows = res.unwrap();
         assert!(workflows.is_empty(), "expected 0 workflows in empty db");
 
-        let report = format_status_report(Ok(&workflows), &[]);
+        let report = format_status_report(Ok(&workflows), Ok(&[]));
         assert!(report.contains("no workflows"));
     }
 
@@ -855,7 +876,7 @@ mod tests {
             "error message must start with 'db error:' but got: {err_msg}"
         );
 
-        let report = format_status_report(Err(&err_msg), &[]);
+        let report = format_status_report(Err(&err_msg), Ok(&[]));
         assert!(
             report.contains("db error:"),
             "rendered report must show db error"
@@ -900,6 +921,63 @@ mod tests {
             err_msg.contains("db error: decoding event row"),
             "must report decoding error, got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn test_status_herdr_agent_list_error_surfaces_herdr_error() {
+        let tmp = temp_test_dir("herdr-err");
+        let _cleaner = TempDirCleaner(tmp.clone());
+
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "herdr socket unavailable",
+        );
+        let mock = MockHerdr::with_err(io_err);
+
+        // Even with an owner file present, it must NOT emit false ORPHAN rows!
+        fs::write(tmp.join("sude-test.owner"), "arch-lead\n").unwrap();
+
+        let res = scan_orchestration(&tmp, &mock);
+        assert!(
+            res.is_err(),
+            "scan_orchestration must fail when herdr fails"
+        );
+        let err_msg = res.unwrap_err();
+        assert!(
+            err_msg.starts_with("herdr error:"),
+            "error must start with 'herdr error:' but got: {err_msg}"
+        );
+
+        let report = format_status_report(Ok(&[]), Err(&err_msg));
+        assert!(
+            report.contains("herdr error:"),
+            "report must show herdr error"
+        );
+        assert!(
+            !report.contains("ORPHAN"),
+            "must NOT emit false ORPHAN flags when herdr is unreachable"
+        );
+    }
+
+    #[test]
+    fn test_status_herdr_invalid_json_surfaces_herdr_error() {
+        let tmp = temp_test_dir("herdr-json-err");
+        let _cleaner = TempDirCleaner(tmp.clone());
+
+        let mock = MockHerdr::new("invalid json output from herdr");
+        let res = scan_orchestration(&tmp, &mock);
+        assert!(
+            res.is_err(),
+            "scan_orchestration must fail on unparseable JSON"
+        );
+        let err_msg = res.unwrap_err();
+        assert!(
+            err_msg.contains("herdr error: invalid agent list JSON"),
+            "error must identify invalid json, got: {err_msg}"
+        );
+
+        let report = format_status_report(Ok(&[]), Err(&err_msg));
+        assert!(report.contains("herdr error: invalid agent list JSON"));
     }
 
     #[test]
