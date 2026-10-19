@@ -108,6 +108,13 @@ fn test_pipeline_reviewer_prefix_matching_n2() {
     assert!(!matches_pipeline_reviewer("sude-testreview", "test"));
 }
 
+/// Provisional adapter (W2 rewire) driving HerdrOps through MockActivities.
+///
+/// NOTE on W2 rewire: The current W0 testkit `HerdrRequest` enum does not have variants
+/// for pane split, agent list, metadata reporting, or waiting. Consequently, this adapter
+/// provisionally maps those operations onto available `HerdrRequest` variants (e.g. `Spawn`,
+/// `ReadAgent`, `Prompt`) and custom activity IDs (`"herdr.pane_split"`, `"herdr.agent_list"`,
+/// etc.) as a temporary bridge until W2 updates the activity contract.
 struct MockActivitiesHerdr {
     pub activities: Mutex<MockActivities>,
 }
@@ -159,9 +166,12 @@ impl MockActivitiesHerdr {
                 content: format!(r#"{{"result":{{"agent":{{"pane_id":"{pane_id}"}}}}}}"#),
             }),
         );
-        mock.set_default(ActivityResult::Herdr(HerdrResult::Cleaned {
-            name: pane_id.to_string(),
-        }));
+        mock.register(
+            "herdr.pane_close",
+            ActivityResult::Herdr(HerdrResult::Cleaned {
+                name: pane_id.to_string(),
+            }),
+        );
         Self::new(mock)
     }
 
@@ -177,6 +187,10 @@ impl MockActivitiesHerdr {
             name: String::new(),
         }));
         Self::new(mock)
+    }
+
+    pub fn calls(&self) -> Vec<(String, ActivityRequest)> {
+        self.activities.lock().unwrap().calls().to_vec()
     }
 
     pub fn call_count(&self) -> usize {
@@ -384,12 +398,17 @@ impl HerdrOps for MockActivitiesHerdr {
             repo: String::new(),
         });
         let mut acts = self.activities.lock().unwrap();
-        let _ = acts.execute("herdr.pane_close", &req);
-        Ok(Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        })
+        match acts.execute("herdr.pane_close", &req) {
+            Ok(_) => Ok(Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            Err(err) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err.to_string(),
+            )),
+        }
     }
 
     fn pane_report_metadata(&self, pane: &str, tokens: &[&str]) -> std::io::Result<Output> {
@@ -2187,6 +2206,14 @@ fn test_cleanup_worker_grid_timeout_fails() {
     let herdr = MockActivitiesHerdr::for_cleanup("w1:p2");
 
     let res = quaqua::worker::cleanup::cleanup_worker("sude-gridfail", &repo_dir, &git, &herdr);
+    assert_eq!(
+        herdr
+            .calls()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["herdr.agent_get", "herdr.pane_close"]
+    );
 
     let wt_exists = wt.exists();
     let owner_file_exists = owner_file.exists();
@@ -2361,6 +2388,14 @@ fn test_cleanup_worker_removes_per_worker_opencode_state() {
     let git = SpawnTestGit;
     let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
     assert!(res.is_ok(), "cleanup_worker failed: {:?}", res);
+    assert_eq!(
+        herdr
+            .calls()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["herdr.agent_get", "herdr.pane_close"]
+    );
     assert!(
         !state_dir.exists(),
         "per-worker state dir must be removed on cleanup"
@@ -2504,6 +2539,14 @@ fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
     let git = SpawnTestGit;
     let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
     assert!(res.is_ok(), "cleanup_worker failed: {:?}", res);
+    assert_eq!(
+        herdr
+            .calls()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["herdr.agent_get", "herdr.pane_close"]
+    );
 
     for f in &files_to_create {
         assert!(!f.exists(), "file must be cleaned up: {}", f.display());
