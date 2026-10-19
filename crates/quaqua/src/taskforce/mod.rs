@@ -407,41 +407,27 @@ fn parse_child_completion(
     slot: &MemberSlot,
     output: &serde_json::Value,
 ) -> Result<PathBuf, (i32, String)> {
-    // 1. Primary path: deserialize SingleWorkerOutput per child contract
-    if let Ok(worker_out) = serde_json::from_value::<SingleWorkerOutput>(output.clone()) {
-        if worker_out.exit != 0 {
-            return Err((
-                worker_out.exit,
-                format!(
-                    "taskforce member '{}' exited with code {}",
-                    slot.id, worker_out.exit
-                ),
-            ));
-        }
-        return Ok(worker_out.report_path);
+    let worker_out: SingleWorkerOutput = serde_json::from_value(output.clone()).map_err(|e| {
+        (
+            6,
+            format!(
+                "taskforce member '{}' returned malformed child output (expected SingleWorkerOutput): {e}",
+                slot.id
+            ),
+        )
+    })?;
+
+    if worker_out.exit != 0 {
+        return Err((
+            worker_out.exit,
+            format!(
+                "taskforce member '{}' exited with code {}",
+                slot.id, worker_out.exit
+            ),
+        ));
     }
 
-    // 2. Fallback path for testkit mock echoing SingleWorkerInput
-    if let Ok(worker_in) = serde_json::from_value::<SingleWorkerInput>(output.clone()) {
-        return Ok(PathBuf::from(format!("runs/{}.md", worker_in.name)));
-    }
-
-    // 3. Generic JSON inspection for exit code and report_path
-    if let Some(exit) = output.get("exit").and_then(|v| v.as_i64()) {
-        let code = exit as i32;
-        if code != 0 {
-            return Err((
-                code,
-                format!("taskforce member '{}' exited with code {code}", slot.id),
-            ));
-        }
-        if let Some(rp) = output.get("report_path").and_then(|v| v.as_str()) {
-            return Ok(PathBuf::from(rp));
-        }
-    }
-
-    // 4. Default report path derived from member's input name
-    Ok(PathBuf::from(format!("runs/{}.md", slot.input.name)))
+    Ok(worker_out.report_path)
 }
 
 /// Deterministic workflow orchestrating taskforce child workers.
@@ -463,11 +449,35 @@ impl Workflow for TaskforceWorkflow {
             None => {
                 if !state.started {
                     state.started = true;
-                    if state.members.is_empty() {
-                        return StepDecision::Fail {
-                            code: 1,
-                            reason: "taskforce workflow has no configured members".to_string(),
-                        };
+                    match state.mode.as_str() {
+                        "advisor" => {
+                            if state.members.len() != 1 {
+                                return StepDecision::Fail {
+                                    code: 1,
+                                    reason: format!(
+                                        "advisor mode requires exactly 1 member, got {}",
+                                        state.members.len()
+                                    ),
+                                };
+                            }
+                        }
+                        "dual-lens" => {
+                            if state.members.len() != 2 {
+                                return StepDecision::Fail {
+                                    code: 1,
+                                    reason: format!(
+                                        "dual-lens mode requires exactly 2 members, got {}",
+                                        state.members.len()
+                                    ),
+                                };
+                            }
+                        }
+                        other => {
+                            return StepDecision::Fail {
+                                code: 1,
+                                reason: format!("unknown taskforce mode: {other}"),
+                            };
+                        }
                     }
                     for member in &mut state.members {
                         member.status = MemberStatus::Started;
@@ -477,7 +487,7 @@ impl Workflow for TaskforceWorkflow {
                                 return StepDecision::Fail {
                                     code: 1,
                                     reason: format!("failed to serialize child input: {e}"),
-                                }
+                                };
                             }
                         };
                         ctx.start_child(&member.id, WORKFLOW_TYPE_SINGLE_WORKER, child_val);
@@ -557,9 +567,6 @@ impl Workflow for TaskforceWorkflow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::testkit::{
-        run_to_completion, InMemoryJournal, MockActivities, VirtualClock,
-    };
 
     #[test]
     fn test_taskforce_dual_lens_quorum_completes_with_both_report_paths() {
@@ -587,34 +594,65 @@ mod tests {
             member1,
             member2,
         );
-        let initial_state = TaskforceState::from_input(&input);
+        let mut state = TaskforceState::from_input(&input);
+        let mut ctx = WorkflowContext::new(100);
 
-        let mut clock = VirtualClock::new(100);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let result = run_to_completion(
-            &workflow,
-            "test-dual-lens-quorum",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        );
-
-        assert!(
-            result.is_ok(),
-            "workflow should complete successfully: {result:?}"
-        );
-        let output = result.unwrap();
+        // Initial step starts both children concurrently
+        let dec_init = workflow.step(&mut state, &mut ctx, None);
+        assert_eq!(dec_init, StepDecision::Continue);
         assert_eq!(
-            output.report_paths,
-            vec![
-                PathBuf::from("runs/truonglao-mytestdl1.md"),
-                PathBuf::from("runs/suhuynh-mytestdl2.md")
-            ],
-            "dual-lens quorum must yield both report paths in member order"
+            ctx.scheduled().len(),
+            2,
+            "both dual-lens children should start concurrently"
         );
+
+        // First member completes with exit 0
+        let out1 =
+            SingleWorkerOutput::new(0, PathBuf::from("runs/truonglao-mytestdl1.md")).unwrap();
+        let dec_c1 = workflow.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ChildCompleted {
+                id: "truonglao-mytestdl1".to_string(),
+                output: serde_json::to_value(&out1).unwrap(),
+            }),
+        );
+        assert_eq!(
+            dec_c1,
+            StepDecision::Continue,
+            "workflow must await full quorum"
+        );
+        assert_eq!(
+            state.members[0].status,
+            MemberStatus::Completed {
+                report_path: PathBuf::from("runs/truonglao-mytestdl1.md")
+            }
+        );
+
+        // Second member completes with exit 0
+        let out2 = SingleWorkerOutput::new(0, PathBuf::from("runs/suhuynh-mytestdl2.md")).unwrap();
+        let dec_c2 = workflow.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ChildCompleted {
+                id: "suhuynh-mytestdl2".to_string(),
+                output: serde_json::to_value(&out2).unwrap(),
+            }),
+        );
+
+        match dec_c2 {
+            StepDecision::Complete(output) => {
+                assert_eq!(
+                    output.report_paths,
+                    vec![
+                        PathBuf::from("runs/truonglao-mytestdl1.md"),
+                        PathBuf::from("runs/suhuynh-mytestdl2.md")
+                    ],
+                    "dual-lens quorum must yield both report paths in member order"
+                );
+            }
+            other => panic!("expected StepDecision::Complete, got {other:?}"),
+        }
     }
 
     #[test]
@@ -656,12 +694,14 @@ mod tests {
         );
 
         // Child 1 completes successfully
+        let out1 =
+            SingleWorkerOutput::new(0, PathBuf::from("runs/truonglao-failtestdl1.md")).unwrap();
         let dec_c1 = workflow.step(
             &mut state,
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "truonglao-failtestdl1".to_string(),
-                output: serde_json::to_value(&input.members[0]).unwrap(),
+                output: serde_json::to_value(&out1).unwrap(),
             }),
         );
         assert_eq!(
@@ -762,6 +802,35 @@ mod tests {
     }
 
     #[test]
+    fn test_taskforce_child_output_malformed_fails_with_code_6() {
+        let workflow = TaskforceWorkflow;
+        let member = SingleWorkerInput::new("w1", "suhuynh", "repo", "brief", 1000, None);
+        let input = TaskforceInput::for_advisor("t1", "repo", "brief", member);
+        let mut state = TaskforceState::from_input(&input);
+        let mut ctx = WorkflowContext::new(100);
+
+        let _ = workflow.step(&mut state, &mut ctx, None);
+
+        // Malformed empty object output
+        let dec_malformed = workflow.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ChildCompleted {
+                id: "w1".to_string(),
+                output: serde_json::json!({}),
+            }),
+        );
+
+        match dec_malformed {
+            StepDecision::Fail { code, reason } => {
+                assert_eq!(code, 6, "malformed child output must fail with code 6");
+                assert!(reason.contains("malformed child output"));
+            }
+            other => panic!("expected StepDecision::Fail with code 6, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_taskforce_advisor_single_child_path_completes() {
         let workflow = TaskforceWorkflow;
         let member = SingleWorkerInput::new(
@@ -778,48 +847,95 @@ mod tests {
             "advisor recommendation",
             member,
         );
-        let initial_state = TaskforceState::from_input(&input);
-
-        let mut clock = VirtualClock::new(100);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let result = run_to_completion(
-            &workflow,
-            "test-advisor-single-child",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        );
-
-        assert!(
-            result.is_ok(),
-            "advisor workflow should complete successfully: {result:?}"
-        );
-        let output = result.unwrap();
-        assert_eq!(
-            output.report_paths,
-            vec![PathBuf::from("runs/suhuynh-advtest.md")],
-            "advisor path must yield exactly one report path"
-        );
-    }
-
-    #[test]
-    fn test_taskforce_empty_members_fails() {
-        let workflow = TaskforceWorkflow;
-        let input = TaskforceInput {
-            mode: "advisor".to_string(),
-            task: "empty".to_string(),
-            repo: "/path/to/repo".to_string(),
-            brief: "empty".to_string(),
-            members: vec![],
-        };
         let mut state = TaskforceState::from_input(&input);
         let mut ctx = WorkflowContext::new(100);
 
-        let decision = workflow.step(&mut state, &mut ctx, None);
-        assert!(matches!(decision, StepDecision::Fail { code: 1, .. }));
+        let dec_init = workflow.step(&mut state, &mut ctx, None);
+        assert_eq!(dec_init, StepDecision::Continue);
+        assert_eq!(ctx.scheduled().len(), 1);
+
+        let out = SingleWorkerOutput::new(0, PathBuf::from("runs/suhuynh-advtest.md")).unwrap();
+        let dec_done = workflow.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ChildCompleted {
+                id: "suhuynh-advtest".to_string(),
+                output: serde_json::to_value(&out).unwrap(),
+            }),
+        );
+
+        match dec_done {
+            StepDecision::Complete(output) => {
+                assert_eq!(
+                    output.report_paths,
+                    vec![PathBuf::from("runs/suhuynh-advtest.md")],
+                    "advisor path must yield exactly one report path"
+                );
+            }
+            other => panic!("expected StepDecision::Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_taskforce_mode_member_count_validation() {
+        let workflow = TaskforceWorkflow;
+        let m1 = SingleWorkerInput::new("w1", "suhuynh", "repo", "brief", 1000, None);
+        let m2 = SingleWorkerInput::new("w2", "truonglao", "repo", "brief", 1000, None);
+
+        // 1. Advisor with 2 members fails
+        let input_adv_bad = TaskforceInput {
+            mode: "advisor".to_string(),
+            task: "t1".to_string(),
+            repo: "repo".to_string(),
+            brief: "brief".to_string(),
+            members: vec![m1.clone(), m2.clone()],
+        };
+        let mut state_adv_bad = TaskforceState::from_input(&input_adv_bad);
+        let mut ctx = WorkflowContext::new(100);
+        let dec1 = workflow.step(&mut state_adv_bad, &mut ctx, None);
+        match dec1 {
+            StepDecision::Fail { code, reason } => {
+                assert_eq!(code, 1);
+                assert!(reason.contains("advisor mode requires exactly 1 member"));
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+
+        // 2. Dual-lens with 1 member fails
+        let input_dl_bad = TaskforceInput {
+            mode: "dual-lens".to_string(),
+            task: "t2".to_string(),
+            repo: "repo".to_string(),
+            brief: "brief".to_string(),
+            members: vec![m1.clone()],
+        };
+        let mut state_dl_bad = TaskforceState::from_input(&input_dl_bad);
+        let dec2 = workflow.step(&mut state_dl_bad, &mut ctx, None);
+        match dec2 {
+            StepDecision::Fail { code, reason } => {
+                assert_eq!(code, 1);
+                assert!(reason.contains("dual-lens mode requires exactly 2 members"));
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+
+        // 3. Unknown mode fails
+        let input_unknown = TaskforceInput {
+            mode: "trio".to_string(),
+            task: "t3".to_string(),
+            repo: "repo".to_string(),
+            brief: "brief".to_string(),
+            members: vec![m1],
+        };
+        let mut state_unknown = TaskforceState::from_input(&input_unknown);
+        let dec3 = workflow.step(&mut state_unknown, &mut ctx, None);
+        match dec3 {
+            StepDecision::Fail { code, reason } => {
+                assert_eq!(code, 1);
+                assert!(reason.contains("unknown taskforce mode"));
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
     }
 
     #[test]
