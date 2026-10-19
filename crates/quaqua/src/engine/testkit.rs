@@ -4,13 +4,13 @@
 //! and the `run_to_completion` execution driver.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::activity::{ActivityError, ActivityRequest, ActivityResult};
 use crate::engine::journal::{EventRecord, Journal, JournalError, SnapshotRecord};
-use crate::engine::workflow::{StepDecision, Workflow, WorkflowContext, WorkflowEvent};
+use crate::engine::workflow::{ScheduledAction, StepDecision, Workflow, WorkflowContext, WorkflowEvent};
 
 /// Error returned by the testkit driver.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -223,14 +223,113 @@ pub fn run_to_completion<W: Workflow>(
     journal: &mut dyn Journal,
 ) -> Result<W::Output, TestkitError> {
     let mut state = initial_state;
-    let mut next_event: Option<WorkflowEvent> = None;
+    let mut event_queue: VecDeque<WorkflowEvent> = VecDeque::new();
     let max_steps = 10_000;
     let mut seq = 0u64;
+    let mut first_step = true;
 
     for _step in 0..max_steps {
-        let mut ctx = WorkflowContext::new(clock.now_ms());
-        let decision = workflow.step(&mut state, &mut ctx, next_event.take());
+        // If the event queue is empty and not the initial step, advance virtual time to the next timer
+        if event_queue.is_empty() && !first_step {
+            if clock.pending_timers_count() > 0 {
+                if let Some((_ts, fired)) = clock.advance_to_next_timer() {
+                    for fired_id in fired {
+                        seq += 1;
+                        journal.append_event(
+                            workflow_id,
+                            &EventRecord::new(
+                                seq,
+                                clock.now_ms(),
+                                "timer_fired",
+                                format!("id={fired_id}"),
+                            ),
+                        )?;
+                        event_queue.push_back(WorkflowEvent::TimerFired { id: fired_id });
+                    }
+                }
+            } else {
+                return Err(TestkitError::Deadlock(
+                    "workflow awaiting events but no activities or timers are pending".to_string(),
+                ));
+            }
+        }
 
+        let next_event = event_queue.pop_front();
+        first_step = false;
+
+        let mut ctx = WorkflowContext::new(clock.now_ms());
+        let decision = workflow.step(&mut state, &mut ctx, next_event);
+
+        // Process any actions scheduled directly on the WorkflowContext
+        for action in ctx.drain_scheduled() {
+            match action {
+                ScheduledAction::Activity { id, activity } => {
+                    seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(
+                            seq,
+                            clock.now_ms(),
+                            "activity_scheduled",
+                            serde_json::to_string(&activity).unwrap_or_default(),
+                        ),
+                    )?;
+
+                    let result = activities.execute(&id, &activity)?;
+                    seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(
+                            seq,
+                            clock.now_ms(),
+                            "activity_completed",
+                            serde_json::to_string(&result).unwrap_or_default(),
+                        ),
+                    )?;
+
+                    event_queue.push_back(WorkflowEvent::ActivityCompleted { id, result });
+                }
+                ScheduledAction::Timer { id, duration } => {
+                    seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(
+                            seq,
+                            clock.now_ms(),
+                            "timer_scheduled",
+                            format!("id={id}; duration_ms={}", duration.as_millis()),
+                        ),
+                    )?;
+
+                    clock.schedule_timer(id, duration);
+                }
+                ScheduledAction::Child { id, workflow_type, input } => {
+                    seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(
+                            seq,
+                            clock.now_ms(),
+                            "child_started",
+                            format!("id={id}; type={workflow_type}"),
+                        ),
+                    )?;
+                    seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(
+                            seq,
+                            clock.now_ms(),
+                            "child_completed",
+                            serde_json::to_string(&input).unwrap_or_default(),
+                        ),
+                    )?;
+                    event_queue.push_back(WorkflowEvent::ChildCompleted { id, output: input });
+                }
+            }
+        }
+
+        // Process step decision
         match decision {
             StepDecision::Complete(output) => {
                 seq += 1;
@@ -289,7 +388,7 @@ pub fn run_to_completion<W: Workflow>(
                     ),
                 )?;
 
-                next_event = Some(WorkflowEvent::ActivityCompleted { id, result });
+                event_queue.push_back(WorkflowEvent::ActivityCompleted { id, result });
             }
             StepDecision::ScheduleTimer { id, duration } => {
                 seq += 1;
@@ -303,24 +402,7 @@ pub fn run_to_completion<W: Workflow>(
                     ),
                 )?;
 
-                clock.schedule_timer(id.clone(), duration);
-                if let Some((_ts, fired)) = clock.advance_to_next_timer() {
-                    if let Some(fired_id) = fired.into_iter().next() {
-                        seq += 1;
-                        journal.append_event(
-                            workflow_id,
-                            &EventRecord::new(
-                                seq,
-                                clock.now_ms(),
-                                "timer_fired",
-                                format!("id={fired_id}"),
-                            ),
-                        )?;
-                        next_event = Some(WorkflowEvent::TimerFired { id: fired_id });
-                    }
-                } else {
-                    return Err(TestkitError::Deadlock(format!("timer {id} scheduled but no timer fired")));
-                }
+                clock.schedule_timer(id, duration);
             }
             StepDecision::Continue => {
                 seq += 1;
@@ -328,7 +410,6 @@ pub fn run_to_completion<W: Workflow>(
                     workflow_id,
                     &EventRecord::new(seq, clock.now_ms(), "continue", ""),
                 )?;
-                next_event = None;
             }
             StepDecision::PauseForApproval { reason } => {
                 seq += 1;
@@ -347,7 +428,7 @@ pub fn run_to_completion<W: Workflow>(
                     workflow_id,
                     &EventRecord::new(seq, clock.now_ms(), "approval_resolved", "approved=true"),
                 )?;
-                next_event = Some(WorkflowEvent::ApprovalResolved {
+                event_queue.push_back(WorkflowEvent::ApprovalResolved {
                     approved: true,
                     reason: None,
                 });
@@ -374,7 +455,7 @@ pub fn run_to_completion<W: Workflow>(
                         serde_json::to_string(&input).unwrap_or_default(),
                     ),
                 )?;
-                next_event = Some(WorkflowEvent::ChildCompleted { id, output: input });
+                event_queue.push_back(WorkflowEvent::ChildCompleted { id, output: input });
             }
         }
     }

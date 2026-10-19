@@ -15,7 +15,7 @@ use crate::engine::telemetry::{
     GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS,
 };
 use crate::engine::testkit::{
-    run_to_completion, InMemoryJournal, MockActivities, VirtualClock,
+    run_to_completion, InMemoryJournal, MockActivities, TestkitError, VirtualClock,
 };
 use crate::engine::workflow::{StepDecision, Workflow, WorkflowContext, WorkflowEvent};
 
@@ -394,4 +394,122 @@ fn test_w1_owners_files_exist() {
     if !missing.is_empty() {
         panic!("Missing W1 target files:\n{}", missing.join("\n"));
     }
+}
+
+// ----------------------------------------------------------------------------
+// Overlapping Timers and Deadlock Tests
+// ----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct OverlappingTimersState {
+    fired_timers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct OverlappingTimersWorkflow;
+
+impl Workflow for OverlappingTimersWorkflow {
+    type Input = ();
+    type State = OverlappingTimersState;
+    type Output = Vec<String>;
+
+    fn step(
+        &self,
+        state: &mut Self::State,
+        ctx: &mut WorkflowContext,
+        event: Option<WorkflowEvent>,
+    ) -> StepDecision<Self::Output> {
+        match event {
+            None => {
+                // Schedule overlapping timers via context scheduling surface
+                ctx.schedule_timer("timer_fast", Duration::from_millis(100));
+                ctx.schedule_timer("timer_coincident", Duration::from_millis(100));
+                ctx.schedule_timer("timer_slow", Duration::from_millis(200));
+                StepDecision::Continue
+            }
+            Some(WorkflowEvent::TimerFired { id }) => {
+                state.fired_timers.push(id);
+                if state.fired_timers.len() == 3 {
+                    StepDecision::Complete(state.fired_timers.clone())
+                } else {
+                    StepDecision::Continue
+                }
+            }
+            _ => StepDecision::Fail {
+                code: 1,
+                reason: "unexpected event".to_string(),
+            },
+        }
+    }
+}
+
+#[test]
+fn test_overlapping_timers_all_delivered() {
+    let workflow = OverlappingTimersWorkflow;
+    let mut clock = VirtualClock::new(0);
+    let mut activities = MockActivities::new();
+    let mut journal = InMemoryJournal::new();
+
+    let initial_state = OverlappingTimersState {
+        fired_timers: Vec::new(),
+    };
+
+    let result = run_to_completion(
+        &workflow,
+        "test-overlapping-timers",
+        initial_state,
+        &mut clock,
+        &mut activities,
+        &mut journal,
+    );
+
+    assert!(result.is_ok(), "workflow should complete: {result:?}");
+    let fired = result.unwrap();
+    assert_eq!(fired.len(), 3, "expected all 3 timers to be delivered");
+    assert!(fired.contains(&"timer_fast".to_string()));
+    assert!(fired.contains(&"timer_coincident".to_string()));
+    assert!(fired.contains(&"timer_slow".to_string()));
+    assert_eq!(fired[2], "timer_slow");
+    assert_eq!(clock.now_ms(), 200);
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct DeadlockWorkflow;
+
+impl Workflow for DeadlockWorkflow {
+    type Input = ();
+    type State = ();
+    type Output = ();
+
+    fn step(
+        &self,
+        _state: &mut Self::State,
+        _ctx: &mut WorkflowContext,
+        _event: Option<WorkflowEvent>,
+    ) -> StepDecision<Self::Output> {
+        // Continues without scheduling any timer or activity
+        StepDecision::Continue
+    }
+}
+
+#[test]
+fn test_deadlock_detection_when_no_pending_events() {
+    let workflow = DeadlockWorkflow;
+    let mut clock = VirtualClock::new(0);
+    let mut activities = MockActivities::new();
+    let mut journal = InMemoryJournal::new();
+
+    let result = run_to_completion(
+        &workflow,
+        "test-deadlock",
+        (),
+        &mut clock,
+        &mut activities,
+        &mut journal,
+    );
+
+    assert!(
+        matches!(result, Err(TestkitError::Deadlock(_))),
+        "expected deadlock, got: {result:?}"
+    );
 }

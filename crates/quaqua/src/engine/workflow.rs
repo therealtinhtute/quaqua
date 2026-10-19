@@ -11,17 +11,41 @@ use crate::engine::activity::{ActivityRequest, ActivityResult};
 
 /// Pure workflow context passed to [`Workflow::step`].
 ///
-/// Exposes scheduling time and metadata only. Intentionally provides no handles
-/// to filesystem, processes, or network resources.
+/// An action scheduled during workflow execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ScheduledAction {
+    Activity {
+        id: String,
+        activity: ActivityRequest,
+    },
+    Timer {
+        id: String,
+        duration: Duration,
+    },
+    Child {
+        id: String,
+        workflow_type: String,
+        input: serde_json::Value,
+    },
+}
+
+/// Pure workflow context passed to [`Workflow::step`].
+///
+/// Exposes virtual scheduling capabilities and virtual time (`now()`) only.
+/// Intentionally provides no handles to filesystem, processes, or network resources.
 #[derive(Debug, Clone)]
 pub struct WorkflowContext {
     now_ms: u64,
+    scheduled: Vec<ScheduledAction>,
 }
 
 impl WorkflowContext {
     /// Creates a new workflow context with the specified virtual timestamp (milliseconds since Unix epoch).
     pub fn new(now_ms: u64) -> Self {
-        Self { now_ms }
+        Self {
+            now_ms,
+            scheduled: Vec::new(),
+        }
     }
 
     /// Virtual current time in milliseconds since Unix epoch.
@@ -34,9 +58,49 @@ impl WorkflowContext {
         UNIX_EPOCH + Duration::from_millis(self.now_ms)
     }
 
-    /// Updates virtual current time in milliseconds.
-    pub fn set_now_ms(&mut self, now_ms: u64) {
-        self.now_ms = now_ms;
+    /// Schedules an activity via the context.
+    pub fn schedule_activity(&mut self, id: impl Into<String>, activity: ActivityRequest) {
+        self.scheduled.push(ScheduledAction::Activity {
+            id: id.into(),
+            activity,
+        });
+    }
+
+    /// Schedules a timer via the context.
+    pub fn schedule_timer(&mut self, id: impl Into<String>, duration: Duration) {
+        self.scheduled.push(ScheduledAction::Timer {
+            id: id.into(),
+            duration,
+        });
+    }
+
+    /// Starts a child workflow via the context.
+    pub fn start_child(
+        &mut self,
+        id: impl Into<String>,
+        workflow_type: impl Into<String>,
+        input: serde_json::Value,
+    ) {
+        self.scheduled.push(ScheduledAction::Child {
+            id: id.into(),
+            workflow_type: workflow_type.into(),
+            input,
+        });
+    }
+
+    /// Returns true if any actions have been scheduled in this context.
+    pub fn has_scheduled(&self) -> bool {
+        !self.scheduled.is_empty()
+    }
+
+    /// Returns a slice of the scheduled actions.
+    pub fn scheduled(&self) -> &[ScheduledAction] {
+        &self.scheduled
+    }
+
+    /// Drains and returns all scheduled actions from the context.
+    pub fn drain_scheduled(&mut self) -> Vec<ScheduledAction> {
+        std::mem::take(&mut self.scheduled)
     }
 }
 

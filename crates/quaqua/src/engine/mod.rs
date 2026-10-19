@@ -15,7 +15,7 @@ pub mod guard;
 #[cfg(test)]
 mod tests;
 
-pub use workflow::{Workflow, WorkflowContext, WorkflowEvent, StepDecision};
+pub use workflow::{Workflow, WorkflowContext, WorkflowEvent, StepDecision, ScheduledAction};
 pub use activity::{Activity, ActivityRequest, ActivityResult, ActivityError};
 pub use journal::{Journal, EventRecord, SnapshotRecord, JournalError};
 pub use telemetry::{
