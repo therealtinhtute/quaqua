@@ -79,8 +79,12 @@ card), and continue with the auditor install below. Templates live in
 
 ## Install
 
+Requires a Rust toolchain (install `rustup` if `cargo --version` fails).
+
 ```bash
 git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
+cargo install --path crates/quaqua --locked   # installs the quaqua binary to ~/.cargo/bin
+~/.cargo/bin/quaqua --version   # verify; an interactive `quaqua` shell function can shadow the binary, so call it by path
 quaqua init     # dirs + rules.md, INDEX.md, _template.md, USER.md
 bash scripts/auditor/install-auditor.sh  # installs scheduling files; prints manual activation command
 ```
