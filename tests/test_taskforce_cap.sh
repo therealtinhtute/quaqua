@@ -62,6 +62,8 @@ case "${1:-} ${2:-}" in
 esac
 STUB
 chmod +x "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
 
 export PATH="$T/bin:$PATH"
 export AGENT_JSON="$T/agents.json"

@@ -57,12 +57,15 @@ fi
 exit 0
 HERDR
 chmod +x "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
 
 run() {  # run [VAR=val...]; sets rc, $T/out, $T/err, $T/calls, $T/args.head|prompt
   : > "$T/calls"; : > "$T/args.head"; : > "$T/args.prompt"
   rc=0
   CALLS="$T/calls" ARGS_HEAD="$T/args.head" ARGS_PROMPT="$T/args.prompt" \
-    PATH="$T/bin:$PATH" \
+    PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" \
     env "$@" "$QUAQUA_BIN" auditor run --repo "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 

@@ -76,6 +76,8 @@ esac
 exit 0
 STUB
 chmod +x "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
 export PATH="$T/bin:$PATH"
 unset HERDR_PANE_ID
 

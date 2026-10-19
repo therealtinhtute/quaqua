@@ -64,11 +64,14 @@ esac
 exit 0
 STUB
 chmod +x "$T/bin/herdr"
+export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
 
 spawn() {
   local name=$1 kind=$2; shift 2
   rc=0
-  HOME="$T/home" PATH="$T/bin:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
+  HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_TEST=1 GRID_SKIP=1 \
     env -u QUAQUA_OWNER "$@" "${QUAQUA_BIN:-quaqua}" worker spawn "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
@@ -197,7 +200,7 @@ Hard constraints: none
 Current design: test
 EOF
 prc=0
-HOME="$T/home" PATH="$T/bin:$PATH" GRID_SKIP=1 QUAQUA_OWNER=cos \
+HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" GRID_SKIP=1 QUAQUA_OWNER=cos \
   "${QUAQUA_BIN:-quaqua}" pipeline pipetest "$T/repo" --brief "$brief" >"$T/out" 2>"$T/err" || prc=$?
 [[ $prc -eq 2 ]] || fail "pipeline cap refusal: exit $prc, want 2: $(cat "$T/err")"
 grep -q 'worker cap exceeded' "$T/err" || fail "pipeline cap refusal: missing error message: $(cat "$T/err")"

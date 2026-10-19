@@ -61,6 +61,8 @@ chmod +x "$T/bin/herdr"
 # by $QUAQUA_OWNER: pin the stub and drop the leaked owner so a live herdr or a
 # foreign owner can never change the outcome
 export HERDR_BIN_PATH="$T/bin/herdr"
+export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
 unset HERDR_STUB_SNAPSHOT QUAQUA_OWNER GRID_CHECK_TIMEOUT_SEC
 
 # a pending move for group "coucou": only --tab coucou-workers/--tab coucou scopes it in
@@ -90,7 +92,7 @@ worktree() {  # worktree <repo> <name>; cleanup keeps the branch, so reuse it
 run_cleanup() {  # run_cleanup <name> [VAR=val...]
   local name=$1; shift
   : > "$T/events"
-  env PATH="$T/bin:$PATH" EVENTS="$T/events" "$@" \
+  env PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" EVENTS="$T/events" "$@" \
     "${QUAQUA_BIN:-quaqua}" worker cleanup "$name" "$T/quaqua"
 }
 

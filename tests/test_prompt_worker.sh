@@ -70,6 +70,7 @@ STUB
 chmod +x "$T/bin/herdr"
 export HERDR_BIN_PATH="$T/bin/herdr"
 export HERDR_SOCKET_PATH="$T/herdr.sock"
+export PATH="$T/bin:$PATH"
 CLK=(PROMPT_WORKER_CLOCK_FILE="$T/clock" PROMPT_WORKER_SLEEP_CMD="$T/bin/advance-clock")
 printf '%s\n' 1700000000 > "$T/clock"
 cat > "$T/bin/advance-clock" <<'ADV'
