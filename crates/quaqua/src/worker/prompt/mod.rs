@@ -3,6 +3,7 @@
 pub mod cost;
 pub mod observer;
 pub mod watchdog;
+pub mod workflow;
 
 pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
 pub use observer::{is_provider_timeout, observe, Observation};
