@@ -3,24 +3,36 @@
 //! Provides [`SystemActivities`], executing typed side-effecting operations
 //! over existing [`Herdr`] and [`Git`] adapters, filesystem reports, and cost checks.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use crate::engine::activity::{
     Activity, ActivityError, ActivityRequest, ActivityResult, CostRequest, CostResult, GitRequest,
-    GitResult, GridRequest, HerdrEventRequest, HerdrRequest, HerdrResult, ReportFileRequest,
-    ReportFileResult,
+    GitResult, GridRequest, GridResult, HerdrEventRequest, HerdrEventResult, HerdrRequest,
+    HerdrResult, ReportFileRequest, ReportFileResult,
 };
 use crate::git::{Git, GitOps};
 use crate::herdr::{Herdr, HerdrOps};
-
 /// Production activities implementation executing real operations against
 /// herdr, git, and local filesystem resources.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SystemActivities {
     pub herdr: Herdr,
     pub git: Git,
     pub repo_dir: PathBuf,
+    event_clients: Arc<Mutex<HashMap<String, crate::herdr_events::HerdrEvents>>>,
+}
+
+impl std::fmt::Debug for SystemActivities {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SystemActivities")
+            .field("herdr", &self.herdr)
+            .field("git", &self.git)
+            .field("repo_dir", &self.repo_dir)
+            .finish()
+    }
 }
 
 impl SystemActivities {
@@ -36,6 +48,7 @@ impl SystemActivities {
             herdr: Herdr::new(),
             git: Git::new(),
             repo_dir: repo_dir.into(),
+            event_clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -45,6 +58,7 @@ impl SystemActivities {
             herdr,
             git,
             repo_dir: repo_dir.into(),
+            event_clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     fn run_with_etxtbusy_retry<F, T>(f: F) -> std::io::Result<T>
@@ -187,12 +201,61 @@ impl SystemActivities {
                     name: name.clone(),
                 }))
             }
-            HerdrRequest::Spawn { .. } => Err(ActivityError::ExecutionFailed(
-                "HerdrRequest::Spawn deferred to W2 pipeline orchestration (P2/K1)".to_string(),
-            )),
-            HerdrRequest::Cleanup { .. } => Err(ActivityError::ExecutionFailed(
-                "HerdrRequest::Cleanup deferred to W2 pipeline orchestration (P1/K1)".to_string(),
-            )),
+            HerdrRequest::Spawn { name, kind, repo } => {
+                let repo_team = Path::new(repo).join("team.toml");
+                let self_team = self.repo_dir.join("team.toml");
+                let base_cfg = if repo_team.is_file() {
+                    crate::config::load(&repo_team).map_err(|e| (1, format!("error: {e}\n")))
+                } else if self_team.is_file() {
+                    crate::config::load(&self_team).map_err(|e| (1, format!("error: {e}\n")))
+                } else {
+                    crate::config::load_team_config()
+                }
+                .map_err(|(code, msg)| {
+                    ActivityError::ExecutionFailed(format!(
+                        "load team config failed (exit {code}): {msg}"
+                    ))
+                })?;
+                let proj_slug = crate::pipeline::resolve_project_slug_from_repo(Path::new(repo));
+                let cfg = if let Some(slug) = proj_slug.as_deref() {
+                    crate::config::resolve(base_cfg.clone(), Some(slug)).unwrap_or(base_cfg)
+                } else {
+                    base_cfg
+                };
+
+                let opts = crate::worker::spawn::SpawnOptions {
+                    base: None,
+                    review: false,
+                    name: name.clone(),
+                    kind: kind.clone(),
+                    repo_path: PathBuf::from(repo),
+                };
+
+                crate::worker::spawn::spawn_worker(opts, &cfg, &self.git, &self.herdr).map_err(
+                    |(code, msg)| {
+                        ActivityError::ExecutionFailed(format!("spawn failed (exit {code}): {msg}"))
+                    },
+                )?;
+
+                Ok(ActivityResult::Herdr(HerdrResult::Spawned {
+                    name: name.clone(),
+                }))
+            }
+            HerdrRequest::Cleanup { name, repo } => {
+                crate::worker::cleanup::cleanup_worker(
+                    name,
+                    Path::new(repo),
+                    &self.git,
+                    &self.herdr,
+                )
+                .map_err(|(code, msg)| {
+                    ActivityError::ExecutionFailed(format!("cleanup failed (exit {code}): {msg}"))
+                })?;
+
+                Ok(ActivityResult::Herdr(HerdrResult::Cleaned {
+                    name: name.clone(),
+                }))
+            }
             HerdrRequest::AgentInfo { name } => {
                 let (_ok, output) = Self::run_with_etxtbusy_retry(|| self.herdr.agent_get(name))
                     .map_err(|e| {
@@ -483,14 +546,181 @@ impl SystemActivities {
         }
     }
 
+    fn execute_herdr_events(
+        &self,
+        req: &HerdrEventRequest,
+    ) -> Result<ActivityResult, ActivityError> {
+        match req {
+            HerdrEventRequest::Subscribe { agent, event_types } => {
+                let mut map = self.event_clients.lock().map_err(|_| {
+                    ActivityError::ExecutionFailed("event_clients mutex poisoned".to_string())
+                })?;
+                let client = crate::herdr_events::HerdrEvents::new();
+                client.subscribe(agent, event_types)?;
+                map.insert(agent.clone(), client);
+                Ok(ActivityResult::HerdrEvents(HerdrEventResult::Subscribed {
+                    agent: agent.clone(),
+                }))
+            }
+            HerdrEventRequest::Unsubscribe { agent } => {
+                let mut map = self.event_clients.lock().map_err(|_| {
+                    ActivityError::ExecutionFailed("event_clients mutex poisoned".to_string())
+                })?;
+                if let Some(client) = map.remove(agent) {
+                    let _ = client.unsubscribe(agent);
+                }
+                Ok(ActivityResult::HerdrEvents(
+                    HerdrEventResult::Unsubscribed {
+                        agent: agent.clone(),
+                    },
+                ))
+            }
+            HerdrEventRequest::PollEventsFor { agent } => {
+                let map = self.event_clients.lock().map_err(|_| {
+                    ActivityError::ExecutionFailed("event_clients mutex poisoned".to_string())
+                })?;
+                let client = map.get(agent).ok_or_else(|| {
+                    ActivityError::NotFound(format!(
+                        "agent_not_found: no subscription active for agent {agent}"
+                    ))
+                })?;
+                let events = client.poll_events()?;
+                Ok(ActivityResult::HerdrEvents(
+                    HerdrEventResult::ScopedEvents {
+                        agent: agent.clone(),
+                        events,
+                    },
+                ))
+            }
+            HerdrEventRequest::PollEvents => {
+                let map = self.event_clients.lock().map_err(|_| {
+                    ActivityError::ExecutionFailed("event_clients mutex poisoned".to_string())
+                })?;
+                if map.is_empty() {
+                    return Ok(ActivityResult::HerdrEvents(HerdrEventResult::Events(
+                        Vec::new(),
+                    )));
+                }
+                let mut all_events = Vec::new();
+                for client in map.values() {
+                    let mut evs = client.poll_events()?;
+                    all_events.append(&mut evs);
+                }
+                Ok(ActivityResult::HerdrEvents(HerdrEventResult::Events(
+                    all_events,
+                )))
+            }
+        }
+    }
+
+    fn execute_grid(&self, req: &GridRequest) -> Result<ActivityResult, ActivityError> {
+        let repo_name = self
+            .repo_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string());
+        let mut grid_act = crate::grid::reconcile::GridActivity::with_driver(self.herdr.clone());
+        if let Some(rn) = repo_name {
+            grid_act = grid_act.with_repo(rn);
+        }
+        grid_act.execute(&ActivityRequest::Grid(req.clone()))
+    }
+
     fn execute_cost(&self, req: &CostRequest) -> Result<ActivityResult, ActivityError> {
         match req {
             CostRequest::CheckBudget { spend, budget } => Ok(ActivityResult::Cost(
                 CostResult::BudgetExceeded(*spend > *budget),
             )),
-            CostRequest::QuerySpend { .. } => Err(ActivityError::ExecutionFailed(
-                "CostRequest::QuerySpend not wired until W2 (owned by K3)".to_string(),
-            )),
+            CostRequest::QuerySpend { session_pattern } => {
+                if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
+                    if let Ok(content) = std::fs::read_to_string(&cost_file) {
+                        if let Ok(val) = content.trim().parse::<f64>() {
+                            return Ok(ActivityResult::Cost(CostResult::Spend(val)));
+                        }
+                    }
+                }
+
+                let mut db_candidates = Vec::new();
+                if let Ok(env_db) = std::env::var("QUAQUA_COST_DB_PATH") {
+                    if !env_db.is_empty() {
+                        db_candidates.push(PathBuf::from(env_db));
+                    }
+                }
+
+                let runs_dir = crate::worker::cleanup::default_runs_dir();
+                let state_dir = runs_dir.join(".opencode-state");
+                if state_dir.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(&state_dir) {
+                        for entry in entries.flatten() {
+                            let p = entry.path().join("opencode").join("opencode.db");
+                            if p.is_file() {
+                                db_candidates.push(p);
+                            }
+                        }
+                    }
+                }
+
+                let repo_db = self.repo_dir.join("opencode.db");
+                if repo_db.is_file() {
+                    db_candidates.push(repo_db);
+                }
+
+                if let Ok(home) = std::env::var("HOME") {
+                    let home_db = PathBuf::from(home).join(".local/share/opencode/opencode.db");
+                    if home_db.is_file() {
+                        db_candidates.push(home_db);
+                    }
+                }
+
+                for db_path in db_candidates {
+                    if !db_path.is_file() {
+                        continue;
+                    }
+                    let conn = match rusqlite::Connection::open_with_flags(
+                        &db_path,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            return Err(ActivityError::ExecutionFailed(format!(
+                                "cannot open cost database at {}: {e}",
+                                db_path.display()
+                            )));
+                        }
+                    };
+
+                    let query = "SELECT cost FROM session_v2 WHERE id = ?1 OR directory = ?1 OR directory LIKE ?1 OR directory LIKE ('%' || ?1) ORDER BY time_updated DESC LIMIT 1;";
+                    let mut stmt = match conn.prepare(query) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let err_msg = e.to_string();
+                            if err_msg.contains("no such table") {
+                                continue;
+                            }
+                            return Err(ActivityError::ExecutionFailed(format!(
+                                "prepare cost query failed on {}: {e}",
+                                db_path.display()
+                            )));
+                        }
+                    };
+
+                    let cost_res: Result<f64, rusqlite::Error> =
+                        stmt.query_row(rusqlite::params![session_pattern], |row| row.get(0));
+
+                    match cost_res {
+                        Ok(cost) => return Ok(ActivityResult::Cost(CostResult::Spend(cost))),
+                        Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                        Err(e) => {
+                            return Err(ActivityError::ExecutionFailed(format!(
+                                "query cost failed on {}: {e}",
+                                db_path.display()
+                            )));
+                        }
+                    }
+                }
+
+                Ok(ActivityResult::Cost(CostResult::Spend(0.0)))
+            }
         }
     }
 }
@@ -505,13 +735,9 @@ impl Activity for SystemActivities {
     fn execute(&self, req: &ActivityRequest) -> Result<ActivityResult, ActivityError> {
         match req {
             ActivityRequest::Herdr(r) => self.execute_herdr(r),
-            ActivityRequest::HerdrEvents(_) => Err(ActivityError::ExecutionFailed(
-                "HerdrEvents activity not wired until W2 (owned by K2)".to_string(),
-            )),
+            ActivityRequest::HerdrEvents(r) => self.execute_herdr_events(r),
             ActivityRequest::Git(r) => self.execute_git(r),
-            ActivityRequest::Grid(_) => Err(ActivityError::ExecutionFailed(
-                "GridRequest not wired until W2 (owned by P2)".to_string(),
-            )),
+            ActivityRequest::Grid(r) => self.execute_grid(r),
             ActivityRequest::ReportFile(r) => self.execute_report_file(r),
             ActivityRequest::Cost(r) => self.execute_cost(r),
         }
@@ -582,8 +808,8 @@ case "$1" in
         fi
         ;;
       get)
-        if [ "$3" = "e3-stub-agent" ]; then
-          echo '{{"result": {{"agent": {{"name": "e3-stub-agent", "pane_id": "e3-pane-42"}}}}}}'
+        if [ "$3" = "e3-stub-agent" ] || [ "$3" = "sude-unit-act" ]; then
+          echo '{{"result": {{"agent": {{"name": "'"$3"'", "pane_id": "e3-pane-42"}}}}}}'
           exit 0
         elif [ "$3" = "e3-info-agent" ]; then
           echo '{{"result": {{"agent": {{"name": "e3-info-agent", "pane_id": "e3-pane-42", "agent_status": "working", "screen_detection_skipped": true, "agent": "omp"}}}}}}'
@@ -601,6 +827,10 @@ case "$1" in
           exit 1
         fi
         ;;
+      start)
+        echo "agent-start:$3:$4" >> "$LOG"
+        exit 0
+        ;;
       *)
         echo "unknown agent command $2" >&2
         exit 1
@@ -610,7 +840,7 @@ case "$1" in
   pane)
     case "$2" in
       close)
-        if [ "$3" = "e3-pane-42" ]; then
+        if [ "$3" = "e3-pane-42" ] || [ "$3" = "e3-pane-split" ]; then
           echo "closed-pane:$3" >> "$LOG"
           exit 0
         else
@@ -618,8 +848,34 @@ case "$1" in
           exit 1
         fi
         ;;
+      split)
+        echo '{{"result": {{"pane": {{"pane_id": "e3-pane-split"}}}}}}'
+        exit 0
+        ;;
+      report-metadata)
+        echo "report-metadata:$3:$4" >> "$LOG"
+        exit 0
+        ;;
+      send-keys)
+        exit 0
+        ;;
+      wait-output)
+        exit 0
+        ;;
       *)
         echo "unknown pane command $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  api)
+    case "$2" in
+      snapshot)
+        echo '{{"result": {{"tabs": [{{"tab_id": "w1:t1", "title": "quaqua-workers", "panes": ["e3-pane-42"]}}], "panes": [{{"pane_id": "e3-pane-42", "rect": {{"x": 0, "y": 0, "width": 100, "height": 100}}, "tokens": {{"grid_ready": "1", "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua-workers"}}}}], "agents": [{{"name": "e3-stub-agent", "pane_id": "e3-pane-42"}}]}}}}'
+        exit 0
+        ;;
+      *)
+        echo "unknown api command $2" >&2
         exit 1
         ;;
     esac
@@ -1239,53 +1495,370 @@ esac
     }
 
     #[test]
-    fn test_deferred_variants_fail_explicitly() {
+    fn test_herdr_spawn_invalid_args_fail_with_execution_failed() {
+        let activities = SystemActivities::new();
+        let req = ActivityRequest::Herdr(HerdrRequest::Spawn {
+            name: "invalid-name".to_string(),
+            kind: "nonexistent-kind".to_string(),
+            repo: ".".to_string(),
+        });
+        let err = activities.execute(&req).unwrap_err();
+        match err {
+            ActivityError::ExecutionFailed(msg) => {
+                assert!(
+                    msg.contains("spawn failed") || msg.contains("load team config"),
+                    "must fail with execution failed containing spawn diagnostics: {msg}"
+                );
+                assert!(!msg.contains("deferred"), "must not be deferred");
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_herdr_spawn_via_stub() {
+        with_herdr_stub(|activities, _log| {
+            let pid = std::process::id();
+            let base_dir = std::env::temp_dir().join(format!("quaqua-act-spawn-{}", pid));
+            let _ = fs::remove_dir_all(&base_dir);
+            let temp_repo = base_dir.join("repo");
+            let _ = fs::create_dir_all(&temp_repo);
+
+            let repo_str = temp_repo.to_str().unwrap();
+            let _ = Command::new("git")
+                .args(["init", "-b", "main"])
+                .arg(&temp_repo)
+                .output();
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "config", "user.email", "test@quaqua.local"])
+                .output();
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "config", "user.name", "Test User"])
+                .output();
+            let dummy = temp_repo.join("dummy.txt");
+            let _ = fs::write(&dummy, "hello");
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "add", "dummy.txt"])
+                .output();
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "commit", "-m", "initial"])
+                .output();
+
+            // Copy worktree team.toml into temp_repo
+            let team_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("team.toml");
+            let _ = fs::copy(&team_path, temp_repo.join("team.toml"));
+            std::env::set_var("QUAQUA_TEAM_TOML", &team_path);
+
+            // Ensure PIPELINE_TASK is set or owner cap doesn't block
+            std::env::set_var("PIPELINE_TASK", "1");
+            let req = ActivityRequest::Herdr(HerdrRequest::Spawn {
+                name: "sude-spawn-act".to_string(),
+                kind: "sude".to_string(),
+                repo: temp_repo.to_string_lossy().to_string(),
+            });
+            let res = activities
+                .execute(&req)
+                .expect("spawn executes successfully");
+            assert_eq!(
+                res,
+                ActivityResult::Herdr(HerdrResult::Spawned {
+                    name: "sude-spawn-act".to_string(),
+                })
+            );
+            std::env::remove_var("PIPELINE_TASK");
+            std::env::remove_var("QUAQUA_TEAM_TOML");
+            let _ = fs::remove_dir_all(&base_dir);
+        });
+    }
+
+    #[test]
+    fn test_herdr_cleanup_via_stub() {
+        with_herdr_stub(|activities, _log| {
+            let pid = std::process::id();
+            let base_dir = std::env::temp_dir().join(format!("quaqua-act-clean-{}", pid));
+            let _ = fs::remove_dir_all(&base_dir);
+            let temp_repo = base_dir.join("repo");
+            let _ = fs::create_dir_all(&temp_repo);
+
+            let repo_str = temp_repo.to_str().unwrap();
+            let _ = Command::new("git")
+                .args(["init", "-b", "main"])
+                .arg(&temp_repo)
+                .output();
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "config", "user.email", "test@quaqua.local"])
+                .output();
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "config", "user.name", "Test User"])
+                .output();
+            let dummy = temp_repo.join("dummy.txt");
+            let _ = fs::write(&dummy, "hello");
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "add", "dummy.txt"])
+                .output();
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "commit", "-m", "initial"])
+                .output();
+
+            let wt = base_dir.join(".wt").join("sude-unit-act");
+            let wt_out = Command::new("git")
+                .args([
+                    "-C",
+                    repo_str,
+                    "worktree",
+                    "add",
+                    wt.to_str().unwrap(),
+                    "-b",
+                    "quaqua/sude-unit-act",
+                ])
+                .output()
+                .expect("add worktree");
+            assert!(wt_out.status.success());
+
+            let req = ActivityRequest::Herdr(HerdrRequest::Cleanup {
+                name: "sude-unit-act".to_string(),
+                repo: temp_repo.to_string_lossy().to_string(),
+            });
+            let res = activities
+                .execute(&req)
+                .expect("cleanup executes successfully");
+            assert_eq!(
+                res,
+                ActivityResult::Herdr(HerdrResult::Cleaned {
+                    name: "sude-unit-act".to_string(),
+                })
+            );
+            let _ = fs::remove_dir_all(&base_dir);
+        });
+    }
+
+    #[test]
+    fn test_herdr_events_live_lifecycle() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::thread;
+
+        let pid = std::process::id();
+        let sock_path = std::env::temp_dir().join(format!("quaqua-act-events-{}.sock", pid));
+        let _ = fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).expect("bind test unix socket");
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read subscribe request");
+
+            let req_val: serde_json::Value =
+                serde_json::from_str(&line).expect("valid json request");
+            assert_eq!(req_val["method"], "events.subscribe");
+            let req_id = req_val["id"].as_str().unwrap().to_string();
+
+            let resp = serde_json::json!({
+                "id": req_id,
+                "result": { "type": "subscription_started" }
+            });
+            let event1 = serde_json::json!({
+                "event": "pane.agent_status_changed",
+                "data": { "agent": "sude-ev", "agent_status": "working" }
+            });
+            let event2 = serde_json::json!({
+                "event": "pane.exited",
+                "data": { "agent": "sude-ev", "exit_code": 0 }
+            });
+            stream
+                .write_all(format!("{}\n{}\n{}\n", resp, event1, event2).as_bytes())
+                .expect("write response and events");
+            stream.flush().expect("flush response and events");
+        });
+
+        std::env::set_var("HERDR_SOCKET_PATH", &sock_path);
         let activities = SystemActivities::new();
 
-        let reqs = [
-            ActivityRequest::Herdr(HerdrRequest::Spawn {
-                name: "a".to_string(),
-                kind: "b".to_string(),
-                repo: "c".to_string(),
-            }),
-            ActivityRequest::Herdr(HerdrRequest::Cleanup {
-                name: "a".to_string(),
-                repo: "c".to_string(),
-            }),
-            ActivityRequest::HerdrEvents(HerdrEventRequest::Subscribe {
-                agent: "a".to_string(),
-                event_types: vec!["b".to_string()],
-            }),
-            ActivityRequest::HerdrEvents(HerdrEventRequest::Unsubscribe {
-                agent: "a".to_string(),
-            }),
-            ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents),
-            ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
-                agent: "a".to_string(),
-            }),
-            ActivityRequest::Grid(GridRequest::Reconcile {
-                tab: None,
-                only: None,
-            }),
-            ActivityRequest::Grid(GridRequest::Plan { tab: None }),
-            ActivityRequest::Cost(CostRequest::QuerySpend {
-                session_pattern: "x".to_string(),
-            }),
-        ];
+        // 1. Subscribe
+        let sub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Subscribe {
+            agent: "sude-ev".to_string(),
+            event_types: vec!["pane.agent_status_changed".to_string()],
+        });
+        let sub_res = activities.execute(&sub_req).expect("subscribe succeeds");
+        assert_eq!(
+            sub_res,
+            ActivityResult::HerdrEvents(HerdrEventResult::Subscribed {
+                agent: "sude-ev".to_string()
+            })
+        );
 
-        for req in &reqs {
-            let err = activities
-                .execute(req)
-                .expect_err("deferred variants must fail with ExecutionFailed");
-            match err {
-                ActivityError::ExecutionFailed(msg) => {
-                    assert!(
-                        msg.contains("W2") || msg.contains("deferred"),
-                        "message must explain deferral to W2: {msg}"
-                    );
-                }
-                other => panic!("expected ExecutionFailed, got: {other:?}"),
-            }
+        // Wait for background server thread to deliver events
+        let _ = handle.join();
+
+        // 2. PollEventsFor (scoped)
+        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
+            agent: "sude-ev".to_string(),
+        });
+        let poll_res = activities.execute(&poll_req).expect("poll events succeeds");
+        if let ActivityResult::HerdrEvents(HerdrEventResult::ScopedEvents { agent, events }) =
+            poll_res
+        {
+            assert_eq!(agent, "sude-ev");
+            assert_eq!(events.len(), 2);
+        } else {
+            panic!("expected ScopedEvents, got {poll_res:?}");
         }
+
+        // 3. PollEventsFor unknown agent preserves agent_not_found vocabulary
+        let unk_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
+            agent: "nonexistent-agent".to_string(),
+        });
+        let unk_err = activities.execute(&unk_req).unwrap_err();
+        match unk_err {
+            ActivityError::NotFound(msg) => {
+                assert!(
+                    msg.contains("agent_not_found"),
+                    "must contain agent_not_found: {msg}"
+                );
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+
+        // 4. Unsubscribe
+        let unsub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Unsubscribe {
+            agent: "sude-ev".to_string(),
+        });
+        let unsub_res = activities
+            .execute(&unsub_req)
+            .expect("unsubscribe succeeds");
+        assert_eq!(
+            unsub_res,
+            ActivityResult::HerdrEvents(HerdrEventResult::Unsubscribed {
+                agent: "sude-ev".to_string()
+            })
+        );
+
+        // 5. Unscoped PollEvents on empty returns Events(vec![])
+        let empty_poll = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
+        let empty_res = activities
+            .execute(&empty_poll)
+            .expect("empty poll succeeds");
+        assert_eq!(
+            empty_res,
+            ActivityResult::HerdrEvents(HerdrEventResult::Events(vec![]))
+        );
+
+        std::env::remove_var("HERDR_SOCKET_PATH");
+        let _ = fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn test_grid_reconcile_and_plan_via_stub() {
+        with_herdr_stub(|activities, _log| {
+            // Plan
+            let plan_req = ActivityRequest::Grid(GridRequest::Plan {
+                tab: Some("quaqua-workers".to_string()),
+            });
+            let plan_res = activities.execute(&plan_req).expect("grid plan succeeds");
+            if let ActivityResult::Grid(GridResult::PlanJson(json)) = plan_res {
+                assert!(json.starts_with('[') && json.ends_with(']'));
+            } else {
+                panic!("expected PlanJson, got {plan_res:?}");
+            }
+
+            // Reconcile
+            let rec_req = ActivityRequest::Grid(GridRequest::Reconcile {
+                tab: Some("quaqua-workers".to_string()),
+                only: None,
+            });
+            let rec_res = activities
+                .execute(&rec_req)
+                .expect("grid reconcile succeeds");
+            if let ActivityResult::Grid(GridResult::Reconciled { changed: _ }) = rec_res {
+                // Succeeded without error
+            } else {
+                panic!("expected Reconciled, got {rec_res:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn test_cost_query_spend_fixture_db() {
+        let pid = std::process::id();
+        let temp_dir = std::env::temp_dir().join(format!("quaqua-act-cost-db-{}", pid));
+        let _ = fs::create_dir_all(&temp_dir);
+        let db_path = temp_dir.join("opencode.db");
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("open temp sqlite db");
+            conn.execute_batch(
+                "CREATE TABLE session_v2 (
+                    id TEXT PRIMARY KEY,
+                    directory TEXT,
+                    cost REAL,
+                    time_updated INTEGER
+                );
+                INSERT INTO session_v2 (id, directory, cost, time_updated) VALUES ('sess-alpha', '/tmp/repos/.wt/sude-1', 1.45, 100);
+                INSERT INTO session_v2 (id, directory, cost, time_updated) VALUES ('sess-beta', '/tmp/repos/.wt/sude-2', 2.80, 200);",
+            )
+            .expect("populate session_v2 fixture");
+        }
+
+        std::env::set_var("QUAQUA_COST_DB_PATH", db_path.to_str().unwrap());
+        let activities = SystemActivities::new();
+
+        // 1. Exact session ID match
+        let req1 = ActivityRequest::Cost(CostRequest::QuerySpend {
+            session_pattern: "sess-alpha".to_string(),
+        });
+        let res1 = activities.execute(&req1).expect("query spend alpha");
+        assert_eq!(res1, ActivityResult::Cost(CostResult::Spend(1.45)));
+
+        // 2. Directory pattern match
+        let req2 = ActivityRequest::Cost(CostRequest::QuerySpend {
+            session_pattern: "%.wt/sude-2".to_string(),
+        });
+        let res2 = activities.execute(&req2).expect("query spend beta");
+        assert_eq!(res2, ActivityResult::Cost(CostResult::Spend(2.80)));
+
+        // 3. Worker substring pattern match
+        let req3 = ActivityRequest::Cost(CostRequest::QuerySpend {
+            session_pattern: "sude-1".to_string(),
+        });
+        let res3 = activities
+            .execute(&req3)
+            .expect("query spend sude-1 substring");
+        assert_eq!(res3, ActivityResult::Cost(CostResult::Spend(1.45)));
+
+        // 4. Non-matching pattern returns Spend(0.0)
+        let req4 = ActivityRequest::Cost(CostRequest::QuerySpend {
+            session_pattern: "nonexistent-session".to_string(),
+        });
+        let res4 = activities.execute(&req4).expect("query spend nonexistent");
+        assert_eq!(res4, ActivityResult::Cost(CostResult::Spend(0.0)));
+
+        std::env::remove_var("QUAQUA_COST_DB_PATH");
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_all_activity_arms_live_no_deferrals() {
+        let activities = SystemActivities::new();
+
+        // PollEvents returns empty vector rather than deferred error
+        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
+        let poll_res = activities.execute(&poll_req).expect("poll events live");
+        assert_eq!(
+            poll_res,
+            ActivityResult::HerdrEvents(HerdrEventResult::Events(vec![]))
+        );
+
+        // QuerySpend returns Spend(0.0) rather than deferred error
+        let cost_req = ActivityRequest::Cost(CostRequest::QuerySpend {
+            session_pattern: "unknown-pattern".to_string(),
+        });
+        let cost_res = activities.execute(&cost_req).expect("query spend live");
+        assert_eq!(cost_res, ActivityResult::Cost(CostResult::Spend(0.0)));
     }
 }
