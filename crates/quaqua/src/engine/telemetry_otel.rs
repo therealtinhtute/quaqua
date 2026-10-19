@@ -14,6 +14,24 @@ use crate::engine::telemetry::{
     GEN_AI_USAGE_OUTPUT_TOKENS,
 };
 
+/// Reserved keys for standard trace fields and GenAI attributes.
+///
+/// These keys are strictly governed by their corresponding typed fields on [`GenAiSpan`].
+/// They are never emitted from [`GenAiSpan::attributes`] if their typed field is `None`.
+const RESERVED_KEYS: &[&str] = &[
+    "trace_id",
+    "span_id",
+    "start_time_ms",
+    "end_time_ms",
+    GEN_AI_SYSTEM,
+    GEN_AI_OPERATION_NAME,
+    GEN_AI_REQUEST_MODEL,
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
+    GEN_AI_AGENT_NAME,
+    GEN_AI_AGENT_ROLE,
+];
+
 /// An append-only OpenTelemetry GenAI JSONL span sink.
 ///
 /// Records each [`GenAiSpan`] as a single-line JSON object. Keys are ordered
@@ -39,7 +57,9 @@ impl JsonlSpanSink {
     /// - Standard keys use the `GEN_AI_*` constants.
     /// - Optional attributes are omitted when `None` (never written as `null`).
     /// - Keys are ordered lexicographically via [`BTreeMap`].
-    /// - Any extra custom attributes in `span.attributes` are merged at the top level.
+    /// - Typed fields take precedence over `span.attributes`: reserved keys in `span.attributes`
+    ///   are never re-emitted if the corresponding typed field is `None`.
+    /// - Any extra custom non-reserved attributes in `span.attributes` are merged at the top level.
     pub fn serialize_span(span: &GenAiSpan) -> Result<String, TelemetryError> {
         let mut map = BTreeMap::new();
 
@@ -99,9 +119,10 @@ impl JsonlSpanSink {
             );
         }
 
-        // Merge extra attributes from span.attributes that aren't the standard keys
+        // Merge extra custom attributes from span.attributes.
+        // Reserved keys are governed strictly by the typed fields above and are skipped here.
         for (k, v) in &span.attributes {
-            if !map.contains_key(k) {
+            if !RESERVED_KEYS.contains(&k.as_str()) {
                 map.insert(k.clone(), serde_json::Value::String(v.clone()));
             }
         }
@@ -150,7 +171,12 @@ impl SpanSink for JsonlSpanSink {
                 ))
             })?;
 
-        writeln!(file, "{line}").map_err(|e| {
+        // Write the line buffer with trailing newline in a single write call
+        // to ensure atomic append under O_APPEND semantics.
+        let mut payload = line.into_bytes();
+        payload.push(b'\n');
+
+        file.write_all(&payload).map_err(|e| {
             TelemetryError::SinkError(format!(
                 "failed to write to trace file `{}`: {e}",
                 self.path.display()
@@ -357,5 +383,58 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&blocker_file);
+    }
+    #[test]
+    fn test_reserved_keys_in_attributes_ignored_when_typed_field_none() {
+        let mut span = GenAiSpan::new("trace-r", "span-r", "op", "anthropic", 1000, 2000);
+        // Inject reserved keys into attributes while typed fields remain None
+        span.attributes
+            .insert(GEN_AI_REQUEST_MODEL.to_string(), "ghost-model".to_string());
+        span.attributes
+            .insert(GEN_AI_USAGE_INPUT_TOKENS.to_string(), "999".to_string());
+        span.attributes
+            .insert(GEN_AI_USAGE_OUTPUT_TOKENS.to_string(), "555".to_string());
+        span.attributes
+            .insert(GEN_AI_AGENT_NAME.to_string(), "ghost-agent".to_string());
+        span.attributes
+            .insert(GEN_AI_AGENT_ROLE.to_string(), "ghost-role".to_string());
+        span.attributes
+            .insert("custom.valid".to_string(), "custom_val".to_string());
+
+        assert!(span.request_model.is_none());
+        assert!(span.input_tokens.is_none());
+        assert!(span.output_tokens.is_none());
+        assert!(span.agent_name.is_none());
+        assert!(span.agent_role.is_none());
+
+        let serialized = JsonlSpanSink::serialize_span(&span).expect("serialization failed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serialized).expect("must parse as json");
+
+        // Reserved keys must not be emitted when typed fields are None
+        assert!(parsed.get(GEN_AI_REQUEST_MODEL).is_none());
+        assert!(parsed.get(GEN_AI_USAGE_INPUT_TOKENS).is_none());
+        assert!(parsed.get(GEN_AI_USAGE_OUTPUT_TOKENS).is_none());
+        assert!(parsed.get(GEN_AI_AGENT_NAME).is_none());
+        assert!(parsed.get(GEN_AI_AGENT_ROLE).is_none());
+
+        // Custom non-reserved attributes must still be merged
+        assert_eq!(parsed["custom.valid"], "custom_val");
+    }
+
+    #[test]
+    fn test_record_span_atomic_single_buffer_newline() {
+        let path = test_temp_file("atomic_buffer");
+        let sink = JsonlSpanSink::new(&path);
+        let span = GenAiSpan::new("t-atom", "s-atom", "op", "sys", 100, 200);
+
+        sink.record_span(&span).expect("record_span failed");
+
+        let raw_bytes = std::fs::read(&path).expect("read file bytes");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(!raw_bytes.is_empty());
+        assert_eq!(raw_bytes.last(), Some(&b'\n'));
+        assert_eq!(raw_bytes.iter().filter(|&&b| b == b'\n').count(), 1);
     }
 }
