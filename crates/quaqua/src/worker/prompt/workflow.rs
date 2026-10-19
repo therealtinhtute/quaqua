@@ -47,6 +47,8 @@ pub struct WatchdogConfig {
     pub hard_cap_sec: u64,
     pub is_fallback_idle: bool,
     pub expect_verdict: bool,
+    #[serde(default)]
+    pub land_sec: u64,
 }
 
 impl Default for WatchdogConfig {
@@ -61,6 +63,7 @@ impl Default for WatchdogConfig {
             hard_cap_sec: 7200,
             is_fallback_idle: false,
             expect_verdict: false,
+            land_sec: 0,
         }
     }
 }
@@ -93,6 +96,14 @@ pub struct SingleWorkerState {
     pub initialized: bool,
     pub report_mtime_ms: u64,
     pub report_mtime_stable: bool,
+    #[serde(default)]
+    pub prompt_landed: bool,
+    #[serde(default)]
+    pub prompt_recovered: bool,
+    #[serde(default)]
+    pub recover_at_ms: u64,
+    #[serde(default)]
+    pub recover_deadline_ms: u64,
 }
 
 impl SingleWorkerState {
@@ -131,6 +142,10 @@ impl SingleWorkerState {
             initialized: false,
             report_mtime_ms: 0,
             report_mtime_stable: false,
+            prompt_landed: false,
+            prompt_recovered: false,
+            recover_at_ms: 0,
+            recover_deadline_ms: 0,
         }
     }
 
@@ -160,6 +175,10 @@ impl SingleWorkerState {
             self.last_progress_ms = last_progress_sec * 1000;
             self.first_progress_seen = true;
         }
+        self.initialized = false;
+        self.prompt_landed = true;
+        self.initialized = false;
+        self.start_ms = 0;
         self
     }
 }
@@ -172,6 +191,21 @@ impl SingleWorkerWorkflow {
     pub fn new() -> Self {
         Self
     }
+}
+fn complete_step(
+    state: &mut SingleWorkerState,
+    now_ms: u64,
+    exit: i32,
+) -> StepDecision<SingleWorkerOutput> {
+    if state.start_ms > 0 && now_ms >= state.start_ms {
+        let added = now_ms - state.start_ms;
+        state.prev_elapsed_ms = (state.prev_elapsed_ms + added).min(state.input.budget_sec * 1000);
+        state.start_ms = now_ms;
+    }
+    StepDecision::Complete(
+        SingleWorkerOutput::new(exit, state.report_path.clone())
+            .expect("valid single worker exit code"),
+    )
 }
 
 /// Cleans pane text body by dropping spinners/separators and collapsing digit sequences to 'N'.
@@ -319,10 +353,7 @@ impl Workflow for SingleWorkerWorkflow {
                         }
 
                         if status == "blocked" {
-                            return StepDecision::Complete(
-                                SingleWorkerOutput::new(5, state.report_path.clone())
-                                    .expect("valid single worker exit code"),
-                            );
+                            return complete_step(state, ctx.now_ms(), 5);
                         }
                     }
                     StepDecision::Continue
@@ -354,10 +385,7 @@ impl Workflow for SingleWorkerWorkflow {
                             let valid =
                                 validate_report_content(&content, state.config.expect_verdict);
                             let exit = if valid.is_ok() { 0 } else { 6 };
-                            return StepDecision::Complete(
-                                SingleWorkerOutput::new(exit, state.report_path.clone())
-                                    .expect("valid single worker exit code"),
-                            );
+                            return complete_step(state, ctx.now_ms(), exit);
                         }
                     }
                     StepDecision::Continue
@@ -393,10 +421,7 @@ impl Workflow for SingleWorkerWorkflow {
 
                         // Interactive question / permission prompt pending
                         if question_seen(&content) {
-                            return StepDecision::Complete(
-                                SingleWorkerOutput::new(5, state.report_path.clone())
-                                    .expect("valid single worker exit code"),
-                            );
+                            return complete_step(state, ctx.now_ms(), 5);
                         }
 
                         // Recompute progress fingerprint with updated pane text
@@ -404,12 +429,37 @@ impl Workflow for SingleWorkerWorkflow {
                             compute_fingerprint(&state.latest_pane_text, &state.current_diff_hash);
                         if state.poll_count == 0 {
                             state.last_progress_fp = fp;
+                            state.last_progress_ms = ctx.now_ms();
                         } else if fp != state.last_progress_fp {
                             state.last_progress_fp = fp;
                             state.last_progress_ms = ctx.now_ms();
                             if state.agent_status != "idle" && state.agent_status != "done" {
                                 state.idle_since_ms = 0;
                             }
+                        }
+
+                        let now = ctx.now_ms();
+                        let is_waiting = {
+                            let runs_dir = state
+                                .report_path
+                                .parent()
+                                .unwrap_or_else(|| std::path::Path::new("."));
+                            crate::worker::prompt::observer::lead_waiting(
+                                runs_dir,
+                                &state.input.name,
+                                "",
+                            )
+                        };
+                        let stall_baseline = if state.last_progress_ms > 0 {
+                            state.last_progress_ms
+                        } else {
+                            state.start_ms
+                        };
+                        if !is_waiting
+                            && state.poll_count > 0
+                            && now.saturating_sub(stall_baseline) >= state.config.stall_sec * 1000
+                        {
+                            return complete_step(state, now, 3);
                         }
                     }
                     StepDecision::Continue
@@ -441,10 +491,7 @@ impl Workflow for SingleWorkerWorkflow {
 
                     // 1. Hard cap check (exit 2)
                     if now >= state.cap_deadline_ms {
-                        return StepDecision::Complete(
-                            SingleWorkerOutput::new(2, state.report_path.clone())
-                                .expect("valid single worker exit code"),
-                        );
+                        return complete_step(state, now, 2);
                     }
 
                     // 2. Agent gone check (exit 3) - includes NotFound or unknown with empty pane
@@ -457,10 +504,7 @@ impl Workflow for SingleWorkerWorkflow {
                             state.gone_since_ms = now;
                         }
                         if now.saturating_sub(state.gone_since_ms) >= state.config.gone_sec * 1000 {
-                            return StepDecision::Complete(
-                                SingleWorkerOutput::new(3, state.report_path.clone())
-                                    .expect("valid single worker exit code"),
-                            );
+                            return complete_step(state, now, 3);
                         }
                     } else {
                         state.gone_since_ms = 0;
@@ -468,10 +512,7 @@ impl Workflow for SingleWorkerWorkflow {
 
                     // 3. Blocked / question check (exit 5)
                     if state.agent_status == "blocked" || question_seen(&state.latest_pane_text) {
-                        return StepDecision::Complete(
-                            SingleWorkerOutput::new(5, state.report_path.clone())
-                                .expect("valid single worker exit code"),
-                        );
+                        return complete_step(state, now, 5);
                     }
 
                     // 4. Budget deadline check (exit 4, with grace and autoext) - checked BEFORE idle and stall
@@ -515,15 +556,45 @@ impl Workflow for SingleWorkerWorkflow {
                         }
 
                         if now >= state.budget_deadline_ms {
-                            return StepDecision::Complete(
-                                SingleWorkerOutput::new(4, state.report_path.clone())
-                                    .expect("valid single worker exit code"),
-                            );
+                            return complete_step(state, now, 4);
+                        }
+                    }
+
+                    let is_waiting = {
+                        let runs_dir = state
+                            .report_path
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new("."));
+                        crate::worker::prompt::observer::lead_waiting(
+                            runs_dir,
+                            &state.input.name,
+                            "",
+                        )
+                    };
+
+                    if !state.prompt_landed && state.config.land_sec > 0 {
+                        if state.agent_status == "working"
+                            || state.agent_status == "blocked"
+                            || is_waiting
+                        {
+                            state.prompt_landed = true;
+                        } else if state.agent_status == "idle" || state.agent_status == "done" {
+                            if state.prompt_recovered {
+                                if now >= state.recover_deadline_ms {
+                                    return complete_step(state, now, 3);
+                                }
+                            } else if now >= state.start_ms + state.config.land_sec * 1000 {
+                                state.prompt_recovered = true;
+                                state.recover_at_ms = now;
+                                state.recover_deadline_ms = now + state.config.land_sec * 1000;
+                            }
                         }
                     }
 
                     // 5. Agent idle check (exit 3) - 120s standard, 300s fallback for opencode/omp without hook
-                    if state.agent_status == "idle" || state.agent_status == "done" {
+                    if is_waiting {
+                        state.idle_since_ms = 0;
+                    } else if state.agent_status == "idle" || state.agent_status == "done" {
                         if state.idle_since_ms == 0 {
                             state.idle_since_ms = now;
                         }
@@ -540,26 +611,10 @@ impl Workflow for SingleWorkerWorkflow {
                                 state.config.idle_sec
                             };
                         if now.saturating_sub(state.idle_since_ms) >= effective_idle_sec * 1000 {
-                            return StepDecision::Complete(
-                                SingleWorkerOutput::new(3, state.report_path.clone())
-                                    .expect("valid single worker exit code"),
-                            );
+                            return complete_step(state, now, 3);
                         }
                     } else {
                         state.idle_since_ms = 0;
-                    }
-
-                    // 6. Stall check (exit 3) - fires when neither pane nor diff moves for stall_sec
-                    let stall_baseline = if state.last_progress_ms > 0 {
-                        state.last_progress_ms
-                    } else {
-                        state.start_ms
-                    };
-                    if now.saturating_sub(stall_baseline) >= state.config.stall_sec * 1000 {
-                        return StepDecision::Complete(
-                            SingleWorkerOutput::new(3, state.report_path.clone())
-                                .expect("valid single worker exit code"),
-                        );
                     }
 
                     // 7. Nudge check (non-terminal)

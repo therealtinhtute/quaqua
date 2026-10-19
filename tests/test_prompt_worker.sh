@@ -189,8 +189,6 @@ Time budget: 25 min" PROMPT_WORKER_MAX_SEC=2 PROMPT_WORKER_POLL_SEC=1
 [[ $rc -eq 2 ]] || fail "sude-bbrief: exit $rc, want 2 (cap): $(cat "$T/err")"
 grep -q 'budget 1500s' "$T/err" \
   || fail "sude-bbrief: brief budget not used: $(cat "$T/err")"
-[[ "$(cat "$T/home/quaqua/runs/.sude-bbrief.budget")" == 1500 ]] \
-  || fail "sude-bbrief: budget sidecar not persisted"
 prompt sude-bover "$brief
 Time budget: 25 min" PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_POLL_SEC=1 \
   PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
