@@ -119,29 +119,31 @@ Critical path: W0 (~1h) → anh iu approves → W1 (12 pipelines, longest ~2h) �
 - Verify: `cargo test --locked` green; toy workflow runs on the testkit; determinism-guard test fails on `std::(fs|process|net)` in any `*Workflow` impl. **Gate: anh iu reviews `engine/` API before W1.**
 
 ### W1: 12 pipelines in parallel
+Peers verify only their own module: `cargo test --locked --lib <module>::` (testkit, no herdr, no bash suites, no full `cargo test`). Integration and live checks belong to the test team in W2.
 **engine-lead** (`src/engine/`)
 - E1 `journal_sqlite.rs`: `rusqlite` (`bundled`, pinned `=`), WAL, `busy_timeout=5000`. Verify: 2 concurrent writers, crash between append and snapshot recovers.
 - E2 `runner.rs`: load snapshot → replay → step → run activity → append → exit when blocked. Verify: kill mid-run → resume = same state; 7200 s timer <50 ms on `VirtualClock`.
-- E3 `activities.rs` + `clock.rs`: real impls over `herdr.rs`/`git.rs`. Verify: unit tests with `HERDR_BIN_PATH` stub.
+- E3 `activities.rs` + `clock.rs`: real impls over `herdr.rs`/`git.rs`. Verify: unit tests with a `HERDR_BIN_PATH` stub.
 - E4 `telemetry_otel.rs`: spans to `runs/traces.jsonl`. Verify: golden-file test of one span.
 
 **worker-lead** (`src/worker/prompt/`, `src/herdr_events.rs`, `src/taskforce/`)
 - K1 `worker/prompt/workflow.rs`: `SingleWorkerWorkflow` timers (budget, grace, autoext, stall 600 s) → exit codes 2–6. Verify: one testkit test per exit code.
-- K2 `herdr_events.rs`: `events.subscribe` activity (`pane.agent_status_changed`, `pane.exited`). Verify: stub socket test + one live probe on herdr.
-- K3 `worker/prompt/cost.rs` + report activity: report mtime + cost80/100 as activity results; drop ANSI scraping in `observer.rs`. Verify: `bash tests/test_prompt_worker.sh` PASS.
-- K4 `taskforce/mod.rs`: `TaskforceWorkflow`. Verify: quorum + one-fail testkit tests; `bash tests/test_taskforce_cap.sh` PASS.
+- K2 `herdr_events.rs`: `events.subscribe` activity (`pane.agent_status_changed`, `pane.exited`). Verify: stub socket test.
+- K3 `worker/prompt/cost.rs` + report activity: report mtime + cost80/100 as activity results; drop ANSI scraping in `observer.rs`. Verify: testkit tests for cost80/100 + report-ready.
+- K4 `taskforce/mod.rs`: `TaskforceWorkflow`. Verify: quorum + one-fail testkit tests.
 
 **pipe-lead** (`src/pipeline/`, `src/grid/`, `src/status.rs`, `tests/worker_unit.rs`)
-- P1 `pipeline/mod.rs` + `pipeline/state.rs`: `PipelineWorkflow` (builder child → plan gate → reviewer child → fix), children mocked per the W0 contract. Verify: plan gate, review fail → fix, resume at phase; `cargo test --locked --test pipeline_prompt`.
-- P2 `grid/` activity: grid repair driven by events, no sync call in phases/spawn. Verify: `bash tests/test_pipeline_grid.sh` PASS.
+- P1 `pipeline/mod.rs` + `pipeline/state.rs`: `PipelineWorkflow` (builder child → plan gate → reviewer child → fix), children mocked per the W0 contract. Verify: plan gate, review fail → fix, resume at phase.
+- P2 `grid/` activity: grid repair driven by events, no sync call in phases/spawn. Verify: unit tests on layout decisions.
 - P3 `status.rs` (#47 P2): `quaqua status` reads `runs/quaqua.db`; WAITER-LOST flag. Verify: fixture DB tests.
-- P4 `tests/worker_unit.rs`: replace the 6 ad-hoc `HerdrOps` mocks with `MockActivities`. Verify: `cargo test --locked --test worker_unit`.
+- P4 `tests/worker_unit.rs`: replace the 6 ad-hoc `HerdrOps` mocks with `MockActivities`. Verify: compiles; test team runs it in W2.
 
 Contract changes during W1: only via `engine-lead`, landed on `arch-integ` first; every team rebases.
 
-### W2: integrate (`engine-lead`)
-- Merge the 12 branches into `arch-integ`; wire K/P workflows to E1–E3; delete the `.{name}.*` dotfile code in `state.rs`.
-- Verify: `bash tests/run.sh --slow` all PASS; `rg -n '\.budget|\.grace|\.autoext' crates/quaqua/src` empty; live spawn → prompt → cleanup, live pipeline, kill → `--resume`.
+### W2: integrate (`engine-lead`) + one test team
+- Merge the 12 branches into `arch-integ` in batches; wire K/P workflows to E1–E3; delete the `.{name}.*` dotfile code in `state.rs`.
+- Test team `tester` (1 worker, tieude, own worktree on `arch-integ`) runs the full suites once per merge batch and files failures back to the owning Lead: `cargo test --locked`, `test_taskforce_cap.sh`, `test_prompt_worker*.sh`, `test_pipeline*.sh`, `--test pipeline_prompt`, `--test worker_unit`, live herdr probe.
+- Done when: `bash tests/run.sh --slow` all PASS; `rg -n '\.budget|\.grace|\.autoext' crates/quaqua/src` empty; live spawn → prompt → cleanup, live pipeline, kill → `--resume`.
 
 ### Risks
 - Provider concurrency (12 omp + 12 opencode at once) is unverified; throttling stalls workers → CoS checks the first 10 min and drops to 2 Leads if more than 3 stall.
