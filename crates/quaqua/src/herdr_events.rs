@@ -3,6 +3,20 @@
 //! Connects to the local herdr Unix domain socket and subscribes to lifecycle
 //! and pane status events (`pane.agent_status_changed`, `pane.exited`) over
 //! newline-delimited JSON. Implements the engine [`Activity`] trait.
+//!
+//! # Protocol & Contract
+//! - Transport: Newline-delimited JSON over a local Unix domain socket.
+//! - Subscriptions: Pane-level events (`pane.agent_status_changed`, `pane.exited`)
+//!   require a valid pane ID (such as `"w1:p1"`). The `agent` parameter in
+//!   [`HerdrEventRequest::Subscribe`] must be a valid pane ID.
+//! - Bounded Handshake: `subscribe()` enforces an overall deadline equal to `read_timeout`
+//!   and caps early buffered events to prevent hanging on chattering non-ack peers.
+//! - Bounded Buffering: Incoming events are buffered in a FIFO queue capped at 10,000
+//!   events. If unpolled events exceed this cap, the oldest events are dropped to prevent
+//!   unbounded memory growth. Unpolled events are cleared on re-subscribe or unsubscribe.
+//! - Disconnection & EOF: If the herdr server closes the socket connection, any remaining
+//!   buffered events are drained first; once empty, subsequent polls return
+//!   [`ActivityError::ExecutionFailed`] to alert the caller that the subscription is dead.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -10,7 +24,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +88,8 @@ struct RpcErrorBody {
 struct HerdrEventsInner {
     stream: Option<UnixStream>,
     active_agent: Option<String>,
-    read_buf: String,
+    connection_closed: bool,
+    read_buf: Vec<u8>,
     buffered_events: VecDeque<String>,
 }
 
@@ -133,6 +148,13 @@ impl HerdrEvents {
 
     /// Subscribes to herdr events for the given agent and event types.
     pub fn subscribe(&self, agent: &str, event_types: &[String]) -> Result<(), ActivityError> {
+        if agent.trim().is_empty() {
+            return Err(ActivityError::ExecutionFailed(
+                "agent identifier must not be empty (required for herdr pane subscription)"
+                    .to_string(),
+            ));
+        }
+
         let socket_path = self.resolve_socket_path()?;
         let mut stream = match UnixStream::connect(&socket_path) {
             Ok(s) => s,
@@ -168,7 +190,7 @@ impl HerdrEvents {
         let subscriptions: Vec<SubscriptionEntry> = target_types
             .into_iter()
             .map(|t| {
-                let pane_id = if t == "pane.agent_status_changed" && !agent.is_empty() {
+                let pane_id = if t.starts_with("pane.") {
                     Some(agent.to_string())
                 } else {
                     None
@@ -201,8 +223,19 @@ impl HerdrEvents {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         let mut early_events = Vec::new();
+        let deadline = Instant::now() + self.read_timeout;
 
         loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(ActivityError::Timeout(format!(
+                    "timed out waiting for subscription response after {:?}",
+                    self.read_timeout
+                )));
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let _ = reader.get_ref().set_read_timeout(Some(remaining));
+
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) => {
@@ -228,6 +261,12 @@ impl HerdrEvents {
                             break;
                         }
                     }
+                    if early_events.len() >= MAX_BUFFERED_EVENTS {
+                        return Err(ActivityError::ExecutionFailed(
+                            "exceeded maximum buffered early events while waiting for subscription ack"
+                                .to_string(),
+                        ));
+                    }
                     early_events.push(trimmed.to_string());
                 }
                 Err(e) => {
@@ -248,7 +287,9 @@ impl HerdrEvents {
 
         let unconsumed = reader.buffer().to_vec();
         let read_stream = reader.into_inner();
-        let _ = read_stream.set_nonblocking(true);
+        read_stream.set_nonblocking(true).map_err(|e| {
+            ActivityError::ExecutionFailed(format!("failed to set nonblocking mode: {e}"))
+        })?;
 
         let mut inner = self.state.lock().map_err(|_| {
             ActivityError::ExecutionFailed("internal state mutex poisoned".to_string())
@@ -259,11 +300,10 @@ impl HerdrEvents {
         }
         inner.read_buf.clear();
         inner.buffered_events.clear();
+        inner.connection_closed = false;
 
         if !unconsumed.is_empty() {
-            inner
-                .read_buf
-                .push_str(&String::from_utf8_lossy(&unconsumed));
+            inner.read_buf.extend_from_slice(&unconsumed);
         }
         for ev in early_events {
             inner.buffered_events.push_back(ev);
@@ -275,26 +315,34 @@ impl HerdrEvents {
     }
 
     /// Drains all buffered socket events non-blocking.
+    ///
+    /// If the connection was closed by the server (EOF), any remaining buffered events
+    /// are returned first. Once buffered events are exhausted, subsequent calls return
+    /// [`ActivityError::ExecutionFailed`] to notify the caller of the closed connection.
     pub fn poll_events(&self) -> Result<Vec<String>, ActivityError> {
         let mut inner = self.state.lock().map_err(|_| {
             ActivityError::ExecutionFailed("internal state mutex poisoned".to_string())
         })?;
         let HerdrEventsInner {
             stream,
+            active_agent,
+            connection_closed,
             read_buf,
             buffered_events,
-            ..
         } = &mut *inner;
+
+        let mut hit_eof = false;
 
         if let Some(s) = stream {
             let mut buf = [0u8; 8192];
             loop {
                 match s.read(&mut buf) {
                     Ok(0) => {
+                        hit_eof = true;
                         break;
                     }
                     Ok(n) => {
-                        read_buf.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        read_buf.extend_from_slice(&buf[..n]);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         break;
@@ -311,8 +359,14 @@ impl HerdrEvents {
             }
         }
 
-        while let Some(pos) = read_buf.find('\n') {
-            let line = read_buf[..pos].trim().to_string();
+        if hit_eof {
+            *stream = None;
+            *connection_closed = true;
+        }
+
+        while let Some(pos) = read_buf.iter().position(|&b| b == b'\n') {
+            let line_bytes = &read_buf[..pos];
+            let line = String::from_utf8_lossy(line_bytes).trim().to_string();
             read_buf.drain(..=pos);
             if !line.is_empty() {
                 if buffered_events.len() >= MAX_BUFFERED_EVENTS {
@@ -322,8 +376,22 @@ impl HerdrEvents {
             }
         }
 
-        let events: Vec<String> = buffered_events.drain(..).collect();
-        Ok(events)
+        if !buffered_events.is_empty() {
+            let events: Vec<String> = buffered_events.drain(..).collect();
+            return Ok(events);
+        }
+
+        if *connection_closed {
+            return Err(ActivityError::ExecutionFailed(
+                "herdr socket connection closed by server (EOF)".to_string(),
+            ));
+        }
+
+        if active_agent.is_none() {
+            return Ok(Vec::new());
+        }
+
+        Ok(Vec::new())
     }
 
     /// Unsubscribes and closes the active socket connection.
@@ -336,6 +404,7 @@ impl HerdrEvents {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
         inner.active_agent = None;
+        inner.connection_closed = false;
         inner.read_buf.clear();
         inner.buffered_events.clear();
         Ok(())
@@ -416,6 +485,26 @@ mod tests {
         (path, guard)
     }
 
+    fn poll_until_events(client: &HerdrEvents, timeout: Duration) -> Vec<String> {
+        let start = Instant::now();
+        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
+        let mut all_events = Vec::new();
+        while start.elapsed() < timeout {
+            match client.execute(&poll_req) {
+                Ok(ActivityResult::HerdrEvents(HerdrEventResult::Events(evs))) => {
+                    all_events.extend(evs);
+                    if !all_events.is_empty() {
+                        break;
+                    }
+                }
+                Ok(other) => panic!("unexpected result: {other:?}"),
+                Err(e) => panic!("poll failed with error: {e:?}"),
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        all_events
+    }
+
     #[test]
     fn test_stub_socket_subscribe_and_poll() {
         let (sock_path, _guard) = temp_socket_path();
@@ -423,27 +512,26 @@ mod tests {
 
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept connection");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
             let mut line = String::new();
             reader.read_line(&mut line).expect("read subscribe request");
 
-            // Verify subscribe request contains method and params
+            // Verify subscribe request contains method and params with pane_id
             let req_val: serde_json::Value =
                 serde_json::from_str(&line).expect("valid json request");
             assert_eq!(req_val["method"], "events.subscribe");
+            let subs = req_val["params"]["subscriptions"].as_array().unwrap();
+            for sub in subs {
+                assert_eq!(sub["pane_id"], "w1:p1");
+            }
             let req_id = req_val["id"].as_str().unwrap().to_string();
 
-            // Reply with success response per schema
+            // Reply with success response AND event in one write/flush to avoid timing race
             let resp = serde_json::json!({
                 "id": req_id,
                 "result": { "type": "subscription_started" }
             });
-            stream
-                .write_all(format!("{}\n", resp).as_bytes())
-                .expect("write response");
-            stream.flush().expect("flush response");
-
-            // Push a pane.agent_status_changed event per subscription_event schema
             let event = serde_json::json!({
                 "event": "pane.agent_status_changed",
                 "data": {
@@ -454,9 +542,9 @@ mod tests {
                 }
             });
             stream
-                .write_all(format!("{}\n", event).as_bytes())
-                .expect("write event");
-            stream.flush().expect("flush event");
+                .write_all(format!("{}\n{}\n", resp, event).as_bytes())
+                .expect("write response and event");
+            stream.flush().expect("flush response and event");
 
             // Keep connection open until client closes it
             let mut buf = [0u8; 16];
@@ -479,22 +567,17 @@ mod tests {
         );
 
         // 2. Poll events: should return the pushed event
-        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
-        let poll_res = client.execute(&poll_req).expect("poll succeeds");
-        match poll_res {
-            ActivityResult::HerdrEvents(HerdrEventResult::Events(events)) => {
-                assert_eq!(events.len(), 1);
-                assert!(events[0].contains("pane.agent_status_changed"));
-                assert!(events[0].contains("working"));
-            }
-            other => panic!("unexpected poll result: {other:?}"),
-        }
+        let events = poll_until_events(&client, Duration::from_secs(2));
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("pane.agent_status_changed"));
+        assert!(events[0].contains("working"));
 
         // 3. Poll again: should be drained (empty)
+        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
         let poll_res2 = client.execute(&poll_req).expect("poll succeeds");
         match poll_res2 {
-            ActivityResult::HerdrEvents(HerdrEventResult::Events(events)) => {
-                assert_eq!(events.len(), 0);
+            ActivityResult::HerdrEvents(HerdrEventResult::Events(evs)) => {
+                assert_eq!(evs.len(), 0);
             }
             other => panic!("unexpected poll result: {other:?}"),
         }
@@ -521,22 +604,23 @@ mod tests {
 
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept connection");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
             let mut line = String::new();
             reader.read_line(&mut line).expect("read subscribe request");
 
             let req_val: serde_json::Value =
                 serde_json::from_str(&line).expect("valid json request");
+            let subs = req_val["params"]["subscriptions"].as_array().unwrap();
+            for sub in subs {
+                assert_eq!(sub["pane_id"], "w1:p1");
+            }
             let req_id = req_val["id"].as_str().unwrap().to_string();
 
             let resp = serde_json::json!({
                 "id": req_id,
                 "result": { "type": "subscription_started" }
             });
-            stream
-                .write_all(format!("{}\n", resp).as_bytes())
-                .expect("write response");
-
             let ev1 = serde_json::json!({
                 "event": "pane.agent_status_changed",
                 "data": { "pane_id": "w1:p1", "agent_status": "working" }
@@ -547,8 +631,8 @@ mod tests {
             });
 
             stream
-                .write_all(format!("{}\n{}\n", ev1, ev2).as_bytes())
-                .expect("write events");
+                .write_all(format!("{}\n{}\n{}\n", resp, ev1, ev2).as_bytes())
+                .expect("write response and events");
             stream.flush().expect("flush events");
 
             let mut buf = [0u8; 16];
@@ -564,17 +648,219 @@ mod tests {
         ));
         assert!(sub_res.is_ok());
 
-        let poll_res = client
-            .execute(&ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents))
-            .expect("poll succeeds");
-        match poll_res {
-            ActivityResult::HerdrEvents(HerdrEventResult::Events(events)) => {
-                assert_eq!(events.len(), 2);
-                assert!(events[0].contains("pane.agent_status_changed"));
-                assert!(events[1].contains("pane.exited"));
+        let events = poll_until_events(&client, Duration::from_secs(2));
+        assert_eq!(events.len(), 2);
+        assert!(events[0].contains("pane.agent_status_changed"));
+        assert!(events[1].contains("pane.exited"));
+
+        let unsub_res = client.execute(&ActivityRequest::HerdrEvents(
+            HerdrEventRequest::Unsubscribe {
+                agent: "w1:p1".to_string(),
+            },
+        ));
+        assert!(unsub_res.is_ok());
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_subscribe_empty_agent_rejected() {
+        let client = HerdrEvents::with_socket_path("/tmp/not_used.sock");
+        let sub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Subscribe {
+            agent: "   ".to_string(),
+            event_types: vec![],
+        });
+        let res = client.execute(&sub_req);
+        assert!(res.is_err());
+        match res.err().unwrap() {
+            ActivityError::ExecutionFailed(msg) => {
+                assert!(msg.contains("agent identifier must not be empty"));
             }
-            other => panic!("unexpected poll result: {other:?}"),
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_stub_socket_eof_returns_error() {
+        let (sock_path, _guard) = temp_socket_path();
+        let listener = UnixListener::bind(&sock_path).expect("bind unix socket");
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read subscribe request");
+
+            let req_val: serde_json::Value =
+                serde_json::from_str(&line).expect("valid json request");
+            let req_id = req_val["id"].as_str().unwrap().to_string();
+
+            let resp = serde_json::json!({
+                "id": req_id,
+                "result": { "type": "subscription_started" }
+            });
+            stream
+                .write_all(format!("{}\n", resp).as_bytes())
+                .expect("write response");
+            stream.flush().expect("flush response");
+
+            // Close the server end immediately to trigger EOF
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        });
+
+        let client = HerdrEvents::with_socket_path(&sock_path);
+        let sub_res = client.execute(&ActivityRequest::HerdrEvents(
+            HerdrEventRequest::Subscribe {
+                agent: "w1:p1".to_string(),
+                event_types: vec![],
+            },
+        ));
+        assert!(sub_res.is_ok());
+
+        // Poll should detect EOF and return error
+        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
+        let poll_res = client.execute(&poll_req);
+        assert!(poll_res.is_err(), "EOF must not be silently swallowed");
+        match poll_res.err().unwrap() {
+            ActivityError::ExecutionFailed(msg) => {
+                assert!(msg.contains("closed by server (EOF)"));
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_subscribe_overall_deadline_chatter() {
+        let (sock_path, _guard) = temp_socket_path();
+        let listener = UnixListener::bind(&sock_path).expect("bind unix socket");
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read subscribe request");
+
+            // Server keeps sending non-ack lines rapidly (every 10ms)
+            for i in 0..100 {
+                let chatter = serde_json::json!({
+                    "id": format!("wrong_id_{i}"),
+                    "event": "some.noise",
+                    "data": {}
+                });
+                if stream
+                    .write_all(format!("{}\n", chatter).as_bytes())
+                    .is_err()
+                {
+                    break;
+                }
+                let _ = stream.flush();
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        // 100ms overall timeout
+        let client =
+            HerdrEvents::with_socket_path_and_timeout(&sock_path, Duration::from_millis(100));
+        let start = Instant::now();
+        let res = client.execute(&ActivityRequest::HerdrEvents(
+            HerdrEventRequest::Subscribe {
+                agent: "w1:p1".to_string(),
+                event_types: vec![],
+            },
+        ));
+        let elapsed = start.elapsed();
+
+        assert!(
+            res.is_err(),
+            "chattering non-ack peer must hit overall deadline"
+        );
+        assert!(
+            matches!(res.err().unwrap(), ActivityError::Timeout(_)),
+            "expected ActivityError::Timeout"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "overall deadline should trigger promptly, took {:?}",
+            elapsed
+        );
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_multibyte_utf8_across_read_boundaries() {
+        let (sock_path, _guard) = temp_socket_path();
+        let listener = UnixListener::bind(&sock_path).expect("bind unix socket");
+
+        // Non-ASCII string with Vietnamese multi-byte characters
+        let title = "✳ Chuyển đổi ompz sang pi — Tiêu đề dài";
+
+        let title_clone = title.to_string();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read subscribe request");
+
+            let req_val: serde_json::Value =
+                serde_json::from_str(&line).expect("valid json request");
+            let req_id = req_val["id"].as_str().unwrap().to_string();
+
+            let resp = serde_json::json!({
+                "id": req_id,
+                "result": { "type": "subscription_started" }
+            });
+            stream
+                .write_all(format!("{}\n", resp).as_bytes())
+                .expect("write response");
+            stream.flush().expect("flush response");
+
+            let event = serde_json::json!({
+                "event": "pane.agent_status_changed",
+                "data": {
+                    "pane_id": "w1:p1",
+                    "title": title_clone
+                }
+            });
+            let event_bytes = format!("{}\n", event).into_bytes();
+
+            // Split the event bytes in the middle of a multi-byte sequence (chunk sizes 3, 5, rest)
+            stream.write_all(&event_bytes[..3]).expect("write chunk 1");
+            stream.flush().expect("flush 1");
+            thread::sleep(Duration::from_millis(15));
+            stream.write_all(&event_bytes[3..8]).expect("write chunk 2");
+            stream.flush().expect("flush 2");
+            thread::sleep(Duration::from_millis(15));
+            stream.write_all(&event_bytes[8..]).expect("write chunk 3");
+            stream.flush().expect("flush 3");
+
+            let mut buf = [0u8; 16];
+            let _ = stream.read(&mut buf);
+        });
+
+        let client = HerdrEvents::with_socket_path(&sock_path);
+        let sub_res = client.execute(&ActivityRequest::HerdrEvents(
+            HerdrEventRequest::Subscribe {
+                agent: "w1:p1".to_string(),
+                event_types: vec![],
+            },
+        ));
+        assert!(sub_res.is_ok());
+
+        let events = poll_until_events(&client, Duration::from_secs(2));
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].contains(title),
+            "multibyte UTF-8 must not be corrupted across chunk boundaries. Got: {}",
+            events[0]
+        );
+        assert!(
+            !events[0].contains('\u{FFFD}'),
+            "no replacement char U+FFFD should appear"
+        );
 
         let unsub_res = client.execute(&ActivityRequest::HerdrEvents(
             HerdrEventRequest::Unsubscribe {
@@ -619,13 +905,11 @@ mod tests {
 
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept connection");
-            // Silent server: accept and sleep without sending anything
             thread::sleep(Duration::from_millis(300));
             let mut buf = [0u8; 16];
             let _ = stream.read(&mut buf);
         });
 
-        // Configure client with short timeout (80ms)
         let client =
             HerdrEvents::with_socket_path_and_timeout(&sock_path, Duration::from_millis(80));
         let sub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Subscribe {
@@ -633,7 +917,7 @@ mod tests {
             event_types: vec![],
         });
 
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let res = client.execute(&sub_req);
         let elapsed = start.elapsed();
 
@@ -721,7 +1005,6 @@ mod tests {
         let client = HerdrEvents::with_socket_path(&sock_path);
         let activity_dyn: Box<dyn Activity> = Box::new(client);
 
-        // Verify object safety and Send + Sync
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<HerdrEvents>();
 
@@ -732,14 +1015,12 @@ mod tests {
 
     #[test]
     fn test_env_resolution_missing() {
-        // Test client without path override when env var is not set
         let client = HerdrEvents::new();
-        // Temporarily clear HERDR_SOCKET_PATH if present
         let orig = std::env::var_os("HERDR_SOCKET_PATH");
         std::env::remove_var("HERDR_SOCKET_PATH");
 
         let sub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Subscribe {
-            agent: "test".to_string(),
+            agent: "w1:p1".to_string(),
             event_types: vec![],
         });
         let res = client.execute(&sub_req);
@@ -755,7 +1036,6 @@ mod tests {
     fn test_poll_and_unsubscribe_when_unconnected() {
         let client = HerdrEvents::with_socket_path("/tmp/not_connected.sock");
 
-        // PollEvents when not connected returns empty list
         let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
         let poll_res = client
             .execute(&poll_req)
@@ -765,7 +1045,6 @@ mod tests {
             ActivityResult::HerdrEvents(HerdrEventResult::Events(vec![]))
         );
 
-        // Unsubscribe when not connected succeeds
         let unsub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Unsubscribe {
             agent: "agent_none".to_string(),
         });
@@ -829,16 +1108,9 @@ mod tests {
         ));
         assert!(sub_res.is_ok());
 
-        let poll_res = client
-            .execute(&ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents))
-            .expect("poll succeeds");
-        match poll_res {
-            ActivityResult::HerdrEvents(HerdrEventResult::Events(events)) => {
-                assert_eq!(events.len(), 1);
-                assert!(events[0].contains("idle"));
-            }
-            other => panic!("unexpected poll result: {other:?}"),
-        }
+        let events = poll_until_events(&client, Duration::from_secs(2));
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("idle"));
 
         let unsub_res = client.execute(&ActivityRequest::HerdrEvents(
             HerdrEventRequest::Unsubscribe {
