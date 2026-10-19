@@ -330,17 +330,7 @@ fn parse_owners_table(content: &str) -> Vec<OwnerEntry> {
 
 fn find_owners_file() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidate1 = manifest_dir.join("src/engine/OWNERS.md");
-    if candidate1.is_file() {
-        return candidate1;
-    }
-    let candidate2 = manifest_dir.parent().and_then(|p| p.parent()).map(|p| p.join("engine/OWNERS.md"));
-    if let Some(c) = candidate2 {
-        if c.is_file() {
-            return c;
-        }
-    }
-    candidate1
+    manifest_dir.join("src/engine/OWNERS.md")
 }
 
 #[test]
