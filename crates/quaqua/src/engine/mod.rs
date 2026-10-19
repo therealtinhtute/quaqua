@@ -8,6 +8,7 @@ pub mod workflow;
 pub mod activity;
 pub mod journal;
 pub mod telemetry;
+pub mod telemetry_otel;
 pub mod child;
 pub mod testkit;
 pub mod guard;
