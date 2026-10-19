@@ -202,16 +202,7 @@ impl SystemActivities {
                 }))
             }
             HerdrRequest::Spawn { name, kind, repo } => {
-                let repo_team = Path::new(repo).join("team.toml");
-                let self_team = self.repo_dir.join("team.toml");
-                let base_cfg = if repo_team.is_file() {
-                    crate::config::load(&repo_team).map_err(|e| (1, format!("error: {e}\n")))
-                } else if self_team.is_file() {
-                    crate::config::load(&self_team).map_err(|e| (1, format!("error: {e}\n")))
-                } else {
-                    crate::config::load_team_config()
-                }
-                .map_err(|(code, msg)| {
+                let base_cfg = crate::config::load_team_config().map_err(|(code, msg)| {
                     ActivityError::ExecutionFailed(format!(
                         "load team config failed (exit {code}): {msg}"
                     ))
@@ -581,7 +572,7 @@ impl SystemActivities {
                 })?;
                 let client = map.get(agent).ok_or_else(|| {
                     ActivityError::NotFound(format!(
-                        "agent_not_found: no subscription active for agent {agent}"
+                        "no active event subscription for agent '{agent}'"
                     ))
                 })?;
                 let events = client.poll_events()?;
@@ -602,9 +593,21 @@ impl SystemActivities {
                     )));
                 }
                 let mut all_events = Vec::new();
+                let mut first_err = None;
                 for client in map.values() {
-                    let mut evs = client.poll_events()?;
-                    all_events.append(&mut evs);
+                    match client.poll_events() {
+                        Ok(mut evs) => all_events.append(&mut evs),
+                        Err(e) => {
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                    }
+                }
+                if all_events.is_empty() {
+                    if let Some(err) = first_err {
+                        return Err(err);
+                    }
                 }
                 Ok(ActivityResult::HerdrEvents(HerdrEventResult::Events(
                     all_events,
@@ -637,6 +640,17 @@ impl SystemActivities {
                             return Ok(ActivityResult::Cost(CostResult::Spend(val)));
                         }
                     }
+                    return Ok(ActivityResult::Cost(CostResult::Spend(0.0)));
+                }
+
+                // Check via existing cost reader entry point
+                if let Some(val) = crate::worker::prompt::cost::read_worker_cost(
+                    session_pattern,
+                    session_pattern,
+                    session_pattern,
+                    "opencode",
+                ) {
+                    return Ok(ActivityResult::Cost(CostResult::Spend(val)));
                 }
 
                 let mut db_candidates = Vec::new();
@@ -657,11 +671,6 @@ impl SystemActivities {
                             }
                         }
                     }
-                }
-
-                let repo_db = self.repo_dir.join("opencode.db");
-                if repo_db.is_file() {
-                    db_candidates.push(repo_db);
                 }
 
                 if let Ok(home) = std::env::var("HOME") {
@@ -755,13 +764,24 @@ mod tests {
 
     static HERDR_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
-    struct EnvRestorer(Option<String>);
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
 
-    impl Drop for EnvRestorer {
+    impl EnvVarGuard {
+        fn set(key: &'static str, val: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            match &self.0 {
-                Some(val) => std::env::set_var("HERDR_BIN_PATH", val),
-                None => std::env::remove_var("HERDR_BIN_PATH"),
+            match &self.prev {
+                Some(val) => std::env::set_var(self.key, val),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -906,15 +926,26 @@ esac
         let log_file = std::env::temp_dir().join(format!("quaqua-herdr-stub-{}.log", pid));
         let _ = fs::remove_file(&log_file);
 
+        let temp_dir = std::env::temp_dir().join(format!("quaqua-herdr-act-{}", pid));
+        let _ = fs::create_dir_all(&temp_dir);
+        let runs_temp = temp_dir.join("runs");
+        let _ = fs::create_dir_all(&runs_temp);
+
+        // Strictly isolate environment so no live herdr or live runs dir is touched
+        let _guard_herdr = EnvVarGuard::set("HERDR_BIN_PATH", stub_bin.to_str().unwrap());
+        let _guard_skip = EnvVarGuard::set("GRID_SKIP", "1");
+        let _guard_test = EnvVarGuard::set("QUAQUA_TEST", "1");
+        let _guard_runs = EnvVarGuard::set("QUAQUA_RUNS_DIR", runs_temp.to_str().unwrap());
+
         let stub_herdr = Herdr {
             bin: stub_bin.to_string_lossy().to_string(),
         };
-        let temp_dir = std::env::temp_dir().join(format!("quaqua-herdr-act-{}", pid));
         let activities = SystemActivities::with_adapters(stub_herdr, Git::new(), &temp_dir);
 
         f(&activities, &log_file);
 
         let _ = fs::remove_file(&log_file);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -1069,9 +1100,7 @@ esac
         let log_file = std::env::temp_dir().join(format!("quaqua-herdr-stub-{}.log", pid));
         let _ = fs::remove_file(&log_file);
 
-        let prev = std::env::var("HERDR_BIN_PATH").ok();
-        std::env::set_var("HERDR_BIN_PATH", stub_bin);
-        let _restorer = EnvRestorer(prev);
+        let _guard = EnvVarGuard::set("HERDR_BIN_PATH", stub_bin);
 
         let activities = SystemActivities::new();
         let req = ActivityRequest::Herdr(HerdrRequest::Prompt {
@@ -1552,10 +1581,8 @@ esac
                 .unwrap()
                 .join("team.toml");
             let _ = fs::copy(&team_path, temp_repo.join("team.toml"));
-            std::env::set_var("QUAQUA_TEAM_TOML", &team_path);
-
-            // Ensure PIPELINE_TASK is set or owner cap doesn't block
-            std::env::set_var("PIPELINE_TASK", "1");
+            let _guard_team = EnvVarGuard::set("QUAQUA_TEAM_TOML", &team_path);
+            let _guard_pipe = EnvVarGuard::set("PIPELINE_TASK", "1");
             let req = ActivityRequest::Herdr(HerdrRequest::Spawn {
                 name: "sude-spawn-act".to_string(),
                 kind: "sude".to_string(),
@@ -1570,8 +1597,6 @@ esac
                     name: "sude-spawn-act".to_string(),
                 })
             );
-            std::env::remove_var("PIPELINE_TASK");
-            std::env::remove_var("QUAQUA_TEAM_TOML");
             let _ = fs::remove_dir_all(&base_dir);
         });
     }
@@ -1642,6 +1667,9 @@ esac
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
         use std::thread;
+        let _lock = HERDR_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let pid = std::process::id();
         let sock_path = std::env::temp_dir().join(format!("quaqua-act-events-{}.sock", pid));
@@ -1677,7 +1705,7 @@ esac
             stream.flush().expect("flush response and events");
         });
 
-        std::env::set_var("HERDR_SOCKET_PATH", &sock_path);
+        let _guard_sock = EnvVarGuard::set("HERDR_SOCKET_PATH", &sock_path);
         let activities = SystemActivities::new();
 
         // 1. Subscribe
@@ -1718,13 +1746,12 @@ esac
         match unk_err {
             ActivityError::NotFound(msg) => {
                 assert!(
-                    msg.contains("agent_not_found"),
-                    "must contain agent_not_found: {msg}"
+                    msg.contains("no active event subscription"),
+                    "must indicate no active subscription: {msg}"
                 );
             }
             other => panic!("expected NotFound, got {other:?}"),
         }
-
         // 4. Unsubscribe
         let unsub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Unsubscribe {
             agent: "sude-ev".to_string(),
@@ -1749,7 +1776,92 @@ esac
             ActivityResult::HerdrEvents(HerdrEventResult::Events(vec![]))
         );
 
-        std::env::remove_var("HERDR_SOCKET_PATH");
+        let _ = fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn test_herdr_events_unscoped_poll_with_multiple_subscriptions() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::thread;
+
+        let _lock = HERDR_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let pid = std::process::id();
+        let sock_path = std::env::temp_dir().join(format!("quaqua-act-events-multi-{}.sock", pid));
+        let _ = fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).expect("bind test unix socket");
+
+        let handle = thread::spawn(move || {
+            // Client 1 (agent-1)
+            let (mut stream1, _) = listener.accept().expect("accept connection 1");
+            let mut reader1 = BufReader::new(stream1.try_clone().expect("clone stream 1"));
+            let mut line1 = String::new();
+            reader1.read_line(&mut line1).expect("read sub 1");
+            let req_val1: serde_json::Value = serde_json::from_str(&line1).unwrap();
+            let req_id1 = req_val1["id"].as_str().unwrap();
+            let resp1 =
+                serde_json::json!({ "id": req_id1, "result": { "type": "subscription_started" } });
+            let ev1 = serde_json::json!({ "event": "pane.agent_status_changed", "data": { "agent": "agent-1", "agent_status": "working" } });
+            stream1
+                .write_all(format!("{}\n{}\n", resp1, ev1).as_bytes())
+                .unwrap();
+            stream1.flush().unwrap();
+
+            // Client 2 (agent-2)
+            let (mut stream2, _) = listener.accept().expect("accept connection 2");
+            let mut reader2 = BufReader::new(stream2.try_clone().expect("clone stream 2"));
+            let mut line2 = String::new();
+            reader2.read_line(&mut line2).expect("read sub 2");
+            let req_val2: serde_json::Value = serde_json::from_str(&line2).unwrap();
+            let req_id2 = req_val2["id"].as_str().unwrap();
+            let resp2 =
+                serde_json::json!({ "id": req_id2, "result": { "type": "subscription_started" } });
+            let ev2 = serde_json::json!({ "event": "pane.exited", "data": { "agent": "agent-2", "exit_code": 0 } });
+            stream2
+                .write_all(format!("{}\n{}\n", resp2, ev2).as_bytes())
+                .unwrap();
+            stream2.flush().unwrap();
+        });
+
+        let _guard_sock = EnvVarGuard::set("HERDR_SOCKET_PATH", &sock_path);
+        let activities = SystemActivities::new();
+
+        activities
+            .execute(&ActivityRequest::HerdrEvents(
+                HerdrEventRequest::Subscribe {
+                    agent: "agent-1".to_string(),
+                    event_types: vec!["pane.agent_status_changed".to_string()],
+                },
+            ))
+            .expect("subscribe agent-1");
+
+        activities
+            .execute(&ActivityRequest::HerdrEvents(
+                HerdrEventRequest::Subscribe {
+                    agent: "agent-2".to_string(),
+                    event_types: vec!["pane.exited".to_string()],
+                },
+            ))
+            .expect("subscribe agent-2");
+
+        let _ = handle.join();
+
+        // Unscoped poll aggregates events from both subscribed clients
+        let poll_res = activities
+            .execute(&ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents))
+            .expect("poll all events");
+        if let ActivityResult::HerdrEvents(HerdrEventResult::Events(events)) = poll_res {
+            assert_eq!(events.len(), 2);
+            let combined = events.join("\n");
+            assert!(combined.contains("agent-1"));
+            assert!(combined.contains("agent-2"));
+        } else {
+            panic!("expected Events, got {poll_res:?}");
+        }
+
         let _ = fs::remove_file(&sock_path);
     }
 
@@ -1785,6 +1897,10 @@ esac
 
     #[test]
     fn test_cost_query_spend_fixture_db() {
+        let _lock = HERDR_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let pid = std::process::id();
         let temp_dir = std::env::temp_dir().join(format!("quaqua-act-cost-db-{}", pid));
         let _ = fs::create_dir_all(&temp_dir);
@@ -1805,7 +1921,7 @@ esac
             .expect("populate session_v2 fixture");
         }
 
-        std::env::set_var("QUAQUA_COST_DB_PATH", db_path.to_str().unwrap());
+        let _guard_db = EnvVarGuard::set("QUAQUA_COST_DB_PATH", db_path.to_str().unwrap());
         let activities = SystemActivities::new();
 
         // 1. Exact session ID match
@@ -1838,7 +1954,6 @@ esac
         let res4 = activities.execute(&req4).expect("query spend nonexistent");
         assert_eq!(res4, ActivityResult::Cost(CostResult::Spend(0.0)));
 
-        std::env::remove_var("QUAQUA_COST_DB_PATH");
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
