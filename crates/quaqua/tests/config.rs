@@ -136,6 +136,8 @@ fn config_get_can_review_and_kind_fields() {
     assert_eq!(stdout(&harness).trim(), "omp");
     let effort = run(&["config", "get", "kinds.sude.effort", "--file", &repo_team()]);
     assert_eq!(stdout(&effort).trim(), "high");
+    let spawn = run(&["config", "get", "kinds.truonglao.spawn", "--file", &repo_team()]);
+    assert_eq!(stdout(&spawn).trim(), "auto");
 }
 
 #[test]
@@ -191,6 +193,7 @@ fn config_invalid_fixtures_are_rejected() {
         ("bad-timer-duration.toml", "timers.budget_default"),
         ("bad-timer-nudge.toml", "timers.nudge_at"),
         ("bad-timer-grace.toml", "timers.grace"),
+        ("unknown-spawn.toml", "unknown spawn policy 'sometimes'"),
     ];
 
     for (name, needle) in cases {

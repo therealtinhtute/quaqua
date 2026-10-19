@@ -8,7 +8,8 @@ use crate::worker::cleanup::default_runs_dir;
 use std::path::{Path, PathBuf};
 
 pub const USAGE: &str = "\
-# Usage: quaqua taskforce <advisor|dual-lens> <task> <repo> --brief <file> [--base <ref>]";
+# Usage: quaqua taskforce <advisor|dual-lens> <task> <repo> --brief <file> [--base <ref>] [--approve-kind <kind>...]
+#   --approve-kind <kind>  approve a member kind whose team.toml spawn = \"approve\"";
 
 pub struct TaskforceArgs {
     pub mode: String,
@@ -16,6 +17,7 @@ pub struct TaskforceArgs {
     pub repo: PathBuf,
     pub brief: PathBuf,
     pub base: Option<String>,
+    pub approve_kinds: Vec<String>,
 }
 
 pub fn parse_taskforce_args(args: &[String]) -> Result<TaskforceArgs, (i32, String)> {
@@ -29,6 +31,7 @@ pub fn parse_taskforce_args(args: &[String]) -> Result<TaskforceArgs, (i32, Stri
 
     let mut brief: Option<PathBuf> = None;
     let mut base: Option<String> = None;
+    let mut approve_kinds: Vec<String> = Vec::new();
     let mut pos = Vec::new();
 
     let mut i = 1;
@@ -42,6 +45,22 @@ pub fn parse_taskforce_args(args: &[String]) -> Result<TaskforceArgs, (i32, Stri
             i += 2;
         } else if let Some(v) = arg.strip_prefix("--brief=") {
             brief = Some(PathBuf::from(v));
+            i += 1;
+        } else if arg == "--approve-kind" {
+            if i + 1 >= args.len() {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            let val = &args[i + 1];
+            if val.is_empty() || val.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            approve_kinds.push(val.clone());
+            i += 2;
+        } else if let Some(v) = arg.strip_prefix("--approve-kind=") {
+            if v.is_empty() || v.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            approve_kinds.push(v.to_string());
             i += 1;
         } else if arg == "--base" {
             if i + 1 >= args.len() {
@@ -70,6 +89,7 @@ pub fn parse_taskforce_args(args: &[String]) -> Result<TaskforceArgs, (i32, Stri
         repo: PathBuf::from(&pos[1]),
         brief: brief.unwrap(),
         base,
+        approve_kinds,
     })
 }
 
@@ -137,6 +157,7 @@ fn run_advisor(
         name: worker_name.clone(),
         kind: kind.to_string(),
         repo_path: args.repo.clone(),
+        approve_kinds: args.approve_kinds.clone(),
     };
 
     // Set PIPELINE_TASK during inner spawn to prevent double-charging the reservation
@@ -202,6 +223,7 @@ fn run_dual_lens(
         name: w1.clone(),
         kind: kind1.to_string(),
         repo_path: args.repo.clone(),
+        approve_kinds: args.approve_kinds.clone(),
     };
 
     let opts2 = crate::worker::spawn::SpawnOptions {
@@ -210,6 +232,7 @@ fn run_dual_lens(
         name: w2.clone(),
         kind: kind2.to_string(),
         repo_path: args.repo.clone(),
+        approve_kinds: args.approve_kinds.clone(),
     };
 
     std::env::set_var("PIPELINE_TASK", &args.task);
@@ -271,4 +294,33 @@ fn run_dual_lens(
     println!("{}", runs_dir.join(format!("{w1}.md")).display());
     println!("{}", runs_dir.join(format!("{w2}.md")).display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approve_kind_flag_is_parsed_and_optional() {
+        let args: Vec<String> = [
+            "dual-lens",
+            "tlcheck",
+            ".",
+            "--brief",
+            "brief.md",
+            "--approve-kind",
+            "truonglao",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let t = parse_taskforce_args(&args).unwrap();
+        assert_eq!(t.approve_kinds, vec!["truonglao".to_string()]);
+
+        let plain: Vec<String> = ["advisor", "tlcheck", ".", "--brief", "brief.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_taskforce_args(&plain).unwrap().approve_kinds.is_empty());
+    }
 }

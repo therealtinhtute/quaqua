@@ -31,6 +31,8 @@ pub struct PipelineState {
     pub lead: String,
     pub lead_pane: String,
     pub pipeline_pid: u32,
+    /// Kinds the Principal approved with `--approve-kind` for this pipeline.
+    pub approve_kinds: Vec<String>,
 }
 
 impl PipelineState {
@@ -82,6 +84,14 @@ impl PipelineState {
                     "lead" => s.lead = val.to_string(),
                     "lead_pane" => s.lead_pane = val.to_string(),
                     "pipeline_pid" => s.pipeline_pid = val.parse().unwrap_or(0),
+                    "approve_kinds" => {
+                        s.approve_kinds = val
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|k| !k.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    }
                     _ => {}
                 }
             }
@@ -118,6 +128,7 @@ impl PipelineState {
         out.push_str(&format!("lead={}\n", self.lead));
         out.push_str(&format!("lead_pane={}\n", self.lead_pane));
         out.push_str(&format!("pipeline_pid={}\n", self.pipeline_pid));
+        out.push_str(&format!("approve_kinds={}\n", self.approve_kinds.join(",")));
         std::fs::write(path, out)
     }
 }

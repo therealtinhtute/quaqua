@@ -15,6 +15,14 @@ pub const CAP_CEILING: i64 = 8;
 pub const ROLE_CLASSES: [&str; 4] = ["cos", "lead", "peer", "taskforce"];
 /// `[roles.<r>]` table keys.
 pub const ROLE_NAMES: [&str; 3] = ["cos", "lead", "peer"];
+/// `[kinds.<k>].spawn` values: free spawn vs explicit-Principal approval.
+pub const SPAWN_AUTO: &str = "auto";
+pub const SPAWN_APPROVE: &str = "approve";
+pub const SPAWN_POLICIES: [&str; 2] = [SPAWN_AUTO, SPAWN_APPROVE];
+
+fn default_spawn() -> String {
+    SPAWN_AUTO.to_string()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -186,6 +194,9 @@ pub struct Kind {
     pub fallback: Option<String>,
     #[serde(default)]
     pub can_review: bool,
+    /// "auto" (spawn freely) or "approve" (require --approve-kind <kind>).
+    #[serde(default = "default_spawn")]
+    pub spawn: String,
 }
 
 /// The effort values a harness accepts. opencode effort is a model *variant*
@@ -443,6 +454,12 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     // team.toml is the only source of harness/model/effort: fail closed on a kind
     // that cannot launch, or on a fallback that names a missing kind or itself.
     for (name, kind) in &cfg.kinds {
+        if !SPAWN_POLICIES.contains(&kind.spawn.as_str()) {
+            return Err(format!(
+                "kind '{name}': unknown spawn policy '{}' (want auto or approve)",
+                kind.spawn
+            ));
+        }
         if !["opencode", "omp", "claude"].contains(&kind.harness.as_str()) {
             return Err(format!(
                 "kind '{name}': unsupported harness '{}'",
@@ -502,6 +519,25 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// The one spawn-policy gate every spawn path calls (worker, pipeline,
+/// taskforce, lead). A kind with `spawn = "approve"` refuses unless the caller
+/// passed `--approve-kind <kind>` for it.
+pub fn check_spawn_policy(
+    kind_name: &str,
+    kind: &Kind,
+    approved_kinds: &[String],
+) -> Result<(), (i32, String)> {
+    if kind.spawn != SPAWN_APPROVE || approved_kinds.iter().any(|k| k == kind_name) {
+        return Ok(());
+    }
+    Err((
+        1,
+        format!(
+            "error: kind '{kind_name}' has spawn = \"approve\" in team.toml: pass --approve-kind {kind_name} to approve this spawn (or set kinds.{kind_name}.spawn = \"auto\")\n"
+        ),
+    ))
+}
+
 /// Resolve one dotted key to its printable value. Arrays print one item per line.
 pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, String> {
     let cfg = resolve(raw.clone(), project)?;
@@ -538,6 +574,7 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
                 "effort" => kind.effort.clone().ok_or_else(|| format!("key '{key}' is unset"))?,
                 "fallback" => kind.fallback.clone().ok_or_else(|| format!("key '{key}' is unset"))?,
                 "can_review" => kind.can_review.to_string(),
+                "spawn" => kind.spawn.clone(),
                 _ => return Err(unknown()),
             }
         }
@@ -636,6 +673,38 @@ workers_tab = "workers"
         assert_eq!(get(&base(), "kinds.tieude.fallback", None).unwrap(), "suhuynh");
         assert!(get(&base(), "strategy.default_reviewer", None).unwrap().contains("suhuynh"));
         assert!(get(&base(), "nope.nope", None).is_err());
+    }
+
+    #[test]
+    fn spawn_policy_defaults_to_auto() {
+        assert_eq!(base().kinds["tieude"].spawn, SPAWN_AUTO);
+        assert_eq!(get(&base(), "kinds.tieude.spawn", None).unwrap(), SPAWN_AUTO);
+    }
+
+    #[test]
+    fn unknown_spawn_policy_is_rejected() {
+        let mut c = base();
+        c.kinds.get_mut("tieude").unwrap().spawn = "sometimes".to_string();
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("unknown spawn policy 'sometimes'"), "{err}");
+    }
+
+    #[test]
+    fn approve_policy_needs_the_matching_flag() {
+        let mut c = base();
+        c.kinds.get_mut("suhuynh").unwrap().spawn = SPAWN_APPROVE.to_string();
+
+        let err = check_spawn_policy("suhuynh", &c.kinds["suhuynh"], &[]).unwrap_err();
+        assert!(err.1.contains("--approve-kind suhuynh"), "{}", err.1);
+
+        // approving another kind does not approve this one
+        let other = vec!["tieude".to_string()];
+        assert!(check_spawn_policy("suhuynh", &c.kinds["suhuynh"], &other).is_err());
+
+        let approved = vec!["suhuynh".to_string()];
+        assert!(check_spawn_policy("suhuynh", &c.kinds["suhuynh"], &approved).is_ok());
+        // auto kinds never need the flag
+        assert!(check_spawn_policy("tieude", &c.kinds["tieude"], &[]).is_ok());
     }
 
     #[test]

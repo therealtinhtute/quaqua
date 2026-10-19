@@ -44,7 +44,8 @@ pub fn run_review<G: GitOps, H: HerdrOps>(
         std::env::set_var("GRID_SKIP", "1");
 
         let spawn_res = (|| -> Result<(), (i32, String)> {
-            let opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
+            let mut opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
+            opts.approve_kinds = state.approve_kinds.clone();
             crate::worker::spawn::spawn_worker(opts, &ctx.cfg, ctx.git, ctx.herdr)
         })();
 
