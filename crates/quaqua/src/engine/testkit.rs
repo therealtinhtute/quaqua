@@ -247,7 +247,6 @@ pub fn run_to_completion<W: Workflow>(
                     workflow_id,
                     &SnapshotRecord::new(
                         seq,
-                        clock.now_ms(),
                         serde_json::to_string(&state).unwrap_or_default(),
                     ),
                 )?;

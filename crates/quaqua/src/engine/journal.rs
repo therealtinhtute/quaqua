@@ -18,7 +18,6 @@
 //! CREATE TABLE IF NOT EXISTS snapshots (
 //!     workflow_id TEXT NOT NULL,
 //!     seq INTEGER NOT NULL,
-//!     ts_ms INTEGER NOT NULL,
 //!     state_json TEXT NOT NULL,
 //!     PRIMARY KEY (workflow_id, seq)
 //! );
@@ -84,17 +83,14 @@ impl EventRecord {
 pub struct SnapshotRecord {
     /// Sequence number up to which events have been incorporated into this snapshot.
     pub seq: u64,
-    /// Timestamp in milliseconds since Unix epoch.
-    pub ts_ms: u64,
     /// Serialized JSON string of workflow state.
     pub state_json: String,
 }
 
 impl SnapshotRecord {
-    pub fn new(seq: u64, ts_ms: u64, state_json: impl Into<String>) -> Self {
+    pub fn new(seq: u64, state_json: impl Into<String>) -> Self {
         Self {
             seq,
-            ts_ms,
             state_json: state_json.into(),
         }
     }

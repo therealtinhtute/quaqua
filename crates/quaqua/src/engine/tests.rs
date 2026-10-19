@@ -164,7 +164,7 @@ fn test_journal_trait_is_object_safe() {
     let seq = journal.append_event("wf-1", &event).expect("append_event failed");
     assert_eq!(seq, 1);
 
-    let snapshot = SnapshotRecord::new(1, 100, r#"{"state":"init"}"#);
+    let snapshot = SnapshotRecord::new(1, r#"{"state":"init"}"#);
     journal.append_snapshot("wf-1", &snapshot).expect("append_snapshot failed");
 
     let loaded_events = journal.load_events("wf-1", 1).expect("load_events failed");
