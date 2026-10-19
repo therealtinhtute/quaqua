@@ -12,12 +12,20 @@ Enforced in W2 with: `cargo test --locked -p quaqua -- --ignored test_w1_owners_
 | E3 | crates/quaqua/src/engine/clock.rs | engine-lead | sude-arch-e3 | System real-time clock implementation for production runtime |
 | E4 | crates/quaqua/src/engine/telemetry_otel.rs | engine-lead | sude-arch-e4 | OpenTelemetry GenAI spans recorder writing to runs/traces.jsonl |
 | K1 | crates/quaqua/src/worker/prompt/workflow.rs | worker-lead | sude-arch-k1 | SingleWorkerWorkflow state machine with budget, grace, autoext, stall timers |
+| K1 | crates/quaqua/src/worker/prompt/mod.rs | worker-lead | sude-arch-k1 | Prompt worker entry point and workflow runner integration |
+| K1 | crates/quaqua/src/worker/prompt/watchdog.rs | worker-lead | sude-arch-k1 | Watchdog timer state machine adaptation |
 | K2 | crates/quaqua/src/herdr_events.rs | worker-lead | sude-arch-k2 | herdr event subscriber activity (agent_status_changed, pane.exited) |
 | K3 | crates/quaqua/src/worker/prompt/cost.rs | worker-lead | sude-arch-k3 | Cost tracking activity (cost80/cost100 and report mtime checks) |
 | K3 | crates/quaqua/src/worker/prompt/observer.rs | worker-lead | sude-arch-k3 | Observer updates: drop ANSI scraping in favour of activity results |
 | K4 | crates/quaqua/src/taskforce/mod.rs | worker-lead | sude-arch-k4 | TaskforceWorkflow implementation (quorum, dual-lens, advisor) |
 | P1 | crates/quaqua/src/pipeline/mod.rs | pipe-lead | sude-arch-p1 | PipelineWorkflow: plan gate, build child, review child, fix cycle |
 | P1 | crates/quaqua/src/pipeline/state.rs | pipe-lead | sude-arch-p1 | Pipeline state transitions and durable event recovery |
+| P1 | crates/quaqua/src/pipeline/phases/mod.rs | pipe-lead | sude-arch-p1 | Phase execution abstractions and common helpers |
+| P1 | crates/quaqua/src/pipeline/phases/build.rs | pipe-lead | sude-arch-p1 | Build phase child execution and outcome inspection |
+| P1 | crates/quaqua/src/pipeline/phases/fix.rs | pipe-lead | sude-arch-p1 | Fix phase child execution and retry handling |
+| P1 | crates/quaqua/src/pipeline/phases/plan.rs | pipe-lead | sude-arch-p1 | Plan phase child execution and plan gate |
+| P1 | crates/quaqua/src/pipeline/phases/review.rs | pipe-lead | sude-arch-p1 | Review phase child execution and verdict evaluation |
+| P2 | crates/quaqua/src/pipeline/phases/spawn.rs | pipe-lead | sude-arch-p2 | Spawn phase: removal of sync grid call in favour of event repair |
 | P2 | crates/quaqua/src/grid/mod.rs | pipe-lead | sude-arch-p2 | Grid activity entry point and layout repair driven by events |
 | P2 | crates/quaqua/src/grid/apply.rs | pipe-lead | sude-arch-p2 | Grid pane split and movement actions |
 | P2 | crates/quaqua/src/grid/hook.rs | pipe-lead | sude-arch-p2 | Grid hook invocation helpers |

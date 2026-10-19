@@ -513,3 +513,112 @@ fn test_deadlock_detection_when_no_pending_events() {
         "expected deadlock, got: {result:?}"
     );
 }
+
+// ----------------------------------------------------------------------------
+// Testkit Full Surface Verification (Context Scheduling & Clock Advances)
+// ----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct FanoutState {
+    activity_received: bool,
+    child_received: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct FanoutWorkflow;
+
+impl Workflow for FanoutWorkflow {
+    type Input = ();
+    type State = FanoutState;
+    type Output = String;
+
+    fn step(
+        &self,
+        state: &mut Self::State,
+        ctx: &mut WorkflowContext,
+        event: Option<WorkflowEvent>,
+    ) -> StepDecision<Self::Output> {
+        match event {
+            None => {
+                // Schedule both an activity and a child via WorkflowContext surface
+                ctx.schedule_activity(
+                    "git_sha_fanout",
+                    ActivityRequest::Git(GitRequest::CurrentSha),
+                );
+                ctx.start_child(
+                    "child_worker_1",
+                    "single_worker",
+                    serde_json::json!({ "exit": 0 }),
+                );
+                StepDecision::Continue
+            }
+            Some(WorkflowEvent::ActivityCompleted { id, result }) => {
+                assert_eq!(id, "git_sha_fanout");
+                if let ActivityResult::Git(GitResult::Sha(sha)) = result {
+                    assert_eq!(sha, "default_sha");
+                    state.activity_received = true;
+                }
+                if state.activity_received && state.child_received {
+                    StepDecision::Complete("FANOUT_SUCCESS".to_string())
+                } else {
+                    StepDecision::Continue
+                }
+            }
+            Some(WorkflowEvent::ChildCompleted { id, output }) => {
+                assert_eq!(id, "child_worker_1");
+                assert_eq!(output["exit"], 0);
+                state.child_received = true;
+                if state.activity_received && state.child_received {
+                    StepDecision::Complete("FANOUT_SUCCESS".to_string())
+                } else {
+                    StepDecision::Continue
+                }
+            }
+            _ => StepDecision::Fail {
+                code: 1,
+                reason: "unexpected event in fanout".to_string(),
+            },
+        }
+    }
+}
+
+#[test]
+fn test_context_scheduling_activities_and_children() {
+    let workflow = FanoutWorkflow;
+    let mut clock = VirtualClock::new(100);
+    let mut activities = MockActivities::new();
+    activities.set_default(ActivityResult::Git(GitResult::Sha("default_sha".to_string())));
+    let mut journal = InMemoryJournal::new();
+
+    let initial_state = FanoutState {
+        activity_received: false,
+        child_received: false,
+    };
+
+    let result = run_to_completion(
+        &workflow,
+        "test-fanout",
+        initial_state,
+        &mut clock,
+        &mut activities,
+        &mut journal,
+    );
+
+    assert_eq!(result, Ok("FANOUT_SUCCESS".to_string()));
+    assert_eq!(activities.call_count(), 1);
+    assert_eq!(activities.calls()[0].0, "git_sha_fanout");
+}
+
+#[test]
+fn test_virtual_clock_advance_and_mock_defaults() {
+    let mut clock = VirtualClock::new(1000);
+    clock.schedule_timer("timer_1", Duration::from_millis(150));
+
+    let expired_early = clock.advance(Duration::from_millis(100));
+    assert!(expired_early.is_empty(), "timer should not have expired at 1100ms");
+    assert_eq!(clock.now_ms(), 1100);
+
+    let expired_later = clock.advance(Duration::from_millis(100));
+    assert_eq!(expired_later, vec!["timer_1"], "timer should expire by 1200ms");
+    assert_eq!(clock.now_ms(), 1200);
+}
