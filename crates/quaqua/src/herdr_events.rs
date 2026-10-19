@@ -505,6 +505,21 @@ mod tests {
         all_events
     }
 
+    fn poll_until_error(client: &HerdrEvents, timeout: Duration) -> ActivityError {
+        let start = Instant::now();
+        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
+        while start.elapsed() < timeout {
+            match client.execute(&poll_req) {
+                Err(e) => return e,
+                Ok(ActivityResult::HerdrEvents(HerdrEventResult::Events(_))) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Ok(other) => panic!("unexpected result: {other:?}"),
+            }
+        }
+        panic!("timed out waiting for EOF error after {timeout:?}");
+    }
+
     #[test]
     fn test_stub_socket_subscribe_and_poll() {
         let (sock_path, _guard) = temp_socket_path();
@@ -717,18 +732,25 @@ mod tests {
         ));
         assert!(sub_res.is_ok());
 
-        // Poll should detect EOF and return error
-        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
-        let poll_res = client.execute(&poll_req);
-        assert!(poll_res.is_err(), "EOF must not be silently swallowed");
-        match poll_res.err().unwrap() {
+        // Wait for the server thread to complete shutdown
+        let _ = handle.join();
+
+        // Poll should detect EOF and return error (bounded retry loop handles socket propagation)
+        let err = poll_until_error(&client, Duration::from_secs(2));
+        match err {
             ActivityError::ExecutionFailed(msg) => {
                 assert!(msg.contains("closed by server (EOF)"));
             }
             other => panic!("expected ExecutionFailed, got: {other:?}"),
         }
 
-        let _ = handle.join();
+        // Verify the connection remains closed on subsequent polls
+        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
+        let poll_res = client.execute(&poll_req);
+        assert!(
+            poll_res.is_err(),
+            "connection must stay closed on subsequent polls"
+        );
     }
 
     #[test]
