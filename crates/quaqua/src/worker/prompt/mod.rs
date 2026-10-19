@@ -515,13 +515,12 @@ impl Activity for PromptActivities {
                     }
                 }
             }
-            ActivityRequest::Herdr(HerdrRequest::Prompt { name, task }) => {
+            ActivityRequest::Herdr(HerdrRequest::Prompt { task, .. }) => {
                 if task.starts_with("Time check: you are past") {
                     eprintln!(
                         "WATCHDOG nudge sent (once, at {}% of {}s budget)",
                         self.nudge_pct, self.budget
                     );
-                    let _ = WorkerMetadata::record_nudged(&self.runs_dir, name);
                 }
             }
             _ => {}
@@ -722,6 +721,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 out.display()
             );
         }
+        let _ = std::fs::remove_file(WorkerMetadata::provider_retry_path(&runs_dir, name));
 
         // Pre-prompt grid check
         if std::env::var("GRID_SKIP").as_deref() != Ok("1")
@@ -929,7 +929,11 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         recover_at: Mutex::new(0),
         recover_deadline: Mutex::new(0),
         prompt_not_landed: Mutex::new(false),
-        provider_retried: Mutex::new(WorkerMetadata::has_provider_retry(&runs_dir, name)),
+        provider_retried: Mutex::new(if resume {
+            WorkerMetadata::has_provider_retry(&runs_dir, name)
+        } else {
+            false
+        }),
     };
     let mut acts = prompt_acts;
     let mut clock = PromptClock::new();
