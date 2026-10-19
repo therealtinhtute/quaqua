@@ -264,10 +264,10 @@ pub fn scan_orchestration<H: HerdrOps>(
                     if let (Ok(m_mtime), Ok(r_mtime)) = (m_meta.modified(), r_meta.modified()) {
                         m_mtime >= r_mtime
                     } else {
-                        true
+                        false
                     }
                 } else {
-                    true
+                    false
                 }
             } else {
                 false
@@ -933,6 +933,49 @@ mod tests {
         assert!(
             e1.flags.contains(&WarningFlag::WaiterLost),
             "stale .read marker must NOT suppress WAITER-LOST"
+        );
+        assert_eq!(e1.report_status, ReportStatus::Unread);
+    }
+    #[test]
+    fn test_status_unreadable_read_marker_treated_as_unread() {
+        let tmp = temp_test_dir("unreadable-read-marker");
+        let _cleaner = TempDirCleaner(tmp.clone());
+
+        let mock_json = r#"{
+            "result": {
+                "agents": [
+                    {"name": "arch-lead", "agent_status": "idle"},
+                    {"name": "sude-e1", "agent_status": "done"}
+                ]
+            }
+        }"#;
+        let mock = MockHerdr::new(mock_json);
+
+        fs::write(tmp.join("sude-e1.owner"), "arch-lead\n").unwrap();
+        let report_path = tmp.join("sude-e1.md");
+        fs::write(&report_path, "Goal: done\n## Lessons\nnone\n").unwrap();
+
+        let now = std::time::SystemTime::now();
+        let report_file = fs::File::open(&report_path).unwrap();
+        let mut report_times = fs::FileTimes::new();
+        report_times = report_times
+            .set_modified(now)
+            .set_accessed(now - Duration::from_secs(10));
+        report_file.set_times(report_times).unwrap();
+
+        // If read marker is a directory or otherwise unreadable for file metadata mtime
+        let marker_path = tmp.join(".sude-e1.read");
+        fs::create_dir(&marker_path).unwrap(); // is_file() is false, metadata/modified will not match a valid read marker
+
+        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let e1 = rows
+            .iter()
+            .find(|r| r.name == "sude-e1")
+            .expect("sude-e1 found");
+
+        assert!(
+            e1.flags.contains(&WarningFlag::WaiterLost),
+            "unreadable or invalid .read marker must NOT suppress WAITER-LOST"
         );
         assert_eq!(e1.report_status, ReportStatus::Unread);
     }
