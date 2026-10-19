@@ -6,7 +6,7 @@ Status: locked, awaiting approval → to-plan
 The Rust engine lives in its own repo `~/Lab/quaqua-rs`. `~/quaqua` holds only the workspace and uses the installed `quaqua` binary. The workspace is the md files, memory, runs, rules, team.toml and the hooks.
 
 ## Decisions (anh iu, 2026-10-16)
-- Repo: `~/Lab/quaqua-rs`
+- Repo: `~/Lab/quaqua-rs` is a local checkout only; upstream stays `therealtinhtute/quaqua` — the engine lives on its own branch `engine` there, the workspace on `main` (anh iu, 2026-10-19).
 - History: keep it with `git subtree split` (blame and PR #42 stay traceable)
 - Grid: port `grid-workers.sh` to Rust before the split
 - Order: lock the plan and run to-plan for both phases first, then build
@@ -23,7 +23,7 @@ The Rust engine lives in its own repo `~/Lab/quaqua-rs`. `~/quaqua` holds only t
   - cargo tests pass, and the grid tests and the targeted bash suites pass
 
 ## Phase 2: split the repo
-- Move `crates/`, `Cargo.*` and the engine tests to `~/Lab/quaqua-rs` with `git subtree split`, keeping history.
+- `git subtree split` `crates/`, `Cargo.*` and the engine tests into a new branch `engine` (history kept), push it to the same upstream `therealtinhtute/quaqua`, and clone that branch to `~/Lab/quaqua-rs`. No new GitHub repo.
 - Install from the new repo with `cargo install --path ~/Lab/quaqua-rs/crates/quaqua`.
 - In `~/quaqua`:
   - `.claude/settings.json` calls `quaqua gate` directly
