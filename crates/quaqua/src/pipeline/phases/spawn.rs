@@ -68,6 +68,15 @@ pub fn run_spawn<G: GitOps, H: HerdrOps>(
         let _ = state.save(&ctx.state_file);
     }
 
+    if !ctx.run_grid_hook() {
+        let b = format!(
+            "grid check failed for {bname} — arrange the pane per rules/_all/fanout-agent-grid.md, then 'quaqua pipeline --resume {} {}'",
+            ctx.task, state.repo
+        );
+        let _ = state.save(&ctx.state_file);
+        return ctx.finish(state, "blocked", 5, Some(&b));
+    }
+
     let wt_path = Path::new(&state.wt);
     let rev_out = ctx.git.run_in(wt_path, &["rev-parse", "HEAD"]);
     let head = rev_out
