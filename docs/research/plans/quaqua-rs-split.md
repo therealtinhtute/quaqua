@@ -103,35 +103,49 @@ Every workspace path the binary uses goes through `workspace_root()`. If one is 
 - Patterns: Rust `Workflow` trait impls; declarative TOML deferred.
 - Migration: strangler fig in `crates/quaqua` — taskforce → worker/prompt → pipeline, tests green each commit; before the repo split.
 
-## Steps: engine core (to-plan 2026-10-19, parallel)
-Driver: one Lead `arch-lead` (8 task workers = 4 pipelines, the cap). Peers branch from `quaqua/arch-integ`; each team = sude build + suhuynh review, one review round. CoS re-runs every Verify; anh iu approves the W0 contract before W1 opens, and every push/merge main.
-Waves: W0 (alone) → W1 (4 teams in parallel, one owner per directory) → W2 (integrate). Each wave ends with tests green on `quaqua/arch-integ`.
+## Steps: engine core (to-plan 2026-10-19, 3 Leads × 8)
+Drivers: `engine-lead`, `worker-lead`, `pipe-lead` — 4 pipelines each (sude build + suhuynh review, one round) = 24 task workers. Peers branch from `quaqua/arch-integ`. One owner per **file** (listed below); nobody else edits it. `engine-lead` owns `arch-integ` and runs W2. CoS re-runs every Verify; anh iu approves the W0 contract, every push and merge to main.
+Critical path: W0 (~1h) → anh iu approves → W1 (12 pipelines, longest ~2h) → W2 (~2h). Target: same day.
 
-### W0: freeze the contract (blocks W1, ~1h)
-- `crates/quaqua/src/engine/` API only — types, traits, docs, `todo!()` bodies; no callers:
-  - `Workflow` trait: `step(&self, state, ctx, event) -> StepDecision` (Continue · ScheduleActivity · ScheduleTimer · StartChild · PauseForApproval · Complete · Fail). `WorkflowContext` exposes only scheduling + `now()` — no fs/net/process.
-  - `Activity` trait + typed requests/results for herdr, git, grid, report-file.
-  - `Journal` trait; SQLite schema `events(workflow_id, seq, ts_ms, kind, payload_json)` + `snapshots(workflow_id, seq, state_json)`, DB `<workspace_root>/runs/quaqua.db`.
-  - Testkit API: `VirtualClock`, `MockActivities`, in-memory `Journal`, `run_to_completion(workflow, input)`. The in-memory pieces are implemented here (small) so W1 teams test without team A.
-  - Child-workflow contract: `SingleWorkerInput {name, kind, repo, brief, budget_sec, cost_budget}` → `SingleWorkerOutput {exit: 0|2..6, report_path}`; D depends on this, not on C's code.
-- Verify: `cargo build --locked` + `cargo test --locked` green; a toy workflow runs to completion on the in-memory testkit; determinism-guard test fails on `std::(fs|process|net)` inside any `*Workflow` impl. Anh iu reviews the trait file.
+### W0: freeze the contract (`engine-lead`, one pipeline, blocks W1)
+- `crates/quaqua/src/engine/` API only (types, traits, docs, `todo!()` bodies; no callers):
+  - `workflow.rs`: `Workflow` trait `step(&self, state, ctx, event) -> StepDecision` (Continue · ScheduleActivity · ScheduleTimer · StartChild · PauseForApproval · Complete · Fail); `WorkflowContext` = scheduling + `now()` only.
+  - `activity.rs`: `Activity` trait + typed request/result enums for herdr, herdr events, git, grid, report-file, cost.
+  - `journal.rs`: `Journal` trait; SQLite schema `events(workflow_id, seq, ts_ms, kind, payload_json)` + `snapshots(workflow_id, seq, state_json)`; DB `<workspace_root>/runs/quaqua.db`.
+  - `telemetry.rs`: `SpanSink` trait, OTel GenAI field list.
+  - `testkit.rs` (implemented, small): `VirtualClock`, `MockActivities`, in-memory `Journal`, `run_to_completion`.
+  - Child contract: `SingleWorkerInput {name, kind, repo, brief, budget_sec, cost_budget}` → `SingleWorkerOutput {exit: 0|2..6, report_path}`.
+  - File-ownership table for W1 checked into `engine/OWNERS.md`; a test fails if a W1 file listed there is missing after W2.
+- Verify: `cargo test --locked` green; toy workflow runs on the testkit; determinism-guard test fails on `std::(fs|process|net)` in any `*Workflow` impl. **Gate: anh iu reviews `engine/` API before W1.**
 
-### W1: four teams in parallel (2.5–4h wall)
-- **A — engine impl** (`src/engine/` impls): `rusqlite` (`bundled`, pinned `=`), WAL + `busy_timeout=5000`, ephemeral runner (load snapshot → replay → step → run activity → append → exit when blocked), real clock.
-  Verify: `cargo test --locked engine::` — kill mid-run → resume gives the same state; 2 concurrent writers don't corrupt; 7200 s timer under `VirtualClock` <50 ms.
-- **B — taskforce** (`taskforce/`): `TaskforceWorkflow` replaces the 274-LoC loop; cap/quorum state into workflow state.
-  Verify: testkit tests for quorum + one worker failing; `bash tests/test_taskforce_cap.sh` PASS.
-- **C — worker prompt/watchdog** (`worker/prompt/`): `SingleWorkerWorkflow` with durable timers (budget, grace, autoext, stall 600 s) + herdr `events.subscribe` (`pane.agent_status_changed`, `pane.exited`) + report mtime as activities. Drop ANSI scraping in `observer.rs` and the `.{name}.*` dotfiles. Exit codes 2–6 and `--resume/--extend` stay byte-identical.
-  Verify: testkit test per exit code 2–6 under virtual time; `bash tests/test_prompt_worker.sh` + `tests/test_prompt_worker_watchdog.sh` PASS.
-- **D — pipeline** (`pipeline/`): `PipelineWorkflow` = builder child → `PauseForApproval` plan gate → reviewer child → fix round, children mocked per the W0 contract; replaces the `pipeline/state.rs` key=value parser; grid repair as an activity; OTel GenAI-shaped spans to `runs/traces.jsonl`.
-  Verify: testkit tests for plan gate, review fail → fix, resume at the same phase; `cargo test --locked --test pipeline_prompt` PASS.
-- A contract change during W1 goes through the Lead, lands on `arch-integ` first, and every team rebases — no team edits `src/engine/` API except A via the Lead.
+### W1: 12 pipelines in parallel
+**engine-lead** (`src/engine/`)
+- E1 `journal_sqlite.rs`: `rusqlite` (`bundled`, pinned `=`), WAL, `busy_timeout=5000`. Verify: 2 concurrent writers, crash between append and snapshot recovers.
+- E2 `runner.rs`: load snapshot → replay → step → run activity → append → exit when blocked. Verify: kill mid-run → resume = same state; 7200 s timer <50 ms on `VirtualClock`.
+- E3 `activities.rs` + `clock.rs`: real impls over `herdr.rs`/`git.rs`. Verify: unit tests with `HERDR_BIN_PATH` stub.
+- E4 `telemetry_otel.rs`: spans to `runs/traces.jsonl`. Verify: golden-file test of one span.
 
-### W2: integrate + cleanup (1.5–2h)
-- Merge A–D on `arch-integ`; wire B/C/D to A's SQLite journal + real activities.
-- Replace the 6 ad-hoc `HerdrOps` mocks in `tests/worker_unit.rs` with `MockActivities`; remove dead dotfile code in `state.rs`.
-- `quaqua status` (issue #47 P2) reads `runs/quaqua.db`; WAITER-LOST = a workflow blocked with no live waiter.
-- Verify: `bash tests/run.sh --slow` all PASS; `rg -n '\.budget|\.grace|\.autoext' crates/quaqua/src` empty; one live spawn → prompt → cleanup and one live pipeline on herdr, plus kill → `--resume`.
+**worker-lead** (`src/worker/prompt/`, `src/herdr_events.rs`, `src/taskforce/`)
+- K1 `worker/prompt/workflow.rs`: `SingleWorkerWorkflow` timers (budget, grace, autoext, stall 600 s) → exit codes 2–6. Verify: one testkit test per exit code.
+- K2 `herdr_events.rs`: `events.subscribe` activity (`pane.agent_status_changed`, `pane.exited`). Verify: stub socket test + one live probe on herdr.
+- K3 `worker/prompt/cost.rs` + report activity: report mtime + cost80/100 as activity results; drop ANSI scraping in `observer.rs`. Verify: `bash tests/test_prompt_worker.sh` PASS.
+- K4 `taskforce/mod.rs`: `TaskforceWorkflow`. Verify: quorum + one-fail testkit tests; `bash tests/test_taskforce_cap.sh` PASS.
+
+**pipe-lead** (`src/pipeline/`, `src/grid/`, `src/status.rs`, `tests/worker_unit.rs`)
+- P1 `pipeline/mod.rs` + `pipeline/state.rs`: `PipelineWorkflow` (builder child → plan gate → reviewer child → fix), children mocked per the W0 contract. Verify: plan gate, review fail → fix, resume at phase; `cargo test --locked --test pipeline_prompt`.
+- P2 `grid/` activity: grid repair driven by events, no sync call in phases/spawn. Verify: `bash tests/test_pipeline_grid.sh` PASS.
+- P3 `status.rs` (#47 P2): `quaqua status` reads `runs/quaqua.db`; WAITER-LOST flag. Verify: fixture DB tests.
+- P4 `tests/worker_unit.rs`: replace the 6 ad-hoc `HerdrOps` mocks with `MockActivities`. Verify: `cargo test --locked --test worker_unit`.
+
+Contract changes during W1: only via `engine-lead`, landed on `arch-integ` first; every team rebases.
+
+### W2: integrate (`engine-lead`)
+- Merge the 12 branches into `arch-integ`; wire K/P workflows to E1–E3; delete the `.{name}.*` dotfile code in `state.rs`.
+- Verify: `bash tests/run.sh --slow` all PASS; `rg -n '\.budget|\.grace|\.autoext' crates/quaqua/src` empty; live spawn → prompt → cleanup, live pipeline, kill → `--resume`.
+
+### Risks
+- Provider concurrency (12 omp + 12 opencode at once) is unverified; throttling stalls workers → CoS checks the first 10 min and drops to 2 Leads if more than 3 stall.
+- W2 conflicts if W0 under-specifies; mitigated by the contract tests and file ownership.
 
 ### Then
-The repo split (Phase 2 above) runs after W2, so `quaqua-rs` starts on the new core.
+Repo split (Phase 2 above) after W2, so `quaqua-rs` starts on the new core.
