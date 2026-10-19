@@ -168,6 +168,9 @@ fn default_fix_budget() -> u64 {
 fn default_base() -> String {
     "main".to_string()
 }
+fn default_brief_path() -> String {
+    "brief.md".to_string()
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PipelineInput {
@@ -176,6 +179,8 @@ pub struct PipelineInput {
     pub builder: String,
     pub reviewer: String,
     pub brief: String,
+    #[serde(default = "default_brief_path")]
+    pub brief_path: String,
     #[serde(default = "default_base")]
     pub base: String,
     #[serde(default = "default_review_strategy")]
@@ -206,6 +211,7 @@ impl PipelineInput {
             builder: builder.into(),
             reviewer: reviewer.into(),
             brief: brief.into(),
+            brief_path: "brief.md".to_string(),
             base: "main".to_string(),
             review_strategy: ReviewStrategy::Auto,
             max_rounds: 2,
@@ -229,6 +235,7 @@ pub struct PipelineWorkflowState {
     pub head_sha: Option<String>,
     pub active_child_id: Option<String>,
     pub pending_report_read: Option<String>,
+    pub last_review_report: Option<String>,
 }
 
 impl PipelineWorkflowState {
@@ -244,6 +251,7 @@ impl PipelineWorkflowState {
             head_sha: None,
             active_child_id: None,
             pending_report_read: None,
+            last_review_report: None,
         }
     }
 }
