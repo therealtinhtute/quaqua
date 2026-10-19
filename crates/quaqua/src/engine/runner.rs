@@ -185,11 +185,6 @@ struct WorkflowFailedData {
     reason: String,
 }
 
-enum ReplayStepInput {
-    NoneStep,
-    Event(WorkflowEvent),
-}
-
 // ----------------------------------------------------------------------------
 // Dispatch Helpers
 // ----------------------------------------------------------------------------
@@ -327,11 +322,11 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
     options: &RunnerOptions,
     incoming_events: Vec<WorkflowEvent>,
 ) -> Result<RunnerOutcome<W::Output>, RunnerError> {
-    // 1. Load full history from seq 1 to inspect terminal status and build complete indexes
+    // 1. Inspect full history to handle terminal states and index activities/timers
     let all_events = journal.load_events(workflow_id, 1)?;
     let mut current_seq = all_events.iter().map(|e| e.seq).max().unwrap_or(0);
 
-    // Finding 4: Resuming an already completed or failed workflow immediately returns terminal outcome
+    // Finding 4: Resuming already completed or failed workflow returns terminal outcome immediately
     for rec in &all_events {
         if rec.kind == "workflow_completed" {
             let output: W::Output = serde_json::from_str(&rec.payload_json)
@@ -348,7 +343,6 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         }
     }
 
-    // Build complete activity & timer index across ALL historical events
     let mut completed_activities: HashMap<String, ActivityResult> = HashMap::new();
     let mut scheduled_activities: HashMap<String, ActivityRequest> = HashMap::new();
     let mut scheduled_timers: HashMap<String, (u64, Duration)> = HashMap::new();
@@ -383,17 +377,19 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         }
     }
 
-    // Findings 2 & 5: Restore pending timers from full history with their remaining duration
-    for (id, (sched_ts, orig_dur)) in &scheduled_timers {
-        if !fired_timers.contains(id) {
-            let deadline_ms = sched_ts + orig_dur.as_millis() as u64;
-            let current_now = clock.now_ms();
-            let remaining = if deadline_ms > current_now {
-                Duration::from_millis(deadline_ms - current_now)
-            } else {
-                Duration::from_millis(0)
-            };
-            clock.schedule_timer(id, remaining);
+    // Findings 2 & 5: Restore pending timers from full history with remaining duration ONLY if clock has no timers
+    if clock.pending_timers_count() == 0 {
+        for (id, (sched_ts, orig_dur)) in &scheduled_timers {
+            if !fired_timers.contains(id) {
+                let deadline_ms = sched_ts + orig_dur.as_millis() as u64;
+                let current_now = clock.now_ms();
+                let remaining = if deadline_ms > current_now {
+                    Duration::from_millis(deadline_ms - current_now)
+                } else {
+                    Duration::from_millis(0)
+                };
+                clock.schedule_timer(id, remaining);
+            }
         }
     }
 
@@ -411,90 +407,81 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         }
     };
 
-    // 3. Collect step inputs from events recorded after the snapshot
+    // 3. Replay steps through step() deterministically from snapshot to journal head
     let events_since_snapshot_rec = journal.load_events(workflow_id, snapshot_seq + 1)?;
-    let mut replay_queue: VecDeque<ReplayStepInput> = VecDeque::new();
-
-    if snapshot_seq == 0 && !all_events.is_empty() {
-        replay_queue.push_back(ReplayStepInput::NoneStep);
-    }
+    let mut historical_events_to_deliver: VecDeque<WorkflowEvent> = VecDeque::new();
 
     for rec in &events_since_snapshot_rec {
         match rec.kind.as_str() {
-            // Finding 3: Continue steps must be replayed as step(None)
-            "continue" => {
-                replay_queue.push_back(ReplayStepInput::NoneStep);
-            }
             "activity_completed" => {
                 let data: ActivityCompletedData = serde_json::from_str(&rec.payload_json)
                     .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                replay_queue.push_back(ReplayStepInput::Event(WorkflowEvent::ActivityCompleted {
+                historical_events_to_deliver.push_back(WorkflowEvent::ActivityCompleted {
                     id: data.id,
                     result: data.result,
-                }));
+                });
             }
             "timer_fired" => {
                 let data: TimerFiredData = serde_json::from_str(&rec.payload_json)
                     .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                replay_queue.push_back(ReplayStepInput::Event(WorkflowEvent::TimerFired {
-                    id: data.id,
-                }));
+                historical_events_to_deliver.push_back(WorkflowEvent::TimerFired { id: data.id });
             }
             "approval_resolved" => {
                 let data: ApprovalResolvedData = serde_json::from_str(&rec.payload_json)
                     .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                replay_queue.push_back(ReplayStepInput::Event(WorkflowEvent::ApprovalResolved {
+                historical_events_to_deliver.push_back(WorkflowEvent::ApprovalResolved {
                     approved: data.approved,
                     reason: data.reason,
-                }));
+                });
             }
             "child_completed" => {
                 let data: ChildCompletedData = serde_json::from_str(&rec.payload_json)
                     .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                replay_queue.push_back(ReplayStepInput::Event(WorkflowEvent::ChildCompleted {
+                historical_events_to_deliver.push_back(WorkflowEvent::ChildCompleted {
                     id: data.id,
                     output: data.output,
-                }));
+                });
             }
             "child_failed" => {
                 let data: ChildFailedData = serde_json::from_str(&rec.payload_json)
                     .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                replay_queue.push_back(ReplayStepInput::Event(WorkflowEvent::ChildFailed {
+                historical_events_to_deliver.push_back(WorkflowEvent::ChildFailed {
                     id: data.id,
                     code: data.code,
                     reason: data.reason,
-                }));
+                });
             }
             _ => {}
         }
     }
 
-    // 4. Replay steps through step()
+    let mut replay_initial_step = snapshot_seq == 0 && !all_events.is_empty();
     let mut last_replay_decision: Option<StepDecision<W::Output>> = None;
     let mut last_replay_scheduled: Vec<ScheduledAction> = Vec::new();
 
-    while let Some(item) = replay_queue.pop_front() {
-        let is_last = replay_queue.is_empty();
-        let ev = match item {
-            ReplayStepInput::NoneStep => None,
-            ReplayStepInput::Event(e) => Some(e),
+    while replay_initial_step || !historical_events_to_deliver.is_empty() {
+        let ev = if replay_initial_step {
+            replay_initial_step = false;
+            None
+        } else if let Some(e) = historical_events_to_deliver.pop_front() {
+            Some(e)
+        } else {
+            break;
         };
+
         let mut ctx = WorkflowContext::new(clock.now_ms());
         let dec = workflow.step(&mut state, &mut ctx, ev);
         let scheduled = ctx.drain_scheduled();
 
-        if is_last {
-            last_replay_decision = Some(dec);
-            last_replay_scheduled = scheduled;
-        }
+        last_replay_decision = Some(dec);
+        last_replay_scheduled = scheduled;
     }
 
-    // 5. Transition to Forward Execution
+    // 4. Transition to Forward Execution Queue
     let mut event_queue: VecDeque<WorkflowEvent> = VecDeque::new();
     let mut events_since_snapshot = 0u64;
-    let mut continue_immediate = false;
 
-    // Handle unscheduled actions from the last step of replay (if any)
+    // Dispatch any unscheduled actions from the last step of replay
     for action in last_replay_scheduled {
         match action {
             ScheduledAction::Activity { id, activity } => {
@@ -552,9 +539,6 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
 
     if let Some(decision) = last_replay_decision {
         match decision {
-            StepDecision::Continue => {
-                continue_immediate = true;
-            }
             StepDecision::ScheduleActivity { id, activity } => {
                 if !scheduled_activities.contains_key(&id) {
                     let ev = dispatch_activity(
@@ -639,28 +623,7 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                     )?;
                 }
             }
-            StepDecision::StartChild {
-                id,
-                workflow_type,
-                input,
-            } => {
-                current_seq += 1;
-                journal.append_event(
-                    workflow_id,
-                    &EventRecord::new(
-                        current_seq,
-                        clock.now_ms(),
-                        "child_started",
-                        serde_json::to_string(&ChildStartedData {
-                            id,
-                            workflow_type,
-                            input,
-                        })
-                        .map_err(|e| RunnerError::Serialization(e.to_string()))?,
-                    ),
-                )?;
-                events_since_snapshot += 1;
-            }
+            _ => {}
         }
     }
 
@@ -689,7 +652,7 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         }
     }
 
-    // Append and queue any new incoming external events
+    // Append and queue any new incoming external events in FIFO order
     for ev in incoming_events {
         current_seq += 1;
         match &ev {
@@ -770,7 +733,7 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         event_queue.push_back(ev);
     }
 
-    let mut first_step_needed = snapshot_seq == 0 && all_events.is_empty();
+    let mut initial_step_needed = snapshot_seq == 0 && all_events.is_empty();
     let mut steps = 0;
 
     loop {
@@ -779,17 +742,20 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
             return Err(RunnerError::StepLimitExceeded(options.max_steps));
         }
 
-        let next_event = if first_step_needed {
-            first_step_needed = false;
-            None
-        } else if continue_immediate {
-            continue_immediate = false;
+        let next_event = if initial_step_needed {
+            initial_step_needed = false;
             None
         } else if let Some(ev) = event_queue.pop_front() {
             Some(ev)
         } else if clock.pending_timers_count() > 0 {
             if let Some((_ts, fired_ids)) = clock.advance_to_next_timer() {
                 for id in fired_ids {
+                    // Finding 2: Dedup timer firing against fired_timers to prevent duplicate events on reused clocks
+                    if fired_timers.contains(&id) {
+                        continue;
+                    }
+                    fired_timers.insert(id.clone());
+
                     current_seq += 1;
                     journal.append_event(
                         workflow_id,
@@ -804,9 +770,23 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                     events_since_snapshot += 1;
                     event_queue.push_back(WorkflowEvent::TimerFired { id });
                 }
-                event_queue.pop_front()
+            }
+            if let Some(ev) = event_queue.pop_front() {
+                Some(ev)
             } else {
-                None
+                if options.snapshot_at_blocked {
+                    journal.append_snapshot(
+                        workflow_id,
+                        &SnapshotRecord::new(
+                            current_seq,
+                            serde_json::to_string(&state)
+                                .map_err(|e| RunnerError::Serialization(e.to_string()))?,
+                        ),
+                    )?;
+                }
+                return Ok(RunnerOutcome::Blocked(
+                    "no pending events or timers".to_string(),
+                ));
             }
         } else {
             // Quiescent point: event queue empty and no pending timers can fire
@@ -889,7 +869,6 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                     &EventRecord::new(current_seq, clock.now_ms(), "continue", ""),
                 )?;
                 events_since_snapshot += 1;
-                continue_immediate = true;
             }
             StepDecision::ScheduleActivity { id, activity } => {
                 let ev = dispatch_activity(
@@ -1007,11 +986,10 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         }
 
         // Finding 1: Periodic snapshots are ONLY taken at a quiescent point!
-        // i.e., when no events remain queued and no continue_immediate is pending.
+        // (no events remaining in event_queue)
         if options.snapshot_interval > 0
             && events_since_snapshot >= options.snapshot_interval
             && event_queue.is_empty()
-            && !continue_immediate
         {
             journal.append_snapshot(
                 workflow_id,
@@ -1300,7 +1278,6 @@ mod tests {
         activities_interrupted.register(req2.clone(), res2);
         let mut clock_interrupted = VirtualClock::new(5000);
 
-        // Pre-write act_1 events as if killed right after act_1 finished before act_2
         journal_interrupted
             .append_event(
                 "int_wf",
@@ -1380,62 +1357,360 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Test Workflow 3: Periodic Snapshotting & Quiescent Safety (Finding 1)
+    // Test Workflow 3: Continue With Ctx Activity Order & Replay (Finding 1)
     // ------------------------------------------------------------------------
 
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ContinueWithCtxState {
+        order: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ContinueWithCtxWorkflow;
+
+    impl Workflow for ContinueWithCtxWorkflow {
+        type Input = ();
+        type State = ContinueWithCtxState;
+        type Output = Vec<String>;
+
+        fn step(
+            &self,
+            state: &mut Self::State,
+            ctx: &mut WorkflowContext,
+            event: Option<WorkflowEvent>,
+        ) -> StepDecision<Self::Output> {
+            match event {
+                None => {
+                    state.order.push("initial_step".to_string());
+                    ctx.schedule_activity(
+                        "act_a",
+                        ActivityRequest::Herdr(HerdrRequest::Stop {
+                            name: "w1".to_string(),
+                        }),
+                    );
+                    StepDecision::Continue
+                }
+                Some(WorkflowEvent::ActivityCompleted { id, .. }) => {
+                    state.order.push(format!("completed_{id}"));
+                    StepDecision::Complete(state.order.clone())
+                }
+                _ => StepDecision::Fail {
+                    code: 1,
+                    reason: "unexpected".to_string(),
+                },
+            }
+        }
+    }
+
     #[test]
-    fn test_periodic_snapshot_does_not_drop_queued_events_on_resume() {
-        let workflow = MidrunKillWorkflow;
+    fn test_continue_with_ctx_activity_maintains_deterministic_order_and_replay() {
+        let workflow = ContinueWithCtxWorkflow;
+        let initial_state = ContinueWithCtxState { order: Vec::new() };
+
+        let req = ActivityRequest::Herdr(HerdrRequest::Stop {
+            name: "w1".to_string(),
+        });
+        let res = ActivityResult::Herdr(HerdrResult::Stopped {
+            name: "w1".to_string(),
+        });
+
+        // --- Run 1: Uninterrupted Reference Run ---
+        let mut journal_ref = InMemoryJournal::new();
+        let mut activities_ref = MockActivityRegistry::new();
+        activities_ref.register(req.clone(), res.clone());
+        let mut clock_ref = VirtualClock::new(100);
+
+        let outcome_ref = run(
+            &workflow,
+            "c_ctx_ref",
+            initial_state.clone(),
+            &mut journal_ref,
+            &mut activities_ref,
+            &mut clock_ref,
+        )
+        .expect("ref run");
+
+        assert_eq!(
+            outcome_ref,
+            RunnerOutcome::Completed(vec![
+                "initial_step".to_string(),
+                "completed_act_a".to_string()
+            ])
+        );
+
+        let ref_events = journal_ref
+            .load_events("c_ctx_ref", 1)
+            .expect("load ref events");
+
+        // --- Run 2: Interrupted Run (Kill after act_a and continue are journaled) ---
+        let mut journal_int = InMemoryJournal::new();
+        let mut activities_int = MockActivityRegistry::new();
+        activities_int.register(req.clone(), res.clone());
+        let mut clock_int = VirtualClock::new(100);
+
+        // Pre-populate with first 3 events (act scheduled, act completed, continue)
+        for ev in ref_events.iter().take(3) {
+            journal_int.append_event("c_ctx_int", ev).unwrap();
+        }
+
+        let outcome_resumed = run(
+            &workflow,
+            "c_ctx_int",
+            initial_state,
+            &mut journal_int,
+            &mut activities_int,
+            &mut clock_int,
+        )
+        .expect("resumed run");
+
+        assert_eq!(outcome_resumed, outcome_ref);
+        // Activity executed 0 times during replay!
+        assert_eq!(activities_int.count_for(&req), 0);
+
+        let int_events = journal_int
+            .load_events("c_ctx_int", 1)
+            .expect("load int events");
+        assert_eq!(int_events.len(), ref_events.len());
+        for (i, (int_ev, ref_ev)) in int_events.iter().zip(ref_events.iter()).enumerate() {
+            assert_eq!(int_ev.kind, ref_ev.kind, "event {i} kind mismatch");
+            assert_eq!(int_ev.seq, ref_ev.seq, "event {i} seq mismatch");
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Test Workflow 4: Resuming on Reused Clock Does Not Duplicate Timer (Finding 2)
+    // ------------------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ReusedClockState {
+        approved: bool,
+        timer_fired_count: usize,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ReusedClockWorkflow;
+
+    impl Workflow for ReusedClockWorkflow {
+        type Input = ();
+        type State = ReusedClockState;
+        type Output = usize;
+
+        fn step(
+            &self,
+            state: &mut Self::State,
+            ctx: &mut WorkflowContext,
+            event: Option<WorkflowEvent>,
+        ) -> StepDecision<Self::Output> {
+            match event {
+                None => {
+                    ctx.schedule_timer("timeout", Duration::from_secs(600));
+                    StepDecision::PauseForApproval {
+                        reason: "need approval".to_string(),
+                    }
+                }
+                Some(WorkflowEvent::ApprovalResolved { approved, .. }) => {
+                    state.approved = approved;
+                    StepDecision::Continue
+                }
+                Some(WorkflowEvent::TimerFired { id }) => {
+                    if id == "timeout" {
+                        state.timer_fired_count += 1;
+                        StepDecision::Complete(state.timer_fired_count)
+                    } else {
+                        StepDecision::Fail {
+                            code: 1,
+                            reason: "unknown timer".to_string(),
+                        }
+                    }
+                }
+                _ => StepDecision::Fail {
+                    code: 2,
+                    reason: "bad ev".to_string(),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn test_resume_on_reused_clock_does_not_duplicate_timer() {
+        let workflow = ReusedClockWorkflow;
         let mut journal = InMemoryJournal::new();
         let mut activities = MockActivityRegistry::new();
+        let mut reused_clock = VirtualClock::new(1000);
 
-        let req1 = ActivityRequest::Cost(CostRequest::QuerySpend {
-            session_pattern: "session_1".to_string(),
-        });
-        let res1 = ActivityResult::Cost(CostResult::Spend(10.0));
-        let req2 = ActivityRequest::Cost(CostRequest::QuerySpend {
-            session_pattern: "session_2".to_string(),
-        });
-        let res2 = ActivityResult::Cost(CostResult::Spend(20.0));
+        // 1. Initial run schedules timer and blocks on approval
+        let outcome1 = run(
+            &workflow,
+            "reused_clock_wf",
+            ReusedClockState {
+                approved: false,
+                timer_fired_count: 0,
+            },
+            &mut journal,
+            &mut activities,
+            &mut reused_clock,
+        )
+        .expect("run to blocked");
 
-        activities.register(req1, res1);
-        activities.register(req2, res2);
-        let mut clock = VirtualClock::new(100);
+        assert!(matches!(outcome1, RunnerOutcome::Blocked(_)));
 
-        // Set snapshot_interval = 2 (triggers periodic snapshot after 2 events)
+        // 2. Resume on the EXACT SAME clock with approval
+        let outcome2 = resume(
+            &workflow,
+            "reused_clock_wf",
+            &mut journal,
+            &mut activities,
+            &mut reused_clock,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: None,
+            }],
+        )
+        .expect("resume call");
+
+        // The timer fired exactly once and completed!
+        assert_eq!(outcome2, RunnerOutcome::Completed(1));
+
+        // Journal has exactly ONE timer_fired event!
+        let events = journal.load_events("reused_clock_wf", 1).unwrap();
+        let timer_fired_count = events.iter().filter(|e| e.kind == "timer_fired").count();
+        assert_eq!(timer_fired_count, 1, "timer fired more than once!");
+    }
+
+    // ------------------------------------------------------------------------
+    // Test Workflow 5: Periodic Snapshot at Quiescence and Resume (Finding 3 & 1)
+    // ------------------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct QuiescentTimerState {
+        stage: usize,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct QuiescentTimerWorkflow;
+
+    impl Workflow for QuiescentTimerWorkflow {
+        type Input = ();
+        type State = QuiescentTimerState;
+        type Output = String;
+
+        fn step(
+            &self,
+            state: &mut Self::State,
+            ctx: &mut WorkflowContext,
+            event: Option<WorkflowEvent>,
+        ) -> StepDecision<Self::Output> {
+            match event {
+                None => {
+                    ctx.schedule_timer("t1", Duration::from_secs(500));
+                    ctx.schedule_activity(
+                        "act_q",
+                        ActivityRequest::Herdr(HerdrRequest::Stop {
+                            name: "wq".to_string(),
+                        }),
+                    );
+                    StepDecision::Continue
+                }
+                Some(WorkflowEvent::ActivityCompleted { id, .. }) => {
+                    if id == "act_q" {
+                        state.stage = 1;
+                        StepDecision::PauseForApproval {
+                            reason: "at quiescence with pending timer".to_string(),
+                        }
+                    } else {
+                        StepDecision::Fail {
+                            code: 1,
+                            reason: "unknown act".to_string(),
+                        }
+                    }
+                }
+                Some(WorkflowEvent::ApprovalResolved { .. }) => {
+                    state.stage = 2;
+                    StepDecision::Continue
+                }
+                Some(WorkflowEvent::TimerFired { id }) => {
+                    if id == "t1" {
+                        state.stage = 3;
+                        StepDecision::Complete("finished".to_string())
+                    } else {
+                        StepDecision::Fail {
+                            code: 2,
+                            reason: "unknown timer".to_string(),
+                        }
+                    }
+                }
+                _ => StepDecision::Fail {
+                    code: 3,
+                    reason: "bad ev".to_string(),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn test_periodic_snapshot_quiescent_guard_and_resume() {
+        let workflow = QuiescentTimerWorkflow;
+        let mut journal = InMemoryJournal::new();
+        let mut activities = MockActivityRegistry::new();
+        activities.register(
+            ActivityRequest::Herdr(HerdrRequest::Stop {
+                name: "wq".to_string(),
+            }),
+            ActivityResult::Herdr(HerdrResult::Stopped {
+                name: "wq".to_string(),
+            }),
+        );
+        let mut clock = VirtualClock::new(1000);
+
         let options = RunnerOptions {
             max_steps: 100,
             snapshot_interval: 2,
             snapshot_at_blocked: true,
         };
 
-        let outcome = run_until_blocked(
+        // 1. Run until Blocked on approval
+        let outcome1 = run_until_blocked(
             &workflow,
-            "periodic_wf",
-            Some(MidrunKillState {
-                act1_result: None,
-                act2_result: None,
-            }),
+            "q_wf",
+            Some(QuiescentTimerState { stage: 0 }),
             &mut journal,
             &mut activities,
             &mut clock,
             &options,
             Vec::new(),
         )
-        .expect("should complete without getting stuck");
+        .expect("run to blocked");
 
-        assert_eq!(outcome, RunnerOutcome::Completed("total: 30".to_string()));
+        assert!(matches!(outcome1, RunnerOutcome::Blocked(_)));
 
-        // Snapshot was taken during execution
+        // Verify snapshot was taken at quiescence
         let snap = journal
-            .load_latest_snapshot("periodic_wf")
+            .load_latest_snapshot("q_wf")
             .expect("load snap")
-            .unwrap();
+            .expect("must have snapshot");
         assert!(snap.seq >= 2);
+
+        // 2. Kill and resume with fresh runner and approval
+        let mut fresh_clock = VirtualClock::new(1000);
+        let outcome2 = resume(
+            &workflow,
+            "q_wf",
+            &mut journal,
+            &mut activities,
+            &mut fresh_clock,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: None,
+            }],
+        )
+        .expect("resume");
+
+        assert_eq!(outcome2, RunnerOutcome::Completed("finished".to_string()));
+        assert_eq!(fresh_clock.now_ms(), 1000 + 500 * 1000);
     }
 
     // ------------------------------------------------------------------------
-    // Test Workflow 4: Pending Timers Across Mid-run Snapshot & Remaining Duration (Findings 2 & 5)
+    // Test Workflow 6: Pending Timers Across Mid-run Snapshot (Findings 2 & 5)
     // ------------------------------------------------------------------------
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1512,7 +1787,6 @@ mod tests {
         activities.register(req, res);
 
         // Pre-populate journal: timer scheduled at ts=1000 with duration=1000s (deadline=1001000)
-        // And a periodic snapshot was taken at seq 1
         journal
             .append_event(
                 "timer_snap_wf",
@@ -1548,7 +1822,7 @@ mod tests {
         let outcome = run_until_blocked(
             &workflow,
             "timer_snap_wf",
-            None, // resumes from snapshot
+            None,
             &mut journal,
             &mut activities,
             &mut resuming_clock,
@@ -1558,181 +1832,11 @@ mod tests {
         .expect("should advance and complete");
 
         assert_eq!(outcome, RunnerOutcome::Completed("done".to_string()));
-        // Clock advanced to exactly 1001000 (the original deadline)!
         assert_eq!(resuming_clock.now_ms(), 1001000);
     }
 
     // ------------------------------------------------------------------------
-    // Test Workflow 5: Continue Replay Determinism (Finding 3)
-    // ------------------------------------------------------------------------
-
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct ContinueWorkflowState {
-        continued: bool,
-        act_done: bool,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct ContinueWorkflow;
-
-    impl Workflow for ContinueWorkflow {
-        type Input = ();
-        type State = ContinueWorkflowState;
-        type Output = String;
-
-        fn step(
-            &self,
-            state: &mut Self::State,
-            _ctx: &mut WorkflowContext,
-            event: Option<WorkflowEvent>,
-        ) -> StepDecision<Self::Output> {
-            match event {
-                None => {
-                    if !state.continued {
-                        state.continued = true;
-                        StepDecision::Continue
-                    } else {
-                        StepDecision::ScheduleActivity {
-                            id: "act_after_continue".to_string(),
-                            activity: ActivityRequest::Herdr(HerdrRequest::Stop {
-                                name: "worker_c".to_string(),
-                            }),
-                        }
-                    }
-                }
-                Some(WorkflowEvent::ActivityCompleted { id, .. }) => {
-                    if id == "act_after_continue" {
-                        state.act_done = true;
-                        StepDecision::Complete("continue_completed".to_string())
-                    } else {
-                        StepDecision::Fail {
-                            code: 1,
-                            reason: "unknown act".to_string(),
-                        }
-                    }
-                }
-                _ => StepDecision::Fail {
-                    code: 2,
-                    reason: "bad ev".to_string(),
-                },
-            }
-        }
-    }
-
-    #[test]
-    fn test_continue_events_replayed_deterministically_without_double_execution() {
-        let workflow = ContinueWorkflow;
-        let initial_state = ContinueWorkflowState {
-            continued: false,
-            act_done: false,
-        };
-
-        let req = ActivityRequest::Herdr(HerdrRequest::Stop {
-            name: "worker_c".to_string(),
-        });
-        let res = ActivityResult::Herdr(HerdrResult::Stopped {
-            name: "worker_c".to_string(),
-        });
-
-        // --- Run 1: Uninterrupted Reference Run ---
-        let mut journal_ref = InMemoryJournal::new();
-        let mut activities_ref = MockActivityRegistry::new();
-        activities_ref.register(req.clone(), res.clone());
-        let mut clock_ref = VirtualClock::new(100);
-
-        let outcome_ref = run(
-            &workflow,
-            "continue_ref",
-            initial_state.clone(),
-            &mut journal_ref,
-            &mut activities_ref,
-            &mut clock_ref,
-        )
-        .expect("ref run");
-
-        assert_eq!(
-            outcome_ref,
-            RunnerOutcome::Completed("continue_completed".to_string())
-        );
-        let ref_events = journal_ref
-            .load_events("continue_ref", 1)
-            .expect("load ref events");
-
-        // --- Run 2: Interrupted Run (kill right after act_after_continue completes) ---
-        let mut journal_int = InMemoryJournal::new();
-        let mut activities_int = MockActivityRegistry::new();
-        activities_int.register(req.clone(), res.clone());
-        let mut clock_int = VirtualClock::new(100);
-
-        // Pre-populate journal with continue, activity_scheduled, activity_completed
-        journal_int
-            .append_event(
-                "continue_int",
-                &EventRecord::new(1, 100, "continue", "".to_string()),
-            )
-            .unwrap();
-        journal_int
-            .append_event(
-                "continue_int",
-                &EventRecord::new(
-                    2,
-                    100,
-                    "activity_scheduled",
-                    serde_json::to_string(&ActivityScheduledData {
-                        id: "act_after_continue".to_string(),
-                        activity: req.clone(),
-                    })
-                    .unwrap(),
-                ),
-            )
-            .unwrap();
-        journal_int
-            .append_event(
-                "continue_int",
-                &EventRecord::new(
-                    3,
-                    100,
-                    "activity_completed",
-                    serde_json::to_string(&ActivityCompletedData {
-                        id: "act_after_continue".to_string(),
-                        result: res,
-                    })
-                    .unwrap(),
-                ),
-            )
-            .unwrap();
-
-        let outcome_resumed = run(
-            &workflow,
-            "continue_int",
-            initial_state,
-            &mut journal_int,
-            &mut activities_int,
-            &mut clock_int,
-        )
-        .expect("resumed run");
-
-        assert_eq!(
-            outcome_resumed,
-            RunnerOutcome::Completed("continue_completed".to_string())
-        );
-
-        // Activity was replayed without second execution!
-        assert_eq!(activities_int.count_for(&req), 0);
-
-        // Event sequence matches reference run exactly
-        let int_events = journal_int
-            .load_events("continue_int", 1)
-            .expect("load int events");
-        assert_eq!(int_events.len(), ref_events.len());
-        for (i, (int_ev, ref_ev)) in int_events.iter().zip(ref_events.iter()).enumerate() {
-            assert_eq!(int_ev.kind, ref_ev.kind, "event {i} kind mismatch");
-            assert_eq!(int_ev.seq, ref_ev.seq, "event {i} seq mismatch");
-        }
-    }
-
-    // ------------------------------------------------------------------------
-    // Test Workflow 6: Resuming Completed Workflow Returns Completed (Finding 4)
+    // Test Workflow 7: Resuming Completed Workflow Returns Completed (Finding 4)
     // ------------------------------------------------------------------------
 
     #[test]
@@ -1763,7 +1867,6 @@ mod tests {
 
         let event_count_before = journal.load_events("completed_wf", 1).unwrap().len();
 
-        // Calling resume on completed workflow must return Completed directly without appending events
         let mut clock2 = VirtualClock::new(100);
         let outcome2 = resume(
             &workflow,
@@ -1784,12 +1887,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Test Workflow 7: Corrupted Payload Fails Fast (Finding 7)
+    // Test Workflow 8: Corrupted Payload Fails Fast (Finding 7)
     // ------------------------------------------------------------------------
 
     #[test]
     fn test_corrupt_payload_returns_serialization_error() {
-        let workflow = ContinueWorkflow;
+        let workflow = TimerWorkflow {
+            timer_duration_secs: 10,
+        };
         let mut journal = InMemoryJournal::new();
         let mut activities = MockActivityRegistry::new();
         let mut clock = VirtualClock::new(0);
@@ -1804,9 +1909,8 @@ mod tests {
         let res = run(
             &workflow,
             "corrupt_wf",
-            ContinueWorkflowState {
-                continued: false,
-                act_done: false,
+            TimerWorkflowState {
+                timer_completed: false,
             },
             &mut journal,
             &mut activities,
@@ -1815,6 +1919,10 @@ mod tests {
 
         assert!(matches!(res, Err(RunnerError::Serialization(_))));
     }
+
+    // ------------------------------------------------------------------------
+    // Test Workflow 9: Workflow Failure Recorded in Journal
+    // ------------------------------------------------------------------------
 
     #[test]
     fn test_workflow_failure_recorded_in_journal() {
