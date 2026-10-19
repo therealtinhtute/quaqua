@@ -134,19 +134,24 @@ impl SystemActivities {
                             .and_then(|r| r.get("agent"))
                             .and_then(|a| a.get("pane_id"))
                             .and_then(|p| p.as_str())
+                            .filter(|s| !s.is_empty())
                             .map(String::from)
                     });
 
-                if let Some(pane) = pane_id {
-                    let close_out = self.herdr.pane_close(&pane).map_err(|e| {
-                        ActivityError::ExecutionFailed(format!("herdr pane close io error: {e}"))
-                    })?;
-                    if !close_out.status.success() {
-                        let err = String::from_utf8_lossy(&close_out.stderr);
-                        return Err(ActivityError::ExecutionFailed(format!(
-                            "herdr pane close failed: {err}"
-                        )));
-                    }
+                let pane = pane_id.ok_or_else(|| {
+                    ActivityError::ExecutionFailed(format!(
+                        "cannot stop agent {name}: no valid pane_id found in herdr output: {output}"
+                    ))
+                })?;
+
+                let close_out = self.herdr.pane_close(&pane).map_err(|e| {
+                    ActivityError::ExecutionFailed(format!("herdr pane close io error: {e}"))
+                })?;
+                if !close_out.status.success() {
+                    let err = String::from_utf8_lossy(&close_out.stderr);
+                    return Err(ActivityError::ExecutionFailed(format!(
+                        "herdr pane close failed: {err}"
+                    )));
                 }
 
                 Ok(ActivityResult::Herdr(HerdrResult::Stopped {
@@ -262,6 +267,12 @@ impl SystemActivities {
                     .map_err(|e| {
                         ActivityError::ExecutionFailed(format!("git rev-parse io error: {e}"))
                     })?;
+                if !sha_out.status.success() {
+                    let stderr = String::from_utf8_lossy(&sha_out.stderr);
+                    return Err(ActivityError::ExecutionFailed(format!(
+                        "git rev-parse HEAD failed: {stderr}"
+                    )));
+                }
                 let sha = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
                 Ok(ActivityResult::Git(GitResult::Merged { sha }))
             }
@@ -398,11 +409,7 @@ mod tests {
         }
     }
 
-    fn with_herdr_stub<F: FnOnce(&Path, &Path)>(f: F) {
-        let _lock = HERDR_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
+    fn with_herdr_stub<F: FnOnce(&SystemActivities, &Path)>(f: F) {
         let pid = std::process::id();
         let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let temp_dir = std::env::temp_dir().join(format!("quaqua-herdr-stub-{}-{}", pid, count));
@@ -448,6 +455,9 @@ case "$1" in
         if [ "$3" = "e3-stub-agent" ]; then
           echo '{{"result": {{"agent": {{"name": "e3-stub-agent", "pane_id": "e3-pane-42"}}}}}}'
           exit 0
+        elif [ "$3" = "e3-nopane-agent" ]; then
+          echo '{{"result": {{"agent": {{"name": "e3-nopane-agent"}}}}}}'
+          exit 0
         else
           echo '{{"error": {{"code": "agent_not_found"}}}}' >&2
           exit 1
@@ -490,22 +500,19 @@ esac
         perms.set_mode(0o755);
         fs::set_permissions(&stub_bin, perms).expect("chmod +x stub script");
 
-        let prev = std::env::var("HERDR_BIN_PATH").ok();
-        std::env::set_var("HERDR_BIN_PATH", &stub_bin);
-        let restorer = EnvRestorer {
-            prev,
-            temp_dir: temp_dir.clone(),
+        let stub_herdr = Herdr {
+            bin: stub_bin.to_string_lossy().to_string(),
         };
+        let activities = SystemActivities::with_adapters(stub_herdr, Git::new(), &temp_dir);
 
-        f(&stub_bin, &log_file);
+        f(&activities, &log_file);
 
-        drop(restorer);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_herdr_prompt_via_stub() {
-        with_herdr_stub(|_stub_bin, log_file| {
-            let activities = SystemActivities::new();
+        with_herdr_stub(|activities, log_file| {
             let req = ActivityRequest::Herdr(HerdrRequest::Prompt {
                 name: "e3-stub-agent".to_string(),
                 task: "execute plan".to_string(),
@@ -525,8 +532,7 @@ esac
 
     #[test]
     fn test_herdr_send_keys_via_stub() {
-        with_herdr_stub(|_stub_bin, log_file| {
-            let activities = SystemActivities::new();
+        with_herdr_stub(|activities, log_file| {
             let req = ActivityRequest::Herdr(HerdrRequest::SendKeys {
                 name: "e3-stub-agent".to_string(),
                 keys: "C-c".to_string(),
@@ -546,8 +552,7 @@ esac
 
     #[test]
     fn test_herdr_read_agent_via_stub() {
-        with_herdr_stub(|_stub_bin, _log_file| {
-            let activities = SystemActivities::new();
+        with_herdr_stub(|activities, _log_file| {
             let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
                 name: "e3-stub-agent".to_string(),
                 lines: 50,
@@ -564,8 +569,7 @@ esac
 
     #[test]
     fn test_herdr_stop_agent_via_stub() {
-        with_herdr_stub(|_stub_bin, log_file| {
-            let activities = SystemActivities::new();
+        with_herdr_stub(|activities, log_file| {
             let req = ActivityRequest::Herdr(HerdrRequest::Stop {
                 name: "e3-stub-agent".to_string(),
             });
@@ -583,9 +587,26 @@ esac
     }
 
     #[test]
+    fn test_herdr_stop_missing_pane_id_fails() {
+        with_herdr_stub(|activities, _log_file| {
+            let req = ActivityRequest::Herdr(HerdrRequest::Stop {
+                name: "e3-nopane-agent".to_string(),
+            });
+            let err = activities
+                .execute(&req)
+                .expect_err("stopping agent without pane_id must fail");
+            match err {
+                ActivityError::ExecutionFailed(msg) => {
+                    assert!(msg.contains("no valid pane_id"));
+                }
+                other => panic!("expected ExecutionFailed, got: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
     fn test_herdr_unknown_agent_fails() {
-        with_herdr_stub(|_stub_bin, _log_file| {
-            let activities = SystemActivities::new();
+        with_herdr_stub(|activities, _log_file| {
             let req = ActivityRequest::Herdr(HerdrRequest::Prompt {
                 name: "live-agent-nonexistent".to_string(),
                 task: "should fail".to_string(),
@@ -599,8 +620,7 @@ esac
 
     #[test]
     fn test_herdr_stop_nonexistent_returns_not_found() {
-        with_herdr_stub(|_stub_bin, _log_file| {
-            let activities = SystemActivities::new();
+        with_herdr_stub(|activities, _log_file| {
             let req = ActivityRequest::Herdr(HerdrRequest::Stop {
                 name: "live-agent-nonexistent".to_string(),
             });
@@ -612,13 +632,67 @@ esac
     }
 
     #[test]
+    fn test_herdr_bin_path_env_var_resolution() {
+        let _lock = HERDR_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let pid = std::process::id();
+        let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let temp_dir = std::env::temp_dir().join(format!("quaqua-herdr-env-{}-{}", pid, count));
+        let _ = fs::create_dir_all(&temp_dir);
+        let stub_bin = temp_dir.join("herdr_stub.sh");
+        let log_file = temp_dir.join("herdr_stub.log");
+
+        let script = format!(
+            r#"#!/bin/sh
+LOG="{}"
+if [ "$1" = "agent" ] && [ "$2" = "prompt" ] && [ "$3" = "e3-stub-agent" ]; then
+  echo "env-prompted:$4" >> "$LOG"
+  exit 0
+fi
+exit 1
+"#,
+            log_file.to_string_lossy()
+        );
+        fs::write(&stub_bin, script).expect("write stub script");
+        let mut perms = fs::metadata(&stub_bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub_bin, perms).expect("chmod +x stub script");
+
+        let prev = std::env::var("HERDR_BIN_PATH").ok();
+        std::env::set_var("HERDR_BIN_PATH", &stub_bin);
+        let restorer = EnvRestorer {
+            prev,
+            temp_dir: temp_dir.clone(),
+        };
+
+        let activities = SystemActivities::new();
+        let req = ActivityRequest::Herdr(HerdrRequest::Prompt {
+            name: "e3-stub-agent".to_string(),
+            task: "verify env path".to_string(),
+        });
+        let res = activities
+            .execute(&req)
+            .expect("prompt via HERDR_BIN_PATH must succeed");
+        assert_eq!(
+            res,
+            ActivityResult::Herdr(HerdrResult::Prompted {
+                name: "e3-stub-agent".to_string(),
+            })
+        );
+        let log_content = fs::read_to_string(&log_file).unwrap_or_default();
+        assert!(log_content.contains("env-prompted:verify env path"));
+        drop(restorer);
+    }
+
+    #[test]
     fn test_report_file_operations() {
         let pid = std::process::id();
         let temp_dir = std::env::temp_dir().join(format!("quaqua-act-report-{}", pid));
         let _ = fs::create_dir_all(&temp_dir);
         let test_file = temp_dir.join("sub").join("report.md");
         let path_str = test_file.to_string_lossy().to_string();
-
         let activities = SystemActivities::new();
 
         // 1. Exists returns false
@@ -807,6 +881,42 @@ esac
                 path: wt_path.to_string_lossy().to_string(),
             })
         );
+        // 5. Merge
+        run_cmd(&["checkout", "-b", "feature-merge"]);
+        let merge_file = temp_dir.join("merge-item.txt");
+        fs::write(&merge_file, "content to merge").unwrap();
+        run_cmd(&["add", "merge-item.txt"]);
+        run_cmd(&["commit", "-m", "commit on feature-merge"]);
+
+        run_cmd(&["checkout", "feature-branch"]);
+
+        let res = activities
+            .execute(&ActivityRequest::Git(GitRequest::Merge {
+                branch: "feature-merge".to_string(),
+            }))
+            .expect("git merge must succeed");
+        let merge_sha = match res {
+            ActivityResult::Git(GitResult::Merged { sha }) => {
+                assert_eq!(sha.len(), 40);
+                sha
+            }
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(merge_file.exists());
+        assert_eq!(
+            activities
+                .execute(&ActivityRequest::Git(GitRequest::CurrentSha))
+                .unwrap(),
+            ActivityResult::Git(GitResult::Sha(merge_sha))
+        );
+
+        // Merge failure (nonexistent branch)
+        let err = activities
+            .execute(&ActivityRequest::Git(GitRequest::Merge {
+                branch: "nonexistent-branch-404".to_string(),
+            }))
+            .expect_err("merging invalid branch must fail");
+        assert!(matches!(err, ActivityError::ExecutionFailed(_)));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
