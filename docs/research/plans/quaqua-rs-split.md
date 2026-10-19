@@ -102,3 +102,42 @@ Every workspace path the binary uses goes through `workspace_root()`. If one is 
 - Process: ephemeral CLI, no daemon.
 - Patterns: Rust `Workflow` trait impls; declarative TOML deferred.
 - Migration: strangler fig in `crates/quaqua` — taskforce → worker/prompt → pipeline, tests green each commit; before the repo split.
+
+## Steps: engine core (to-plan 2026-10-19)
+Driver: Lead `arch-lead` (multi-day). Peers branch from `quaqua/arch-integ`; build = sude, review = suhuynh (different harnesses); one review round. Each phase ships alone: tests green, old path still works until its own cutover. CoS re-runs every Verify; anh iu approves push/merge main.
+One owner per directory: E0 owns `src/engine/`; E1 `taskforce/`; E2 `worker/prompt/`; E3 `pipeline/`. E1–E3 run in sequence (each proves the trait before the next leans on it).
+
+### E0: engine skeleton (no caller yet)
+- New `crates/quaqua/src/engine/{mod,workflow,journal,activity,clock,testkit}.rs`.
+  - `Workflow` trait: `step(&self, state, ctx, event) -> StepDecision` (Continue · ScheduleActivity · ScheduleTimer · PauseForApproval · Complete · Fail). `WorkflowContext` exposes only scheduling + `now()` from the clock — no fs/net/process.
+  - Journal: `rusqlite` (`bundled`, pinned `=` like other deps), WAL + `busy_timeout=5000`, tables `events(workflow_id, seq, ts_ms, kind, payload_json)` + `snapshots(workflow_id, seq, state_json)`. DB at `<workspace_root>/runs/quaqua.db`.
+  - Runner: load snapshot → apply events → `step` → run activity → append event → snapshot; ephemeral, exits when blocked on a timer/external event (re-entered by the next CLI call).
+  - Testkit: `VirtualClock`, `MockActivities` (scripted results), `replay(events) == state` helper.
+- Verify:
+  - `cargo test --locked engine::` covers: a toy 3-step workflow completes; a 7200 s timer fires via `clock.advance` in <50 ms; kill mid-run → resume from journal yields the same final state; two concurrent writers don't corrupt (WAL).
+  - `cargo test --locked` total still green (173+); `cargo tree -e normal | rg rusqlite` shows the pinned version.
+  - Determinism guard as a test (tooling, not a text rule): it greps `engine/workflow.rs` + every `*Workflow` impl for `std::(fs|process|net)` and fails on a hit.
+
+### E1: taskforce on the engine
+- `TaskforceWorkflow` replaces the loop in `taskforce/mod.rs` (274 LoC); spawn/prompt/cleanup become activities calling the existing `worker::*` fns.
+- Its cap/quorum state moves from dotfiles to the journal.
+- Verify: `bash tests/test_taskforce_cap.sh` PASS unchanged; new testkit unit tests for quorum + one worker failing; one live 2-advisor taskforce run on herdr.
+
+### E2: worker prompt / watchdog on the engine
+- `SingleWorkerWorkflow` replaces the `watchdog.rs` polling loop: durable timers (budget, grace, autoext, stall 600 s) + herdr `events.subscribe` (`pane.agent_status_changed`, `pane.exited`) + `runs/<name>.md` mtime as activities.
+- Drop: ANSI fingerprint/spinner scraping in `observer.rs`; dotfiles `.{name}.budget|grace|autoext|cost80|cost100|progress|elapsed|nudged|provider_retry` (`state.rs`). Keep exit codes 2–6 and the `--resume/--extend` CLI contract byte-identical.
+- Verify: `bash tests/test_prompt_worker.sh` and `tests/test_prompt_worker_watchdog.sh` PASS; testkit tests cover each exit code 2–6 with virtual time; no `runs/.*.budget` after a live run; `cargo test --locked` green.
+
+### E3: pipeline on the engine
+- `PipelineWorkflow` composes builder `SingleWorkerWorkflow` → plan gate `PauseForApproval` → reviewer → fix round; replaces `pipeline/mod.rs` + the `pipeline/state.rs` key=value parser.
+- Grid repair becomes an activity emitted on phase events (no synchronous `grid::run_grid_repair` inside phases).
+- Telemetry: OTel GenAI-shaped spans (trace_id, model, tokens, latency) to `runs/traces.jsonl`, replacing flat `telemetry.jsonl`.
+- Verify: `bash tests/test_pipeline.sh` and `tests/test_pipeline_grid.sh` PASS; `cargo test --locked --test pipeline_prompt` PASS; `quaqua pipeline --resume` after a killed run resumes at the same phase (testkit + one live run).
+
+### E4: cleanup + `status` reads the journal
+- Replace the 6 ad-hoc `HerdrOps` mocks in `tests/worker_unit.rs` with `MockActivities`; remove dead dotfile code in `state.rs`.
+- `quaqua status` (issue #47 P2) queries `runs/quaqua.db`; WAITER-LOST = a workflow blocked with no live waiter.
+- Verify: `bash tests/run.sh --slow` all PASS; `rg -n '\.budget|\.grace|\.autoext' crates/quaqua/src` empty.
+
+### Then
+The repo split (Phase 2 above) runs after E4, so `quaqua-rs` starts on the new core.
