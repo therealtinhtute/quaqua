@@ -38,10 +38,18 @@ pub struct Herdr {
     pub bin: String,
 }
 
+/// The herdr binary every exec site resolves: `HERDR_BIN_PATH` when set (an
+/// empty value counts as unset), else `herdr` through `PATH`.
+pub fn bin_path() -> String {
+    std::env::var("HERDR_BIN_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "herdr".to_string())
+}
+
 impl Herdr {
     pub fn new() -> Self {
-        let bin = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
-        Herdr { bin }
+        Herdr { bin: bin_path() }
     }
 }
 

@@ -9,6 +9,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::herdr::{Herdr, HerdrOps};
+
 pub const USAGE: &str = "# Usage: quaqua auditor run [--dry-run] [--out <path>] [--model <model>] [--harness <harness>] [--repo <path>]";
 
 pub const PROMPT_TEMPLATE: &str = r#"You are the Auditor for the quaqua repo. READ-ONLY: inspect and report only.
@@ -722,7 +724,7 @@ pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
     }
 
     // ── 3. live-worker sandbox pre-checks ─────────────────────────────────────
-    let herdr_res = Command::new("herdr").args(["agent", "list"]).output();
+    let herdr_res = Herdr::new().run(&["agent", "list"]);
     match herdr_res {
         Ok(output) => {
             let herdr_rc = output.status.code().unwrap_or(1);
