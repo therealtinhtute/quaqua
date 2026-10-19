@@ -247,10 +247,11 @@ fn dispatch_timer(
     events_since_snapshot: &mut u64,
 ) -> Result<(), RunnerError> {
     *max_seq += 1;
+    let scheduled_seq = *max_seq;
     journal.append_event(
         workflow_id,
         &EventRecord::new(
-            *max_seq,
+            scheduled_seq,
             clock.now_ms(),
             "timer_scheduled",
             serde_json::to_string(&TimerScheduledData {
@@ -261,7 +262,8 @@ fn dispatch_timer(
         ),
     )?;
     *events_since_snapshot += 1;
-    clock.schedule_timer(id, duration);
+    // Format tag with unique instance scheduled_seq so re-armed timers don't conflict
+    clock.schedule_timer(&format!("{scheduled_seq}:{id}"), duration);
     Ok(())
 }
 
@@ -345,15 +347,21 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
 
     let mut completed_activities: HashMap<String, ActivityResult> = HashMap::new();
     let mut scheduled_activities: HashMap<String, ActivityRequest> = HashMap::new();
-    let mut scheduled_timers: HashMap<String, (u64, Duration)> = HashMap::new();
-    let mut fired_timers: HashSet<String> = HashSet::new();
+    let mut history_scheduled_activity_ids: HashSet<String> = HashSet::new();
+    let mut history_scheduled_timer_ids: HashSet<String> = HashSet::new();
+
+    // Map scheduled_seq -> (id, scheduled_ts_ms, duration)
+    let mut scheduled_timer_instances: HashMap<u64, (String, u64, Duration)> = HashMap::new();
+    let mut timer_id_to_scheduled_seqs: HashMap<String, Vec<u64>> = HashMap::new();
+    let mut fired_timer_seqs: HashSet<u64> = HashSet::new();
 
     for rec in &all_events {
         match rec.kind.as_str() {
             "activity_scheduled" => {
                 let data: ActivityScheduledData = serde_json::from_str(&rec.payload_json)
                     .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                scheduled_activities.insert(data.id, data.activity);
+                scheduled_activities.insert(data.id.clone(), data.activity);
+                history_scheduled_activity_ids.insert(data.id);
             }
             "activity_completed" => {
                 let data: ActivityCompletedData = serde_json::from_str(&rec.payload_json)
@@ -363,33 +371,45 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
             "timer_scheduled" => {
                 let data: TimerScheduledData = serde_json::from_str(&rec.payload_json)
                     .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                scheduled_timers.insert(
-                    data.id,
-                    (rec.ts_ms, Duration::from_millis(data.duration_ms)),
+                scheduled_timer_instances.insert(
+                    rec.seq,
+                    (
+                        data.id.clone(),
+                        rec.ts_ms,
+                        Duration::from_millis(data.duration_ms),
+                    ),
                 );
+                timer_id_to_scheduled_seqs
+                    .entry(data.id.clone())
+                    .or_default()
+                    .push(rec.seq);
+                history_scheduled_timer_ids.insert(data.id);
             }
             "timer_fired" => {
                 let data: TimerFiredData = serde_json::from_str(&rec.payload_json)
                     .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                fired_timers.insert(data.id);
+                // Match fired timer with earliest unfired scheduled_seq for this timer id
+                if let Some(seqs) = timer_id_to_scheduled_seqs.get_mut(&data.id) {
+                    if let Some(pos) = seqs.iter().position(|s| !fired_timer_seqs.contains(s)) {
+                        fired_timer_seqs.insert(seqs[pos]);
+                    }
+                }
             }
             _ => {}
         }
     }
 
-    // Findings 2 & 5: Restore pending timers from full history with remaining duration ONLY if clock has no timers
-    if clock.pending_timers_count() == 0 {
-        for (id, (sched_ts, orig_dur)) in &scheduled_timers {
-            if !fired_timers.contains(id) {
-                let deadline_ms = sched_ts + orig_dur.as_millis() as u64;
-                let current_now = clock.now_ms();
-                let remaining = if deadline_ms > current_now {
-                    Duration::from_millis(deadline_ms - current_now)
-                } else {
-                    Duration::from_millis(0)
-                };
-                clock.schedule_timer(id, remaining);
-            }
+    // Findings 1, 2 & 5: Restore all unfired timer instances with remaining duration
+    for (sched_seq, (id, sched_ts, orig_dur)) in &scheduled_timer_instances {
+        if !fired_timer_seqs.contains(sched_seq) {
+            let deadline_ms = sched_ts + orig_dur.as_millis() as u64;
+            let current_now = clock.now_ms();
+            let remaining = if deadline_ms > current_now {
+                Duration::from_millis(deadline_ms - current_now)
+            } else {
+                Duration::from_millis(0)
+            };
+            clock.schedule_timer(&format!("{sched_seq}:{id}"), remaining);
         }
     }
 
@@ -456,8 +476,8 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
     }
 
     let mut replay_initial_step = snapshot_seq == 0 && !all_events.is_empty();
-    let mut last_replay_decision: Option<StepDecision<W::Output>> = None;
-    let mut last_replay_scheduled: Vec<ScheduledAction> = Vec::new();
+    let mut unjournaled_actions_to_dispatch: Vec<ScheduledAction> = Vec::new();
+    let mut unjournaled_decision_to_dispatch: Option<StepDecision<W::Output>> = None;
 
     while replay_initial_step || !historical_events_to_deliver.is_empty() {
         let ev = if replay_initial_step {
@@ -471,46 +491,84 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
 
         let mut ctx = WorkflowContext::new(clock.now_ms());
         let dec = workflow.step(&mut state, &mut ctx, ev);
-        let scheduled = ctx.drain_scheduled();
 
-        last_replay_decision = Some(dec);
-        last_replay_scheduled = scheduled;
+        // Finding 2: Collect any scheduled action emitted during replay that was NOT journaled in history
+        for action in ctx.drain_scheduled() {
+            match &action {
+                ScheduledAction::Activity { id, .. } => {
+                    if !history_scheduled_activity_ids.contains(id) {
+                        unjournaled_actions_to_dispatch.push(action);
+                    }
+                }
+                ScheduledAction::Timer { id, .. } => {
+                    if !history_scheduled_timer_ids.contains(id) {
+                        unjournaled_actions_to_dispatch.push(action);
+                    }
+                }
+                ScheduledAction::Child { .. } => {
+                    unjournaled_actions_to_dispatch.push(action);
+                }
+            }
+        }
+
+        // If this is the last step evaluated in replay, check if its decision was journaled
+        if historical_events_to_deliver.is_empty() {
+            match &dec {
+                StepDecision::ScheduleActivity { id, .. } => {
+                    if !history_scheduled_activity_ids.contains(id) {
+                        unjournaled_decision_to_dispatch = Some(dec);
+                    }
+                }
+                StepDecision::ScheduleTimer { id, .. } => {
+                    if !history_scheduled_timer_ids.contains(id) {
+                        unjournaled_decision_to_dispatch = Some(dec);
+                    }
+                }
+                StepDecision::Complete(_) => {
+                    if !all_events.iter().any(|e| e.kind == "workflow_completed") {
+                        unjournaled_decision_to_dispatch = Some(dec);
+                    }
+                }
+                StepDecision::Fail { .. } => {
+                    if !all_events.iter().any(|e| e.kind == "workflow_failed") {
+                        unjournaled_decision_to_dispatch = Some(dec);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     // 4. Transition to Forward Execution Queue
     let mut event_queue: VecDeque<WorkflowEvent> = VecDeque::new();
     let mut events_since_snapshot = 0u64;
 
-    // Dispatch any unscheduled actions from the last step of replay
-    for action in last_replay_scheduled {
+    // Dispatch any unjournaled actions caught by mid-step crash
+    for action in unjournaled_actions_to_dispatch {
         match action {
             ScheduledAction::Activity { id, activity } => {
-                if !scheduled_activities.contains_key(&id) {
-                    let ev = dispatch_activity(
-                        workflow_id,
-                        &id,
-                        &activity,
-                        journal,
-                        activities,
-                        clock,
-                        &mut current_seq,
-                        &mut events_since_snapshot,
-                    )?;
-                    event_queue.push_back(ev);
-                }
+                let ev = dispatch_activity(
+                    workflow_id,
+                    &id,
+                    &activity,
+                    journal,
+                    activities,
+                    clock,
+                    &mut current_seq,
+                    &mut events_since_snapshot,
+                )?;
+                event_queue.push_back(ev);
             }
             ScheduledAction::Timer { id, duration } => {
-                if !scheduled_timers.contains_key(&id) {
-                    dispatch_timer(
-                        workflow_id,
-                        &id,
-                        duration,
-                        journal,
-                        clock,
-                        &mut current_seq,
-                        &mut events_since_snapshot,
-                    )?;
-                }
+                dispatch_timer(
+                    workflow_id,
+                    &id,
+                    duration,
+                    journal,
+                    clock,
+                    &mut current_seq,
+                    &mut events_since_snapshot,
+                )?;
             }
             ScheduledAction::Child {
                 id,
@@ -537,35 +595,31 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         }
     }
 
-    if let Some(decision) = last_replay_decision {
+    if let Some(decision) = unjournaled_decision_to_dispatch {
         match decision {
             StepDecision::ScheduleActivity { id, activity } => {
-                if !scheduled_activities.contains_key(&id) {
-                    let ev = dispatch_activity(
-                        workflow_id,
-                        &id,
-                        &activity,
-                        journal,
-                        activities,
-                        clock,
-                        &mut current_seq,
-                        &mut events_since_snapshot,
-                    )?;
-                    event_queue.push_back(ev);
-                }
+                let ev = dispatch_activity(
+                    workflow_id,
+                    &id,
+                    &activity,
+                    journal,
+                    activities,
+                    clock,
+                    &mut current_seq,
+                    &mut events_since_snapshot,
+                )?;
+                event_queue.push_back(ev);
             }
             StepDecision::ScheduleTimer { id, duration } => {
-                if !scheduled_timers.contains_key(&id) {
-                    dispatch_timer(
-                        workflow_id,
-                        &id,
-                        duration,
-                        journal,
-                        clock,
-                        &mut current_seq,
-                        &mut events_since_snapshot,
-                    )?;
-                }
+                dispatch_timer(
+                    workflow_id,
+                    &id,
+                    duration,
+                    journal,
+                    clock,
+                    &mut current_seq,
+                    &mut events_since_snapshot,
+                )?;
             }
             StepDecision::Complete(output) => {
                 current_seq += 1;
@@ -605,23 +659,6 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                     ),
                 )?;
                 return Ok(RunnerOutcome::Failed { code, reason });
-            }
-            StepDecision::PauseForApproval { reason } => {
-                if !all_events.iter().any(|e| e.kind == "pause_for_approval") {
-                    current_seq += 1;
-                    journal.append_event(
-                        workflow_id,
-                        &EventRecord::new(
-                            current_seq,
-                            clock.now_ms(),
-                            "pause_for_approval",
-                            serde_json::to_string(&PauseForApprovalData {
-                                reason: reason.clone(),
-                            })
-                            .map_err(|e| RunnerError::Serialization(e.to_string()))?,
-                        ),
-                    )?;
-                }
             }
             _ => {}
         }
@@ -748,13 +785,22 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         } else if let Some(ev) = event_queue.pop_front() {
             Some(ev)
         } else if clock.pending_timers_count() > 0 {
-            if let Some((_ts, fired_ids)) = clock.advance_to_next_timer() {
-                for id in fired_ids {
-                    // Finding 2: Dedup timer firing against fired_timers to prevent duplicate events on reused clocks
-                    if fired_timers.contains(&id) {
+            if let Some((_ts, fired_tags)) = clock.advance_to_next_timer() {
+                for tag in fired_tags {
+                    // Tag format: "{scheduled_seq}:{user_id}" or legacy "{user_id}"
+                    let (sched_seq, user_id) = if let Some((s_str, u_id)) = tag.split_once(':') {
+                        (s_str.parse::<u64>().unwrap_or(0), u_id)
+                    } else {
+                        (0u64, tag.as_str())
+                    };
+
+                    // Findings 1 & 3: Dedup by unique instance sched_seq, never by user id!
+                    if sched_seq > 0 && fired_timer_seqs.contains(&sched_seq) {
                         continue;
                     }
-                    fired_timers.insert(id.clone());
+                    if sched_seq > 0 {
+                        fired_timer_seqs.insert(sched_seq);
+                    }
 
                     current_seq += 1;
                     journal.append_event(
@@ -763,12 +809,16 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                             current_seq,
                             clock.now_ms(),
                             "timer_fired",
-                            serde_json::to_string(&TimerFiredData { id: id.clone() })
-                                .map_err(|e| RunnerError::Serialization(e.to_string()))?,
+                            serde_json::to_string(&TimerFiredData {
+                                id: user_id.to_string(),
+                            })
+                            .map_err(|e| RunnerError::Serialization(e.to_string()))?,
                         ),
                     )?;
                     events_since_snapshot += 1;
-                    event_queue.push_back(WorkflowEvent::TimerFired { id });
+                    event_queue.push_back(WorkflowEvent::TimerFired {
+                        id: user_id.to_string(),
+                    });
                 }
             }
             if let Some(ev) = event_queue.pop_front() {
@@ -807,8 +857,7 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
 
         let mut ctx = WorkflowContext::new(clock.now_ms());
         let decision = workflow.step(&mut state, &mut ctx, next_event);
-
-        // Process actions scheduled directly on WorkflowContext
+        // Process actions scheduled directly on WorkflowContext FIRST
         for action in ctx.drain_scheduled() {
             match action {
                 ScheduledAction::Activity { id, activity } => {
@@ -1448,7 +1497,7 @@ mod tests {
         activities_int.register(req.clone(), res.clone());
         let mut clock_int = VirtualClock::new(100);
 
-        // Pre-populate with first 3 events (act scheduled, act completed, continue)
+        // Pre-populate with first 3 events (continue, act scheduled, act completed)
         for ev in ref_events.iter().take(3) {
             journal_int.append_event("c_ctx_int", ev).unwrap();
         }
@@ -1478,7 +1527,263 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Test Workflow 4: Resuming on Reused Clock Does Not Duplicate Timer (Finding 2)
+    // Test Workflow 4: Re-armed Timers with Same ID (Finding 1)
+    // ------------------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct PollTimerState {
+        poll_count: usize,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct PollTimerWorkflow {
+        target_polls: usize,
+    }
+
+    impl Workflow for PollTimerWorkflow {
+        type Input = ();
+        type State = PollTimerState;
+        type Output = usize;
+
+        fn step(
+            &self,
+            state: &mut Self::State,
+            _ctx: &mut WorkflowContext,
+            event: Option<WorkflowEvent>,
+        ) -> StepDecision<Self::Output> {
+            match event {
+                None => StepDecision::ScheduleTimer {
+                    id: "poll".to_string(),
+                    duration: Duration::from_secs(60),
+                },
+                Some(WorkflowEvent::TimerFired { id }) => {
+                    if id == "poll" {
+                        state.poll_count += 1;
+                        if state.poll_count >= self.target_polls {
+                            StepDecision::Complete(state.poll_count)
+                        } else {
+                            StepDecision::ScheduleTimer {
+                                id: "poll".to_string(),
+                                duration: Duration::from_secs(60),
+                            }
+                        }
+                    } else {
+                        StepDecision::Fail {
+                            code: 1,
+                            reason: "unknown timer".to_string(),
+                        }
+                    }
+                }
+                _ => StepDecision::Fail {
+                    code: 2,
+                    reason: "bad ev".to_string(),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn test_rearmed_timer_with_same_id_fires_on_every_loop() {
+        let workflow = PollTimerWorkflow { target_polls: 3 };
+        let mut journal = InMemoryJournal::new();
+        let mut activities = MockActivityRegistry::new();
+        let mut clock = VirtualClock::new(1000);
+
+        let outcome = run(
+            &workflow,
+            "poll_wf",
+            PollTimerState { poll_count: 0 },
+            &mut journal,
+            &mut activities,
+            &mut clock,
+        )
+        .expect("should loop and complete");
+
+        // The timer re-armed under the same ID "poll" 3 times and fired all 3 times!
+        assert_eq!(outcome, RunnerOutcome::Completed(3));
+        assert_eq!(clock.now_ms(), 1000 + 3 * 60 * 1000);
+
+        let events = journal.load_events("poll_wf", 1).unwrap();
+        let timer_fired_count = events.iter().filter(|e| e.kind == "timer_fired").count();
+        assert_eq!(
+            timer_fired_count, 3,
+            "expected exactly 3 timer_fired events"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Test Workflow 5: Kill Between Two Ctx Actions of Same Step (Finding 2)
+    // ------------------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct MidStepActionState {
+        act_a_done: bool,
+        act_b_done: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct MidStepActionWorkflow;
+
+    impl Workflow for MidStepActionWorkflow {
+        type Input = ();
+        type State = MidStepActionState;
+        type Output = String;
+
+        fn step(
+            &self,
+            state: &mut Self::State,
+            ctx: &mut WorkflowContext,
+            event: Option<WorkflowEvent>,
+        ) -> StepDecision<Self::Output> {
+            match event {
+                None => {
+                    ctx.schedule_activity(
+                        "act_a",
+                        ActivityRequest::Herdr(HerdrRequest::Stop {
+                            name: "worker_a".to_string(),
+                        }),
+                    );
+                    ctx.schedule_activity(
+                        "act_b",
+                        ActivityRequest::Herdr(HerdrRequest::Stop {
+                            name: "worker_b".to_string(),
+                        }),
+                    );
+                    StepDecision::Continue
+                }
+                Some(WorkflowEvent::ActivityCompleted { id, .. }) => {
+                    if id == "act_a" {
+                        state.act_a_done = true;
+                    } else if id == "act_b" {
+                        state.act_b_done = true;
+                    }
+                    if state.act_a_done && state.act_b_done {
+                        StepDecision::Complete("both_done".to_string())
+                    } else {
+                        StepDecision::Continue
+                    }
+                }
+                _ => StepDecision::Fail {
+                    code: 1,
+                    reason: "bad ev".to_string(),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn test_kill_between_two_ctx_actions_dispatches_second_action_on_resume() {
+        let workflow = MidStepActionWorkflow;
+        let initial_state = MidStepActionState {
+            act_a_done: false,
+            act_b_done: false,
+        };
+
+        let req_a = ActivityRequest::Herdr(HerdrRequest::Stop {
+            name: "worker_a".to_string(),
+        });
+        let res_a = ActivityResult::Herdr(HerdrResult::Stopped {
+            name: "worker_a".to_string(),
+        });
+        let req_b = ActivityRequest::Herdr(HerdrRequest::Stop {
+            name: "worker_b".to_string(),
+        });
+        let res_b = ActivityResult::Herdr(HerdrResult::Stopped {
+            name: "worker_b".to_string(),
+        });
+
+        // --- Run 1: Uninterrupted Reference Run ---
+        let mut journal_ref = InMemoryJournal::new();
+        let mut activities_ref = MockActivityRegistry::new();
+        activities_ref.register(req_a.clone(), res_a.clone());
+        activities_ref.register(req_b.clone(), res_b.clone());
+        let mut clock_ref = VirtualClock::new(100);
+
+        let outcome_ref = run(
+            &workflow,
+            "mid_step_ref",
+            initial_state.clone(),
+            &mut journal_ref,
+            &mut activities_ref,
+            &mut clock_ref,
+        )
+        .expect("ref run");
+
+        assert_eq!(
+            outcome_ref,
+            RunnerOutcome::Completed("both_done".to_string())
+        );
+
+        // --- Run 2: Interrupted Run (Kill after act_a completed, BEFORE act_b was journaled) ---
+        let mut journal_int = InMemoryJournal::new();
+        let mut activities_int = MockActivityRegistry::new();
+        activities_int.register(req_a.clone(), res_a.clone());
+        activities_int.register(req_b.clone(), res_b);
+        let mut clock_int = VirtualClock::new(100);
+
+        // Pre-populate journal with act_a scheduled and completed, and continue record
+        journal_int
+            .append_event(
+                "mid_step_int",
+                &EventRecord::new(1, 100, "continue", "".to_string()),
+            )
+            .unwrap();
+        journal_int
+            .append_event(
+                "mid_step_int",
+                &EventRecord::new(
+                    2,
+                    100,
+                    "activity_scheduled",
+                    serde_json::to_string(&ActivityScheduledData {
+                        id: "act_a".to_string(),
+                        activity: req_a.clone(),
+                    })
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        journal_int
+            .append_event(
+                "mid_step_int",
+                &EventRecord::new(
+                    3,
+                    100,
+                    "activity_completed",
+                    serde_json::to_string(&ActivityCompletedData {
+                        id: "act_a".to_string(),
+                        result: res_a,
+                    })
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+
+        // Resumed runner MUST recognize act_b was emitted by Step 0 but never journaled,
+        // and dispatch act_b on resume!
+        let outcome_resumed = run(
+            &workflow,
+            "mid_step_int",
+            initial_state,
+            &mut journal_int,
+            &mut activities_int,
+            &mut clock_int,
+        )
+        .expect("resumed run should complete");
+
+        assert_eq!(
+            outcome_resumed,
+            RunnerOutcome::Completed("both_done".to_string())
+        );
+
+        // act_a was NOT re-executed!
+        assert_eq!(activities_int.count_for(&req_a), 0);
+        // act_b was dispatched and executed on resume!
+        assert_eq!(activities_int.count_for(&req_b), 1);
+    }
+
+    // ------------------------------------------------------------------------
+    // Test Workflow 6: Resuming on Reused Clock Exercises Dedup (Finding 3)
     // ------------------------------------------------------------------------
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1578,7 +1883,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Test Workflow 5: Periodic Snapshot at Quiescence and Resume (Finding 3 & 1)
+    // Test Workflow 7: Periodic Snapshot at Quiescence and Resume
     // ------------------------------------------------------------------------
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1710,7 +2015,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Test Workflow 6: Pending Timers Across Mid-run Snapshot (Findings 2 & 5)
+    // Test Workflow 8: Pending Timers Across Mid-run Snapshot (Findings 2 & 5)
     // ------------------------------------------------------------------------
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1836,7 +2141,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Test Workflow 7: Resuming Completed Workflow Returns Completed (Finding 4)
+    // Test Workflow 9: Resuming Completed Workflow Returns Completed (Finding 4)
     // ------------------------------------------------------------------------
 
     #[test]
@@ -1887,7 +2192,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Test Workflow 8: Corrupted Payload Fails Fast (Finding 7)
+    // Test Workflow 10: Corrupted Payload Fails Fast (Finding 7)
     // ------------------------------------------------------------------------
 
     #[test]
@@ -1921,7 +2226,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Test Workflow 9: Workflow Failure Recorded in Journal
+    // Test Workflow 11: Workflow Failure Recorded in Journal
     // ------------------------------------------------------------------------
 
     #[test]
