@@ -28,7 +28,9 @@ Rejected: daemon/Kafka/blackboard service thường trực — herdr server đã
 - **P3 — metrics chung**: gộp `telemetry.jsonl` + cost per session (opencode trước); dashboard popup herdr = optional.
 - Điều kiện tiên quyết: `sude-guard` (W7 kind routing) merge + binary mới — vì transfer Claude-out đang dùng cùng binary.
 
-## Open questions (anh iu)
-1. Duyệt plan này thành `docs/plans/active/` file chính thức chứ? (repo convention: mỗi lúc 1 plan active — hiện có `harness-effort-cost-audit`)
-2. `quaqua watch` ưu tiên P1 hay `quaqua status` P2 trước? (đề xuất: `status` trước — rẻ, chữa đúng lỗi retro #1; `watch` sau)
-3. P3 metrics: chấp nhận "opencode-only trước, omp/claude sau" như W2 đã bị chốt là chưa khả thi đa harness?
+## Decisions (anh iu, 2026-10-19 · issue #47)
+- **P1 `watch` + P2 `status` song song**: 2 worker, mỗi worker một file area riêng (`status` / `watch`); CoS điều phối trực tiếp, không cần Lead (<3 worker).
+- **P2 thêm cờ `WAITER-LOST`**: orchestrator đang idle trong khi worker của nó còn chạy hoặc đã nộp `runs/<name>.md` mà chưa ai đọc. Ca thật 2026-10-19: lệnh chờ nền của mu-lead chết theo session, worker P4 vẫn chạy, không ai biết cho tới khi CoS tự kiểm tra. `watch` không chữa được ca này vì nó cũng chết theo session.
+- **Trigger**: CoS chạy `quaqua status` đầu mỗi lượt (thêm 1 dòng vào Protocol trong AGENTS.md) + Auditor cron báo cờ đỏ về CoS khi không có session nào mở.
+- **P3 metrics bị tách khỏi #47**, chuyển sang #48 (cost đa harness).
+- **Text-only.** Dashboard popup herdr để lại làm improve sau (xem `docs/research/herdr-ui-ux-notes.md`), không nằm trong scope #47.
