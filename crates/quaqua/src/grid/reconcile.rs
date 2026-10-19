@@ -703,23 +703,25 @@ pub fn run_grid_check(tab: &str, only: Option<&str>, owner: Option<&str>) -> Res
     run_reconcile(&mut driver, &opts, tab, None)
 }
 
-fn resolve_default_tab(explicit_tab: Option<&str>, owner: Option<&str>) -> String {
+fn resolve_default_tab(
+    explicit_tab: Option<&str>,
+    owner: Option<&str>,
+    repo_name: Option<&str>,
+    env_grid_tab: Option<&str>,
+) -> String {
     if let Some(t) = explicit_tab {
         if !t.is_empty() {
             return t.to_string();
         }
     }
-    if let Ok(gt) = std::env::var("GRID_TAB") {
+    if let Some(gt) = env_grid_tab {
         if !gt.is_empty() {
-            return gt;
+            return gt.to_string();
         }
     }
-    if let Some(o) = owner {
-        if !o.is_empty() && o != "cos" {
-            return format!("{o}-workers");
-        }
-    }
-    "workers".to_string()
+    let o = owner.unwrap_or("cos");
+    let r = repo_name.unwrap_or("quaqua");
+    crate::worker::spawn::default_grid_tab(o, r)
 }
 
 /// Deterministic engine activity executing agent grid operations.
@@ -727,6 +729,7 @@ pub struct GridActivity<D = CliHerdrDriver> {
     driver: Mutex<D>,
     default_tab: Option<String>,
     owner: Option<String>,
+    repo: Option<String>,
     deferred_statuses: Option<Vec<String>>,
 }
 
@@ -736,6 +739,7 @@ impl GridActivity<CliHerdrDriver> {
             driver: Mutex::new(CliHerdrDriver::new()),
             default_tab: None,
             owner: None,
+            repo: None,
             deferred_statuses: None,
         }
     }
@@ -753,8 +757,14 @@ impl<D: HerdrDriver> GridActivity<D> {
             driver: Mutex::new(driver),
             default_tab: None,
             owner: None,
+            repo: None,
             deferred_statuses: None,
         }
+    }
+
+    pub fn with_repo(mut self, repo: impl Into<String>) -> Self {
+        self.repo = Some(repo.into());
+        self
     }
 
     pub fn with_default_tab(mut self, tab: impl Into<String>) -> Self {
@@ -780,6 +790,17 @@ impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
             .clone()
             .or_else(|| std::env::var("QUAQUA_OWNER").ok())
             .unwrap_or_else(|| "cos".to_string());
+        let effective_repo = self
+            .repo
+            .clone()
+            .or_else(|| std::env::var("PIPELINE_REPO").ok())
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            })
+            .unwrap_or_else(|| "quaqua".to_string());
+        let env_grid_tab = std::env::var("GRID_TAB").ok();
 
         match req {
             ActivityRequest::Grid(GridRequest::Reconcile { tab, only }) => {
@@ -788,7 +809,12 @@ impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
                     .lock()
                     .map_err(|e| ActivityError::ExecutionFailed(e.to_string()))?;
                 let target_tab = tab.as_deref().or(self.default_tab.as_deref());
-                let resolved_tab = resolve_default_tab(target_tab, Some(&effective_owner));
+                let resolved_tab = resolve_default_tab(
+                    target_tab,
+                    Some(&effective_owner),
+                    Some(&effective_repo),
+                    env_grid_tab.as_deref(),
+                );
                 let opts = ReconcileOptions {
                     check: false,
                     repair: true,
@@ -813,7 +839,12 @@ impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
                     .lock()
                     .map_err(|e| ActivityError::ExecutionFailed(e.to_string()))?;
                 let target_tab = tab.as_deref().or(self.default_tab.as_deref());
-                let resolved_tab = resolve_default_tab(target_tab, Some(&effective_owner));
+                let resolved_tab = resolve_default_tab(
+                    target_tab,
+                    Some(&effective_owner),
+                    Some(&effective_repo),
+                    env_grid_tab.as_deref(),
+                );
                 let snap = driver.snapshot().map_err(ActivityError::ExecutionFailed)?;
                 let def_slices = self
                     .deferred_statuses
@@ -1260,13 +1291,47 @@ mod tests {
 
     #[test]
     fn test_resolve_default_tab_conventions() {
-        assert_eq!(resolve_default_tab(Some("custom-tab"), None), "custom-tab");
+        // Explicit tab always wins
         assert_eq!(
-            resolve_default_tab(None, Some("arch-p2")),
-            "arch-p2-workers"
+            resolve_default_tab(Some("custom-tab"), None, None, None),
+            "custom-tab"
         );
-        assert_eq!(resolve_default_tab(None, Some("cos")), "workers");
-        assert_eq!(resolve_default_tab(None, None), "workers");
+        assert_eq!(
+            resolve_default_tab(
+                Some("custom-tab"),
+                Some("arch-pipe-lead"),
+                Some("quaqua"),
+                Some("env-tab")
+            ),
+            "custom-tab"
+        );
+
+        // Ambient GRID_TAB wins over owner/repo default
+        assert_eq!(
+            resolve_default_tab(
+                None,
+                Some("arch-pipe-lead"),
+                Some("quaqua"),
+                Some("env-tab")
+            ),
+            "env-tab"
+        );
+
+        // Lead owner convention: strips -lead and appends -workers
+        assert_eq!(
+            resolve_default_tab(None, Some("arch-pipe-lead"), Some("quaqua"), None),
+            "arch-pipe-workers"
+        );
+
+        // CoS owner convention: uses repo name + -workers
+        assert_eq!(
+            resolve_default_tab(None, Some("cos"), Some("quaqua"), None),
+            "quaqua-workers"
+        );
+        assert_eq!(
+            resolve_default_tab(None, None, Some("monotinhtute"), None),
+            "monotinhtute-workers"
+        );
     }
 
     #[test]
