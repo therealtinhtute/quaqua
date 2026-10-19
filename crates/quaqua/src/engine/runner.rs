@@ -3171,4 +3171,120 @@ mod tests {
             RunnerOutcome::Completed("pauses: 2".to_string())
         );
     }
+    #[test]
+    fn test_two_sequential_pause_resolved_cycles_kill_between_dispatches_nothing() {
+        let workflow = MultiPauseWorkflow;
+        let initial_state = MultiPauseState { pause_count: 0 };
+        let options = RunnerOptions {
+            max_steps: 100,
+            snapshot_interval: 0,
+            snapshot_at_blocked: false,
+        };
+
+        let mut journal = InMemoryJournal::new();
+        let mut activities = MockActivityRegistry::new();
+        let mut clock = VirtualClock::new(1000);
+
+        // 1. Initial run blocks on pause_1 (Cycle 1 start)
+        let out1 = run_until_blocked(
+            &workflow,
+            "two_cycle_wf",
+            Some(initial_state.clone()),
+            &mut journal,
+            &mut activities,
+            &mut clock,
+            &options,
+            Vec::new(),
+        )
+        .expect("step to pause 1");
+        assert_eq!(
+            out1,
+            RunnerOutcome::Blocked("pause_for_approval: pause_1".to_string())
+        );
+
+        // 2. Resolve pause_1 -> advances and blocks on pause_2 (Cycle 1 resolve + Cycle 2 pause)
+        let out2 = run_until_blocked(
+            &workflow,
+            "two_cycle_wf",
+            Some(initial_state.clone()),
+            &mut journal,
+            &mut activities,
+            &mut clock,
+            &options,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: None,
+            }],
+        )
+        .expect("step to pause 2");
+        assert_eq!(
+            out2,
+            RunnerOutcome::Blocked("pause_for_approval: pause_2".to_string())
+        );
+
+        let events_before_kill = journal.load_events("two_cycle_wf", 1).expect("load events");
+        assert_eq!(events_before_kill.len(), 3);
+        assert_eq!(events_before_kill[0].kind, "pause_for_approval");
+        assert_eq!(events_before_kill[1].kind, "approval_resolved");
+        assert_eq!(events_before_kill[2].kind, "pause_for_approval");
+
+        // 3. Process is killed between cycle 1 resolve and cycle 2 resolve (while blocked on pause_2).
+        // A fresh runner restarts and replays from the journal with no new events.
+        // Replay MUST re-dispatch nothing: no new pause_for_approval or other events emitted.
+        let mut clock_resumed = VirtualClock::new(1000);
+        let out_resumed = run_until_blocked(
+            &workflow,
+            "two_cycle_wf",
+            Some(initial_state.clone()),
+            &mut journal,
+            &mut activities,
+            &mut clock_resumed,
+            &options,
+            Vec::new(),
+        )
+        .expect("resumed replay to blocked");
+
+        // Outcome reaches quiescent blocked point without appending duplicate events
+        assert_eq!(
+            out_resumed,
+            RunnerOutcome::Blocked("no pending events or timers".to_string())
+        );
+
+        let events_after_replay = journal.load_events("two_cycle_wf", 1).expect("load events");
+        assert_eq!(
+            events_after_replay.len(),
+            3,
+            "replay must re-dispatch nothing; journal event count must remain 3"
+        );
+        for (i, (before, after)) in events_before_kill.iter().zip(events_after_replay.iter()).enumerate() {
+            assert_eq!(before.seq, after.seq, "event {i} seq mismatch");
+            assert_eq!(before.kind, after.kind, "event {i} kind mismatch");
+            assert_eq!(before.payload_json, after.payload_json, "event {i} payload mismatch");
+        }
+
+        // 4. Finally deliver approval for pause_2 (Cycle 2 resolve) -> workflow completes cleanly
+        let out_final = run_until_blocked(
+            &workflow,
+            "two_cycle_wf",
+            Some(initial_state),
+            &mut journal,
+            &mut activities,
+            &mut clock_resumed,
+            &options,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: None,
+            }],
+        )
+        .expect("resume to completion");
+        assert_eq!(
+            out_final,
+            RunnerOutcome::Completed("pauses: 2".to_string())
+        );
+
+        let final_events = journal.load_events("two_cycle_wf", 1).expect("load final events");
+        assert_eq!(final_events.len(), 5);
+        assert_eq!(final_events[3].kind, "approval_resolved");
+        assert_eq!(final_events[4].kind, "workflow_completed");
+    }
 }

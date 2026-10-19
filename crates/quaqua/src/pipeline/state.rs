@@ -137,8 +137,31 @@ pub enum PipelinePhase {
     Complete,
     Failed,
     Disputed,
+    Blocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedKind {
+    Restart,
+    RoundsExhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeDirective {
+    pub max_rounds: u32,
+}
+
+pub fn parse_blocked_gate(reason: &str) -> Option<(i32, String)> {
+    let s = reason
+        .strip_prefix("pause_for_approval: ")
+        .unwrap_or(reason);
+    let s = s.strip_prefix("blocked ")?;
+    let (code_str, rest) = s.split_once(':')?;
+    let code: i32 = code_str.trim().parse().ok()?;
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    Some((code, rest.to_string()))
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewStrategy {
@@ -241,6 +264,14 @@ pub struct PipelineWorkflowState {
     pub last_review_report: Option<String>,
     #[serde(default)]
     pub review_skip: bool,
+    #[serde(default)]
+    pub blocked_from: Option<PipelinePhase>,
+    #[serde(default)]
+    pub blocked_kind: Option<BlockedKind>,
+    #[serde(default)]
+    pub blocked_code: i32,
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
 }
 
 impl PipelineWorkflowState {
@@ -258,6 +289,10 @@ impl PipelineWorkflowState {
             pending_report_read: None,
             last_review_report: None,
             review_skip: false,
+            blocked_from: None,
+            blocked_kind: None,
+            blocked_code: 0,
+            blocked_reason: None,
         }
     }
 }
@@ -268,4 +303,34 @@ pub struct PipelineOutput {
     pub rounds: u32,
     pub review_changed: bool,
     pub commit: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_blocked_gate() {
+        assert_eq!(
+            parse_blocked_gate("pause_for_approval: blocked 5: review rounds exhausted"),
+            Some((5, "review rounds exhausted".to_string()))
+        );
+        assert_eq!(
+            parse_blocked_gate("blocked 6: invalid output contract"),
+            Some((6, "invalid output contract".to_string()))
+        );
+        assert_eq!(
+            parse_blocked_gate("pause_for_approval: approve plan then resume"),
+            None
+        );
+        assert_eq!(parse_blocked_gate("something else"), None);
+    }
+
+    #[test]
+    fn test_resume_directive_serde() {
+        let d = ResumeDirective { max_rounds: 3 };
+        let s = serde_json::to_string(&d).unwrap();
+        let back: ResumeDirective = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.max_rounds, 3);
+    }
 }
