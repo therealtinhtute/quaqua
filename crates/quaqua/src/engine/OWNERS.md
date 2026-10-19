@@ -14,9 +14,15 @@ Enforced in W2 with: `cargo test --locked -p quaqua -- --ignored test_w1_owners_
 | K1 | crates/quaqua/src/worker/prompt/workflow.rs | worker-lead | sude-arch-k1 | SingleWorkerWorkflow state machine with budget, grace, autoext, stall timers |
 | K2 | crates/quaqua/src/herdr_events.rs | worker-lead | sude-arch-k2 | herdr event subscriber activity (agent_status_changed, pane.exited) |
 | K3 | crates/quaqua/src/worker/prompt/cost.rs | worker-lead | sude-arch-k3 | Cost tracking activity (cost80/cost100 and report mtime checks) |
+| K3 | crates/quaqua/src/worker/prompt/observer.rs | worker-lead | sude-arch-k3 | Observer updates: drop ANSI scraping in favour of activity results |
 | K4 | crates/quaqua/src/taskforce/mod.rs | worker-lead | sude-arch-k4 | TaskforceWorkflow implementation (quorum, dual-lens, advisor) |
 | P1 | crates/quaqua/src/pipeline/mod.rs | pipe-lead | sude-arch-p1 | PipelineWorkflow: plan gate, build child, review child, fix cycle |
 | P1 | crates/quaqua/src/pipeline/state.rs | pipe-lead | sude-arch-p1 | Pipeline state transitions and durable event recovery |
-| P2 | crates/quaqua/src/grid/mod.rs | pipe-lead | sude-arch-p2 | Grid activity: layout reconcile and repair driven by events |
+| P2 | crates/quaqua/src/grid/mod.rs | pipe-lead | sude-arch-p2 | Grid activity entry point and layout repair driven by events |
+| P2 | crates/quaqua/src/grid/apply.rs | pipe-lead | sude-arch-p2 | Grid pane split and movement actions |
+| P2 | crates/quaqua/src/grid/hook.rs | pipe-lead | sude-arch-p2 | Grid hook invocation helpers |
+| P2 | crates/quaqua/src/grid/plan.rs | pipe-lead | sude-arch-p2 | Grid placement calculation and layout planning |
+| P2 | crates/quaqua/src/grid/reconcile.rs | pipe-lead | sude-arch-p2 | Grid reconciliation algorithm |
+| P2 | crates/quaqua/src/grid/types.rs | pipe-lead | sude-arch-p2 | Grid layout data types and structures |
 | P3 | crates/quaqua/src/status.rs | pipe-lead | sude-arch-p3 | quaqua status query reading runs/quaqua.db (issue #47) |
 | P4 | crates/quaqua/tests/worker_unit.rs | pipe-lead | sude-arch-p4 | Migration of HerdrOps mocks to MockActivities |
