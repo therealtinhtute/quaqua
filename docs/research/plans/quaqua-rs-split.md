@@ -95,3 +95,10 @@ Every workspace path the binary uses goes through `workspace_root()`. If one is 
 - New features
 - Publishing to crates.io
 - Changing CI beyond what `tieude-ci` adds
+
+## Engine core decisions (anh iu, 2026-10-19 · raw/2026-10-19-quaqua-archresearch.md)
+- Core: embedded event-sourced workflow engine (6 layers: runtime · journal · activities · patterns · CLI/OTel · testkit).
+- Journal: SQLite (`rusqlite` bundled, WAL) replaces `runs/.{name}.*` dotfiles.
+- Process: ephemeral CLI, no daemon.
+- Patterns: Rust `Workflow` trait impls; declarative TOML deferred.
+- Migration: strangler fig in `crates/quaqua` — taskforce → worker/prompt → pipeline, tests green each commit; before the repo split.
