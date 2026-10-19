@@ -6,7 +6,7 @@ Status: locked, awaiting approval → to-plan
 The Rust engine lives in its own checkout `~/Lab/quaqua`. `~/quaqua` holds only the workspace and uses the installed `quaqua` binary. The workspace is the md files, memory, runs, rules, team.toml and the hooks.
 
 ## Decisions (anh iu, 2026-10-16)
-- Repo (anh iu, 2026-10-19): one upstream `therealtinhtute/quaqua` — engine on branch `engine`, workspace on `main`. Locally two dirs: the codebase checkout `~/Lab/quaqua` (named `~/Lab/quaqua` on other machines; per-machine path lives in `projects/INDEX.md`, never hardcoded) and the consuming workspace `~/quaqua`.
+- Repo (anh iu, 2026-10-19): one upstream `therealtinhtute/quaqua` — engine on branch `engine`, workspace on `main`. Locally two dirs: the codebase checkout `~/Lab/quaqua` (named `~/Lab/quaqua-rs` on other machines; per-machine path lives in `projects/INDEX.md`, never hardcoded) and the consuming workspace `~/quaqua`.
 - History: keep it with `git subtree split` (blame and PR #42 stay traceable)
 - Grid: port `grid-workers.sh` to Rust before the split
 - Order: lock the plan and run to-plan for both phases first, then build
