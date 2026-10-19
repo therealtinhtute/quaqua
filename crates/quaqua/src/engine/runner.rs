@@ -313,6 +313,17 @@ pub(crate) fn resume<W: Workflow, C: RunnerClock>(
     )
 }
 
+/// Replay side-effect collected during deterministic history replay.
+#[derive(Debug, Clone)]
+enum ReplayEffect<Output> {
+    DispatchAction(ScheduledAction),
+    ExecuteInFlightActivity {
+        id: String,
+        activity: ActivityRequest,
+    },
+    DispatchDecision(StepDecision<Output>),
+}
+
 /// Executes or resumes a workflow until blocked, completed, or failed.
 pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
     workflow: &W,
@@ -345,30 +356,13 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         }
     }
 
-    let mut completed_activities: HashMap<String, ActivityResult> = HashMap::new();
-    let mut scheduled_activities: HashMap<String, ActivityRequest> = HashMap::new();
-    let mut history_activity_counts: HashMap<String, usize> = HashMap::new();
-    let mut history_timer_counts: HashMap<String, usize> = HashMap::new();
-    let mut history_child_counts: HashMap<String, usize> = HashMap::new();
-
-    // Map scheduled_seq -> (id, scheduled_ts_ms, duration)
+    // Map scheduled_seq -> (id, scheduled_ts_ms, duration) across ALL history for timer restoration
     let mut scheduled_timer_instances: HashMap<u64, (String, u64, Duration)> = HashMap::new();
     let mut timer_id_to_scheduled_seqs: HashMap<String, Vec<u64>> = HashMap::new();
     let mut fired_timer_seqs: HashSet<u64> = HashSet::new();
 
     for rec in &all_events {
         match rec.kind.as_str() {
-            "activity_scheduled" => {
-                let data: ActivityScheduledData = serde_json::from_str(&rec.payload_json)
-                    .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                scheduled_activities.insert(data.id.clone(), data.activity);
-                *history_activity_counts.entry(data.id).or_default() += 1;
-            }
-            "activity_completed" => {
-                let data: ActivityCompletedData = serde_json::from_str(&rec.payload_json)
-                    .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                completed_activities.insert(data.id, data.result);
-            }
             "timer_scheduled" => {
                 let data: TimerScheduledData = serde_json::from_str(&rec.payload_json)
                     .map_err(|e| RunnerError::Serialization(e.to_string()))?;
@@ -384,7 +378,6 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                     .entry(data.id.clone())
                     .or_default()
                     .push(rec.seq);
-                *history_timer_counts.entry(data.id).or_default() += 1;
             }
             "timer_fired" => {
                 let data: TimerFiredData = serde_json::from_str(&rec.payload_json)
@@ -396,16 +389,11 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                     }
                 }
             }
-            "child_started" => {
-                let data: ChildStartedData = serde_json::from_str(&rec.payload_json)
-                    .map_err(|e| RunnerError::Serialization(e.to_string()))?;
-                *history_child_counts.entry(data.id).or_default() += 1;
-            }
             _ => {}
         }
     }
 
-    // Findings 1, 2 & 5: Restore all unfired timer instances with remaining duration
+    // Restore all unfired timer instances across history with remaining duration
     for (sched_seq, (id, sched_ts, orig_dur)) in &scheduled_timer_instances {
         if !fired_timer_seqs.contains(sched_seq) {
             let deadline_ms = sched_ts + orig_dur.as_millis() as u64;
@@ -433,19 +421,38 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         }
     };
 
-    // 3. Replay steps through step() deterministically from snapshot to journal head
+    // 3. Post-snapshot occurrence indexing: count records strictly with seq > snapshot_seq
     let events_since_snapshot_rec = journal.load_events(workflow_id, snapshot_seq + 1)?;
     let mut historical_events_to_deliver: VecDeque<WorkflowEvent> = VecDeque::new();
+    let mut history_activity_scheduled: HashMap<String, usize> = HashMap::new();
+    let mut history_activity_completed: HashMap<String, usize> = HashMap::new();
+    let mut history_timer_scheduled: HashMap<String, usize> = HashMap::new();
+    let mut history_child_started: HashMap<String, usize> = HashMap::new();
+    let mut has_paused_for_approval = false;
+    let mut history_continue_count = 0usize;
 
     for rec in &events_since_snapshot_rec {
         match rec.kind.as_str() {
+            "activity_scheduled" => {
+                let data: ActivityScheduledData = serde_json::from_str(&rec.payload_json)
+                    .map_err(|e| RunnerError::Serialization(e.to_string()))?;
+                *history_activity_scheduled.entry(data.id).or_default() += 1;
+            }
             "activity_completed" => {
                 let data: ActivityCompletedData = serde_json::from_str(&rec.payload_json)
                     .map_err(|e| RunnerError::Serialization(e.to_string()))?;
+                *history_activity_completed
+                    .entry(data.id.clone())
+                    .or_default() += 1;
                 historical_events_to_deliver.push_back(WorkflowEvent::ActivityCompleted {
                     id: data.id,
                     result: data.result,
                 });
+            }
+            "timer_scheduled" => {
+                let data: TimerScheduledData = serde_json::from_str(&rec.payload_json)
+                    .map_err(|e| RunnerError::Serialization(e.to_string()))?;
+                *history_timer_scheduled.entry(data.id).or_default() += 1;
             }
             "timer_fired" => {
                 let data: TimerFiredData = serde_json::from_str(&rec.payload_json)
@@ -459,6 +466,11 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                     approved: data.approved,
                     reason: data.reason,
                 });
+            }
+            "child_started" => {
+                let data: ChildStartedData = serde_json::from_str(&rec.payload_json)
+                    .map_err(|e| RunnerError::Serialization(e.to_string()))?;
+                *history_child_started.entry(data.id).or_default() += 1;
             }
             "child_completed" => {
                 let data: ChildCompletedData = serde_json::from_str(&rec.payload_json)
@@ -477,17 +489,24 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                     reason: data.reason,
                 });
             }
+            "pause_for_approval" => {
+                has_paused_for_approval = true;
+            }
+            "continue" => {
+                history_continue_count += 1;
+            }
             _ => {}
         }
     }
 
+    // 4. Replay steps deterministically from snapshot to journal head
     let mut replay_initial_step = snapshot_seq == 0 && !all_events.is_empty();
     let mut replayed_activity_counts: HashMap<String, usize> = HashMap::new();
     let mut replayed_timer_counts: HashMap<String, usize> = HashMap::new();
     let mut replayed_child_counts: HashMap<String, usize> = HashMap::new();
+    let mut replayed_continue_count = 0usize;
 
-    let mut unjournaled_actions_to_dispatch: Vec<ScheduledAction> = Vec::new();
-    let mut unjournaled_decision_to_dispatch: Option<StepDecision<W::Output>> = None;
+    let mut pending_replay_effects: Vec<ReplayEffect<W::Output>> = Vec::new();
 
     while replay_initial_step || !historical_events_to_deliver.is_empty() {
         let ev = if replay_initial_step {
@@ -502,248 +521,332 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
         let mut ctx = WorkflowContext::new(clock.now_ms());
         let dec = workflow.step(&mut state, &mut ctx, ev);
 
-        // Findings 1, 2, 3: Reconcile ctx actions on EVERY replay step by occurrence count
+        // Reconcile ctx actions on this replay step in order
         for action in ctx.drain_scheduled() {
-            match &action {
-                ScheduledAction::Activity { id, .. } => {
+            match action {
+                ScheduledAction::Activity { id, activity } => {
                     let count = replayed_activity_counts.entry(id.clone()).or_default();
                     *count += 1;
-                    let history_count = history_activity_counts.get(id).copied().unwrap_or(0);
-                    if *count > history_count {
-                        unjournaled_actions_to_dispatch.push(action);
+                    let sched_cnt = history_activity_scheduled.get(&id).copied().unwrap_or(0);
+                    let comp_cnt = history_activity_completed.get(&id).copied().unwrap_or(0);
+                    if *count <= comp_cnt {
+                        // Already scheduled and completed in history
+                    } else if *count <= sched_cnt {
+                        // In-flight activity: scheduled in history, completion lost to kill
+                        pending_replay_effects
+                            .push(ReplayEffect::ExecuteInFlightActivity { id, activity });
+                    } else {
+                        // Unjournaled action
+                        pending_replay_effects.push(ReplayEffect::DispatchAction(
+                            ScheduledAction::Activity { id, activity },
+                        ));
                     }
                 }
-                ScheduledAction::Timer { id, .. } => {
+                ScheduledAction::Timer { id, duration } => {
                     let count = replayed_timer_counts.entry(id.clone()).or_default();
                     *count += 1;
-                    let history_count = history_timer_counts.get(id).copied().unwrap_or(0);
-                    if *count > history_count {
-                        unjournaled_actions_to_dispatch.push(action);
+                    let sched_cnt = history_timer_scheduled.get(&id).copied().unwrap_or(0);
+                    if *count > sched_cnt {
+                        pending_replay_effects.push(ReplayEffect::DispatchAction(
+                            ScheduledAction::Timer { id, duration },
+                        ));
                     }
                 }
-                ScheduledAction::Child { id, .. } => {
+                ScheduledAction::Child {
+                    id,
+                    workflow_type,
+                    input,
+                } => {
                     let count = replayed_child_counts.entry(id.clone()).or_default();
                     *count += 1;
-                    let history_count = history_child_counts.get(id).copied().unwrap_or(0);
-                    if *count > history_count {
-                        unjournaled_actions_to_dispatch.push(action);
+                    let sched_cnt = history_child_started.get(&id).copied().unwrap_or(0);
+                    if *count > sched_cnt {
+                        pending_replay_effects.push(ReplayEffect::DispatchAction(
+                            ScheduledAction::Child {
+                                id,
+                                workflow_type,
+                                input,
+                            },
+                        ));
                     }
                 }
             }
         }
 
-        // Findings 1, 2, 3: Reconcile decision on EVERY replay step by occurrence count
-        match &dec {
-            StepDecision::ScheduleActivity { id, .. } => {
+        // Reconcile step decision on this replay step
+        match dec {
+            StepDecision::ScheduleActivity { id, activity } => {
                 let count = replayed_activity_counts.entry(id.clone()).or_default();
                 *count += 1;
-                let history_count = history_activity_counts.get(id).copied().unwrap_or(0);
-                if *count > history_count {
-                    unjournaled_decision_to_dispatch = Some(dec);
+                let sched_cnt = history_activity_scheduled.get(&id).copied().unwrap_or(0);
+                let comp_cnt = history_activity_completed.get(&id).copied().unwrap_or(0);
+                if *count <= comp_cnt {
+                    // Already scheduled and completed in history
+                } else if *count <= sched_cnt {
+                    // In-flight activity
+                    pending_replay_effects
+                        .push(ReplayEffect::ExecuteInFlightActivity { id, activity });
+                } else {
+                    // Unjournaled decision
+                    pending_replay_effects.push(ReplayEffect::DispatchDecision(
+                        StepDecision::ScheduleActivity { id, activity },
+                    ));
                 }
-            }
-            StepDecision::ScheduleTimer { id, .. } => {
-                let count = replayed_timer_counts.entry(id.clone()).or_default();
-                *count += 1;
-                let history_count = history_timer_counts.get(id).copied().unwrap_or(0);
-                if *count > history_count {
-                    unjournaled_decision_to_dispatch = Some(dec);
-                }
-            }
-            StepDecision::StartChild { id, .. } => {
-                let count = replayed_child_counts.entry(id.clone()).or_default();
-                *count += 1;
-                let history_count = history_child_counts.get(id).copied().unwrap_or(0);
-                if *count > history_count {
-                    unjournaled_decision_to_dispatch = Some(dec);
-                }
-            }
-            StepDecision::Complete(_) => {
-                if !all_events.iter().any(|e| e.kind == "workflow_completed") {
-                    unjournaled_decision_to_dispatch = Some(dec);
-                }
-            }
-            StepDecision::Fail { .. } => {
-                if !all_events.iter().any(|e| e.kind == "workflow_failed") {
-                    unjournaled_decision_to_dispatch = Some(dec);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // 4. Transition to Forward Execution Queue
-    let mut event_queue: VecDeque<WorkflowEvent> = VecDeque::new();
-    let mut events_since_snapshot = 0u64;
-
-    // Dispatch any unjournaled actions caught by mid-step crash
-    for action in unjournaled_actions_to_dispatch {
-        match action {
-            ScheduledAction::Activity { id, activity } => {
-                let ev = dispatch_activity(
-                    workflow_id,
-                    &id,
-                    &activity,
-                    journal,
-                    activities,
-                    clock,
-                    &mut current_seq,
-                    &mut events_since_snapshot,
-                )?;
-                event_queue.push_back(ev);
-            }
-            ScheduledAction::Timer { id, duration } => {
-                dispatch_timer(
-                    workflow_id,
-                    &id,
-                    duration,
-                    journal,
-                    clock,
-                    &mut current_seq,
-                    &mut events_since_snapshot,
-                )?;
-            }
-            ScheduledAction::Child {
-                id,
-                workflow_type,
-                input,
-            } => {
-                current_seq += 1;
-                journal.append_event(
-                    workflow_id,
-                    &EventRecord::new(
-                        current_seq,
-                        clock.now_ms(),
-                        "child_started",
-                        serde_json::to_string(&ChildStartedData {
-                            id,
-                            workflow_type,
-                            input,
-                        })
-                        .map_err(|e| RunnerError::Serialization(e.to_string()))?,
-                    ),
-                )?;
-                events_since_snapshot += 1;
-            }
-        }
-    }
-
-    if let Some(decision) = unjournaled_decision_to_dispatch {
-        match decision {
-            StepDecision::ScheduleActivity { id, activity } => {
-                let ev = dispatch_activity(
-                    workflow_id,
-                    &id,
-                    &activity,
-                    journal,
-                    activities,
-                    clock,
-                    &mut current_seq,
-                    &mut events_since_snapshot,
-                )?;
-                event_queue.push_back(ev);
             }
             StepDecision::ScheduleTimer { id, duration } => {
-                dispatch_timer(
-                    workflow_id,
-                    &id,
-                    duration,
-                    journal,
-                    clock,
-                    &mut current_seq,
-                    &mut events_since_snapshot,
-                )?;
+                let count = replayed_timer_counts.entry(id.clone()).or_default();
+                *count += 1;
+                let sched_cnt = history_timer_scheduled.get(&id).copied().unwrap_or(0);
+                if *count > sched_cnt {
+                    pending_replay_effects.push(ReplayEffect::DispatchDecision(
+                        StepDecision::ScheduleTimer { id, duration },
+                    ));
+                }
             }
             StepDecision::StartChild {
                 id,
                 workflow_type,
                 input,
             } => {
+                let count = replayed_child_counts.entry(id.clone()).or_default();
+                *count += 1;
+                let sched_cnt = history_child_started.get(&id).copied().unwrap_or(0);
+                if *count > sched_cnt {
+                    pending_replay_effects.push(ReplayEffect::DispatchDecision(
+                        StepDecision::StartChild {
+                            id,
+                            workflow_type,
+                            input,
+                        },
+                    ));
+                }
+            }
+            StepDecision::Complete(output) => {
+                pending_replay_effects.push(ReplayEffect::DispatchDecision(
+                    StepDecision::Complete(output),
+                ));
+            }
+            StepDecision::Fail { code, reason } => {
+                pending_replay_effects.push(ReplayEffect::DispatchDecision(StepDecision::Fail {
+                    code,
+                    reason,
+                }));
+            }
+            StepDecision::PauseForApproval { reason } => {
+                if !has_paused_for_approval {
+                    pending_replay_effects.push(ReplayEffect::DispatchDecision(
+                        StepDecision::PauseForApproval { reason },
+                    ));
+                }
+            }
+            StepDecision::Continue => {
+                replayed_continue_count += 1;
+                if replayed_continue_count > history_continue_count {
+                    pending_replay_effects
+                        .push(ReplayEffect::DispatchDecision(StepDecision::Continue));
+                }
+            }
+        }
+    }
+
+    // 5. Transition to Forward Execution Queue & Dispatch Pending Replay Effects in Order
+    let mut event_queue: VecDeque<WorkflowEvent> = VecDeque::new();
+    let mut events_since_snapshot = 0u64;
+
+    for effect in pending_replay_effects {
+        match effect {
+            ReplayEffect::ExecuteInFlightActivity { id, activity } => {
+                let result = activities.execute(&activity)?;
                 current_seq += 1;
                 journal.append_event(
                     workflow_id,
                     &EventRecord::new(
                         current_seq,
                         clock.now_ms(),
-                        "child_started",
-                        serde_json::to_string(&ChildStartedData {
-                            id,
-                            workflow_type,
-                            input,
+                        "activity_completed",
+                        serde_json::to_string(&ActivityCompletedData {
+                            id: id.clone(),
+                            result: result.clone(),
                         })
                         .map_err(|e| RunnerError::Serialization(e.to_string()))?,
                     ),
                 )?;
                 events_since_snapshot += 1;
+                event_queue.push_back(WorkflowEvent::ActivityCompleted { id, result });
             }
-            StepDecision::Complete(output) => {
-                current_seq += 1;
-                journal.append_event(
-                    workflow_id,
-                    &EventRecord::new(
-                        current_seq,
-                        clock.now_ms(),
-                        "workflow_completed",
-                        serde_json::to_string(&output)
+            ReplayEffect::DispatchAction(action) => match action {
+                ScheduledAction::Activity { id, activity } => {
+                    let ev = dispatch_activity(
+                        workflow_id,
+                        &id,
+                        &activity,
+                        journal,
+                        activities,
+                        clock,
+                        &mut current_seq,
+                        &mut events_since_snapshot,
+                    )?;
+                    event_queue.push_back(ev);
+                }
+                ScheduledAction::Timer { id, duration } => {
+                    dispatch_timer(
+                        workflow_id,
+                        &id,
+                        duration,
+                        journal,
+                        clock,
+                        &mut current_seq,
+                        &mut events_since_snapshot,
+                    )?;
+                }
+                ScheduledAction::Child {
+                    id,
+                    workflow_type,
+                    input,
+                } => {
+                    current_seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(
+                            current_seq,
+                            clock.now_ms(),
+                            "child_started",
+                            serde_json::to_string(&ChildStartedData {
+                                id,
+                                workflow_type,
+                                input,
+                            })
                             .map_err(|e| RunnerError::Serialization(e.to_string()))?,
-                    ),
-                )?;
-                journal.append_snapshot(
-                    workflow_id,
-                    &SnapshotRecord::new(
-                        current_seq,
-                        serde_json::to_string(&state)
+                        ),
+                    )?;
+                    events_since_snapshot += 1;
+                }
+            },
+            ReplayEffect::DispatchDecision(decision) => match decision {
+                StepDecision::ScheduleActivity { id, activity } => {
+                    let ev = dispatch_activity(
+                        workflow_id,
+                        &id,
+                        &activity,
+                        journal,
+                        activities,
+                        clock,
+                        &mut current_seq,
+                        &mut events_since_snapshot,
+                    )?;
+                    event_queue.push_back(ev);
+                }
+                StepDecision::ScheduleTimer { id, duration } => {
+                    dispatch_timer(
+                        workflow_id,
+                        &id,
+                        duration,
+                        journal,
+                        clock,
+                        &mut current_seq,
+                        &mut events_since_snapshot,
+                    )?;
+                }
+                StepDecision::StartChild {
+                    id,
+                    workflow_type,
+                    input,
+                } => {
+                    current_seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(
+                            current_seq,
+                            clock.now_ms(),
+                            "child_started",
+                            serde_json::to_string(&ChildStartedData {
+                                id,
+                                workflow_type,
+                                input,
+                            })
                             .map_err(|e| RunnerError::Serialization(e.to_string()))?,
-                    ),
-                )?;
-                return Ok(RunnerOutcome::Completed(output));
-            }
-            StepDecision::Fail { code, reason } => {
-                current_seq += 1;
-                journal.append_event(
-                    workflow_id,
-                    &EventRecord::new(
-                        current_seq,
-                        clock.now_ms(),
-                        "workflow_failed",
-                        serde_json::to_string(&WorkflowFailedData {
-                            code,
-                            reason: reason.clone(),
-                        })
-                        .map_err(|e| RunnerError::Serialization(e.to_string()))?,
-                    ),
-                )?;
-                return Ok(RunnerOutcome::Failed { code, reason });
-            }
-            _ => {}
+                        ),
+                    )?;
+                    events_since_snapshot += 1;
+                }
+                StepDecision::Continue => {
+                    current_seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(current_seq, clock.now_ms(), "continue", ""),
+                    )?;
+                    events_since_snapshot += 1;
+                }
+                StepDecision::PauseForApproval { reason } => {
+                    current_seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(
+                            current_seq,
+                            clock.now_ms(),
+                            "pause_for_approval",
+                            serde_json::to_string(&PauseForApprovalData {
+                                reason: reason.clone(),
+                            })
+                            .map_err(|e| RunnerError::Serialization(e.to_string()))?,
+                        ),
+                    )?;
+                    if options.snapshot_at_blocked {
+                        journal.append_snapshot(
+                            workflow_id,
+                            &SnapshotRecord::new(
+                                current_seq,
+                                serde_json::to_string(&state)
+                                    .map_err(|e| RunnerError::Serialization(e.to_string()))?,
+                            ),
+                        )?;
+                    }
+                    return Ok(RunnerOutcome::Blocked(format!(
+                        "pause_for_approval: {reason}"
+                    )));
+                }
+                StepDecision::Complete(output) => {
+                    current_seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(
+                            current_seq,
+                            clock.now_ms(),
+                            "workflow_completed",
+                            serde_json::to_string(&output)
+                                .map_err(|e| RunnerError::Serialization(e.to_string()))?,
+                        ),
+                    )?;
+                    journal.append_snapshot(
+                        workflow_id,
+                        &SnapshotRecord::new(
+                            current_seq,
+                            serde_json::to_string(&state)
+                                .map_err(|e| RunnerError::Serialization(e.to_string()))?,
+                        ),
+                    )?;
+                    return Ok(RunnerOutcome::Completed(output));
+                }
+                StepDecision::Fail { code, reason } => {
+                    current_seq += 1;
+                    journal.append_event(
+                        workflow_id,
+                        &EventRecord::new(
+                            current_seq,
+                            clock.now_ms(),
+                            "workflow_failed",
+                            serde_json::to_string(&WorkflowFailedData {
+                                code,
+                                reason: reason.clone(),
+                            })
+                            .map_err(|e| RunnerError::Serialization(e.to_string()))?,
+                        ),
+                    )?;
+                    return Ok(RunnerOutcome::Failed { code, reason });
+                }
+            },
         }
     }
-
-    // Re-dispatch any activities that were scheduled in history but never completed
-    for (id, req) in &scheduled_activities {
-        if !completed_activities.contains_key(id) {
-            let result = activities.execute(req)?;
-            current_seq += 1;
-            journal.append_event(
-                workflow_id,
-                &EventRecord::new(
-                    current_seq,
-                    clock.now_ms(),
-                    "activity_completed",
-                    serde_json::to_string(&ActivityCompletedData {
-                        id: id.clone(),
-                        result: result.clone(),
-                    })
-                    .map_err(|e| RunnerError::Serialization(e.to_string()))?,
-                ),
-            )?;
-            event_queue.push_back(WorkflowEvent::ActivityCompleted {
-                id: id.clone(),
-                result,
-            });
-        }
-    }
-
     // Append and queue any new incoming external events in FIFO order
     for ev in incoming_events {
         current_seq += 1;
@@ -2445,5 +2548,445 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "workflow_failed");
         assert!(events[0].payload_json.contains("deliberate test failure"));
+    }
+    // ------------------------------------------------------------------------
+    // Acceptance Test (a): Mid-step kill on re-armed timer with periodic snapshot
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_midstep_kill_on_rearmed_timer_with_periodic_snapshot_resumes_cleanly() {
+        let workflow = PollTimerWorkflow { target_polls: 5 };
+        let options = RunnerOptions {
+            max_steps: 100,
+            snapshot_interval: 2,
+            snapshot_at_blocked: true,
+        };
+
+        // --- Run 1: Uninterrupted Reference Run ---
+        let mut journal_ref = InMemoryJournal::new();
+        let mut activities_ref = MockActivityRegistry::new();
+        let mut clock_ref = VirtualClock::new(1000);
+
+        let outcome_ref = run_until_blocked(
+            &workflow,
+            "poll_snap_ref",
+            Some(PollTimerState { poll_count: 0 }),
+            &mut journal_ref,
+            &mut activities_ref,
+            &mut clock_ref,
+            &options,
+            Vec::new(),
+        )
+        .expect("ref run should complete");
+
+        assert_eq!(outcome_ref, RunnerOutcome::Completed(5));
+        let ref_events = journal_ref
+            .load_events("poll_snap_ref", 1)
+            .expect("load ref events");
+        let ref_snap = journal_ref
+            .load_latest_snapshot("poll_snap_ref")
+            .expect("load ref snap")
+            .expect("must have final snapshot");
+
+        // Verify reference run took at least one periodic snapshot before final completion
+        assert!(ref_events.len() >= 10);
+
+        // --- Run 2: Interrupted Run ---
+        // Truncate journal right after timer_fired (seq 4), with periodic snapshot present at seq 3,
+        // killing before timer_scheduled (seq 5) is recorded!
+        let mut journal_int = InMemoryJournal::new();
+        let mut activities_int = MockActivityRegistry::new();
+        let mut clock_int = VirtualClock::new(1000 + 2 * 60 * 1000);
+
+        for ev in ref_events.iter().take(4) {
+            journal_int.append_event("poll_snap_int", ev).unwrap();
+        }
+        // Copy the snapshot taken at seq 3 (poll_count = 1)
+        journal_int
+            .append_snapshot(
+                "poll_snap_int",
+                &SnapshotRecord::new(
+                    3,
+                    serde_json::to_string(&PollTimerState { poll_count: 1 }).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        // Resume with no initial state (must load from snapshot at seq 3)
+        let outcome_resumed = run_until_blocked(
+            &workflow,
+            "poll_snap_int",
+            None,
+            &mut journal_int,
+            &mut activities_int,
+            &mut clock_int,
+            &options,
+            Vec::new(),
+        )
+        .expect("resumed run should complete target polls");
+
+        assert_eq!(outcome_resumed, outcome_ref);
+
+        let int_events = journal_int
+            .load_events("poll_snap_int", 1)
+            .expect("load int events");
+        assert_eq!(
+            int_events.len(),
+            ref_events.len(),
+            "event count mismatch between resumed and reference run"
+        );
+        for (i, (int_ev, ref_ev)) in int_events.iter().zip(ref_events.iter()).enumerate() {
+            assert_eq!(int_ev.kind, ref_ev.kind, "event {i} kind mismatch");
+            assert_eq!(int_ev.seq, ref_ev.seq, "event {i} seq mismatch");
+            assert_eq!(
+                int_ev.payload_json, ref_ev.payload_json,
+                "event {i} payload mismatch"
+            );
+        }
+
+        let int_snap = journal_int
+            .load_latest_snapshot("poll_snap_int")
+            .expect("load int snap")
+            .expect("must have final snapshot");
+        assert_eq!(int_snap.state_json, ref_snap.state_json);
+    }
+
+    // ------------------------------------------------------------------------
+    // Acceptance Test (b): Two lost side effects in one replay dispatched in order
+    // ------------------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TwoLostState {
+        act1_done: bool,
+        act2_done: bool,
+        timer_fired: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TwoLostSideEffectsWorkflow;
+
+    impl Workflow for TwoLostSideEffectsWorkflow {
+        type Input = ();
+        type State = TwoLostState;
+        type Output = String;
+
+        fn step(
+            &self,
+            state: &mut Self::State,
+            ctx: &mut WorkflowContext,
+            event: Option<WorkflowEvent>,
+        ) -> StepDecision<Self::Output> {
+            match event {
+                None => {
+                    ctx.schedule_activity(
+                        "act_1",
+                        ActivityRequest::Herdr(HerdrRequest::Stop {
+                            name: "w1".to_string(),
+                        }),
+                    );
+                    StepDecision::ScheduleTimer {
+                        id: "timer_1".to_string(),
+                        duration: Duration::from_secs(100),
+                    }
+                }
+                Some(WorkflowEvent::ActivityCompleted { id, .. }) => {
+                    if id == "act_1" {
+                        state.act1_done = true;
+                        ctx.schedule_activity(
+                            "act_2",
+                            ActivityRequest::Herdr(HerdrRequest::Stop {
+                                name: "w2".to_string(),
+                            }),
+                        );
+                        StepDecision::Continue
+                    } else if id == "act_2" {
+                        state.act2_done = true;
+                        if state.act1_done && state.act2_done && state.timer_fired {
+                            StepDecision::Complete("all_done".to_string())
+                        } else {
+                            StepDecision::Continue
+                        }
+                    } else {
+                        StepDecision::Fail {
+                            code: 1,
+                            reason: "unknown act".to_string(),
+                        }
+                    }
+                }
+                Some(WorkflowEvent::TimerFired { id }) => {
+                    if id == "timer_1" {
+                        state.timer_fired = true;
+                        if state.act1_done && state.act2_done && state.timer_fired {
+                            StepDecision::Complete("all_done".to_string())
+                        } else {
+                            StepDecision::Continue
+                        }
+                    } else {
+                        StepDecision::Fail {
+                            code: 2,
+                            reason: "unknown timer".to_string(),
+                        }
+                    }
+                }
+                _ => StepDecision::Fail {
+                    code: 3,
+                    reason: "bad ev".to_string(),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn test_two_lost_side_effects_in_one_replay_dispatched_in_order() {
+        let workflow = TwoLostSideEffectsWorkflow;
+        let initial_state = TwoLostState {
+            act1_done: false,
+            act2_done: false,
+            timer_fired: false,
+        };
+
+        let req1 = ActivityRequest::Herdr(HerdrRequest::Stop {
+            name: "w1".to_string(),
+        });
+        let res1 = ActivityResult::Herdr(HerdrResult::Stopped {
+            name: "w1".to_string(),
+        });
+        let req2 = ActivityRequest::Herdr(HerdrRequest::Stop {
+            name: "w2".to_string(),
+        });
+        let res2 = ActivityResult::Herdr(HerdrResult::Stopped {
+            name: "w2".to_string(),
+        });
+
+        // --- Run 1: Uninterrupted Reference Run ---
+        let mut journal_ref = InMemoryJournal::new();
+        let mut activities_ref = MockActivityRegistry::new();
+        activities_ref.register(req1.clone(), res1.clone());
+        activities_ref.register(req2.clone(), res2.clone());
+        let mut clock_ref = VirtualClock::new(1000);
+
+        let outcome_ref = run(
+            &workflow,
+            "two_lost_ref",
+            initial_state.clone(),
+            &mut journal_ref,
+            &mut activities_ref,
+            &mut clock_ref,
+        )
+        .expect("ref run should complete");
+
+        assert_eq!(
+            outcome_ref,
+            RunnerOutcome::Completed("all_done".to_string())
+        );
+        let ref_events = journal_ref
+            .load_events("two_lost_ref", 1)
+            .expect("load ref events");
+
+        // --- Run 2: Interrupted Run ---
+        // Pre-populate with only act_1 scheduled and completed.
+        // Kill lands after act_1 completes, dropping Step 0 decision (timer_1) AND Step 1 ctx action (act_2)!
+        let mut journal_int = InMemoryJournal::new();
+        let mut activities_int = MockActivityRegistry::new();
+        activities_int.register(req1, res1);
+        activities_int.register(req2, res2);
+        let mut clock_int = VirtualClock::new(1000);
+
+        for ev in ref_events.iter().take(2) {
+            journal_int.append_event("two_lost_int", ev).unwrap();
+        }
+
+        let outcome_resumed = run(
+            &workflow,
+            "two_lost_int",
+            initial_state,
+            &mut journal_int,
+            &mut activities_int,
+            &mut clock_int,
+        )
+        .expect("resumed run should dispatch both lost side effects in order and complete");
+
+        assert_eq!(outcome_resumed, outcome_ref);
+
+        let int_events = journal_int
+            .load_events("two_lost_int", 1)
+            .expect("load int events");
+        assert_eq!(
+            int_events.len(),
+            ref_events.len(),
+            "event count mismatch between resumed and reference run"
+        );
+        for (i, (int_ev, ref_ev)) in int_events.iter().zip(ref_events.iter()).enumerate() {
+            assert_eq!(int_ev.kind, ref_ev.kind, "event {i} kind mismatch");
+            assert_eq!(int_ev.seq, ref_ev.seq, "event {i} seq mismatch");
+            assert_eq!(
+                int_ev.payload_json, ref_ev.payload_json,
+                "event {i} payload mismatch"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Acceptance Test (c): In-flight activity #2 on a re-issued ID after #1 completed
+    // ------------------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ReissuedActivityState {
+        first_result: Option<f64>,
+        second_result: Option<f64>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ReissuedActivityWorkflow;
+
+    impl Workflow for ReissuedActivityWorkflow {
+        type Input = ();
+        type State = ReissuedActivityState;
+        type Output = String;
+
+        fn step(
+            &self,
+            state: &mut Self::State,
+            _ctx: &mut WorkflowContext,
+            event: Option<WorkflowEvent>,
+        ) -> StepDecision<Self::Output> {
+            match event {
+                None => StepDecision::ScheduleActivity {
+                    id: "fetch".to_string(),
+                    activity: ActivityRequest::Cost(CostRequest::QuerySpend {
+                        session_pattern: "req_1".to_string(),
+                    }),
+                },
+                Some(WorkflowEvent::ActivityCompleted { id, result }) => {
+                    if id == "fetch" && state.first_result.is_none() {
+                        if let ActivityResult::Cost(CostResult::Spend(v)) = result {
+                            state.first_result = Some(v);
+                            StepDecision::ScheduleActivity {
+                                id: "fetch".to_string(),
+                                activity: ActivityRequest::Cost(CostRequest::QuerySpend {
+                                    session_pattern: "req_2".to_string(),
+                                }),
+                            }
+                        } else {
+                            StepDecision::Fail {
+                                code: 1,
+                                reason: "bad res 1".to_string(),
+                            }
+                        }
+                    } else if id == "fetch" && state.first_result.is_some() {
+                        if let ActivityResult::Cost(CostResult::Spend(v)) = result {
+                            state.second_result = Some(v);
+                            StepDecision::Complete(format!(
+                                "first: {}, second: {}",
+                                state.first_result.unwrap(),
+                                v
+                            ))
+                        } else {
+                            StepDecision::Fail {
+                                code: 2,
+                                reason: "bad res 2".to_string(),
+                            }
+                        }
+                    } else {
+                        StepDecision::Fail {
+                            code: 3,
+                            reason: "unknown event".to_string(),
+                        }
+                    }
+                }
+                _ => StepDecision::Fail {
+                    code: 4,
+                    reason: "bad ev".to_string(),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn test_inflight_activity_on_reissued_id_after_completion() {
+        let workflow = ReissuedActivityWorkflow;
+        let initial_state = ReissuedActivityState {
+            first_result: None,
+            second_result: None,
+        };
+
+        let req1 = ActivityRequest::Cost(CostRequest::QuerySpend {
+            session_pattern: "req_1".to_string(),
+        });
+        let res1 = ActivityResult::Cost(CostResult::Spend(10.0));
+        let req2 = ActivityRequest::Cost(CostRequest::QuerySpend {
+            session_pattern: "req_2".to_string(),
+        });
+        let res2 = ActivityResult::Cost(CostResult::Spend(20.0));
+
+        // --- Run 1: Uninterrupted Reference Run ---
+        let mut journal_ref = InMemoryJournal::new();
+        let mut activities_ref = MockActivityRegistry::new();
+        activities_ref.register(req1.clone(), res1.clone());
+        activities_ref.register(req2.clone(), res2.clone());
+        let mut clock_ref = VirtualClock::new(1000);
+
+        let outcome_ref = run(
+            &workflow,
+            "reissued_act_ref",
+            initial_state.clone(),
+            &mut journal_ref,
+            &mut activities_ref,
+            &mut clock_ref,
+        )
+        .expect("ref run should complete");
+
+        assert_eq!(
+            outcome_ref,
+            RunnerOutcome::Completed("first: 10, second: 20".to_string())
+        );
+        let ref_events = journal_ref
+            .load_events("reissued_act_ref", 1)
+            .expect("load ref events");
+
+        // --- Run 2: Interrupted Run ---
+        // Pre-populate with first 3 events:
+        // 1. activity_scheduled fetch (req1)
+        // 2. activity_completed fetch (res1)
+        // 3. activity_scheduled fetch (req2)
+        // Kill lands right after activity #2 is scheduled, before completion is written!
+        let mut journal_int = InMemoryJournal::new();
+        let mut activities_int = MockActivityRegistry::new();
+        activities_int.register(req1, res1);
+        activities_int.register(req2, res2);
+        let mut clock_int = VirtualClock::new(1000);
+
+        for ev in ref_events.iter().take(3) {
+            journal_int.append_event("reissued_act_int", ev).unwrap();
+        }
+
+        let outcome_resumed = run(
+            &workflow,
+            "reissued_act_int",
+            initial_state,
+            &mut journal_int,
+            &mut activities_int,
+            &mut clock_int,
+        )
+        .expect("resumed run should complete in-flight activity #2 without ID collision");
+
+        assert_eq!(outcome_resumed, outcome_ref);
+
+        let int_events = journal_int
+            .load_events("reissued_act_int", 1)
+            .expect("load int events");
+        assert_eq!(
+            int_events.len(),
+            ref_events.len(),
+            "event count mismatch between resumed and reference run"
+        );
+        for (i, (int_ev, ref_ev)) in int_events.iter().zip(ref_events.iter()).enumerate() {
+            assert_eq!(int_ev.kind, ref_ev.kind, "event {i} kind mismatch");
+            assert_eq!(int_ev.seq, ref_ev.seq, "event {i} seq mismatch");
+            assert_eq!(
+                int_ev.payload_json, ref_ev.payload_json,
+                "event {i} payload mismatch"
+            );
+        }
     }
 }
