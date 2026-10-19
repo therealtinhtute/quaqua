@@ -703,10 +703,29 @@ pub fn run_grid_check(tab: &str, only: Option<&str>, owner: Option<&str>) -> Res
     run_reconcile(&mut driver, &opts, tab, None)
 }
 
+fn resolve_default_tab(explicit_tab: Option<&str>, owner: Option<&str>) -> String {
+    if let Some(t) = explicit_tab {
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    if let Ok(gt) = std::env::var("GRID_TAB") {
+        if !gt.is_empty() {
+            return gt;
+        }
+    }
+    if let Some(o) = owner {
+        if !o.is_empty() && o != "cos" {
+            return format!("{o}-workers");
+        }
+    }
+    "workers".to_string()
+}
+
 /// Deterministic engine activity executing agent grid operations.
 pub struct GridActivity<D = CliHerdrDriver> {
     driver: Mutex<D>,
-    default_tab: String,
+    default_tab: Option<String>,
     owner: Option<String>,
     deferred_statuses: Option<Vec<String>>,
 }
@@ -715,7 +734,7 @@ impl GridActivity<CliHerdrDriver> {
     pub fn new() -> Self {
         Self {
             driver: Mutex::new(CliHerdrDriver::new()),
-            default_tab: "workers".to_string(),
+            default_tab: None,
             owner: None,
             deferred_statuses: None,
         }
@@ -732,14 +751,14 @@ impl<D: HerdrDriver> GridActivity<D> {
     pub fn with_driver(driver: D) -> Self {
         Self {
             driver: Mutex::new(driver),
-            default_tab: "workers".to_string(),
+            default_tab: None,
             owner: None,
             deferred_statuses: None,
         }
     }
 
     pub fn with_default_tab(mut self, tab: impl Into<String>) -> Self {
-        self.default_tab = tab.into();
+        self.default_tab = Some(tab.into());
         self
     }
 
@@ -756,18 +775,26 @@ impl<D: HerdrDriver> GridActivity<D> {
 
 impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
     fn execute(&self, req: &ActivityRequest) -> Result<ActivityResult, ActivityError> {
+        let effective_owner = self
+            .owner
+            .clone()
+            .or_else(|| std::env::var("QUAQUA_OWNER").ok())
+            .unwrap_or_else(|| "cos".to_string());
+
         match req {
             ActivityRequest::Grid(GridRequest::Reconcile { tab, only }) => {
                 let mut driver = self
                     .driver
                     .lock()
                     .map_err(|e| ActivityError::ExecutionFailed(e.to_string()))?;
+                let target_tab = tab.as_deref().or(self.default_tab.as_deref());
+                let resolved_tab = resolve_default_tab(target_tab, Some(&effective_owner));
                 let opts = ReconcileOptions {
                     check: false,
                     repair: true,
-                    tab: tab.clone(),
+                    tab: Some(resolved_tab.clone()),
                     only: only.clone(),
-                    owner: self.owner.clone(),
+                    owner: Some(effective_owner),
                     dry_run: false,
                     timeout_sec: None,
                 };
@@ -775,9 +802,8 @@ impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
                     .deferred_statuses
                     .as_ref()
                     .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
-                let target_tab = tab.as_deref().unwrap_or(&self.default_tab);
                 let changed =
-                    reconcile_core(&mut *driver, &opts, target_tab, def_slices.as_deref())
+                    reconcile_core(&mut *driver, &opts, &resolved_tab, def_slices.as_deref())
                         .map_err(ActivityError::ExecutionFailed)?;
                 Ok(ActivityResult::Grid(GridResult::Reconciled { changed }))
             }
@@ -786,6 +812,8 @@ impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
                     .driver
                     .lock()
                     .map_err(|e| ActivityError::ExecutionFailed(e.to_string()))?;
+                let target_tab = tab.as_deref().or(self.default_tab.as_deref());
+                let resolved_tab = resolve_default_tab(target_tab, Some(&effective_owner));
                 let snap = driver.snapshot().map_err(ActivityError::ExecutionFailed)?;
                 let def_slices = self
                     .deferred_statuses
@@ -793,18 +821,16 @@ impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
                     .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
                 let ops = plan_with_deferred(&snap, def_slices.as_deref())
                     .map_err(ActivityError::ExecutionFailed)?;
-                let filtered_ops: Vec<Op> = if let Some(t) = tab {
-                    if !t.is_empty() {
-                        filter_ops_for_check(&ops, &snap, self.owner.as_deref(), None, Some(t))
-                            .into_iter()
-                            .cloned()
-                            .collect()
-                    } else {
-                        ops
-                    }
-                } else {
-                    ops
-                };
+                let filtered_ops: Vec<Op> = filter_ops_for_check(
+                    &ops,
+                    &snap,
+                    Some(&effective_owner),
+                    None,
+                    Some(&resolved_tab),
+                )
+                .into_iter()
+                .cloned()
+                .collect();
                 let json = serde_json::to_string(&filtered_ops)
                     .map_err(|e| ActivityError::ExecutionFailed(e.to_string()))?;
                 Ok(ActivityResult::Grid(GridResult::PlanJson(json)))
@@ -1188,6 +1214,62 @@ mod tests {
     }
 
     #[test]
+    fn test_reconcile_activity_mixed_working_and_idle() {
+        let mock = MockHerdrDriver {
+            snapshot: Snapshot {
+                panes: vec![
+                    make_worker("w1:t1:p1", "grp", Some("tab:other"), Some("working")),
+                    make_worker("w1:t1:p2", "grp", Some("tab:other"), Some("idle")),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let activity = GridActivity::with_driver(mock).with_owner("cos");
+        let req = ActivityRequest::Grid(GridRequest::Reconcile {
+            tab: Some("grp-workers".to_string()),
+            only: None,
+        });
+        let res = activity.execute(&req).unwrap();
+        assert_eq!(
+            res,
+            ActivityResult::Grid(GridResult::Reconciled { changed: true })
+        );
+
+        let driver = activity.driver.lock().unwrap();
+        // Working pane must NEVER be moved
+        assert!(
+            !driver.move_calls.iter().any(|(p, _)| p == "w1:t1:p1"),
+            "working pane w1:t1:p1 must not be moved"
+        );
+        // Idle pane must be moved
+        assert!(
+            driver.move_calls.iter().any(|(p, _)| p == "w1:t1:p2"),
+            "idle pane w1:t1:p2 must be moved"
+        );
+        // No split must be anchored on the working pane
+        for (_, target) in &driver.move_calls {
+            if let Target::Split { anchor, .. } = target {
+                assert_ne!(
+                    anchor, "w1:t1:p1",
+                    "split must not be anchored on working pane"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_default_tab_conventions() {
+        assert_eq!(resolve_default_tab(Some("custom-tab"), None), "custom-tab");
+        assert_eq!(
+            resolve_default_tab(None, Some("arch-p2")),
+            "arch-p2-workers"
+        );
+        assert_eq!(resolve_default_tab(None, Some("cos")), "workers");
+        assert_eq!(resolve_default_tab(None, None), "workers");
+    }
+
+    #[test]
     fn test_grid_activity_plan_json() {
         let mock = MockHerdrDriver {
             snapshot: Snapshot {
@@ -1199,7 +1281,9 @@ mod tests {
             },
             ..Default::default()
         };
-        let activity = GridActivity::with_driver(mock).with_owner("cos");
+        let activity = GridActivity::with_driver(mock)
+            .with_owner("cos")
+            .with_default_tab("grp-workers");
         let req = ActivityRequest::Grid(GridRequest::Plan { tab: None });
         let res = activity.execute(&req).unwrap();
         if let ActivityResult::Grid(GridResult::PlanJson(json)) = res {
