@@ -1,9 +1,13 @@
 //! Production system clock implementation for the Quaqua workflow engine.
 //!
-//! Provides [`SystemClock`], exposing real-time timestamps (`now_ms`)
-//! derived from the system clock since Unix epoch for production workflow execution.
+//! Provides [`SystemClock`] for timestamp queries and [`RealClock`] as the production
+//! implementation of [`RunnerClock`] for workflow execution with scheduled timers.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::engine::runner::RunnerClock;
 
 /// Real-time clock backed by [`SystemTime`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -26,6 +30,103 @@ impl SystemClock {
     /// Returns the current system time as [`SystemTime`].
     pub fn now(&self) -> SystemTime {
         SystemTime::now()
+    }
+}
+
+/// Real-time clock with scheduled timers implementing [`RunnerClock`].
+///
+/// Manages scheduled timers in an in-memory priority queue ordered by deadline.
+/// Timestamps are millisecond Unix timestamps derived from [`SystemTime`].
+/// When advancing to the next timer, sleeps the calling thread for the remaining
+/// duration rather than spinning.
+#[derive(Debug, Clone, Default)]
+pub struct RealClock {
+    // Min-heap ordered by (deadline_ms, insert_seq, timer_id)
+    timers: BinaryHeap<Reverse<(u64, u64, String)>>,
+    seq: u64,
+}
+
+impl RealClock {
+    /// Creates a new real-time clock instance with no scheduled timers.
+    pub fn new() -> Self {
+        Self {
+            timers: BinaryHeap::new(),
+            seq: 0,
+        }
+    }
+
+    /// Returns the current system time in milliseconds since Unix epoch.
+    pub fn now_ms(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Schedules a timer with an ID and relative duration.
+    pub fn schedule_timer(&mut self, id: &str, duration: Duration) {
+        let deadline = self.now_ms().saturating_add(duration.as_millis() as u64);
+        self.seq = self.seq.wrapping_add(1);
+        self.timers
+            .push(Reverse((deadline, self.seq, id.to_string())));
+    }
+
+    /// Advances real time to the earliest scheduled timer, if any, by sleeping the calling thread
+    /// until the deadline expires, then drains and returns all expired timer IDs.
+    ///
+    /// Returns `None` when no timers are scheduled.
+    pub fn advance_to_next_timer(&mut self) -> Option<(u64, Vec<String>)> {
+        if self.timers.is_empty() {
+            return None;
+        }
+
+        // Sleep until the earliest timer's deadline has passed without busy-waiting.
+        while let Some(Reverse((earliest_deadline, _, _))) = self.timers.peek() {
+            let now = self.now_ms();
+            if *earliest_deadline > now {
+                let delta = Duration::from_millis(earliest_deadline - now);
+                std::thread::sleep(delta);
+            } else {
+                break;
+            }
+        }
+
+        let now = self.now_ms();
+        let mut fired = Vec::new();
+        while let Some(Reverse((deadline, _, _))) = self.timers.peek() {
+            if *deadline <= now {
+                if let Some(Reverse((_, _, id))) = self.timers.pop() {
+                    fired.push(id);
+                }
+            } else {
+                break;
+            }
+        }
+
+        Some((now, fired))
+    }
+
+    /// Returns the number of scheduled timers waiting to fire.
+    pub fn pending_timers_count(&self) -> usize {
+        self.timers.len()
+    }
+}
+
+impl RunnerClock for RealClock {
+    fn now_ms(&self) -> u64 {
+        self.now_ms()
+    }
+
+    fn schedule_timer(&mut self, id: &str, duration: Duration) {
+        self.schedule_timer(id, duration);
+    }
+
+    fn advance_to_next_timer(&mut self) -> Option<(u64, Vec<String>)> {
+        self.advance_to_next_timer()
+    }
+
+    fn pending_timers_count(&self) -> usize {
+        self.pending_timers_count()
     }
 }
 
@@ -60,5 +161,103 @@ mod tests {
     fn test_system_clock_default() {
         let clock = SystemClock::default();
         assert!(clock.now_ms() > 0);
+    }
+
+    #[test]
+    fn test_real_clock_timer_advance_sleeps_bounded_wall_time() {
+        let mut clock = RealClock::new();
+        clock.schedule_timer("t-bounded", Duration::from_millis(40));
+        assert_eq!(clock.pending_timers_count(), 1);
+
+        let start = std::time::Instant::now();
+        let res = clock.advance_to_next_timer();
+        let elapsed = start.elapsed();
+        println!(
+            "test_real_clock_timer_advance_sleeps_bounded_wall_time: elapsed wall time = {:?}",
+            elapsed
+        );
+        let (fired_at, fired_ids) = res.unwrap();
+        assert!(fired_at > 0, "fired_at must be positive epoch timestamp");
+        assert_eq!(fired_ids, vec!["t-bounded"]);
+        assert!(
+            elapsed >= Duration::from_millis(30),
+            "advance took {:?}, expected >= 30ms wall time",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "advance took {:?}, expected < 1s wall time",
+            elapsed
+        );
+        assert_eq!(clock.pending_timers_count(), 0);
+    }
+
+    #[test]
+    fn test_real_clock_multiple_timers_ordering() {
+        let mut clock = RealClock::new();
+        // Schedule in non-deadline order: 80ms, 25ms, 50ms
+        clock.schedule_timer("t-long", Duration::from_millis(80));
+        clock.schedule_timer("t-short", Duration::from_millis(25));
+        clock.schedule_timer("t-med", Duration::from_millis(50));
+        assert_eq!(clock.pending_timers_count(), 3);
+
+        // First timer to expire must be t-short
+        let res1 = clock.advance_to_next_timer().expect("res1 should fire");
+        assert_eq!(res1.1, vec!["t-short"]);
+        assert_eq!(clock.pending_timers_count(), 2);
+
+        // Second timer to expire must be t-med
+        let res2 = clock.advance_to_next_timer().expect("res2 should fire");
+        assert_eq!(res2.1, vec!["t-med"]);
+        assert_eq!(clock.pending_timers_count(), 1);
+
+        // Third timer to expire must be t-long
+        let res3 = clock.advance_to_next_timer().expect("res3 should fire");
+        assert_eq!(res3.1, vec!["t-long"]);
+        assert_eq!(clock.pending_timers_count(), 0);
+
+        // Subsequent advance on empty clock returns None
+        assert_eq!(clock.advance_to_next_timer(), None);
+    }
+
+    #[test]
+    fn test_real_clock_pending_count_transitions() {
+        let mut clock = RealClock::new();
+        assert_eq!(clock.pending_timers_count(), 0);
+
+        clock.schedule_timer("timer-a", Duration::from_millis(15));
+        assert_eq!(clock.pending_timers_count(), 1);
+
+        clock.schedule_timer("timer-b", Duration::from_millis(30));
+        assert_eq!(clock.pending_timers_count(), 2);
+
+        let _ = clock.advance_to_next_timer();
+        assert_eq!(clock.pending_timers_count(), 1);
+
+        let _ = clock.advance_to_next_timer();
+        assert_eq!(clock.pending_timers_count(), 0);
+
+        assert_eq!(clock.advance_to_next_timer(), None);
+        assert_eq!(clock.pending_timers_count(), 0);
+    }
+
+    #[test]
+    fn test_real_clock_simultaneous_timers_drain_together() {
+        let mut clock = RealClock::new();
+        // Same duration, inserted sequentially
+        clock.schedule_timer("t1", Duration::from_millis(20));
+        clock.schedule_timer("t2", Duration::from_millis(20));
+        assert_eq!(clock.pending_timers_count(), 2);
+
+        let res = clock.advance_to_next_timer().expect("timers should fire");
+        assert_eq!(res.1, vec!["t1", "t2"]);
+        assert_eq!(clock.pending_timers_count(), 0);
+    }
+
+    #[test]
+    fn test_real_clock_implements_runner_clock() {
+        fn check_send_and_runner_clock<T: RunnerClock + Send>(_val: &T) {}
+        let clock = RealClock::new();
+        check_send_and_runner_clock(&clock);
     }
 }
