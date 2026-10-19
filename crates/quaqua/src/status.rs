@@ -254,12 +254,14 @@ pub fn scan_orchestration<H: HerdrOps>(
         let report_path = runs_dir.join(format!("{name}.md"));
         let report_exists = report_path.is_file();
 
-        // Heuristic: check if report file access time is at or before modified time.
-        // Assumption: requires filesystem with atime tracking enabled (not `noatime`).
-        // Note: incidental reads (e.g. auditor scans) can cause false negatives.
-        // Durable solution: quaqua-owned `.read` marker planned for W2.
-        let atime_unread = if report_exists {
-            if let Ok(meta) = std::fs::metadata(&report_path) {
+        // Check quaqua-owned `.read` marker first.
+        // If the marker exists (`runs/.<name>.read`), report has been consumed (is_unread = false).
+        // Fallback: check if report file access time is at or before modified time.
+        let read_marker_path = runs_dir.join(format!(".{name}.read"));
+        let is_unread = if report_exists {
+            if read_marker_path.exists() {
+                false
+            } else if let Ok(meta) = std::fs::metadata(&report_path) {
                 if let (Ok(atime), Ok(mtime)) = (meta.accessed(), meta.modified()) {
                     atime <= mtime
                 } else {
@@ -289,7 +291,7 @@ pub fn scan_orchestration<H: HerdrOps>(
         // 1. Orchestrator is inactive while its worker is still running.
         // 2. Report exists and nobody has read it (atime <= mtime).
         let waiter_lost_running = worker_running && owner_inactive;
-        let waiter_lost_report = report_exists && atime_unread;
+        let waiter_lost_report = report_exists && is_unread;
 
         if waiter_lost_running || waiter_lost_report {
             flags.push(WarningFlag::WaiterLost);
@@ -316,7 +318,7 @@ pub fn scan_orchestration<H: HerdrOps>(
 
         let report_status = if !report_exists {
             ReportStatus::None
-        } else if atime_unread {
+        } else if is_unread {
             ReportStatus::Unread
         } else {
             ReportStatus::Present
@@ -824,6 +826,49 @@ mod tests {
         );
         assert_eq!(e1.report_status, ReportStatus::Present);
         assert!(e1.flags.contains(&WarningFlag::DoneNotCleaned));
+    }
+    #[test]
+    fn test_status_read_marker_overrides_atime_unread() {
+        let tmp = temp_test_dir("read-marker-override");
+        let _cleaner = TempDirCleaner(tmp.clone());
+
+        let mock_json = r#"{
+            "result": {
+                "agents": [
+                    {"name": "arch-lead", "agent_status": "idle"},
+                    {"name": "sude-e1", "agent_status": "done"}
+                ]
+            }
+        }"#;
+        let mock = MockHerdr::new(mock_json);
+
+        fs::write(tmp.join("sude-e1.owner"), "arch-lead\n").unwrap();
+        let report_path = tmp.join("sude-e1.md");
+        fs::write(&report_path, "Goal: done\n## Lessons\nnone\n").unwrap();
+
+        // Force atime <= mtime (unaccessed heuristic)
+        let file = fs::File::open(&report_path).unwrap();
+        let now = std::time::SystemTime::now();
+        let mut times = fs::FileTimes::new();
+        times = times
+            .set_modified(now)
+            .set_accessed(now - Duration::from_secs(10));
+        file.set_times(times).unwrap();
+
+        // Write .read marker
+        fs::write(tmp.join(".sude-e1.read"), "").unwrap();
+
+        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let e1 = rows
+            .iter()
+            .find(|r| r.name == "sude-e1")
+            .expect("sude-e1 found");
+
+        assert!(
+            !e1.flags.contains(&WarningFlag::WaiterLost),
+            ".read marker must override atime heuristic and not flag WAITER-LOST"
+        );
+        assert_eq!(e1.report_status, ReportStatus::Present);
     }
 
     #[test]

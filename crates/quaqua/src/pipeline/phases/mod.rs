@@ -41,21 +41,6 @@ pub struct PipelineContext<'a, G: GitOps, H: HerdrOps> {
 }
 
 impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
-    pub fn run_grid_hook(&self) -> bool {
-        if std::env::var("GRID_SKIP").as_deref() == Ok("1")
-            && std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
-        {
-            return true;
-        }
-        match crate::grid::run_grid_repair(&self.grid_tab, Some(&self.grid_owner)) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("warning: grid check failed ({e}); arrange panes manually");
-                false
-            }
-        }
-    }
-
     pub fn finish(
         &self,
         state: &mut PipelineState,
@@ -128,7 +113,10 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
         }
     }
 
-    pub fn check_clock(&self, state: &mut PipelineState) -> Option<Result<StepResult, (i32, String)>> {
+    pub fn check_clock(
+        &self,
+        state: &mut PipelineState,
+    ) -> Option<Result<StepResult, (i32, String)>> {
         let el = state.start_elapsed + (now_sec() - self.inv_start);
         if el > self.max_sec {
             let b = format!(
@@ -229,12 +217,7 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
             let _prev_b = std::env::var("PROMPT_WORKER_BUDGET_SEC").ok();
             std::env::set_var("PROMPT_WORKER_BUDGET_SEC", budget.to_string());
             rc = match crate::worker::prompt::prompt_worker(
-                worker,
-                None,
-                true,
-                None,
-                self.git,
-                self.herdr,
+                worker, None, true, None, self.git, self.herdr,
             ) {
                 Ok(()) => 0,
                 Err((c, _)) => c,
@@ -273,17 +256,13 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
         let wt_path = Path::new(&state.wt);
         let rev_out = self.git.run_in(wt_path, &["rev-parse", "HEAD"]);
         let head = match rev_out {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).trim().to_string()
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => "?".to_string(),
         };
 
         let st_out = self.git.run_in(wt_path, &["status", "--porcelain"]);
         let dirty = match st_out {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).trim().to_string()
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => "?".to_string(),
         };
 
@@ -318,8 +297,9 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
                 if let Ok(rep_content) = std::fs::read_to_string(report_path) {
                     for line in rep_content.lines() {
                         let t = line.trim();
-                        if let Some(rest) =
-                            t.strip_prefix("Outcome:").or_else(|| t.strip_prefix("outcome:"))
+                        if let Some(rest) = t
+                            .strip_prefix("Outcome:")
+                            .or_else(|| t.strip_prefix("outcome:"))
                         {
                             let rest_upper = rest.trim().to_ascii_uppercase();
                             if rest_upper.starts_with("NO CHANGES")
@@ -402,8 +382,9 @@ pub fn has_real_blockers(content: &str) -> bool {
                 .unwrap_or(item);
 
             // Strip markdown emphasis (*, _, `), trailing dots/ellipsis, and whitespace
-            let core = first_part
-                .trim_matches(|c: char| c == '*' || c == '_' || c == '`' || c == '.' || c == '…' || c.is_whitespace());
+            let core = first_part.trim_matches(|c: char| {
+                c == '*' || c == '_' || c == '`' || c == '.' || c == '…' || c.is_whitespace()
+            });
             // If the declaration is "none" (e.g. "None", "None. All done...", "**None**. All 9..."),
             // it is an informational note, NOT a blocker.
             if !core.is_empty() && core.eq_ignore_ascii_case("none") {
@@ -584,9 +565,7 @@ pub fn file_mtime(path: &Path) -> u64 {
 pub fn iso_timestamp() -> String {
     let sec = now_sec();
     let dt = match Command::new("date").arg("-Iseconds").output() {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
         _ => {
             format!("{sec}")
         }

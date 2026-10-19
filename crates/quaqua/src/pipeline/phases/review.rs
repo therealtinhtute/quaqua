@@ -82,15 +82,6 @@ pub fn run_review<G: GitOps, H: HerdrOps>(
         let _ = std::fs::write(&ctx.pfile, pcontent);
     }
 
-    if !ctx.run_grid_hook() {
-        let b = format!(
-            "grid check failed for {revname} — arrange the panes per rules/_all/fanout-agent-grid.md, then 'quaqua pipeline --resume {} {}'",
-            ctx.task, state.repo
-        );
-        let _ = state.save(&ctx.state_file);
-        return ctx.finish(state, "blocked", 5, Some(&b));
-    }
-
     let review_prompt = format!(
         "Goal: review the diff for task '{}' and report findings with file:line evidence\nHard constraints: read-only — do not edit or create files outside ~/quaqua/runs; every finding must cite file:line in the diff.\nCurrent design (open to challenge): builder {bname} implemented the task on branch quaqua/{bname} — your worktree is on its tip; run 'git diff {}' for the full change. Original brief: {} (readable).\nUnknowns: whether the change meets the brief — verify correctness, missing tests, and scope creep against the diff, not the report.\nEvidence: a findings list, then the runs file MUST end with exactly one line: 'Verdict: clean' or 'Verdict: <N> findings'. Write to a temp file and rename it to ~/quaqua/runs/{revname}.md — publish atomically; reply only its path.\nPipeline phase: REVIEW (round {} of {})",
         ctx.task, state.base_sha, state.brief, state.round, state.rounds
@@ -100,9 +91,7 @@ pub fn run_review<G: GitOps, H: HerdrOps>(
     let rev_already_delivered = rev_report.is_file() && {
         let content = std::fs::read_to_string(&rev_report).unwrap_or_default();
         content.lines().any(|l| {
-            l.trim_start()
-                .to_ascii_lowercase()
-                .starts_with("verdict:")
+            l.trim_start().to_ascii_lowercase().starts_with("verdict:")
                 || l.trim().starts_with("## Challenge")
         })
     };
@@ -135,7 +124,6 @@ pub fn run_review<G: GitOps, H: HerdrOps>(
         } else {
             std::env::remove_var("GRID_SKIP");
         }
-        let _ = ctx.run_grid_hook();
     };
 
     if rev_content
@@ -150,7 +138,9 @@ pub fn run_review<G: GitOps, H: HerdrOps>(
         ));
         let _ = std::fs::write(&ctx.pfile, pcontent);
         cleanup_reviewer();
-        let b = format!("reviewer {revname} challenged the premise — Lead resolves the Challenge above");
+        let b = format!(
+            "reviewer {revname} challenged the premise — Lead resolves the Challenge above"
+        );
         return ctx.finish(state, "disputed", 0, Some(&b));
     }
 

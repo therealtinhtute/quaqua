@@ -4,23 +4,31 @@
 pub mod phases;
 pub mod state;
 
+use crate::engine::activities::SystemActivities;
 use crate::engine::activity::{
-    ActivityRequest, ActivityResult, ReportFileRequest, ReportFileResult,
+    Activity, ActivityError, ActivityRequest, ActivityResult, GitRequest, GitResult, GridRequest,
+    HerdrEventRequest, HerdrEventResult, HerdrRequest, ReportFileRequest, ReportFileResult,
 };
 use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
+use crate::engine::clock::RealClock;
+use crate::engine::journal::Journal;
+use crate::engine::journal_sqlite::SqliteJournal;
+use crate::engine::runner::{self, RunnerOptions, RunnerOutcome};
 use crate::engine::workflow::{StepDecision, Workflow, WorkflowContext, WorkflowEvent};
+use crate::worker::prompt::workflow::{SingleWorkerState, SingleWorkerWorkflow, WatchdogConfig};
 pub use phases::{
-    blocked_outcome, harness_of_kind, has_real_blockers, pipeline_finished,
-    select_default_reviewer, PipelineContext, StepResult,
+    blocked_outcome, file_mtime, harness_of_kind, has_real_blockers, log_blockers, log_challenge,
+    pipeline_finished, select_default_reviewer, PipelineContext, StepResult,
 };
 pub use state::{
     PipelineInput, PipelineOutput, PipelinePhase, PipelineState, PipelineWorkflowState,
     ReviewStrategy,
 };
+use std::collections::HashSet;
 
 use crate::cap::count_owner_slots;
 use crate::config::load_team_config;
-use crate::git::Git;
+use crate::git::{Git, GitOps};
 use crate::herdr::Herdr;
 use crate::util::now_sec;
 use crate::worker::cleanup::default_runs_dir;
@@ -115,6 +123,163 @@ pub fn resolve_project_slug_from_repo(repo: &Path) -> Option<String> {
     None
 }
 
+struct PipelineActivities {
+    system: SystemActivities,
+}
+
+impl Activity for PipelineActivities {
+    fn execute(&self, req: &ActivityRequest) -> Result<ActivityResult, ActivityError> {
+        match req {
+            ActivityRequest::HerdrEvents(HerdrEventRequest::Subscribe { agent, .. }) => {
+                match self.system.execute(req) {
+                    Ok(res) => Ok(res),
+                    Err(_) => Ok(ActivityResult::HerdrEvents(HerdrEventResult::Subscribed {
+                        agent: agent.clone(),
+                    })),
+                }
+            }
+            ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor { agent }) => {
+                match self.system.execute(req) {
+                    Ok(res) => Ok(res),
+                    Err(_) => Ok(ActivityResult::HerdrEvents(
+                        HerdrEventResult::ScopedEvents {
+                            agent: agent.clone(),
+                            events: Vec::new(),
+                        },
+                    )),
+                }
+            }
+            ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents) => {
+                match self.system.execute(req) {
+                    Ok(res) => Ok(res),
+                    Err(_) => Ok(ActivityResult::HerdrEvents(HerdrEventResult::Events(
+                        Vec::new(),
+                    ))),
+                }
+            }
+            ActivityRequest::HerdrEvents(HerdrEventRequest::Unsubscribe { agent }) => {
+                let _ = self.system.execute(req);
+                Ok(ActivityResult::HerdrEvents(
+                    HerdrEventResult::Unsubscribed {
+                        agent: agent.clone(),
+                    },
+                ))
+            }
+            ActivityRequest::ReportFile(ReportFileRequest::CheckMtime { .. }) => {
+                match self.system.execute(req) {
+                    Ok(res) => Ok(res),
+                    Err(ActivityError::NotFound(_)) => {
+                        Ok(ActivityResult::ReportFile(ReportFileResult::MtimeMs(0)))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            ActivityRequest::Git(GitRequest::DiffHash { .. }) => match self.system.execute(req) {
+                Ok(res) => Ok(res),
+                Err(_) => Ok(ActivityResult::Git(GitResult::DiffHash {
+                    hash: String::new(),
+                    stat: String::new(),
+                })),
+            },
+            ActivityRequest::Herdr(HerdrRequest::AgentInfo { name }) => {
+                match self.system.execute(req) {
+                    Ok(res) => Ok(res),
+                    Err(_) => Ok(ActivityResult::Herdr(
+                        crate::engine::activity::HerdrResult::AgentInfo {
+                            name: name.clone(),
+                            status: "working".to_string(),
+                            harness: None,
+                            hook_active: false,
+                        },
+                    )),
+                }
+            }
+            _ => self.system.execute(req),
+        }
+    }
+}
+
+fn seed_state_from_pipeline_state(
+    input: PipelineInput,
+    state: &PipelineState,
+) -> PipelineWorkflowState {
+    let mut init_state = PipelineWorkflowState::new(input);
+    match state.phase.as_str() {
+        "plan" => init_state.phase = PipelinePhase::Plan,
+        "build" => init_state.phase = PipelinePhase::Build,
+        "review" => {
+            init_state.phase = PipelinePhase::Review;
+            init_state.round = state.round.max(1);
+        }
+        "fix" => {
+            init_state.phase = PipelinePhase::Fix;
+            init_state.round = state.round.max(1);
+        }
+        _ => {}
+    }
+    init_state.round = state.round.max(if state.phase == "review" { 1 } else { 0 });
+    init_state.rounds_run = state.rounds_run;
+    init_state.last_findings = state.last_findings;
+    init_state.review_changed = state.review_changed;
+    if !state.head_sha.is_empty() {
+        init_state.head_sha = Some(state.head_sha.clone());
+    }
+    if !state.planfile.is_empty() {
+        init_state.planfile = Some(state.planfile.clone());
+    }
+    init_state
+}
+
+fn watchdog_config_from_env(expect_verdict: bool, is_fallback_idle: bool) -> WatchdogConfig {
+    let mut config = WatchdogConfig::default();
+    config.expect_verdict = expect_verdict;
+    config.is_fallback_idle = is_fallback_idle;
+
+    if let Some(p) = std::env::var("PROMPT_WORKER_POLL_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        config.poll_sec = p;
+    }
+    if let Some(s) = std::env::var("PROMPT_WORKER_STALL_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        config.stall_sec = s;
+    }
+    if let Some(i) = std::env::var("PROMPT_WORKER_IDLE_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        config.idle_sec = i;
+    }
+    if let Some(f) = std::env::var("PROMPT_WORKER_IDLE_FALLBACK_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        config.idle_fallback_sec = f;
+    }
+    if let Some(g) = std::env::var("PROMPT_WORKER_AGENT_GONE_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        config.gone_sec = g;
+    }
+    if let Some(m) = std::env::var("PROMPT_WORKER_MAX_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        config.hard_cap_sec = m;
+    }
+    if let Some(n) = std::env::var("PROMPT_WORKER_NUDGE_PCT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        config.nudge_pct = n;
+    }
+    config
+}
+
 pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, String)> {
     let inv_start = now_sec();
     let runs_dir = default_runs_dir();
@@ -150,8 +315,8 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
     let repo_path: PathBuf;
     let state_file: PathBuf;
     let pfile: PathBuf;
-
-    if !args.is_empty() && args[0] == "--resume" {
+    let is_resume = !args.is_empty() && args[0] == "--resume";
+    if is_resume {
         let mut resume_rounds: Option<u32> = None;
         let mut pos = Vec::new();
         let mut i = 1;
@@ -548,32 +713,1055 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         grid_owner,
     };
 
-    // Phase machine loop
+    let db_path = runs_dir.join("quaqua.db");
+    let mut journal = SqliteJournal::open(&db_path).map_err(|e| {
+        (
+            1,
+            format!("cannot open sqlite journal {}: {e}\n", db_path.display()),
+        )
+    })?;
+    let mut activities = PipelineActivities {
+        system: SystemActivities::with_adapters(herdr.clone(), git.clone(), &repo_path),
+    };
+    let mut clock = RealClock::new();
+    let workflow = PipelineWorkflow::new();
+    let parent_wf_id = format!("pipeline:{}", task);
+
+    let abs_brief_path = match std::fs::canonicalize(&state.brief) {
+        Ok(p) => p,
+        Err(_) => PathBuf::from(&state.brief),
+    };
+
+    let review_strategy = match state.review.as_str() {
+        "always" => ReviewStrategy::Always,
+        "skip" => ReviewStrategy::Skip,
+        _ => ReviewStrategy::Auto,
+    };
+
+    let input = PipelineInput {
+        task: task.clone(),
+        repo: repo_path.to_string_lossy().to_string(),
+        builder: state.builder.clone(),
+        reviewer: state.reviewer.clone(),
+        brief: ctx.brief_text.clone(),
+        brief_path: abs_brief_path.to_string_lossy().to_string(),
+        base: state.base.clone(),
+        review_strategy,
+        max_rounds: state.rounds,
+        plan_budget_sec: plan_budget,
+        build_budget_sec: build_budget,
+        review_budget_sec: review_budget,
+        fix_budget_sec: fix_budget,
+    };
+
+    let parent_events = journal
+        .load_events(&parent_wf_id, 1)
+        .map_err(|e| (1, format!("journal error: {e}\n")))?;
+
+    let runner_opts = RunnerOptions {
+        snapshot_at_blocked: false,
+        ..Default::default()
+    };
+
+    let mut parent_outcome = if !is_resume {
+        let initial_state = PipelineWorkflowState::new(input.clone());
+        runner::run_until_blocked(
+            &workflow,
+            &parent_wf_id,
+            Some(initial_state),
+            &mut journal,
+            &mut activities,
+            &mut clock,
+            &runner_opts,
+            Vec::new(),
+        )
+        .map_err(|e| (1, format!("workflow error: {e}\n")))?
+    } else if parent_events.is_empty() {
+        let mut init_state = PipelineWorkflowState::new(input.clone());
+        match state.phase.as_str() {
+            "plan" => init_state.phase = PipelinePhase::Plan,
+            "build" => init_state.phase = PipelinePhase::Build,
+            "review" => {
+                init_state.phase = PipelinePhase::Review;
+                init_state.round = state.round.max(1);
+            }
+            "fix" => {
+                init_state.phase = PipelinePhase::Fix;
+                init_state.round = state.round.max(1);
+            }
+            _ => {}
+        }
+        init_state.round = state.round;
+        init_state.rounds_run = state.rounds_run;
+        init_state.last_findings = state.last_findings;
+        init_state.review_changed = state.review_changed;
+        if !state.head_sha.is_empty() {
+            init_state.head_sha = Some(state.head_sha.clone());
+        }
+        if !state.planfile.is_empty() {
+            init_state.planfile = Some(state.planfile.clone());
+        }
+        runner::run_until_blocked(
+            &workflow,
+            &parent_wf_id,
+            Some(init_state),
+            &mut journal,
+            &mut activities,
+            &mut clock,
+            &runner_opts,
+            Vec::new(),
+        )
+        .map_err(|e| (1, format!("workflow error: {e}\n")))?
+    } else {
+        let is_plan_gate = parent_events
+            .iter()
+            .rev()
+            .any(|e| e.kind == "pause_for_approval")
+            && !parent_events
+                .iter()
+                .rev()
+                .any(|e| e.kind == "approval_resolved");
+        let incoming = if is_plan_gate {
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: None,
+            }]
+        } else {
+            vec![]
+        };
+        let mut init_state = PipelineWorkflowState::new(input.clone());
+        match state.phase.as_str() {
+            "plan" => init_state.phase = PipelinePhase::Plan,
+            "build" => init_state.phase = PipelinePhase::Build,
+            "review" => {
+                init_state.phase = PipelinePhase::Review;
+                init_state.round = state.round.max(1);
+            }
+            "fix" => {
+                init_state.phase = PipelinePhase::Fix;
+                init_state.round = state.round.max(1);
+            }
+            _ => {}
+        }
+        init_state.round = state.round;
+        init_state.rounds_run = state.rounds_run;
+        init_state.last_findings = state.last_findings;
+        init_state.review_changed = state.review_changed;
+        if !state.head_sha.is_empty() {
+            init_state.head_sha = Some(state.head_sha.clone());
+        }
+        if !state.planfile.is_empty() {
+            init_state.planfile = Some(state.planfile.clone());
+        }
+        runner::run_until_blocked(
+            &workflow,
+            &parent_wf_id,
+            Some(init_state),
+            &mut journal,
+            &mut activities,
+            &mut clock,
+            &runner_opts,
+            incoming,
+        )
+        .map_err(|e| (1, format!("workflow error: {e}\n")))?
+    };
+
     loop {
         if let Some(res) = ctx.check_clock(&mut state) {
             return res.map(|_| ());
         }
 
-        let step = match state.phase.as_str() {
-            "spawn" => phases::spawn::run_spawn(&mut state, &ctx)?,
-            "plan" => phases::plan::run_plan(&mut state, &ctx)?,
-            "build" => phases::build::run_build(&mut state, &ctx)?,
-            "review" => phases::review::run_review(&mut state, &ctx)?,
-            "fix" => phases::fix::run_fix(&mut state, &ctx)?,
-            _ => {
-                return Err((
-                    1,
-                    format!(
-                        "corrupt state: phase={} ({})\n",
-                        state.phase,
-                        ctx.state_file.display()
-                    ),
-                ));
+        match parent_outcome {
+            RunnerOutcome::Completed(out) => {
+                if let Some(c) = out.commit {
+                    state.commit = if c.len() >= 7 { c[..7].to_string() } else { c };
+                }
+                state.rounds_run = out.rounds;
+                state.review_changed = out.review_changed;
+                let b = if out.status == "disputed" {
+                    Some("disputed")
+                } else {
+                    None
+                };
+                return ctx.finish(&mut state, &out.status, 0, b).map(|_| ());
             }
-        };
+            RunnerOutcome::Failed { code, reason } => {
+                let actual_code = if reason.contains("review rounds exhausted") {
+                    0
+                } else {
+                    code
+                };
+                return ctx
+                    .finish(&mut state, "blocked", actual_code, Some(&reason))
+                    .map(|_| ());
+            }
+            RunnerOutcome::Blocked(reason) => {
+                if reason.starts_with("pause_for_approval") {
+                    let bname = format!("{}-{}", state.builder, ctx.task);
+                    let cur_md = ctx.runs_dir.join(format!("{bname}.md"));
+                    let plan_path = ctx.runs_dir.join(format!("{bname}.plan.md"));
+                    if cur_md.exists() {
+                        let _ = std::fs::rename(&cur_md, &plan_path);
+                    }
+                    let _ = std::fs::write(ctx.runs_dir.join(format!(".{bname}.read")), "");
+                    eprintln!(
+                        "PIPELINE plan-ready: approve {} then resume: quaqua pipeline --resume {} {}",
+                        plan_path.display(),
+                        ctx.task,
+                        state.repo
+                    );
+                    state.phase = "build".to_string();
+                    state.planfile = plan_path.to_string_lossy().to_string();
+                    state.prompted = 0;
+                    let _ = state.save(&ctx.state_file);
+                    return ctx.finish(&mut state, "plan-ready", 5, None).map(|_| ());
+                }
 
-        if let StepResult::Done = step {
-            return Ok(());
+                let all_events = journal
+                    .load_events(&parent_wf_id, 1)
+                    .map_err(|e| (1, format!("journal error: {e}\n")))?;
+                let mut completed_children = HashSet::new();
+                for rec in &all_events {
+                    if rec.kind == "child_completed" || rec.kind == "child_failed" {
+                        if let Ok(data) =
+                            serde_json::from_str::<serde_json::Value>(&rec.payload_json)
+                        {
+                            if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
+                                completed_children.insert(id.to_string());
+                            }
+                        }
+                    }
+                }
+
+                let mut pending_child: Option<(String, String, SingleWorkerInput)> = None;
+                for rec in &all_events {
+                    if rec.kind == "child_started" {
+                        if let Ok(data) =
+                            serde_json::from_str::<serde_json::Value>(&rec.payload_json)
+                        {
+                            let id = data
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let wf_type = data
+                                .get("workflow_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if !completed_children.contains(&id) {
+                                if let Some(input_val) = data.get("input") {
+                                    if let Ok(worker_in) = serde_json::from_value::<SingleWorkerInput>(
+                                        input_val.clone(),
+                                    ) {
+                                        pending_child = Some((id, wf_type, worker_in));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let Some((child_id, _wf_type, mut child_input)) = pending_child else {
+                    return Err((
+                        1,
+                        format!("pipeline blocked with no pending child or approval: {reason}\n"),
+                    ));
+                };
+
+                let is_reviewer = child_id.contains("-review-");
+
+                let el = state.start_elapsed + (now_sec() - ctx.inv_start);
+                let rem = if ctx.max_sec > el {
+                    ctx.max_sec - el
+                } else {
+                    0
+                };
+                let mut budget = if rem < child_input.budget_sec {
+                    rem
+                } else {
+                    child_input.budget_sec
+                };
+                if budget < 1 {
+                    budget = 1;
+                }
+                child_input.budget_sec = budget;
+                let mut is_fresh_spawn = false;
+                if is_reviewer {
+                    if state.round == 0 {
+                        state.round = 1;
+                    }
+                    if state.reviewer_spawned == 0 {
+                        is_fresh_spawn = true;
+                        let rev_report = ctx.runs_dir.join(format!("{}.md", child_input.name));
+                        if rev_report.is_file() {
+                            ctx.archive_stale(&rev_report);
+                        }
+
+                        let sargs = vec![
+                            "--review".to_string(),
+                            "--base".to_string(),
+                            state.head_sha.clone(),
+                            child_input.name.clone(),
+                            state.reviewer.clone(),
+                            state.repo.clone(),
+                        ];
+                        let prev_pt = std::env::var("PIPELINE_TASK").ok();
+                        let prev_qo = std::env::var("QUAQUA_OWNER").ok();
+                        let prev_gs = std::env::var("GRID_SKIP").ok();
+
+                        std::env::set_var("PIPELINE_TASK", &ctx.task);
+                        std::env::set_var(
+                            "QUAQUA_OWNER",
+                            if state.lead.is_empty() {
+                                "cos"
+                            } else {
+                                &state.lead
+                            },
+                        );
+                        std::env::set_var("GRID_SKIP", "1");
+
+                        let spawn_res = (|| -> Result<(), (i32, String)> {
+                            let opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
+                            crate::worker::spawn::spawn_worker(opts, &ctx.cfg, ctx.git, ctx.herdr)
+                        })();
+
+                        if let Some(pt) = prev_pt {
+                            std::env::set_var("PIPELINE_TASK", pt);
+                        } else {
+                            std::env::remove_var("PIPELINE_TASK");
+                        }
+                        if let Some(qo) = prev_qo {
+                            std::env::set_var("QUAQUA_OWNER", qo);
+                        } else {
+                            std::env::remove_var("QUAQUA_OWNER");
+                        }
+                        if let Some(gs) = prev_gs {
+                            std::env::set_var("GRID_SKIP", gs);
+                        } else {
+                            std::env::remove_var("GRID_SKIP");
+                        }
+
+                        if spawn_res.is_err() {
+                            let b = format!(
+                                "worker spawn failed for reviewer {} — fix the cause, then 'quaqua pipeline --resume {} {}'",
+                                child_input.name, ctx.task, state.repo
+                            );
+                            return ctx.finish(&mut state, "blocked", 3, Some(&b)).map(|_| ());
+                        }
+                        state.reviewer_spawned = 1;
+                        let _ = state.save(&ctx.state_file);
+
+                        let mut pcontent = std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                        pcontent.push_str(&format!(
+                            "- review round {}: {} spawned on {} (quaqua/{}-{} tip)\n",
+                            state.round, child_input.name, state.head_sha, state.builder, ctx.task
+                        ));
+                        let _ = std::fs::write(&ctx.pfile, pcontent);
+                    }
+                } else {
+                    let bname = format!("{}-{}", state.builder, ctx.task);
+                    if state.builder_spawned == 0 {
+                        is_fresh_spawn = true;
+                        let mut sargs = Vec::new();
+                        if !state.base.is_empty() {
+                            sargs.push("--base".to_string());
+                            sargs.push(state.base.clone());
+                        }
+                        sargs.push(bname.clone());
+                        sargs.push(state.builder.clone());
+                        sargs.push(state.repo.clone());
+
+                        let prev_pt = std::env::var("PIPELINE_TASK").ok();
+                        let prev_qo = std::env::var("QUAQUA_OWNER").ok();
+                        let prev_gs = std::env::var("GRID_SKIP").ok();
+
+                        std::env::set_var("PIPELINE_TASK", &ctx.task);
+                        std::env::set_var(
+                            "QUAQUA_OWNER",
+                            if state.lead.is_empty() {
+                                "cos"
+                            } else {
+                                &state.lead
+                            },
+                        );
+                        std::env::set_var("GRID_SKIP", "1");
+
+                        let spawn_res = (|| -> Result<(), (i32, String)> {
+                            let opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
+                            crate::worker::spawn::spawn_worker(opts, &ctx.cfg, ctx.git, ctx.herdr)
+                        })();
+
+                        if let Some(pt) = prev_pt {
+                            std::env::set_var("PIPELINE_TASK", pt);
+                        } else {
+                            std::env::remove_var("PIPELINE_TASK");
+                        }
+                        if let Some(qo) = prev_qo {
+                            std::env::set_var("QUAQUA_OWNER", qo);
+                        } else {
+                            std::env::remove_var("QUAQUA_OWNER");
+                        }
+                        if let Some(gs) = prev_gs {
+                            std::env::set_var("GRID_SKIP", gs);
+                        } else {
+                            std::env::remove_var("GRID_SKIP");
+                        }
+
+                        if spawn_res.is_err() {
+                            let b = format!(
+                                "worker spawn failed for builder {bname} — fix the cause, then 'quaqua pipeline --resume {} {}'",
+                                ctx.task, state.repo
+                            );
+                            return ctx.finish(&mut state, "blocked", 3, Some(&b)).map(|_| ());
+                        }
+                        state.builder_spawned = 1;
+                        let _ = state.save(&ctx.state_file);
+
+                        let wt_path = Path::new(&state.wt);
+                        let rev_out = ctx.git.run_in(wt_path, &["rev-parse", "HEAD"]);
+                        let head = rev_out
+                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        state.base_sha = head;
+                        let _ = state.save(&ctx.state_file);
+
+                        let mut pcontent = std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                        pcontent.push_str(&format!(
+                            "- builder {bname} spawned (base {})\n",
+                            state.base_sha
+                        ));
+                        let _ = std::fs::write(&ctx.pfile, pcontent);
+                    }
+                }
+
+                if is_fresh_spawn || state.phase == "spawn" {
+                    let prev_qo = std::env::var("QUAQUA_OWNER").ok();
+                    let prev_pr = std::env::var("PIPELINE_REPO").ok();
+                    std::env::set_var("QUAQUA_OWNER", &ctx.grid_owner);
+                    std::env::set_var("PIPELINE_REPO", repo_path.to_string_lossy().to_string());
+
+                    let grid_res = if std::env::var("GRID_SKIP").as_deref() == Ok("1")
+                        && std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
+                    {
+                        Ok(crate::engine::activity::ActivityResult::Grid(
+                            crate::engine::activity::GridResult::Reconciled { changed: false },
+                        ))
+                    } else {
+                        activities.execute(&ActivityRequest::Grid(GridRequest::Reconcile {
+                            tab: Some(ctx.grid_tab.clone()),
+                            only: None,
+                        }))
+                    };
+
+                    if let Some(qo) = prev_qo {
+                        std::env::set_var("QUAQUA_OWNER", qo);
+                    } else {
+                        std::env::remove_var("QUAQUA_OWNER");
+                    }
+                    if let Some(pr) = prev_pr {
+                        std::env::set_var("PIPELINE_REPO", pr);
+                    } else {
+                        std::env::remove_var("PIPELINE_REPO");
+                    }
+
+                    if let Err(e) = grid_res {
+                        eprintln!("warning: grid check failed ({e}); arrange panes manually");
+                        let b = format!(
+                            "grid check failed for {} — arrange the pane per rules/_all/fanout-agent-grid.md, then 'quaqua pipeline --resume {} {}'",
+                            child_input.name, ctx.task, state.repo
+                        );
+                        state.prompted = 0;
+                        let _ = state.save(&ctx.state_file);
+                        let code = if is_fresh_spawn { 5 } else { 1 };
+                        return ctx
+                            .finish(&mut state, "blocked", code, Some(&b))
+                            .map(|_| ());
+                    }
+                }
+
+                let child_wf_id = format!("pipeline:{}:{}", ctx.task, child_id);
+                let child_events = journal
+                    .load_events(&child_wf_id, 1)
+                    .map_err(|e| (1, format!("journal error: {e}\n")))?;
+
+                let mut child_completed_out = None;
+                let mut child_failed_out = None;
+
+                for rec in &child_events {
+                    if rec.kind == "workflow_completed" {
+                        if let Ok(out) =
+                            serde_json::from_str::<SingleWorkerOutput>(&rec.payload_json)
+                        {
+                            if out.exit == 0 {
+                                child_completed_out = Some(out);
+                            }
+                        }
+                    } else if rec.kind == "workflow_failed" {
+                        if let Ok(val) =
+                            serde_json::from_str::<serde_json::Value>(&rec.payload_json)
+                        {
+                            let code = val.get("code").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+                            let reason = val
+                                .get("reason")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("failed")
+                                .to_string();
+                            child_failed_out = Some((code, reason));
+                        }
+                    }
+                }
+
+                let child_report_path = ctx.runs_dir.join(format!("{}.md", child_input.name));
+                if child_report_path.is_file()
+                    && state.prompt_ts > 0
+                    && file_mtime(&child_report_path) < state.prompt_ts
+                {
+                    ctx.archive_stale(&child_report_path);
+                }
+                let child_outcome = if let Some(out) = child_completed_out {
+                    RunnerOutcome::Completed(out)
+                } else if let Some((code, reason)) = child_failed_out {
+                    RunnerOutcome::Failed { code, reason }
+                } else {
+                    let _prev_b = std::env::var("PROMPT_WORKER_BUDGET_SEC").ok();
+                    std::env::set_var("PROMPT_WORKER_BUDGET_SEC", budget.to_string());
+
+                    let already_delivered = child_report_path.is_file() && {
+                        let content =
+                            std::fs::read_to_string(&child_report_path).unwrap_or_default();
+                        crate::worker::prompt::watchdog::validate_report_content(
+                            &content,
+                            is_reviewer,
+                        )
+                        .is_ok()
+                            || content
+                                .lines()
+                                .any(|l| l.trim().starts_with("## Challenge"))
+                    };
+
+                    let res = if already_delivered {
+                        RunnerOutcome::Completed(
+                            SingleWorkerOutput::new(0, &child_report_path).unwrap(),
+                        )
+                    } else if child_events.is_empty() {
+                        if state.prompted == 0 {
+                            if std::env::var("GRID_SKIP").as_deref() != Ok("1")
+                                || (std::env::var("PIPELINE_TASK").is_err()
+                                    && std::env::var("QUAQUA_TEST").as_deref() != Ok("1"))
+                            {
+                                let prev_qo = std::env::var("QUAQUA_OWNER").ok();
+                                let prev_pr = std::env::var("PIPELINE_REPO").ok();
+                                std::env::set_var("QUAQUA_OWNER", &ctx.grid_owner);
+                                std::env::set_var(
+                                    "PIPELINE_REPO",
+                                    repo_path.to_string_lossy().to_string(),
+                                );
+
+                                let grid_check_res =
+                                    activities.execute(&ActivityRequest::Grid(GridRequest::Plan {
+                                        tab: Some(ctx.grid_tab.clone()),
+                                    }));
+
+                                if let Some(qo) = prev_qo {
+                                    std::env::set_var("QUAQUA_OWNER", qo);
+                                } else {
+                                    std::env::remove_var("QUAQUA_OWNER");
+                                }
+                                if let Some(pr) = prev_pr {
+                                    std::env::set_var("PIPELINE_REPO", pr);
+                                } else {
+                                    std::env::remove_var("PIPELINE_REPO");
+                                }
+
+                                if let Err(e) = grid_check_res {
+                                    eprintln!(
+                                        "warning: grid check failed ({e}); arrange panes manually"
+                                    );
+                                    let b = format!(
+                                        "grid check failed for {} ({e}); arrange panes manually before prompting",
+                                        child_input.name
+                                    );
+                                    state.prompted = 0;
+                                    let _ = state.save(&ctx.state_file);
+                                    return ctx
+                                        .finish(&mut state, "blocked", 1, Some(&b))
+                                        .map(|_| ());
+                                }
+                            }
+
+                            if child_report_path.exists() {
+                                ctx.archive_stale(&child_report_path);
+                            }
+
+                            let _ = std::fs::write(
+                                ctx.runs_dir.join(format!(".{}.budget", child_input.name)),
+                                format!("{budget}\n"),
+                            );
+                            let _ = std::fs::remove_file(
+                                ctx.runs_dir.join(format!(".{}.elapsed", child_input.name)),
+                            );
+                            let _ = std::fs::remove_file(
+                                ctx.runs_dir.join(format!(".{}.grace", child_input.name)),
+                            );
+                            let _ = std::fs::remove_file(
+                                ctx.runs_dir.join(format!(".{}.nudged", child_input.name)),
+                            );
+                            let _ = std::fs::remove_file(
+                                ctx.runs_dir.join(format!(".{}.autoext", child_input.name)),
+                            );
+
+                            let prompt_body = format!(
+                                    "{}. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/{}.md (publish it atomically, never a partial file); reply only the path.",
+                                    child_input.brief, child_input.name
+                                );
+                            let prompt_res =
+                                activities.execute(&ActivityRequest::Herdr(HerdrRequest::Prompt {
+                                    name: child_input.name.clone(),
+                                    task: prompt_body,
+                                }));
+                            if let Err(e) = prompt_res {
+                                let b = format!(
+                                        "prompt failed for {} ({e}) — check the worker, then 'quaqua pipeline --resume {} {}'",
+                                        child_input.name, ctx.task, state.repo
+                                    );
+                                state.prompted = 0;
+                                let _ = state.save(&ctx.state_file);
+                                return ctx.finish(&mut state, "blocked", 1, Some(&b)).map(|_| ());
+                            }
+                            state.prompted = 1;
+                            state.prompt_ts = now_sec();
+                            let _ = state.save(&ctx.state_file);
+                        } else if child_report_path.is_file()
+                            && file_mtime(&child_report_path) < state.prompt_ts
+                        {
+                            ctx.archive_stale(&child_report_path);
+                        }
+
+                        let child_wf = SingleWorkerWorkflow::new();
+                        let is_fallback = child_input.kind.contains("opencode")
+                            || child_input.kind.contains("omp");
+                        let config = watchdog_config_from_env(is_reviewer, is_fallback);
+                        eprintln!(
+                            "waiting for {} (poll {}s, stall {}s, idle {}s, budget {}s, cap {}s)",
+                            child_report_path.display(),
+                            config.poll_sec,
+                            config.stall_sec,
+                            config.idle_sec,
+                            budget,
+                            config.hard_cap_sec
+                        );
+                        let child_state = SingleWorkerState::new(child_input.clone())
+                            .with_report_path(&child_report_path)
+                            .with_config(config);
+                        runner::run_until_blocked(
+                            &child_wf,
+                            &child_wf_id,
+                            Some(child_state),
+                            &mut journal,
+                            &mut activities,
+                            &mut clock,
+                            &runner_opts,
+                            Vec::new(),
+                        )
+                        .map_err(|e| (1, format!("child runner error: {e}\n")))?
+                    } else {
+                        if child_report_path.is_file()
+                            && file_mtime(&child_report_path) < state.prompt_ts
+                        {
+                            ctx.archive_stale(&child_report_path);
+                        }
+                        let child_wf = SingleWorkerWorkflow::new();
+                        let is_fallback = child_input.kind.contains("opencode")
+                            || child_input.kind.contains("omp");
+                        let config = watchdog_config_from_env(is_reviewer, is_fallback);
+                        eprintln!(
+                            "waiting for {} (poll {}s, stall {}s, idle {}s, budget {}s, cap {}s)",
+                            child_report_path.display(),
+                            config.poll_sec,
+                            config.stall_sec,
+                            config.idle_sec,
+                            budget,
+                            config.hard_cap_sec
+                        );
+                        let child_state = SingleWorkerState::new(child_input.clone())
+                            .with_report_path(&child_report_path)
+                            .with_config(config);
+                        runner::run_until_blocked(
+                            &child_wf,
+                            &child_wf_id,
+                            Some(child_state),
+                            &mut journal,
+                            &mut activities,
+                            &mut clock,
+                            &runner_opts,
+                            Vec::new(),
+                        )
+                        .map_err(|e| (1, format!("child resume error: {e}\n")))?
+                    };
+
+                    if let Some(pb) = _prev_b {
+                        std::env::set_var("PROMPT_WORKER_BUDGET_SEC", pb);
+                    } else {
+                        std::env::remove_var("PROMPT_WORKER_BUDGET_SEC");
+                    }
+                    res
+                };
+
+                match child_outcome {
+                    RunnerOutcome::Completed(child_out) => {
+                        if child_out.exit != 0 {
+                            if child_out.exit == 6 {
+                                eprintln!(
+                                    "WATCHDOG malformed-report | name={} missing=verdict report={}",
+                                    child_input.name,
+                                    child_report_path.display()
+                                );
+                            } else {
+                                eprintln!("WATCHDOG exit={}", child_out.exit);
+                            }
+                            let b = format!("watchdog exit {}", child_out.exit);
+                            return ctx
+                                .finish(&mut state, "blocked", child_out.exit, Some(&b))
+                                .map(|_| ());
+                        }
+
+                        let _ = std::fs::write(
+                            ctx.runs_dir.join(format!(".{}.read", child_input.name)),
+                            "",
+                        );
+                        state.prompted = 0;
+                        let _ = state.save(&ctx.state_file);
+
+                        let mut child_output_json = serde_json::to_value(&child_out).unwrap();
+
+                        if child_id.ends_with("-plan") {
+                            let planfile =
+                                ctx.runs_dir.join(format!("{}.plan.md", child_input.name));
+                            let _ = std::fs::rename(&child_report_path, &planfile);
+                            state.planfile = planfile.to_string_lossy().to_string();
+
+                            if let Ok(content) = std::fs::read_to_string(&planfile) {
+                                if content
+                                    .lines()
+                                    .any(|l| l.trim().starts_with("## Challenge"))
+                                {
+                                    log_challenge(&planfile, &ctx.pfile);
+                                    let b = "builder challenged the premise at plan stage — Lead resolves the Challenge above";
+                                    return ctx
+                                        .finish(&mut state, "disputed", 0, Some(b))
+                                        .map(|_| ());
+                                }
+                            }
+
+                            if blocked_outcome(&planfile) {
+                                log_blockers(&planfile, &ctx.pfile);
+                                let b = "builder's plan reports unfinished work — Lead decides how to proceed";
+                                return ctx.finish(&mut state, "blocked", 0, Some(b)).map(|_| ());
+                            }
+
+                            let mut pcontent =
+                                std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                            pcontent.push_str(&format!(
+                                "- plan: {}\n",
+                                planfile.file_name().and_then(|n| n.to_str()).unwrap_or("")
+                            ));
+                            let _ = std::fs::write(&ctx.pfile, pcontent);
+                            let _ = state.save(&ctx.state_file);
+                            child_output_json["report_path"] =
+                                serde_json::Value::String(planfile.to_string_lossy().to_string());
+                        } else if child_id.ends_with("-build") {
+                            let build_md =
+                                ctx.runs_dir.join(format!("{}.build.md", child_input.name));
+                            let _ = std::fs::rename(&child_report_path, &build_md);
+
+                            if let Ok(content) = std::fs::read_to_string(&build_md) {
+                                if content
+                                    .lines()
+                                    .any(|l| l.trim().starts_with("## Challenge"))
+                                {
+                                    log_challenge(&build_md, &ctx.pfile);
+                                    let b = "builder challenged the premise during build — Lead resolves the Challenge above";
+                                    return ctx
+                                        .finish(&mut state, "disputed", 0, Some(b))
+                                        .map(|_| ());
+                                }
+                            }
+
+                            if blocked_outcome(&build_md) {
+                                log_blockers(&build_md, &ctx.pfile);
+                                let b = "builder's build report is unfinished (see above) — Lead decides how to proceed";
+                                return ctx.finish(&mut state, "blocked", 0, Some(b)).map(|_| ());
+                            }
+
+                            if let Some(_done) = ctx.check_impl(&mut state, &build_md, None)? {
+                                return Ok(());
+                            }
+                            let mut pcontent =
+                                std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                            pcontent.push_str(&format!(
+                                "- build: commit {} ({}.build.md)\n",
+                                state.commit, child_input.name
+                            ));
+                            let _ = std::fs::write(&ctx.pfile, pcontent);
+
+                            let mut skip_review = false;
+                            if state.review == "auto" {
+                                let wt_path = Path::new(&state.wt);
+                                let numstat_out = ctx.git.run_in(
+                                    wt_path,
+                                    &["diff", "--numstat", &state.base_sha, &state.head_sha],
+                                );
+                                let mut total_lines = 0;
+                                if let Ok(o) = numstat_out {
+                                    for line in String::from_utf8_lossy(&o.stdout).lines() {
+                                        let parts: Vec<&str> = line.split_whitespace().collect();
+                                        if parts.len() >= 2 {
+                                            let add: usize = parts[0].parse().unwrap_or(0);
+                                            let del: usize = parts[1].parse().unwrap_or(0);
+                                            total_lines += add + del;
+                                        }
+                                    }
+                                }
+                                let names_out = ctx.git.run_in(
+                                    wt_path,
+                                    &["diff", "--name-only", &state.base_sha, &state.head_sha],
+                                );
+                                let mut dirs = std::collections::BTreeSet::new();
+                                if let Ok(o) = names_out {
+                                    for line in String::from_utf8_lossy(&o.stdout).lines() {
+                                        let path = line.trim();
+                                        if let Some(idx) = path.find('/') {
+                                            dirs.insert(path[..idx].to_string());
+                                        } else if !path.is_empty() {
+                                            dirs.insert(".".to_string());
+                                        }
+                                    }
+                                }
+                                let mut pcontent =
+                                    std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                                pcontent.push_str(&format!(
+                                    "- review gate: {total_lines} changed lines, {} top-level dirs (run if >{} or >1)\n",
+                                    dirs.len(),
+                                    ctx.review_lines
+                                ));
+                                let _ = std::fs::write(&ctx.pfile, pcontent);
+
+                                if total_lines > ctx.review_lines || dirs.len() > 1 {
+                                    state.review_run = "run".to_string();
+                                } else {
+                                    state.review_run = "skip".to_string();
+                                    skip_review = true;
+                                    let mut pcontent =
+                                        std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                                    pcontent.push_str(&format!(
+                                        "- review: skipped (gate: {})\n",
+                                        state.review
+                                    ));
+                                    let _ = std::fs::write(&ctx.pfile, pcontent);
+                                }
+                            } else if state.review == "always" {
+                                state.review_run = "run".to_string();
+                            } else {
+                                state.review_run = "skip".to_string();
+                                skip_review = true;
+                            }
+
+                            child_output_json["report_path"] =
+                                serde_json::Value::String(build_md.to_string_lossy().to_string());
+                            child_output_json["skip_review"] = serde_json::Value::Bool(skip_review);
+                            child_output_json["commit"] =
+                                serde_json::Value::String(state.head_sha.clone());
+                        } else if is_reviewer {
+                            state.rounds_run = state.round;
+                            let rev_content =
+                                std::fs::read_to_string(&child_report_path).unwrap_or_default();
+
+                            let cleanup_reviewer = || {
+                                let prev_pt = std::env::var("PIPELINE_TASK").ok();
+                                let prev_gs = std::env::var("GRID_SKIP").ok();
+                                std::env::set_var("PIPELINE_TASK", &ctx.task);
+                                std::env::set_var("GRID_SKIP", "1");
+                                let _ = crate::worker::cleanup::cleanup_worker(
+                                    &child_input.name,
+                                    Path::new(&state.repo),
+                                    ctx.git,
+                                    ctx.herdr,
+                                );
+                                if let Some(pt) = prev_pt {
+                                    std::env::set_var("PIPELINE_TASK", pt);
+                                } else {
+                                    std::env::remove_var("PIPELINE_TASK");
+                                }
+                                if let Some(gs) = prev_gs {
+                                    std::env::set_var("GRID_SKIP", gs);
+                                } else {
+                                    std::env::remove_var("GRID_SKIP");
+                                }
+                                let _ = activities.execute(&ActivityRequest::Grid(
+                                    GridRequest::Reconcile {
+                                        tab: Some(ctx.grid_tab.clone()),
+                                        only: None,
+                                    },
+                                ));
+                            };
+
+                            if rev_content
+                                .lines()
+                                .any(|l| l.trim().starts_with("## Challenge"))
+                            {
+                                log_challenge(&child_report_path, &ctx.pfile);
+                                let mut pcontent =
+                                    std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                                pcontent.push_str(&format!(
+                                    "- review round {}: {} challenged the premise\n",
+                                    state.round, child_input.name
+                                ));
+                                let _ = std::fs::write(&ctx.pfile, pcontent);
+                                cleanup_reviewer();
+                                let b = format!(
+                                    "reviewer {} challenged the premise — Lead resolves the Challenge above",
+                                    child_input.name
+                                );
+                                return ctx.finish(&mut state, "disputed", 0, Some(&b)).map(|_| ());
+                            }
+
+                            let mut verdict_line = None;
+                            for line in rev_content.lines() {
+                                let t = line.trim();
+                                if t.to_ascii_lowercase().starts_with("verdict:") {
+                                    verdict_line = Some(t.to_string());
+                                }
+                            }
+                            if let Some(vl) = &verdict_line {
+                                if let Ok((findings, _)) = parse_verdict_str(vl) {
+                                    state.last_findings = findings;
+                                }
+                            }
+                            let _ = state.save(&ctx.state_file);
+                            let mut pcontent =
+                                std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                            pcontent.push_str(&format!(
+                                "- review round {}: {} ({}.md)\n",
+                                state.round,
+                                verdict_line.as_deref().unwrap_or("NO VERDICT LINE"),
+                                child_input.name
+                            ));
+                            let _ = std::fs::write(&ctx.pfile, pcontent);
+
+                            cleanup_reviewer();
+
+                            let _v = match verdict_line {
+                                Some(vl) => vl,
+                                None => {
+                                    let b = format!(
+                                        "reviewer {} runs file has no 'Verdict: clean | <N> findings' line (lock §1) — Lead decides",
+                                        child_input.name
+                                    );
+                                    return ctx
+                                        .finish(&mut state, "blocked", 0, Some(&b))
+                                        .map(|_| ());
+                                }
+                            };
+
+                            if state.last_findings == 0 {
+                                return ctx.finish(&mut state, "clean", 0, None).map(|_| ());
+                            }
+
+                            state.review_changed = true;
+                            if state.round >= state.rounds {
+                                let b = format!(
+                                    "review rounds exhausted: {} findings still open after {} round(s) — Lead decides",
+                                    state.last_findings, state.rounds
+                                );
+                                return ctx.finish(&mut state, "blocked", 0, Some(&b)).map(|_| ());
+                            }
+
+                            state.phase = "fix".to_string();
+                            state.prompted = 0;
+                            let _ = state.save(&ctx.state_file);
+                        } else if child_id.contains("-fix-") {
+                            let fix_md = ctx
+                                .runs_dir
+                                .join(format!("{}.fix{}.md", child_input.name, state.round));
+                            let _ = std::fs::rename(&child_report_path, &fix_md);
+
+                            if let Ok(content) = std::fs::read_to_string(&fix_md) {
+                                if content
+                                    .lines()
+                                    .any(|l| l.trim().starts_with("## Challenge"))
+                                {
+                                    log_challenge(&fix_md, &ctx.pfile);
+                                    let b = "builder disputed review findings — Lead resolves the Challenge above";
+                                    return ctx
+                                        .finish(&mut state, "disputed", 0, Some(b))
+                                        .map(|_| ());
+                                }
+                            }
+
+                            if blocked_outcome(&fix_md) {
+                                log_blockers(&fix_md, &ctx.pfile);
+                                let b = "builder's fix report is unfinished (see above) — Lead decides how to proceed";
+                                return ctx.finish(&mut state, "blocked", 0, Some(b)).map(|_| ());
+                            }
+
+                            let prev_sha = state.head_sha.clone();
+                            if let Some(_done) =
+                                ctx.check_impl(&mut state, &fix_md, Some(&prev_sha))?
+                            {
+                                return Ok(());
+                            }
+
+                            let mut pcontent =
+                                std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                            pcontent.push_str(&format!(
+                                "- fix {}: commit {} ({}.fix{}.md)\n",
+                                state.round, state.commit, child_input.name, state.round
+                            ));
+                            let _ = std::fs::write(&ctx.pfile, pcontent);
+
+                            state.phase = "review".to_string();
+                            state.round += 1;
+                            state.prompted = 0;
+                            state.reviewer_spawned = 0;
+                            let _ = state.save(&ctx.state_file);
+
+                            child_output_json["report_path"] =
+                                serde_json::Value::String(fix_md.to_string_lossy().to_string());
+                            child_output_json["commit"] =
+                                serde_json::Value::String(state.head_sha.clone());
+                        }
+
+                        let parent_init = seed_state_from_pipeline_state(input.clone(), &state);
+                        parent_outcome = runner::run_until_blocked(
+                            &workflow,
+                            &parent_wf_id,
+                            Some(parent_init),
+                            &mut journal,
+                            &mut activities,
+                            &mut clock,
+                            &runner_opts,
+                            vec![WorkflowEvent::ChildCompleted {
+                                id: child_id.clone(),
+                                output: child_output_json,
+                            }],
+                        )
+                        .map_err(|e| (1, format!("parent resume error: {e}\n")))?;
+                    }
+                    RunnerOutcome::Failed { code, reason: _ } => {
+                        eprintln!("WATCHDOG exit={code}");
+                        let b = format!("watchdog exit {code}");
+                        return ctx
+                            .finish(&mut state, "blocked", code, Some(&b))
+                            .map(|_| ());
+                    }
+                    RunnerOutcome::Blocked(reason) => {
+                        return ctx
+                            .finish(&mut state, "blocked", 5, Some(&reason))
+                            .map(|_| ());
+                    }
+                }
+            }
         }
     }
 }
@@ -858,6 +2046,16 @@ impl Workflow for PipelineWorkflow {
                     }
                 }
                 state.active_child_id = None;
+                if let Some(skip) = output.get("skip_review").and_then(|v| v.as_bool()) {
+                    if skip {
+                        state.review_skip = true;
+                    }
+                }
+                if let Some(commit) = output.get("commit").and_then(|v| v.as_str()) {
+                    if !commit.is_empty() {
+                        state.head_sha = Some(commit.to_string());
+                    }
+                }
 
                 let worker_output: SingleWorkerOutput = match serde_json::from_value(output) {
                     Ok(o) => o,
@@ -992,7 +2190,9 @@ impl Workflow for PipelineWorkflow {
                                     if let Some(commit) = extract_commit_from_report(&content) {
                                         state.head_sha = Some(commit);
                                     }
-                                    if state.input.review_strategy == ReviewStrategy::Skip {
+                                    if state.input.review_strategy == ReviewStrategy::Skip
+                                        || state.review_skip
+                                    {
                                         state.phase = PipelinePhase::Complete;
                                         return StepDecision::Complete(PipelineOutput {
                                             status: "clean".to_string(),

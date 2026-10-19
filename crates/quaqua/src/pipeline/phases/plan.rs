@@ -35,7 +35,8 @@ pub fn run_plan<G: GitOps, H: HerdrOps>(
             .any(|l| l.trim().starts_with("## Challenge"))
         {
             log_challenge(&planfile, &ctx.pfile);
-            let b = "builder challenged the premise at plan stage — Lead resolves the Challenge above";
+            let b =
+                "builder challenged the premise at plan stage — Lead resolves the Challenge above";
             return ctx.finish(state, "disputed", 0, Some(b));
         }
     }

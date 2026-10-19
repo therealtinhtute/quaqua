@@ -29,7 +29,8 @@ pub fn run_build<G: GitOps, H: HerdrOps>(
             .any(|l| l.trim().starts_with("## Challenge"))
         {
             log_challenge(&build_md, &ctx.pfile);
-            let b = "builder challenged the premise during build — Lead resolves the Challenge above";
+            let b =
+                "builder challenged the premise during build — Lead resolves the Challenge above";
             return ctx.finish(state, "disputed", 0, Some(b));
         }
     }

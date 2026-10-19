@@ -236,6 +236,8 @@ pub struct PipelineWorkflowState {
     pub active_child_id: Option<String>,
     pub pending_report_read: Option<String>,
     pub last_review_report: Option<String>,
+    #[serde(default)]
+    pub review_skip: bool,
 }
 
 impl PipelineWorkflowState {
@@ -252,6 +254,7 @@ impl PipelineWorkflowState {
             active_child_id: None,
             pending_report_read: None,
             last_review_report: None,
+            review_skip: false,
         }
     }
 }
