@@ -1836,6 +1836,7 @@ impl Drop for EnvLockGuard {
         std::env::remove_var("GRID_TAB");
         std::env::remove_var("GRID_CHECK_TIMEOUT_SEC");
         std::env::remove_var("HERDR_STUB_SNAPSHOT");
+        std::env::remove_var("HERDR_PANE_ID");
         std::env::remove_var("GRID_SKIP");
         std::env::remove_var("QUAQUA_TEST");
         ENV_BUSY.store(false, std::sync::atomic::Ordering::Release);
@@ -2187,6 +2188,91 @@ fn test_spawn_worker_default_grid_tab_from_owner() {
     std::env::remove_var("QUAQUA_OWNER");
     std::env::remove_var("GRID_SKIP");
     std::env::remove_var("QUAQUA_TEST");
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+/// Spawn `name` against a fake herdr whose `pane get` reports `pane_json` for
+/// the caller pane, and return the recorded `(owner, grid tab)`.
+fn spawn_with_caller_pane(
+    name: &str,
+    repo_dir: &Path,
+    runs_dir: &Path,
+    cfg: &config::Config,
+    pane_json: &str,
+) -> (String, String) {
+    let mut mock = MockActivities::new();
+    mock.register(
+        "herdr.pane_split",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    mock.register(
+        "herdr.run",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: pane_json.to_string(),
+        }),
+    );
+    mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+        name: String::new(),
+    }));
+    let herdr = MockActivitiesHerdr::new(mock);
+    let opts = parse_spawn_args(&[
+        name.to_string(),
+        "sude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    let res = quaqua::worker::spawn::spawn_worker(opts, cfg, &SpawnTestGit, &herdr);
+    assert!(res.is_ok(), "spawn {name} failed: {:?}", res.err());
+    let owner = std::fs::read_to_string(runs_dir.join(format!("{name}.owner"))).unwrap();
+    let grid = std::fs::read_to_string(runs_dir.join(format!("{name}.grid"))).unwrap();
+    (owner.trim().to_string(), grid.trim().to_string())
+}
+
+#[test]
+fn test_spawn_owner_from_caller_pane_not_stale_env() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-paneown-{}", std::process::id()));
+    let repo_dir = temp.join("quaqua");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::remove_var("GRID_TAB");
+    std::env::set_var("HERDR_PANE_ID", "wA:p1");
+
+    let cfg = test_cfg_with_fallback();
+    let lead_pane = r#"{"result":{"pane":{"pane_id":"wA:p1","tokens":{"grid_role":"orchestrator","grid_owner":"arch-lead"}}}}"#;
+
+    // A Lead's shell can still say `cos` (a herdr restart restores the daemon's
+    // environment); its pane metadata is the durable record of who it is, and
+    // the worker must land in the project's tab, not the CoS repo tab.
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    let (owner, grid) =
+        spawn_with_caller_pane("sude-panelead", &repo_dir, &runs_dir, &cfg, lead_pane);
+    assert_eq!(owner, "arch-lead", "pane tag must beat the stale shell env");
+    assert_eq!(grid, "arch-workers");
+
+    // An explicit project owner in the environment stays authoritative: a
+    // pipeline spawns its Lead's workers with QUAQUA_OWNER=<slug>-lead from
+    // whatever pane it happens to run in.
+    std::env::set_var("QUAQUA_OWNER", "quaqua-rs-lead");
+    let (owner, grid) =
+        spawn_with_caller_pane("sude-envlead", &repo_dir, &runs_dir, &cfg, lead_pane);
+    assert_eq!(owner, "quaqua-rs-lead");
+    assert_eq!(grid, "quaqua-rs-workers");
+
+    // A worker pane never overrides the environment.
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    let worker_pane = r#"{"result":{"pane":{"pane_id":"wA:p9","tokens":{"grid_role":"worker","grid_owner":"arch-lead"}}}}"#;
+    let (owner, grid) =
+        spawn_with_caller_pane("sude-paneworker", &repo_dir, &runs_dir, &cfg, worker_pane);
+    assert_eq!(owner, "cos");
+    assert_eq!(grid, "quaqua-workers");
+
     let _ = std::fs::remove_dir_all(&temp);
 }
 

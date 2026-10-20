@@ -194,6 +194,57 @@ pub fn default_grid_tab(owner: &str, repo_name: &str) -> String {
     }
 }
 
+/// True for an owner that names a project team's Lead (`<slug>-lead`).
+fn is_project_owner(owner: &str) -> bool {
+    owner
+        .strip_suffix("-lead")
+        .map(|slug| !slug.is_empty())
+        .unwrap_or(false)
+}
+
+/// The owner of the pane this process runs in, when herdr can still see it:
+/// `grid_owner` of a pane that is not itself a worker.
+fn caller_pane_owner<H: HerdrOps>(herdr: &H) -> Option<String> {
+    let pane = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let out = herdr.run(&["pane", "get", &pane]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let tokens = v.pointer("/result/pane/tokens")?;
+    if tokens.get("grid_role").and_then(|r| r.as_str()) == Some("worker") {
+        return None;
+    }
+    let owner = tokens.get("grid_owner").and_then(|o| o.as_str())?.trim();
+    if owner.is_empty() {
+        return None;
+    }
+    Some(owner.to_string())
+}
+
+/// Resolve the owner a spawn belongs to.
+///
+/// `$QUAQUA_OWNER` is the normal source, but it lives in the *shell*: a herdr
+/// restart restores panes with the daemon's environment, so a Lead's shell can
+/// say `cos` while its pane metadata still says `<slug>-lead`. The pane is the
+/// durable record, so a tagged non-worker pane wins — except over an explicit
+/// project-Lead owner in the environment (`QUAQUA_OWNER=<slug>-lead`, e.g. a
+/// pipeline spawning on behalf of its Lead): a project owner is specific, `cos`
+/// is the fallback. Workers spawned by such a Lead were tagged `grid_owner=cos`
+/// and landed in `quaqua-workers` instead of the project's tab, mixing projects.
+fn resolve_owner<H: HerdrOps>(herdr: &H) -> String {
+    let env_owner = std::env::var("QUAQUA_OWNER")
+        .ok()
+        .filter(|o| !o.is_empty())
+        .unwrap_or_else(|| "cos".to_string());
+    match caller_pane_owner(herdr) {
+        Some(pane) if is_project_owner(&pane) && !is_project_owner(&env_owner) => pane,
+        _ => env_owner,
+    }
+}
+
 pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     opts: SpawnOptions,
     cfg: &Config,
@@ -234,7 +285,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         validate_base_ref(git, &repo, base_ref)?;
     }
 
-    let owner = std::env::var("QUAQUA_OWNER").unwrap_or_else(|_| "cos".to_string());
+    let owner = resolve_owner(herdr);
     let runs_dir = crate::worker::cleanup::default_runs_dir();
     let _ = std::fs::create_dir_all(&runs_dir);
 

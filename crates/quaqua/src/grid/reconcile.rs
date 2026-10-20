@@ -55,6 +55,7 @@ pub fn filter_ops_for_check<'a>(
     owner_filter: Option<&str>,
     only_filter: Option<&str>,
     tab_filter: Option<&str>,
+    workspace_filter: Option<&str>,
 ) -> Vec<&'a Op> {
     let only_set: Option<HashSet<&str>> = only_filter.map(|s| {
         s.split(',')
@@ -83,6 +84,21 @@ pub fn filter_ops_for_check<'a>(
                 })
                 .or_else(|| pane.and_then(|p| p.label.as_deref()))
                 .unwrap_or("");
+
+            // Only the invoker's own workspace is in scope: a tab in another
+            // workspace can never receive these panes, so counting such an op
+            // as pending is what timed the check out (the `wA:p1J -> new_tab
+            // quaqua-workers` move of a Lead's pane into the CoS workspace).
+            // A pane with no recorded workspace is left in scope.
+            if let Some(ws) = workspace_filter {
+                if !ws.is_empty() {
+                    if let Some(pw) = pane.and_then(|p| p.workspace_id.as_deref()) {
+                        if pw != ws {
+                            return false;
+                        }
+                    }
+                }
+            }
 
             let powner = pane
                 .and_then(|p| p.tokens.as_ref())
@@ -150,6 +166,99 @@ pub fn filter_ops_for_check<'a>(
         .collect()
 }
 
+/// True for the tag that names a project team's Lead (`<slug>-lead`). Such an
+/// owner is specific; `cos` is the default a pane falls back to when its shell
+/// lost the variable, and a herdr restart restores panes with the daemon's env.
+pub fn is_project_owner(owner: &str) -> bool {
+    owner
+        .strip_suffix("-lead")
+        .map(|slug| !slug.is_empty())
+        .unwrap_or(false)
+}
+
+/// The pane that invoked this process. herdr exports `HERDR_PANE_ID` to every
+/// process it starts; only the snapshot knows that pane's tokens.
+fn caller_pane<'a>(snap: &'a Snapshot) -> Option<&'a super::types::Pane> {
+    let id = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    snap.panes.iter().find(|p| p.pane_id == id)
+}
+
+/// The owner a pane is tagged with, when it is not itself a worker: a Lead
+/// keeps its identity in pane metadata, which outlives the shell environment.
+fn pane_owner(pane: &super::types::Pane) -> Option<&str> {
+    let t = pane.tokens.as_ref()?;
+    if t.grid_role.as_deref() == Some("worker") {
+        return None;
+    }
+    t.grid_owner.as_deref().filter(|o| !o.is_empty())
+}
+
+/// Owner and workspace a reconcile call acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GridScope {
+    pub owner: String,
+    pub workspace: Option<String>,
+}
+
+/// Resolve what one reconcile call may touch.
+///
+/// Owner: an explicit `--owner` wins; otherwise a project Lead owner beats the
+/// ambient/default one whichever side it is on, and the caller's tagged pane
+/// beats `$QUAQUA_OWNER` (a Lead's shell can carry the CoS value while its pane
+/// still says `<slug>-lead`).
+///
+/// Workspace: the caller's own workspace, else the workspace of the requested
+/// workers tab when exactly one tab carries that label. Panes are arranged one
+/// workspace at a time regardless (see `plan::plan_owner_workspace`); this only
+/// keeps one project's repair from touching another project's panes.
+pub fn grid_scope(
+    snap: &Snapshot,
+    requested_owner: Option<&str>,
+    requested_tab: Option<&str>,
+) -> GridScope {
+    let caller = caller_pane(snap);
+    let caller_owner = caller.and_then(pane_owner);
+    let env_owner = std::env::var("QUAQUA_OWNER").ok().filter(|s| !s.is_empty());
+
+    let owner = match requested_owner.filter(|o| !o.is_empty()) {
+        Some(o) => o.to_string(),
+        None => match (env_owner.as_deref(), caller_owner) {
+            (Some(env), Some(pane)) if is_project_owner(pane) && !is_project_owner(env) => {
+                pane.to_string()
+            }
+            (Some(env), _) => env.to_string(),
+            (None, Some(pane)) => pane.to_string(),
+            (None, None) => "cos".to_string(),
+        },
+    };
+
+    let workspace = caller
+        .and_then(|p| p.workspace_id.as_deref())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let label = requested_tab.filter(|t| !t.is_empty())?;
+            let mut ws: Vec<&str> = snap
+                .tabs
+                .iter()
+                .filter(|t| t.label.as_deref() == Some(label))
+                .filter_map(|t| t.workspace_id.as_deref())
+                .filter(|w| !w.is_empty())
+                .collect();
+            ws.sort_unstable();
+            ws.dedup();
+            if ws.len() == 1 {
+                Some(ws[0].to_string())
+            } else {
+                None
+            }
+        });
+
+    GridScope { owner, workspace }
+}
+
 pub fn run_reconcile<D: HerdrDriver>(
     driver: &mut D,
     opts: &ReconcileOptions,
@@ -167,11 +276,6 @@ pub fn reconcile_core<D: HerdrDriver>(
 ) -> Result<bool, String> {
     let tab = opts.tab.as_deref().unwrap_or(default_tab);
     let requested = opts.tab.clone().filter(|t| !t.is_empty());
-    let owner_env = opts
-        .owner
-        .clone()
-        .or_else(|| std::env::var("QUAQUA_OWNER").ok())
-        .unwrap_or_else(|| "cos".to_string());
 
     if opts.check {
         let timeout_sec = opts.timeout_sec.unwrap_or_else(|| {
@@ -200,13 +304,15 @@ pub fn reconcile_core<D: HerdrDriver>(
                 }
             };
 
+            let scope = grid_scope(&snap, opts.owner.as_deref(), Some(tab));
             let ops = plan_with_deferred(&snap, deferred_statuses)?;
             let rem_ops = filter_ops_for_check(
                 &ops,
                 &snap,
-                Some(&owner_env),
+                Some(&scope.owner),
                 opts.only.as_deref(),
                 Some(tab),
+                scope.workspace.as_deref(),
             );
 
             if opts.dry_run {
@@ -237,6 +343,7 @@ pub fn reconcile_core<D: HerdrDriver>(
 
     // Repair / apply mode
     let snap = driver.snapshot()?;
+    let scope = grid_scope(&snap, opts.owner.as_deref(), Some(tab));
 
     let only_set: Option<HashSet<&str>> = opts.only.as_deref().map(|s| {
         s.split(',')
@@ -260,7 +367,15 @@ pub fn reconcile_core<D: HerdrDriver>(
                 .as_ref()
                 .and_then(|t| t.grid_owner.as_deref())
                 .unwrap_or("cos");
-            owner_env.is_empty() || powner == owner_env
+            if !scope.owner.is_empty() && powner != scope.owner {
+                return false;
+            }
+            // The invoker's workspace only: repairing another project's panes
+            // from here is what made a Lead's check move the CoS's panes.
+            match (scope.workspace.as_deref(), p.workspace_id.as_deref()) {
+                (Some(ws), Some(pw)) if !ws.is_empty() => pw == ws,
+                _ => true,
+            }
         })
         .collect();
 
@@ -270,9 +385,12 @@ pub fn reconcile_core<D: HerdrDriver>(
         return Ok(false);
     }
 
-    let owner_ws = owner_workers[0].workspace_id.as_deref().unwrap_or("");
+    let owner_ws = match scope.workspace.as_deref() {
+        Some(ws) if !ws.is_empty() => ws,
+        _ => owner_workers[0].workspace_id.as_deref().unwrap_or(""),
+    };
     let anchor_pane_id =
-        super::plan::find_owner_pane(&owner_env, &snap.panes, &snap.agents, owner_ws);
+        super::plan::find_owner_pane(&scope.owner, &snap.panes, &snap.agents, owner_ws);
     let anchor_pane = anchor_pane_id
         .as_ref()
         .and_then(|id| snap.panes.iter().find(|p| &p.pane_id == id));
@@ -808,6 +926,11 @@ impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
                     .driver
                     .lock()
                     .map_err(|e| ActivityError::ExecutionFailed(e.to_string()))?;
+                // A pipeline run from a project Lead's pane inherits the CoS's
+                // `QUAQUA_OWNER`; the caller's tagged pane is the authoritative
+                // owner, exactly as in `worker spawn`.
+                let snap = driver.snapshot().map_err(ActivityError::ExecutionFailed)?;
+                let requested_owner = self.owner.as_deref().filter(|o| is_project_owner(o));
                 let target_tab = tab.as_deref().or(self.default_tab.as_deref());
                 let resolved_tab = resolve_default_tab(
                     target_tab,
@@ -815,12 +938,13 @@ impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
                     Some(&effective_repo),
                     env_grid_tab.as_deref(),
                 );
+                let scope = grid_scope(&snap, requested_owner, Some(&resolved_tab));
                 let opts = ReconcileOptions {
                     check: false,
                     repair: true,
                     tab: Some(resolved_tab.clone()),
                     only: only.clone(),
-                    owner: Some(effective_owner),
+                    owner: Some(scope.owner),
                     dry_run: false,
                     timeout_sec: None,
                 };
@@ -850,14 +974,20 @@ impl<D: HerdrDriver + Send + 'static> Activity for GridActivity<D> {
                     .deferred_statuses
                     .as_ref()
                     .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+                let scope = grid_scope(
+                    &snap,
+                    self.owner.as_deref().filter(|o| is_project_owner(o)),
+                    Some(&resolved_tab),
+                );
                 let ops = plan_with_deferred(&snap, def_slices.as_deref())
                     .map_err(ActivityError::ExecutionFailed)?;
                 let filtered_ops: Vec<Op> = filter_ops_for_check(
                     &ops,
                     &snap,
-                    Some(&effective_owner),
+                    Some(&scope.owner),
                     None,
                     Some(&resolved_tab),
+                    scope.workspace.as_deref(),
                 )
                 .into_iter()
                 .cloned()

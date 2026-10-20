@@ -1608,6 +1608,7 @@ fn test_check_filter_does_not_drop_chunk_0_splits_when_tab_ends_in_dash_two() {
         Some("cos"),
         None,
         Some("web-2-workers"),
+        None,
     );
     assert_eq!(filtered.len(), 1, "chunk-0 split op must not be dropped when tab label has -2 in base name");
 }
@@ -1645,7 +1646,7 @@ fn test_reconcile_step_convergence_matches_filter_ops_for_check() {
     assert!(!ops.is_empty(), "plan has deferred ops");
     assert!(ops.iter().all(|op| op.deferred), "all ops in working-deferred must be deferred");
 
-    let runnable = quaqua::grid::reconcile::filter_ops_for_check(&ops, &snap, None, None, None);
+    let runnable = quaqua::grid::reconcile::filter_ops_for_check(&ops, &snap, None, None, None, None);
     assert!(runnable.is_empty(), "filter_ops_for_check must yield 0 runnable ops");
 
     let sdir = edge_state_dir("test-deferred-convergence");
@@ -1672,4 +1673,145 @@ fn test_unified_herdr_driver_instantiation_and_contract() {
     assert!(snap_res.is_err(), "snapshot with invalid binary path must return Err");
     let err = snap_res.unwrap_err();
     assert!(err.contains("cannot run /nonexistent/herdr/binary"), "unexpected error: {err}");
+}
+
+/// No planned op may move a pane into a tab of another workspace: herdr keeps
+/// tabs workspace-local, so such an op can never run and the check that counts
+/// it times out (the reported `wA:p1J -> new_tab quaqua-workers` pending op).
+fn assert_ops_stay_in_their_workspace(snap: &Snapshot, ops: &[quaqua::grid::Op]) {
+    for op in ops {
+        let pane_ws = snap
+            .panes
+            .iter()
+            .find(|p| p.pane_id == op.pane)
+            .and_then(|p| p.workspace_id.as_deref());
+        if let Target::Split { tab, .. } = &op.target {
+            if let Some(tab_ws) = snap
+                .tabs
+                .iter()
+                .find(|t| &t.tab_id == tab)
+                .and_then(|t| t.workspace_id.as_deref())
+            {
+                assert_eq!(
+                    Some(tab_ws),
+                    pane_ws,
+                    "op {op:?} moves a pane across workspaces"
+                );
+            }
+        }
+    }
+}
+
+/// A project Lead's worker must be arranged inside the Lead's own workspace even
+/// when the pane still carries the default owner `cos` (a herdr restart restores
+/// the shell env, not the pane's tag). The CoS's workers in w1 are arranged and
+/// must stay untouched.
+#[test]
+fn test_plan_arranges_each_workspace_separately() {
+    let val = serde_json::json!({
+        "snapshot": {
+            "workspaces": [
+                { "workspace_id": "w1", "label": "quaqua" },
+                { "workspace_id": "wA", "label": "arch" }
+            ],
+            "tabs": [
+                { "tab_id": "w1:t1", "workspace_id": "w1", "label": "quaqua", "pane_count": 1 },
+                { "tab_id": "w1:t2", "workspace_id": "w1", "label": "quaqua-workers", "pane_count": 2 },
+                { "tab_id": "wA:t1", "workspace_id": "wA", "label": "arch", "pane_count": 1 },
+                { "tab_id": "wA:t2", "workspace_id": "wA", "label": "scratch", "pane_count": 1 }
+            ],
+            "panes": [
+                { "pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "orchestrator", "grid_owner": "cos", "grid_ready": "1" } },
+                { "pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua", "grid_tab": "quaqua-workers", "grid_ready": "1" } },
+                { "pane_id": "w1:p3", "tab_id": "w1:t2", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua", "grid_tab": "quaqua-workers", "grid_ready": "1" } },
+                { "pane_id": "wA:p1", "tab_id": "wA:t1", "workspace_id": "wA", "agent_status": "idle", "tokens": { "grid_role": "orchestrator", "grid_owner": "arch-lead", "grid_ready": "1" } },
+                { "pane_id": "wA:p2", "tab_id": "wA:t2", "workspace_id": "wA", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua", "grid_tab": "arch-workers", "grid_ready": "1" } }
+            ],
+            "layouts": [
+                {
+                    "tab_id": "w1:t2", "workspace_id": "w1", "area": { "x": 0, "y": 0, "width": 200, "height": 50 },
+                    "panes": [
+                        { "pane_id": "w1:p2", "rect": { "x": 0, "y": 0, "width": 100, "height": 50 } },
+                        { "pane_id": "w1:p3", "rect": { "x": 100, "y": 0, "width": 100, "height": 50 } }
+                    ]
+                }
+            ],
+            "agents": []
+        }
+    });
+
+    let snap = parse_snapshot_value(&val).unwrap();
+    let ops = plan(&snap).unwrap();
+    assert_ops_stay_in_their_workspace(&snap, &ops);
+
+    // The Lead's unarranged worker is taken to its own anchor in wA, not into a
+    // quaqua tab of the CoS workspace.
+    assert_eq!(ops.len(), 1, "only the wA worker needs arranging: {ops:?}");
+    assert_eq!(ops[0].pane, "wA:p2");
+    match &ops[0].target {
+        Target::Split { tab, anchor, .. } => {
+            assert_eq!(tab, "wA:t1", "must land beside the Lead in its own workspace");
+            assert_eq!(anchor, "wA:p1");
+        }
+        other => panic!("expected the wA worker beside its Lead, got {other:?}"),
+    }
+}
+
+/// A `grid check`/repair invoked from a Lead's workspace must ignore pending ops
+/// of panes in other workspaces: that is what timed the check out (60 s) while
+/// the Lead's own layout was valid.
+#[test]
+fn test_check_from_a_lead_workspace_ignores_foreign_workspace_panes() {
+    let val = serde_json::json!({
+        "snapshot": {
+            "workspaces": [
+                { "workspace_id": "w1", "label": "quaqua" },
+                { "workspace_id": "wA", "label": "arch" }
+            ],
+            "tabs": [
+                { "tab_id": "w1:t1", "workspace_id": "w1", "label": "quaqua", "pane_count": 3 },
+                { "tab_id": "wA:t1", "workspace_id": "wA", "label": "arch", "pane_count": 2 }
+            ],
+            "panes": [
+                { "pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "orchestrator", "grid_owner": "cos", "grid_ready": "1" } },
+                { "pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua", "grid_tab": "quaqua-workers", "grid_ready": "1" } },
+                { "pane_id": "w1:p3", "tab_id": "w1:t1", "workspace_id": "w1", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua", "grid_tab": "quaqua-workers", "grid_ready": "1" } },
+                { "pane_id": "wA:pLEAD9", "tab_id": "wA:t1", "workspace_id": "wA", "agent_status": "idle", "tokens": { "grid_role": "orchestrator", "grid_owner": "arch-lead", "grid_ready": "1" } },
+                { "pane_id": "wA:p2", "tab_id": "wA:t1", "workspace_id": "wA", "agent_status": "idle", "tokens": { "grid_role": "worker", "grid_owner": "cos", "grid_group": "quaqua", "grid_tab": "arch-workers", "grid_ready": "1" } }
+            ],
+            "layouts": [
+                {
+                    "tab_id": "wA:t1", "workspace_id": "wA", "area": { "x": 0, "y": 0, "width": 200, "height": 50 },
+                    "panes": [
+                        { "pane_id": "wA:pLEAD9", "rect": { "x": 0, "y": 0, "width": 80, "height": 50 } },
+                        { "pane_id": "wA:p2", "rect": { "x": 80, "y": 0, "width": 120, "height": 50 } }
+                    ]
+                }
+            ],
+            "agents": []
+        }
+    });
+
+    let snap = parse_snapshot_value(&val).unwrap();
+    let ops = plan(&snap).unwrap();
+    assert_ops_stay_in_their_workspace(&snap, &ops);
+
+    // The Lead pane invokes the check from wA while its shell still says `cos`.
+    std::env::set_var("HERDR_PANE_ID", "wA:pLEAD9");
+    let opts = ReconcileOptions {
+        check: true,
+        repair: false,
+        tab: Some("arch-workers".to_string()),
+        only: None,
+        owner: None,
+        dry_run: false,
+        timeout_sec: Some(1),
+    };
+    let mut driver = FakeHerdrDriver::new(snap);
+    let res = run_reconcile(&mut driver, &opts, "arch-workers", None);
+    std::env::remove_var("HERDR_PANE_ID");
+    assert!(
+        res.is_ok(),
+        "check must ignore other workspaces' pending ops: {res:?}"
+    );
 }

@@ -257,8 +257,16 @@ fn split_target(n: usize, i: usize, gws: &[&Pane], tab_ref: &str) -> Target {
 }
 
 pub fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) -> Option<String> {
+    // The anchor must live in the same workspace as the panes it anchors:
+    // a split into another workspace's tab cannot run, and an owner (`cos`)
+    // can have a pane in several workspaces at once.
+    let in_ws = |p: &Pane| ws.is_empty() || p.workspace_id.as_deref() == Some(ws);
+
     // 1. Pane tagged with matching grid_owner and non-worker role
     for p in panes {
+        if !in_ws(p) {
+            continue;
+        }
         if let Some(t) = &p.tokens {
             if t.grid_owner.as_deref() == Some(owner) && t.grid_role.as_deref() != Some("worker") {
                 return Some(p.pane_id.clone());
@@ -269,18 +277,26 @@ pub fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) 
     for a in agents {
         if a.name.as_deref() == Some(owner) {
             if let Some(pid) = &a.pane_id {
-                return Some(pid.clone());
+                if panes.iter().any(|p| &p.pane_id == pid && in_ws(p)) {
+                    return Some(pid.clone());
+                }
             }
         }
     }
     // 3. Pane whose label == owner
     for p in panes {
+        if !in_ws(p) {
+            continue;
+        }
         if p.label.as_deref() == Some(owner) {
             return Some(p.pane_id.clone());
         }
     }
     // 4. Pane whose agent == owner
     for p in panes {
+        if !in_ws(p) {
+            continue;
+        }
         if p.agent.as_deref() == Some(owner) {
             return Some(p.pane_id.clone());
         }
@@ -288,7 +304,7 @@ pub fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) 
     // 5. For cos only: pane tagged orchestrator/lead/cos or first non-worker pane
     if owner == "cos" {
         for p in panes {
-            if p.workspace_id.as_deref() == Some(ws) {
+            if in_ws(p) {
                 if let Some(t) = &p.tokens {
                     let role = t.grid_role.as_deref().unwrap_or("");
                     if role == "orchestrator" || role == "cos" || role == "lead" {
@@ -298,7 +314,7 @@ pub fn find_owner_pane(owner: &str, panes: &[Pane], agents: &[Agent], ws: &str) 
             }
         }
         for p in panes {
-            if p.workspace_id.as_deref() == Some(ws) && !is_candidate_worker(p) {
+            if in_ws(p) && !is_candidate_worker(p) {
                 return Some(p.pane_id.clone());
             }
         }
@@ -400,250 +416,284 @@ pub fn plan_with_deferred(
             seq_a.cmp(&seq_b).then_with(|| a.pane_id.cmp(&b.pane_id))
         });
 
-        let total = owner_workers.len();
-        if total == 0 {
-            continue;
+        // A tab lives in exactly one workspace and a pane is only ever moved
+        // inside its own workspace, so an owner's panes are arranged per
+        // workspace: grouping them by owner alone made one owner's panes in
+        // workspace B targets of a tab in workspace A — a move herdr cannot
+        // perform, so the op never converged and `grid check` timed out. One
+        // owner really does span workspaces: `cos` is the default tag, so every
+        // pane whose shell lost its `QUAQUA_OWNER` (a herdr restart restores the
+        // daemon env) lands under it, across every project workspace.
+        let mut workspaces: BTreeSet<&str> = BTreeSet::new();
+        for w in &owner_workers {
+            workspaces.insert(w.workspace_id.as_deref().unwrap_or(""));
         }
 
-        let owner_ws = owner_workers[0]
-            .workspace_id
-            .as_deref()
-            .unwrap_or("");
-        let anchor_pane_id = find_owner_pane(owner, &snapshot.panes, &snapshot.agents, owner_ws);
-        let anchor_pane = anchor_pane_id
-            .as_ref()
-            .and_then(|id| snapshot.panes.iter().find(|p| &p.pane_id == id));
-        let anchor_tab = anchor_pane.and_then(|p| p.tab_id.as_deref());
+        for owner_ws in workspaces {
+            let ws_workers: Vec<&Pane> = owner_workers
+                .iter()
+                .copied()
+                .filter(|w| w.workspace_id.as_deref().unwrap_or("") == owner_ws)
+                .collect();
+            plan_owner_workspace(owner, owner_ws, &ws_workers, snapshot, def_list, &mut ops)?;
+        }
+    }
 
-        if total == 1 && anchor_pane.is_some() {
-            let w = owner_workers[0];
-            // "Beside the anchor" is acceptance, not a target ratio: the pane is
-            // arranged as soon as it shares the anchor's tab. The repair path
-            // (reconcile.rs `beside`) uses exactly this test, so the check and the
-            // repair must not disagree — a herdr `pane split` lands 50/50, never
-            // the old 2/5|3/5, and the old rect_near test made `--check` time out
-            // forever on an already-arranged pane.
-            let atab = anchor_tab.unwrap_or_default();
-            let in_place = anchor_tab.is_some() && w.tab_id.as_deref() == Some(atab);
+    propagate_deferrals(&mut ops, &snapshot.panes);
+    Ok(ops)
+}
 
-            if !in_place {
-                ops.push(Op {
-                    op: "move".to_string(),
-                    pane: w.pane_id.clone(),
-                    deferred: is_status_deferred(w.agent_status.as_deref(), def_list),
-                    target: Target::Split {
-                        tab: atab.to_string(),
-                        anchor: anchor_pane.unwrap().pane_id.clone(),
-                        direction: "right".to_string(),
-                        ratio: 0.4,
-                    },
-                });
-            }
-        } else {
-            // >1 workers total for this owner -> one tab per group
-            // Distinct groups in sorted order (jq: `[ $owner_workers[].tokens.grid_group ] | unique`)
-            let mut groups: BTreeSet<&str> = BTreeSet::new();
-            for w in &owner_workers {
-                if let Some(t) = &w.tokens {
-                    if let Some(g) = &t.grid_group {
-                        groups.insert(g.as_str());
-                    }
+/// Plan one `(owner, workspace)` cell of the grid: the owner's panes that live
+/// in `owner_ws`, arranged beside the owner's pane or into `owner_ws`'s workers
+/// tab. Every op it emits targets either a tab of `owner_ws` or a new tab, which
+/// herdr creates in the pane's own workspace.
+fn plan_owner_workspace(
+    owner: &str,
+    owner_ws: &str,
+    owner_workers: &[&Pane],
+    snapshot: &Snapshot,
+    def_list: &[&str],
+    ops: &mut Vec<Op>,
+) -> Result<(), String> {
+    let total = owner_workers.len();
+    if total == 0 {
+        return Ok(());
+    }
+
+    let anchor_pane_id = find_owner_pane(owner, &snapshot.panes, &snapshot.agents, owner_ws);
+    let anchor_pane = anchor_pane_id
+        .as_ref()
+        .and_then(|id| snapshot.panes.iter().find(|p| &p.pane_id == id));
+    let anchor_tab = anchor_pane.and_then(|p| p.tab_id.as_deref());
+
+    if total == 1 && anchor_pane.is_some() {
+        let w = owner_workers[0];
+        // "Beside the anchor" is acceptance, not a target ratio: the pane is
+        // arranged as soon as it shares the anchor's tab. The repair path
+        // (reconcile.rs `beside`) uses exactly this test, so the check and the
+        // repair must not disagree — a herdr `pane split` lands 50/50, never
+        // the old 2/5|3/5, and the old rect_near test made `--check` time out
+        // forever on an already-arranged pane.
+        let atab = anchor_tab.unwrap_or_default();
+        let in_place = anchor_tab.is_some() && w.tab_id.as_deref() == Some(atab);
+
+        if !in_place {
+            ops.push(Op {
+                op: "move".to_string(),
+                pane: w.pane_id.clone(),
+                deferred: is_status_deferred(w.agent_status.as_deref(), def_list),
+                target: Target::Split {
+                    tab: atab.to_string(),
+                    anchor: anchor_pane.unwrap().pane_id.clone(),
+                    direction: "right".to_string(),
+                    ratio: 0.4,
+                },
+            });
+        }
+    } else {
+        // >1 workers total for this owner -> one tab per group
+        // Distinct groups in sorted order (jq: `[ $owner_workers[].tokens.grid_group ] | unique`)
+        let mut groups: BTreeSet<&str> = BTreeSet::new();
+        for w in owner_workers {
+            if let Some(t) = &w.tokens {
+                if let Some(g) = &t.grid_group {
+                    groups.insert(g.as_str());
                 }
             }
+        }
 
-            for group in groups {
-                let mut gws: Vec<&Pane> = owner_workers
+        for group in groups {
+            let mut gws: Vec<&Pane> = owner_workers
+                .iter()
+                .copied()
+                .filter(|w| w.tokens.as_ref().and_then(|t| t.grid_group.as_deref()) == Some(group))
+                .collect();
+
+            gws.sort_by(|a, b| {
+                let seq_a = pane_seq(&a.pane_id);
+                let seq_b = pane_seq(&b.pane_id);
+                seq_a.cmp(&seq_b).then_with(|| a.pane_id.cmp(&b.pane_id))
+            });
+
+            let n = gws.len();
+            if n > 8 {
+                return Err(format!("too many workers in group {group}: {n} (max 8)"));
+            }
+
+            // The exact workers tab label this group was spawned into
+            // (GRID_TAB), shared with the repair and the check through
+            // `accepts_workers_tab`.
+            let expected_tab = group_expected_tab(&gws);
+            let base_tab = expected_tab.clone().unwrap_or_else(|| group.to_string());
+
+            let chunks: Vec<&[&Pane]> = if n <= 4 {
+                vec![&gws[..]]
+            } else {
+                vec![&gws[..4], &gws[4..]]
+            };
+
+            for (chunk_idx, chunk_gws) in chunks.into_iter().enumerate() {
+                let m = chunk_gws.len();
+                if m == 0 {
+                    continue;
+                }
+
+                let chunk_label = chunk_tab_label(&base_tab, chunk_idx);
+                let tab_ref = chunk_tab_ref(chunk_idx);
+
+                // Search for an existing valid workers tab for this group
+                // jq:
+                // [ $tabs[]
+                //   | select((.workspace_id == $owner_ws or $owner_ws == "")
+                //            and ($anchor_tab == null or .tab_id != $anchor_tab)
+                //            and accepts_chunk_tab($group; $expected; $chunk_idx; .label))
+                //   | .tab_id as $tid
+                //   | [ $panes[] | select(.tab_id == $tid) ] as $occ
+                //   | select(($occ | length > 0)
+                //            and ($occ | all(. as $p | any($gws[]; .pane_id == $p.pane_id))))
+                // ]
+                // | sort_by(if .label == $chunk_label then 0 else 1 end)
+                // | first // null
+                let mut matching_tabs: Vec<&super::types::Tab> = snapshot
+                    .tabs
                     .iter()
-                    .copied()
-                    .filter(|w| w.tokens.as_ref().and_then(|t| t.grid_group.as_deref()) == Some(group))
-                    .collect();
-
-                gws.sort_by(|a, b| {
-                    let seq_a = pane_seq(&a.pane_id);
-                    let seq_b = pane_seq(&b.pane_id);
-                    seq_a.cmp(&seq_b).then_with(|| a.pane_id.cmp(&b.pane_id))
-                });
-
-                let n = gws.len();
-                if n > 8 {
-                    return Err(format!("too many workers in group {group}: {n} (max 8)"));
-                }
-
-                // The exact workers tab label this group was spawned into
-                // (GRID_TAB), shared with the repair and the check through
-                // `accepts_workers_tab`.
-                let expected_tab = group_expected_tab(&gws);
-                let base_tab = expected_tab.clone().unwrap_or_else(|| group.to_string());
-
-                let chunks: Vec<&[&Pane]> = if n <= 4 {
-                    vec![&gws[..]]
-                } else {
-                    vec![&gws[..4], &gws[4..]]
-                };
-
-                for (chunk_idx, chunk_gws) in chunks.into_iter().enumerate() {
-                    let m = chunk_gws.len();
-                    if m == 0 {
-                        continue;
-                    }
-
-                    let chunk_label = chunk_tab_label(&base_tab, chunk_idx);
-                    let tab_ref = chunk_tab_ref(chunk_idx);
-
-                    // Search for an existing valid workers tab for this group
-                    // jq:
-                    // [ $tabs[]
-                    //   | select((.workspace_id == $owner_ws or $owner_ws == "")
-                    //            and ($anchor_tab == null or .tab_id != $anchor_tab)
-                    //            and accepts_chunk_tab($group; $expected; $chunk_idx; .label))
-                    //   | .tab_id as $tid
-                    //   | [ $panes[] | select(.tab_id == $tid) ] as $occ
-                    //   | select(($occ | length > 0)
-                    //            and ($occ | all(. as $p | any($gws[]; .pane_id == $p.pane_id))))
-                    // ]
-                    // | sort_by(if .label == $chunk_label then 0 else 1 end)
-                    // | first // null
-                    let mut matching_tabs: Vec<&super::types::Tab> = snapshot
-                        .tabs
-                        .iter()
-                        .filter(|tab| {
-                            let ws_ok = tab.workspace_id.as_deref() == Some(owner_ws) || owner_ws.is_empty();
-                            let anchor_ok = anchor_tab.map(|at| tab.tab_id != at).unwrap_or(true);
-                            let label_ok =
-                                accepts_chunk_tab(group, expected_tab.as_deref(), chunk_idx, tab.label.as_deref());
-                            if !(ws_ok && anchor_ok && label_ok) {
-                                return false;
-                            }
-                            let occ: Vec<&Pane> = snapshot
-                                .panes
-                                .iter()
-                                .filter(|p| p.tab_id.as_deref() == Some(&tab.tab_id))
-                                .collect();
-                            if occ.is_empty() {
-                                return false;
-                            }
-                            occ.iter().all(|p| gws.iter().any(|gw| gw.pane_id == p.pane_id))
-                        })
-                        .collect();
-
-                    matching_tabs.sort_by_key(|tab| {
-                        let l = tab.label.as_deref().unwrap_or("");
-                        let exact = l == chunk_label;
-                        if exact {
-                            0
-                        } else {
-                            1
+                    .filter(|tab| {
+                        let ws_ok = tab.workspace_id.as_deref() == Some(owner_ws) || owner_ws.is_empty();
+                        let anchor_ok = anchor_tab.map(|at| tab.tab_id != at).unwrap_or(true);
+                        let label_ok =
+                            accepts_chunk_tab(group, expected_tab.as_deref(), chunk_idx, tab.label.as_deref());
+                        if !(ws_ok && anchor_ok && label_ok) {
+                            return false;
                         }
-                    });
-
-                    let valid_tab = matching_tabs.first().copied();
-
-                    if let Some(vt) = valid_tab {
-                        let wt_id = &vt.tab_id;
-                        let wt_layout = snapshot.layouts.iter().find(|l| &l.tab_id == wt_id);
-                        let wt_area = wt_layout
-                            .and_then(|l| l.area)
-                            .unwrap_or(Rect { x: 0, y: 0, width: 200, height: 50 });
-                        let occ_count = snapshot
+                        let occ: Vec<&Pane> = snapshot
                             .panes
                             .iter()
-                            .filter(|p| p.tab_id.as_deref() == Some(wt_id.as_str()))
-                            .count();
-                        let all_present = chunk_gws.iter().all(|w| w.tab_id.as_deref() == Some(wt_id.as_str()))
-                            && occ_count == m;
+                            .filter(|p| p.tab_id.as_deref() == Some(&tab.tab_id))
+                            .collect();
+                        if occ.is_empty() {
+                            return false;
+                        }
+                        occ.iter().all(|p| gws.iter().any(|gw| gw.pane_id == p.pane_id))
+                    })
+                    .collect();
 
-                        let in_place = if all_present {
-                            if m == 1 {
-                                let r0 = wt_layout.and_then(|l| {
+                matching_tabs.sort_by_key(|tab| {
+                    let l = tab.label.as_deref().unwrap_or("");
+                    let exact = l == chunk_label;
+                    if exact {
+                        0
+                    } else {
+                        1
+                    }
+                });
+
+                let valid_tab = matching_tabs.first().copied();
+
+                if let Some(vt) = valid_tab {
+                    let wt_id = &vt.tab_id;
+                    let wt_layout = snapshot.layouts.iter().find(|l| &l.tab_id == wt_id);
+                    let wt_area = wt_layout
+                        .and_then(|l| l.area)
+                        .unwrap_or(Rect { x: 0, y: 0, width: 200, height: 50 });
+                    let occ_count = snapshot
+                        .panes
+                        .iter()
+                        .filter(|p| p.tab_id.as_deref() == Some(wt_id.as_str()))
+                        .count();
+                    let all_present = chunk_gws.iter().all(|w| w.tab_id.as_deref() == Some(wt_id.as_str()))
+                        && occ_count == m;
+
+                    let in_place = if all_present {
+                        if m == 1 {
+                            let r0 = wt_layout.and_then(|l| {
+                                l.panes
+                                    .iter()
+                                    .find(|p| p.pane_id == chunk_gws[0].pane_id)
+                                    .and_then(|p| p.rect)
+                            });
+                            r0.map(|r| rect_near(&r, &wt_area)).unwrap_or(false)
+                        } else {
+                            let req_cells = cells(m, &wt_area);
+                            (0..m).all(|i| {
+                                let ri = wt_layout.and_then(|l| {
                                     l.panes
                                         .iter()
-                                        .find(|p| p.pane_id == chunk_gws[0].pane_id)
+                                        .find(|p| p.pane_id == chunk_gws[i].pane_id)
                                         .and_then(|p| p.rect)
                                 });
-                                r0.map(|r| rect_near(&r, &wt_area)).unwrap_or(false)
-                            } else {
-                                let req_cells = cells(m, &wt_area);
-                                (0..m).all(|i| {
-                                    let ri = wt_layout.and_then(|l| {
-                                        l.panes
-                                            .iter()
-                                            .find(|p| p.pane_id == chunk_gws[i].pane_id)
-                                            .and_then(|p| p.rect)
-                                    });
-                                    ri.map(|r| rect_near(&r, &req_cells[i])).unwrap_or(false)
-                                })
-                            }
-                        } else {
-                            false
-                        };
+                                ri.map(|r| rect_near(&r, &req_cells[i])).unwrap_or(false)
+                            })
+                        }
+                    } else {
+                        false
+                    };
 
-                        if !in_place {
-                            let in_tab_count = chunk_gws
-                                .iter()
-                                .filter(|w| w.tab_id.as_deref() == Some(wt_id.as_str()))
-                                .count();
-                            if in_tab_count > 0 && chunk_gws[0].tab_id.as_deref() == Some(wt_id.as_str()) {
-                                // Worker 0 is already in tab; place remaining workers
-                                for i in build_order(m) {
-                                    if i > 0 && chunk_gws[i].tab_id.as_deref() != Some(wt_id.as_str()) {
-                                        ops.push(Op {
-                                            op: "move".to_string(),
-                                            pane: chunk_gws[i].pane_id.clone(),
-                                            deferred: is_status_deferred(chunk_gws[i].agent_status.as_deref(), def_list),
-                                            target: split_target(m, i, &chunk_gws, wt_id),
-                                        });
-                                    }
-                                }
-                            } else {
-                                // The workers tab exists but does not hold the
-                                // first-spawned worker of this chunk: place the missing workers into
-                                // that tab instead of creating a second one.
-                                let anchor = chunk_gws
-                                    .iter()
-                                    .find(|w| w.tab_id.as_deref() == Some(wt_id.as_str()))
-                                    .map(|w| w.pane_id.clone())
-                                    .unwrap_or_else(|| chunk_gws[0].pane_id.clone());
-                                for i in build_order(m) {
-                                    if chunk_gws[i].tab_id.as_deref() == Some(wt_id.as_str()) {
-                                        continue;
-                                    }
+                    if !in_place {
+                        let in_tab_count = chunk_gws
+                            .iter()
+                            .filter(|w| w.tab_id.as_deref() == Some(wt_id.as_str()))
+                            .count();
+                        if in_tab_count > 0 && chunk_gws[0].tab_id.as_deref() == Some(wt_id.as_str()) {
+                            // Worker 0 is already in tab; place remaining workers
+                            for i in build_order(m) {
+                                if i > 0 && chunk_gws[i].tab_id.as_deref() != Some(wt_id.as_str()) {
                                     ops.push(Op {
                                         op: "move".to_string(),
                                         pane: chunk_gws[i].pane_id.clone(),
                                         deferred: is_status_deferred(chunk_gws[i].agent_status.as_deref(), def_list),
-                                        target: Target::Split {
-                                            tab: wt_id.to_string(),
-                                            anchor: anchor.clone(),
-                                            direction: "right".to_string(),
-                                            ratio: 0.5,
-                                        },
+                                        target: split_target(m, i, &chunk_gws, wt_id),
                                     });
                                 }
                             }
-                        }
-                    } else {
-                        // No valid workers tab exists -> create new tab and split.
-                        // Label the tab with the pane's spawn label when it has one
-                        // (`expected_tab`), so the hook and the repair create the
-                        // same tab instead of fighting over `group` vs `--tab`.
-                        for i in build_order(m) {
-                            if i == 0 {
-                                ops.push(Op {
-                                    op: "move".to_string(),
-                                    pane: chunk_gws[0].pane_id.clone(),
-                                    deferred: is_status_deferred(chunk_gws[0].agent_status.as_deref(), def_list),
-                                    target: Target::NewTab {
-                                        label: chunk_label.clone(),
-                                    },
-                                });
-                            } else {
+                        } else {
+                            // The workers tab exists but does not hold the
+                            // first-spawned worker of this chunk: place the missing workers into
+                            // that tab instead of creating a second one.
+                            let anchor = chunk_gws
+                                .iter()
+                                .find(|w| w.tab_id.as_deref() == Some(wt_id.as_str()))
+                                .map(|w| w.pane_id.clone())
+                                .unwrap_or_else(|| chunk_gws[0].pane_id.clone());
+                            for i in build_order(m) {
+                                if chunk_gws[i].tab_id.as_deref() == Some(wt_id.as_str()) {
+                                    continue;
+                                }
                                 ops.push(Op {
                                     op: "move".to_string(),
                                     pane: chunk_gws[i].pane_id.clone(),
                                     deferred: is_status_deferred(chunk_gws[i].agent_status.as_deref(), def_list),
-                                    target: split_target(m, i, &chunk_gws, &tab_ref),
+                                    target: Target::Split {
+                                        tab: wt_id.to_string(),
+                                        anchor: anchor.clone(),
+                                        direction: "right".to_string(),
+                                        ratio: 0.5,
+                                    },
                                 });
                             }
+                        }
+                    }
+                } else {
+                    // No valid workers tab exists -> create new tab and split.
+                    // Label the tab with the pane's spawn label when it has one
+                    // (`expected_tab`), so the hook and the repair create the
+                    // same tab instead of fighting over `group` vs `--tab`.
+                    for i in build_order(m) {
+                        if i == 0 {
+                            ops.push(Op {
+                                op: "move".to_string(),
+                                pane: chunk_gws[0].pane_id.clone(),
+                                deferred: is_status_deferred(chunk_gws[0].agent_status.as_deref(), def_list),
+                                target: Target::NewTab {
+                                    label: chunk_label.clone(),
+                                },
+                            });
+                        } else {
+                            ops.push(Op {
+                                op: "move".to_string(),
+                                pane: chunk_gws[i].pane_id.clone(),
+                                deferred: is_status_deferred(chunk_gws[i].agent_status.as_deref(), def_list),
+                                target: split_target(m, i, &chunk_gws, &tab_ref),
+                            });
                         }
                     }
                 }
@@ -651,6 +701,5 @@ pub fn plan_with_deferred(
         }
     }
 
-    propagate_deferrals(&mut ops, &snapshot.panes);
-    Ok(ops)
+    Ok(())
 }
