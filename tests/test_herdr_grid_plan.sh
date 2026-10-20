@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Unit test for plugins/herdr-quaqua/plan.jq layout planner (phase plugin-shadow, wave 1, T1).
+# plan.jq is the RETIRED planner kept only as a parity oracle; it still encodes
+# the pre-issue-#79 3-pane layout (A|B top + C below). The live planner is
+# `quaqua grid plan` (crates/quaqua/src/grid): its target shape, incremental
+# spawn order and cleanup repairs are pinned by the unit tests in plan.rs.
 # Tests turn a herdr api snapshot JSON into an ordered list of layout ops.
 #
 # Requirements verified:

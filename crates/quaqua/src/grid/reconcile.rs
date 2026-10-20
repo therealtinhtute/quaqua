@@ -501,13 +501,10 @@ pub fn reconcile_core<D: HerdrDriver>(
                 let chunk_label = super::plan::chunk_tab_label(&base_tab, chunk_idx);
                 let chunk_ref = super::plan::chunk_tab_ref(chunk_idx);
 
-                let build_orders = match m {
-                    1 => vec![0],
-                    2 => vec![0, 1],
-                    3 => vec![0, 2, 1],
-                    4 => vec![0, 2, 1, 3],
-                    _ => vec![],
-                };
+                // Cell order == placement order (issue #79): the i-th pane placed
+                // lands at cell i, so a new pane's split is fixed by the current
+                // pane count alone.
+                let build_orders: Vec<usize> = (0..m).collect();
                 // Pivot: the tab is created by an idle worker, never by a working one.
                 // A deferred anchor must not cancel the runnable panes of its own group
                 // (a working pane is never moved, but the idle ones still are; the
@@ -586,6 +583,31 @@ pub fn reconcile_core<D: HerdrDriver>(
                     .map(|t| t.tab_id.clone())
                     .unwrap_or_else(|| chunk_ref.clone());
 
+                // The tab holds every pane of the chunk but the cells are not
+                // the target shape (a cleanup left the mirror column, or a pane
+                // was removed from the wrong column): rebuild in cell order.
+                let shape_wrong = match valid_tab {
+                    Some(vt) if present.len() == m => {
+                        let layout = snap.layouts.iter().find(|l| l.tab_id == vt.tab_id);
+                        let area = layout.and_then(|l| l.area).unwrap_or(super::types::Rect {
+                            x: 0,
+                            y: 0,
+                            width: 200,
+                            height: 50,
+                        });
+                        let rects: Vec<Option<super::types::Rect>> = chunk_gws
+                            .iter()
+                            .map(|w| {
+                                layout
+                                    .and_then(|l| l.panes.iter().find(|p| p.pane_id == w.pane_id))
+                                    .and_then(|p| p.rect)
+                            })
+                            .collect();
+                        super::plan::layout_wrong(m, &area, &rects)
+                    }
+                    _ => false,
+                };
+
                 for (pos, idx) in order.iter().copied().enumerate() {
                     let w = chunk_gws[idx];
                     let is_movable = movable_workers.iter().any(|(p, _)| p.pane_id == w.pane_id);
@@ -602,9 +624,15 @@ pub fn reconcile_core<D: HerdrDriver>(
                         continue;
                     }
 
-                    let in_place = valid_tab
-                        .map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id))
-                        .unwrap_or(false)
+                    // The first pane is the rebuild's base: it stays put.
+                    if shape_wrong && pos == 0 {
+                        continue;
+                    }
+
+                    let in_place = !shape_wrong
+                        && valid_tab
+                            .map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id))
+                            .unwrap_or(false)
                         && (present.contains(&w.pane_id) || present.len() == m);
 
                     if in_place {
@@ -616,22 +644,10 @@ pub fn reconcile_core<D: HerdrDriver>(
 
                     let (mode, anchor_idx, dir, ratio) = if pos == 0 {
                         ("new-tab", 0, "right", 0.5)
-                    } else if m == 2 {
-                        ("split", 0, "right", 0.5)
-                    } else if m == 3 {
-                        if idx == 2 {
-                            ("split", 0, "down", 0.5)
-                        } else {
-                            ("split", 0, "right", 0.5)
-                        }
                     } else {
-                        if idx == 2 {
-                            ("split", 0, "down", 0.5)
-                        } else if idx == 1 {
-                            ("split", 0, "right", 0.5)
-                        } else {
-                            ("split", 2, "right", 0.5)
-                        }
+                        let (parent, dir) = super::plan::placement(pos)
+                            .expect("pos >= 1 has a parent cell");
+                        ("split", order[parent], dir, 0.5)
                     };
 
                     if mode == "new-tab" {
@@ -1138,7 +1154,7 @@ mod tests {
             }
         );
 
-        // 3 workers: A | B top + C below (50% down split)
+        // 3 workers: A │ B/C (left full, right stacked) — issue #79
         let snap3 = Snapshot {
             panes: vec![
                 make_worker("w1:t1:p1", "grp", None, None),
@@ -1149,19 +1165,9 @@ mod tests {
         };
         let ops3 = plan_with_deferred(&snap3, None).unwrap();
         assert_eq!(ops3.len(), 3);
-        assert_eq!(ops3[1].pane, "w1:t1:p3");
+        assert_eq!(ops3[1].pane, "w1:t1:p2");
         assert_eq!(
             ops3[1].target,
-            Target::Split {
-                tab: "@workers".to_string(),
-                anchor: "w1:t1:p1".to_string(),
-                direction: "down".to_string(),
-                ratio: 0.5,
-            }
-        );
-        assert_eq!(ops3[2].pane, "w1:t1:p2");
-        assert_eq!(
-            ops3[2].target,
             Target::Split {
                 tab: "@workers".to_string(),
                 anchor: "w1:t1:p1".to_string(),
@@ -1169,8 +1175,18 @@ mod tests {
                 ratio: 0.5,
             }
         );
+        assert_eq!(ops3[2].pane, "w1:t1:p3");
+        assert_eq!(
+            ops3[2].target,
+            Target::Split {
+                tab: "@workers".to_string(),
+                anchor: "w1:t1:p2".to_string(),
+                direction: "down".to_string(),
+                ratio: 0.5,
+            }
+        );
 
-        // 4 workers: 2x2 grid
+        // 4 workers: 2x2 grid A B / D C (the 4th splits the left column)
         let snap4 = Snapshot {
             panes: vec![
                 make_worker("w1:t1:p1", "grp", None, None),
@@ -1182,23 +1198,23 @@ mod tests {
         };
         let ops4 = plan_with_deferred(&snap4, None).unwrap();
         assert_eq!(ops4.len(), 4);
-        assert_eq!(ops4[1].pane, "w1:t1:p3");
+        assert_eq!(ops4[1].pane, "w1:t1:p2");
         assert_eq!(
             ops4[1].target,
             Target::Split {
                 tab: "@workers".to_string(),
                 anchor: "w1:t1:p1".to_string(),
-                direction: "down".to_string(),
+                direction: "right".to_string(),
                 ratio: 0.5,
             }
         );
-        assert_eq!(ops4[2].pane, "w1:t1:p2");
+        assert_eq!(ops4[2].pane, "w1:t1:p3");
         assert_eq!(
             ops4[2].target,
             Target::Split {
                 tab: "@workers".to_string(),
-                anchor: "w1:t1:p1".to_string(),
-                direction: "right".to_string(),
+                anchor: "w1:t1:p2".to_string(),
+                direction: "down".to_string(),
                 ratio: 0.5,
             }
         );
@@ -1207,8 +1223,8 @@ mod tests {
             ops4[3].target,
             Target::Split {
                 tab: "@workers".to_string(),
-                anchor: "w1:t1:p3".to_string(),
-                direction: "right".to_string(),
+                anchor: "w1:t1:p1".to_string(),
+                direction: "down".to_string(),
                 ratio: 0.5,
             }
         );
@@ -1281,6 +1297,146 @@ mod tests {
         assert!(
             ops[1].deferred,
             "split anchored on deferred pane must also be deferred"
+        );
+    }
+
+    #[test]
+    fn test_repair_rebuilds_the_mirror_column_after_cleanup() {
+        // Issue #79 cleanup, 4->3 removing a right-column pane: the tab is left
+        // with the left column stacked and the right column full (the mirror).
+        // The repair must re-place the panes instead of reporting "in place".
+        let area = crate::grid::types::Rect { x: 0, y: 0, width: 200, height: 100 };
+        let rect = |x, y, width, height| Some(crate::grid::types::Rect { x, y, width, height });
+        let mut panes = vec![
+            Pane {
+                pane_id: "w1:p1".to_string(),
+                tab_id: Some("w1:t1".to_string()),
+                workspace_id: Some("ws1".to_string()),
+                agent: Some("cos".to_string()),
+                agent_status: Some("idle".to_string()),
+                tokens: Some(Tokens {
+                    grid_role: Some("cos".to_string()),
+                    grid_owner: Some("cos".to_string()),
+                    grid_group: None,
+                    grid_tab: None,
+                    grid_ready: None,
+                    grid_name: Some("cos".to_string()),
+                }),
+                label: Some("cos".to_string()),
+            },
+        ];
+        panes.extend([
+            make_worker("w1:p2", "grp", Some("tab:grp-workers"), None), // A
+            make_worker("w1:p4", "grp", Some("tab:grp-workers"), None), // C
+            make_worker("w1:p5", "grp", Some("tab:grp-workers"), None), // D
+        ]);
+        let snapshot = Snapshot {
+            tabs: vec![
+                Tab {
+                    tab_id: "w1:t1".to_string(),
+                    workspace_id: Some("ws1".to_string()),
+                    label: Some("1".to_string()),
+                    pane_count: Some(1),
+                },
+                Tab {
+                    tab_id: "tab:grp-workers".to_string(),
+                    workspace_id: Some("ws1".to_string()),
+                    label: Some("grp-workers".to_string()),
+                    pane_count: Some(3),
+                },
+            ],
+            layouts: vec![super::super::types::Layout {
+                tab_id: "tab:grp-workers".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                area: Some(area),
+                panes: vec![
+                    super::super::types::PaneLayout {
+                        pane_id: "w1:p2".to_string(),
+                        rect: rect(0, 0, 100, 50),
+                    },
+                    super::super::types::PaneLayout {
+                        pane_id: "w1:p4".to_string(),
+                        rect: rect(0, 50, 100, 50),
+                    },
+                    super::super::types::PaneLayout {
+                        pane_id: "w1:p5".to_string(),
+                        rect: rect(100, 0, 100, 100),
+                    },
+                ],
+                zoomed: Some(false),
+            }],
+            panes,
+            ..Default::default()
+        };
+        assert!(
+            crate::grid::plan::layout_wrong(3, &area, &[
+                Some(crate::grid::types::Rect { x: 0, y: 0, width: 100, height: 50 }),
+                Some(crate::grid::types::Rect { x: 0, y: 50, width: 100, height: 50 }),
+                Some(crate::grid::types::Rect { x: 100, y: 0, width: 100, height: 100 }),
+            ]),
+            "this layout must read as the mirror"
+        );
+
+        let mut driver = MockHerdrDriver {
+            snapshot,
+            ..Default::default()
+        };
+        run_reconcile(
+            &mut driver,
+            &super::ReconcileOptions {
+                check: false,
+                repair: true,
+                tab: Some("grp-workers".to_string()),
+                only: None,
+                owner: Some("cos".to_string()),
+                dry_run: false,
+                timeout_sec: None,
+            },
+            "workers",
+            None,
+        )
+        .expect("mirror repair must succeed");
+
+        // apply_ops parks each pane in a scratch tab first (a same-tab split is
+        // a `same_tab` no-op in herdr), then splits it onto the parent cell.
+        let splits: Vec<(String, Target)> = driver
+            .move_calls
+            .iter()
+            .filter(|(_, t)| matches!(t, Target::Split { .. }))
+            .cloned()
+            .collect();
+        let moves: Vec<&str> = splits.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            moves,
+            vec!["w1:p4", "w1:p5"],
+            "rebuild in cell order: {:?}",
+            driver.move_calls
+        );
+        assert_eq!(
+            splits[0].1,
+            Target::Split {
+                tab: "tab:grp-workers".to_string(),
+                anchor: "w1:p2".to_string(),
+                direction: "right".to_string(),
+                ratio: 0.5,
+            }
+        );
+        assert_eq!(
+            splits[1].1,
+            Target::Split {
+                tab: "tab:grp-workers".to_string(),
+                anchor: "w1:p4".to_string(),
+                direction: "down".to_string(),
+                ratio: 0.5,
+            }
+        );
+        assert!(
+            driver
+                .move_calls
+                .iter()
+                .any(|(_, t)| matches!(t, Target::NewTab { label } if label.starts_with("grid-scratch-"))),
+            "each in-tab move must park first: {:?}",
+            driver.move_calls
         );
     }
 

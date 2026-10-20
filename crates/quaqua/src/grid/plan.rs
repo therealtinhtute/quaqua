@@ -161,98 +161,91 @@ pub fn group_expected_tab(gws: &[&Pane]) -> Option<String> {
     })
 }
 
-fn cells(n: usize, a: &Rect) -> Vec<Rect> {
+/// Target cells of one workers tab, in pane-sequence order (issue #79):
+/// 2 = `A │ B`, 3 = `A │ B/C` (left full, right stacked), 4 = `A B / D C`.
+pub fn cells(n: usize, a: &Rect) -> Vec<Rect> {
     let x = a.x;
     let y = a.y;
     let w = if a.width != 0 { a.width } else { 200 };
     let h = if a.height != 0 { a.height } else { 50 };
     let hw = w / 2;
     let hh = h / 2;
-    let cw = (w * 2) / 5;
     match n {
-        1 => vec![
-            Rect { x, y, width: cw, height: h },
-            Rect { x: x + cw, y, width: w - cw, height: h },
-        ],
+        1 => vec![Rect { x, y, width: w, height: h }],
         2 => vec![
             Rect { x, y, width: hw, height: h },
             Rect { x: x + hw, y, width: w - hw, height: h },
         ],
         3 => vec![
-            Rect { x, y, width: hw, height: hh },
+            Rect { x, y, width: hw, height: h },
             Rect { x: x + hw, y, width: w - hw, height: hh },
-            Rect { x, y: y + hh, width: w, height: h - hh },
+            Rect { x: x + hw, y: y + hh, width: w - hw, height: h - hh },
         ],
         4 => vec![
             Rect { x, y, width: hw, height: hh },
             Rect { x: x + hw, y, width: w - hw, height: hh },
-            Rect { x, y: y + hh, width: hw, height: h - hh },
             Rect { x: x + hw, y: y + hh, width: w - hw, height: h - hh },
+            Rect { x, y: y + hh, width: hw, height: h - hh },
         ],
         _ => vec![],
     }
 }
 
-fn build_order(n: usize) -> Vec<usize> {
-    match n {
-        1 => vec![0],
-        2 => vec![0, 1],
-        3 => vec![0, 2, 1],
-        4 => vec![0, 2, 1, 3],
-        _ => vec![],
+/// Where the pane that lands at cell `pos` (0-based) comes from: the pane at
+/// cell `parent` of the layout with `pos` panes splits in `dir` (issue #79).
+/// Cell order is the incremental spawn order, so `pos` is also the number of
+/// panes already in the tab.
+pub fn placement(pos: usize) -> Option<(usize, &'static str)> {
+    match pos {
+        1 => Some((0, "right")),
+        2 => Some((1, "down")),
+        3 => Some((0, "down")),
+        _ => None,
     }
 }
 
-fn split_target(n: usize, i: usize, gws: &[&Pane], tab_ref: &str) -> Target {
-    match n {
-        2 => Target::Split {
-            tab: tab_ref.to_string(),
-            anchor: gws[0].pane_id.clone(),
-            direction: "right".to_string(),
-            ratio: 0.5,
-        },
-        3 => {
-            if i == 2 {
-                Target::Split {
-                    tab: tab_ref.to_string(),
-                    anchor: gws[0].pane_id.clone(),
-                    direction: "down".to_string(),
-                    ratio: 0.5,
-                }
-            } else {
-                Target::Split {
-                    tab: tab_ref.to_string(),
-                    anchor: gws[0].pane_id.clone(),
-                    direction: "right".to_string(),
-                    ratio: 0.5,
-                }
-            }
+/// Cell order == placement order: cell `i` is the `i`-th pane placed.
+fn build_order(n: usize) -> Vec<usize> {
+    (0..n).collect()
+}
+
+/// True when `rects` (one per pane, in any order) already covers the target
+/// cells for `n` panes. Shape, not identity: a cleanup swap that leaves the
+/// same geometry is converged, which keeps `grid check` and the repair agreeing.
+pub fn layout_matches(n: usize, area: &Rect, rects: &[Option<Rect>]) -> bool {
+    let want = cells(n, area);
+    if want.is_empty() || rects.len() != want.len() {
+        return false;
+    }
+    let mut used = vec![false; rects.len()];
+    for cell in &want {
+        match rects
+            .iter()
+            .enumerate()
+            .find(|(i, r)| !used[*i] && r.map(|r| rect_near(&r, cell)).unwrap_or(false))
+        {
+            Some((i, _)) => used[i] = true,
+            None => return false,
         }
-        4 => {
-            if i == 2 {
-                Target::Split {
-                    tab: tab_ref.to_string(),
-                    anchor: gws[0].pane_id.clone(),
-                    direction: "down".to_string(),
-                    ratio: 0.5,
-                }
-            } else if i == 1 {
-                Target::Split {
-                    tab: tab_ref.to_string(),
-                    anchor: gws[0].pane_id.clone(),
-                    direction: "right".to_string(),
-                    ratio: 0.5,
-                }
-            } else {
-                Target::Split {
-                    tab: tab_ref.to_string(),
-                    anchor: gws[2].pane_id.clone(),
-                    direction: "right".to_string(),
-                    ratio: 0.5,
-                }
-            }
-        }
-        _ => unreachable!(),
+    }
+    true
+}
+
+/// True only when every pane rect is known and the shape is not the target —
+/// a snapshot without layout data must not churn the repair forever.
+pub fn layout_wrong(n: usize, area: &Rect, rects: &[Option<Rect>]) -> bool {
+    rects.iter().all(|r| r.is_some()) && !layout_matches(n, area, rects)
+}
+
+/// Split for the pane placed at cell `pos`: anchored on the pane already at the
+/// parent cell (`order[parent]`), in the parent's split direction.
+fn split_target(pos: usize, order: &[usize], gws: &[&Pane], tab_ref: &str) -> Target {
+    let (parent, direction) = placement(pos).expect("pos >= 1 has a parent cell");
+    Target::Split {
+        tab: tab_ref.to_string(),
+        anchor: gws[order[parent]].pane_id.clone(),
+        direction: direction.to_string(),
+        ratio: 0.5,
     }
 }
 
@@ -604,26 +597,21 @@ fn plan_owner_workspace(
                         && occ_count == m;
 
                     let in_place = if all_present {
-                        if m == 1 {
-                            let r0 = wt_layout.and_then(|l| {
-                                l.panes
-                                    .iter()
-                                    .find(|p| p.pane_id == chunk_gws[0].pane_id)
-                                    .and_then(|p| p.rect)
-                            });
-                            r0.map(|r| rect_near(&r, &wt_area)).unwrap_or(false)
-                        } else {
-                            let req_cells = cells(m, &wt_area);
-                            (0..m).all(|i| {
-                                let ri = wt_layout.and_then(|l| {
-                                    l.panes
-                                        .iter()
-                                        .find(|p| p.pane_id == chunk_gws[i].pane_id)
-                                        .and_then(|p| p.rect)
-                                });
-                                ri.map(|r| rect_near(&r, &req_cells[i])).unwrap_or(false)
+                        let rects: Vec<Option<Rect>> = chunk_gws
+                            .iter()
+                            .map(|w| {
+                                wt_layout
+                                    .and_then(|l| {
+                                        l.panes
+                                            .iter()
+                                            .find(|p| p.pane_id == w.pane_id)
+                                            .and_then(|p| p.rect)
+                                    })
                             })
-                        }
+                            .collect();
+                        // Unknown layout data must not read as "wrong" (a
+                        // repair would plan a rebuild on every pass forever).
+                        !layout_wrong(m, &wt_area, &rects)
                     } else {
                         false
                     };
@@ -633,17 +621,29 @@ fn plan_owner_workspace(
                             .iter()
                             .filter(|w| w.tab_id.as_deref() == Some(wt_id.as_str()))
                             .count();
+                        // All panes are there but the shape is wrong (a cleanup
+                        // left the mirror column, or a mirror-image 2x2): rebuild
+                        // in cell order. `apply_ops` parks each pane in a scratch
+                        // tab first, so the split lands on the parent cell.
+                        let rebuild = all_present;
                         if in_tab_count > 0 && chunk_gws[0].tab_id.as_deref() == Some(wt_id.as_str()) {
-                            // Worker 0 is already in tab; place remaining workers
-                            for i in build_order(m) {
-                                if i > 0 && chunk_gws[i].tab_id.as_deref() != Some(wt_id.as_str()) {
-                                    ops.push(Op {
-                                        op: "move".to_string(),
-                                        pane: chunk_gws[i].pane_id.clone(),
-                                        deferred: is_status_deferred(chunk_gws[i].agent_status.as_deref(), def_list),
-                                        target: split_target(m, i, &chunk_gws, wt_id),
-                                    });
+                            // Worker 0 is already in tab; place missing workers,
+                            // or re-place every pane when rebuilding the shape.
+                            let order = build_order(m);
+                            for (pos, i) in order.iter().copied().enumerate() {
+                                if pos == 0 {
+                                    continue;
                                 }
+                                let here = chunk_gws[i].tab_id.as_deref() == Some(wt_id.as_str());
+                                if here && !rebuild {
+                                    continue;
+                                }
+                                ops.push(Op {
+                                    op: "move".to_string(),
+                                    pane: chunk_gws[i].pane_id.clone(),
+                                    deferred: is_status_deferred(chunk_gws[i].agent_status.as_deref(), def_list),
+                                    target: split_target(pos, &order, &chunk_gws, wt_id),
+                                });
                             }
                         } else {
                             // The workers tab exists but does not hold the
@@ -677,12 +677,13 @@ fn plan_owner_workspace(
                     // Label the tab with the pane's spawn label when it has one
                     // (`expected_tab`), so the hook and the repair create the
                     // same tab instead of fighting over `group` vs `--tab`.
-                    for i in build_order(m) {
-                        if i == 0 {
+                    let order = build_order(m);
+                    for (pos, i) in order.iter().copied().enumerate() {
+                        if pos == 0 {
                             ops.push(Op {
                                 op: "move".to_string(),
-                                pane: chunk_gws[0].pane_id.clone(),
-                                deferred: is_status_deferred(chunk_gws[0].agent_status.as_deref(), def_list),
+                                pane: chunk_gws[i].pane_id.clone(),
+                                deferred: is_status_deferred(chunk_gws[i].agent_status.as_deref(), def_list),
                                 target: Target::NewTab {
                                     label: chunk_label.clone(),
                                 },
@@ -692,7 +693,7 @@ fn plan_owner_workspace(
                                 op: "move".to_string(),
                                 pane: chunk_gws[i].pane_id.clone(),
                                 deferred: is_status_deferred(chunk_gws[i].agent_status.as_deref(), def_list),
-                                target: split_target(m, i, &chunk_gws, &tab_ref),
+                                target: split_target(pos, &order, &chunk_gws, &tab_ref),
                             });
                         }
                     }
@@ -702,4 +703,312 @@ fn plan_owner_workspace(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::types::{Layout, PaneLayout, Tab, Tokens};
+
+    const AREA: Rect = Rect { x: 0, y: 0, width: 200, height: 100 };
+
+    /// A binary split tree with herdr's `pane move --split` semantics: a split
+    /// puts the moved pane below/right of the anchor leaf, and removing a leaf
+    /// collapses its parent onto the sibling. That is what `apply_ops` does
+    /// (park in a scratch tab, then split) and what the isolated smoke observed.
+    #[derive(Clone, Debug)]
+    enum Node {
+        Leaf(String),
+        Split {
+            dir: &'static str,
+            a: Box<Node>,
+            b: Box<Node>,
+        },
+    }
+
+    impl Node {
+        fn split(&mut self, anchor: &str, dir: &'static str, new: &str) -> bool {
+            match self {
+                Node::Leaf(p) if p == anchor => {
+                    let old = Node::Leaf(p.clone());
+                    *self = Node::Split {
+                        dir,
+                        a: Box::new(old),
+                        b: Box::new(Node::Leaf(new.to_string())),
+                    };
+                    true
+                }
+                Node::Leaf(_) => false,
+                Node::Split { a, b, .. } => a.split(anchor, dir, new) || b.split(anchor, dir, new),
+            }
+        }
+
+        fn remove(&mut self, pane: &str) -> bool {
+            match self {
+                Node::Leaf(_) => false,
+                Node::Split { a, b, .. } => {
+                    if matches!(a.as_ref(), Node::Leaf(p) if p == pane) {
+                        *self = b.as_ref().clone();
+                        return true;
+                    }
+                    if matches!(b.as_ref(), Node::Leaf(p) if p == pane) {
+                        *self = a.as_ref().clone();
+                        return true;
+                    }
+                    a.remove(pane) || b.remove(pane)
+                }
+            }
+        }
+
+        fn rects(&self, area: Rect, out: &mut Vec<(String, Rect)>) {
+            match self {
+                Node::Leaf(p) => out.push((p.clone(), area)),
+                Node::Split { dir, a, b } => {
+                    if *dir == "right" {
+                        let hw = area.width / 2;
+                        a.rects(Rect { width: hw, ..area }, out);
+                        b.rects(
+                            Rect {
+                                x: area.x + hw,
+                                width: area.width - hw,
+                                ..area
+                            },
+                            out,
+                        );
+                    } else {
+                        let hh = area.height / 2;
+                        a.rects(Rect { height: hh, ..area }, out);
+                        b.rects(
+                            Rect {
+                                y: area.y + hh,
+                                height: area.height - hh,
+                                ..area
+                            },
+                            out,
+                        );
+                    }
+                }
+            }
+        }
+
+        fn rect_of(&self, pane: &str) -> Option<Rect> {
+            let mut all = Vec::new();
+            self.rects(AREA, &mut all);
+            all.into_iter().find(|(p, _)| p == pane).map(|(_, r)| r)
+        }
+    }
+
+    fn worker(id: &str, tab: &str) -> Pane {
+        Pane {
+            pane_id: id.to_string(),
+            tab_id: Some(tab.to_string()),
+            workspace_id: Some("w1".to_string()),
+            agent: Some(id.to_string()),
+            agent_status: Some("idle".to_string()),
+            tokens: Some(Tokens {
+                grid_role: Some("worker".to_string()),
+                grid_owner: Some("cos".to_string()),
+                grid_group: Some("grp".to_string()),
+                grid_tab: Some("grp-workers".to_string()),
+                grid_ready: Some(serde_json::json!(1)),
+                grid_name: Some(id.to_string()),
+            }),
+            label: Some(id.to_string()),
+        }
+    }
+
+    fn owner() -> Pane {
+        Pane {
+            pane_id: "w1:p1".to_string(),
+            tab_id: Some("w1:t1".to_string()),
+            workspace_id: Some("w1".to_string()),
+            agent: Some("cos".to_string()),
+            agent_status: Some("idle".to_string()),
+            tokens: Some(Tokens {
+                grid_role: Some("cos".to_string()),
+                grid_owner: Some("cos".to_string()),
+                grid_group: None,
+                grid_tab: None,
+                grid_ready: None,
+                grid_name: Some("cos".to_string()),
+            }),
+            label: Some("cos".to_string()),
+        }
+    }
+
+    /// Snapshot: `tree` is the workers tab, `extra` panes sit in the
+    /// orchestrator tab (a fresh spawn before the repair moves it).
+    fn snapshot(tree: &Node, extra: &[&str]) -> Snapshot {
+        let mut panes = vec![owner()];
+        let mut pane_layouts = Vec::new();
+        let mut all = Vec::new();
+        tree.rects(AREA, &mut all);
+        for (id, rect) in all {
+            panes.push(worker(&id, "w1:tw"));
+            pane_layouts.push(PaneLayout {
+                pane_id: id,
+                rect: Some(rect),
+            });
+        }
+        for id in extra {
+            panes.push(worker(id, "w1:t1"));
+        }
+        Snapshot {
+            tabs: vec![
+                Tab {
+                    tab_id: "w1:t1".to_string(),
+                    workspace_id: Some("w1".to_string()),
+                    label: Some("1".to_string()),
+                    pane_count: None,
+                },
+                Tab {
+                    tab_id: "w1:tw".to_string(),
+                    workspace_id: Some("w1".to_string()),
+                    label: Some("grp-workers".to_string()),
+                    pane_count: None,
+                },
+            ],
+            layouts: vec![Layout {
+                tab_id: "w1:tw".to_string(),
+                workspace_id: Some("w1".to_string()),
+                area: Some(AREA),
+                panes: pane_layouts,
+                zoomed: Some(false),
+            }],
+            panes,
+            ..Default::default()
+        }
+    }
+
+    fn apply(tree: &mut Node, op: &Op) {
+        tree.remove(&op.pane);
+        match &op.target {
+            Target::Split {
+                anchor, direction, ..
+            } => assert!(
+                tree.split(anchor, if direction == "right" { "right" } else { "down" }, &op.pane),
+                "anchor {anchor} missing for {}",
+                op.pane
+            ),
+            Target::NewTab { .. } => panic!("unexpected new_tab in a rebuild"),
+        }
+    }
+
+    fn matches(tree: &Node, n: usize) -> bool {
+        let mut all = Vec::new();
+        tree.rects(AREA, &mut all);
+        let rects: Vec<Option<Rect>> = all.into_iter().map(|(_, r)| Some(r)).collect();
+        layout_matches(n, &AREA, &rects)
+    }
+
+    /// Issue #79 acceptance: four sequential spawns end in an equal 2x2.
+    #[test]
+    fn test_four_sequential_spawns_give_equal_2x2() {
+        // Spawn 1: A arrives into the (still empty) workers tab.
+        let mut tree = Node::Leaf("w1:p2".to_string());
+        assert!(matches(&tree, 1));
+
+        // Spawns 2..4: each new pane lands in the orchestrator tab and the
+        // repair moves it into the workers tab.
+        let wanted = ["right", "down", "down"];
+        for (k, dir) in wanted.iter().enumerate() {
+            let n = k + 2;
+            let new_pane = format!("w1:p{}", n + 1);
+            let snap = snapshot(&tree, &[&new_pane]);
+            let ops = plan(&snap).unwrap();
+            let op = ops
+                .iter()
+                .find(|o| o.pane == new_pane)
+                .unwrap_or_else(|| panic!("spawn {n}: no move for {new_pane}: {ops:?}"));
+            match &op.target {
+                Target::Split { direction, .. } => assert_eq!(direction, dir, "spawn {n}: {op:?}"),
+                other => panic!("spawn {n}: expected a split, got {other:?}"),
+            }
+            apply(&mut tree, op);
+            assert!(matches(&tree, n), "spawn {n}: not the target shape: {tree:?}");
+            // The repaired tab is converged: a second pass plans nothing.
+            let after = snapshot(&tree, &[]);
+            assert_eq!(plan(&after).unwrap(), vec![], "spawn {n}: replan must converge");
+        }
+
+        let mut all = Vec::new();
+        tree.rects(AREA, &mut all);
+        let rects: Vec<Rect> = all.into_iter().map(|(_, r)| r).collect();
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                assert_eq!(a.width, b.width, "2x2 columns must be equal: {rects:?}");
+                assert_eq!(a.height, b.height, "2x2 rows must be equal: {rects:?}");
+            }
+        }
+    }
+
+    /// A 4-pane tab as it is after the sequential spawns above.
+    fn four_pane_tree() -> Node {
+        let mut tree = Node::Leaf("w1:p2".to_string()); // A
+        tree.split("w1:p2", "right", "w1:p3"); // B
+        tree.split("w1:p3", "down", "w1:p4"); // C (bottom-right)
+        tree.split("w1:p2", "down", "w1:p5"); // D (bottom-left)
+        assert!(matches(&tree, 4));
+        tree
+    }
+
+    /// Cleanup table, row 4->3: removing a left-column pane needs no fix;
+    /// removing a right-column pane is the mirror and must be repaired.
+    #[test]
+    fn test_cleanup_4_to_3() {
+        for removed in ["w1:p2", "w1:p5"] {
+            let mut tree = four_pane_tree();
+            tree.remove(removed);
+            let snap = snapshot(&tree, &[]);
+            let ops = plan(&snap).unwrap();
+            assert_eq!(ops, vec![], "4->3 removing left pane {removed} needs no fix: {ops:?}");
+            assert!(matches(&tree, 3));
+        }
+
+        for removed in ["w1:p3", "w1:p4"] {
+            let mut tree = four_pane_tree();
+            tree.remove(removed);
+            assert!(!matches(&tree, 3), "4->3 removing right pane {removed} starts mirrored");
+            let snap = snapshot(&tree, &[]);
+            let ops = plan(&snap).unwrap();
+            assert!(!ops.is_empty(), "4->3 removing {removed}: expected a swap/rebuild");
+            for op in &ops {
+                apply(&mut tree, op);
+            }
+            assert!(matches(&tree, 3), "4->3 removing {removed}: not repaired: {tree:?}");
+        }
+    }
+
+    /// Cleanup table, row 3->2.
+    #[test]
+    fn test_cleanup_3_to_2() {
+        // Removing B or C leaves A | X: already the target.
+        for removed in ["w1:p3", "w1:p4"] {
+            let mut tree = four_pane_tree();
+            tree.remove("w1:p5"); // D, first: left full + right stacked
+            tree.remove(removed);
+            assert!(matches(&tree, 2), "3->2 removing {removed} needs no fix");
+            let ops = plan(&snapshot(&tree, &[])).unwrap();
+            assert_eq!(ops, vec![], "3->2 removing {removed}: {ops:?}");
+        }
+
+        // Removing A leaves the right column stacked: move C right of B.
+        let mut tree = four_pane_tree();
+        tree.remove("w1:p5");
+        tree.remove("w1:p2");
+        assert!(!matches(&tree, 2), "3->2 removing A starts stacked");
+        let ops = plan(&snapshot(&tree, &[])).unwrap();
+        assert_eq!(ops.len(), 1, "one move fixes 3->2: {ops:?}");
+        match &ops[0].target {
+            Target::Split {
+                anchor, direction, ..
+            } => {
+                assert_eq!(anchor, "w1:p3", "C splits right of B");
+                assert_eq!(direction, "right");
+            }
+            other => panic!("expected a split, got {other:?}"),
+        }
+        apply(&mut tree, &ops[0]);
+        assert!(matches(&tree, 2), "3->2 removing A: {tree:?}");
+    }
 }

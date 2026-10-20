@@ -144,15 +144,15 @@ fn test_5_workers_overflows_to_workers_2() {
     let snap = parse_snapshot_value(&val).unwrap();
     let ops = plan(&snap).unwrap();
     assert_eq!(ops.len(), 5);
-    // First 4 workers land in quaqua-workers (2x2 grid)
+    // First 4 workers land in quaqua-workers (2x2 grid, cell order)
     assert_eq!(ops[0].pane, "w1:p5");
     assert_eq!(ops[0].target, Target::NewTab { label: "quaqua-workers".to_string() });
-    assert_eq!(ops[1].pane, "w1:p7");
-    assert_eq!(ops[1].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "down".to_string(), ratio: 0.5 });
-    assert_eq!(ops[2].pane, "w1:p6");
-    assert_eq!(ops[2].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[1].pane, "w1:p6");
+    assert_eq!(ops[1].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[2].pane, "w1:p7");
+    assert_eq!(ops[2].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p6".to_string(), direction: "down".to_string(), ratio: 0.5 });
     assert_eq!(ops[3].pane, "w1:p8");
-    assert_eq!(ops[3].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p7".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[3].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "down".to_string(), ratio: 0.5 });
     // 5th worker overflows into quaqua-workers-2
     assert_eq!(ops[4].pane, "w1:p9");
     assert_eq!(ops[4].target, Target::NewTab { label: "quaqua-workers-2".to_string() });
@@ -166,24 +166,24 @@ fn test_8_workers_grid_two_tabs_of_four() {
     let snap = parse_snapshot_value(&val).unwrap();
     let ops = plan(&snap).unwrap();
     assert_eq!(ops.len(), 8);
-    // Chunk 0: 4 workers in quaqua-workers (2x2 grid, build order [0, 2, 1, 3])
+    // Chunk 0: 4 workers in quaqua-workers (2x2, cell order A B / D C)
     assert_eq!(ops[0].pane, "w1:p5");
     assert_eq!(ops[0].target, Target::NewTab { label: "quaqua-workers".to_string() });
-    assert_eq!(ops[1].pane, "w1:p7");
-    assert_eq!(ops[1].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "down".to_string(), ratio: 0.5 });
-    assert_eq!(ops[2].pane, "w1:p6");
-    assert_eq!(ops[2].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[1].pane, "w1:p6");
+    assert_eq!(ops[1].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[2].pane, "w1:p7");
+    assert_eq!(ops[2].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p6".to_string(), direction: "down".to_string(), ratio: 0.5 });
     assert_eq!(ops[3].pane, "w1:p8");
-    assert_eq!(ops[3].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p7".to_string(), direction: "right".to_string(), ratio: 0.5 });
-    // Chunk 1: 4 workers in quaqua-workers-2 (2x2 grid, build order [0, 2, 1, 3])
+    assert_eq!(ops[3].target, Target::Split { tab: "@workers".to_string(), anchor: "w1:p5".to_string(), direction: "down".to_string(), ratio: 0.5 });
+    // Chunk 1: 4 workers in quaqua-workers-2 (2x2, cell order)
     assert_eq!(ops[4].pane, "w1:p9");
     assert_eq!(ops[4].target, Target::NewTab { label: "quaqua-workers-2".to_string() });
-    assert_eq!(ops[5].pane, "w1:pB");
-    assert_eq!(ops[5].target, Target::Split { tab: "@workers-2".to_string(), anchor: "w1:p9".to_string(), direction: "down".to_string(), ratio: 0.5 });
-    assert_eq!(ops[6].pane, "w1:pA");
-    assert_eq!(ops[6].target, Target::Split { tab: "@workers-2".to_string(), anchor: "w1:p9".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[5].pane, "w1:pA");
+    assert_eq!(ops[5].target, Target::Split { tab: "@workers-2".to_string(), anchor: "w1:p9".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[6].pane, "w1:pB");
+    assert_eq!(ops[6].target, Target::Split { tab: "@workers-2".to_string(), anchor: "w1:pA".to_string(), direction: "down".to_string(), ratio: 0.5 });
     assert_eq!(ops[7].pane, "w1:pC");
-    assert_eq!(ops[7].target, Target::Split { tab: "@workers-2".to_string(), anchor: "w1:pB".to_string(), direction: "right".to_string(), ratio: 0.5 });
+    assert_eq!(ops[7].target, Target::Split { tab: "@workers-2".to_string(), anchor: "w1:p9".to_string(), direction: "down".to_string(), ratio: 0.5 });
 }
 
 #[test]
@@ -216,7 +216,12 @@ fn test_9_workers_rejected_with_error() {
 }
 
 #[test]
-fn test_differential_all_fixtures_against_plan_jq() {
+fn test_oracle_parity_with_plan_jq_on_panes_and_tabs() {
+    // plan.jq is the retired bash planner kept as an oracle. It pins the old
+    // 3-pane layout (A|B top + C below); issue #79 replaced it with A │ B/C,
+    // so the comparison covers everything except the split geometry that the
+    // decision changed: which panes move, their deferral, and which tab they
+    // land in. The target shape itself is pinned by the unit tests below.
     let jq_bin = Command::new("which")
         .arg("jq")
         .output()
@@ -233,6 +238,41 @@ fn test_differential_all_fixtures_against_plan_jq() {
 
     let entries = fs::read_dir(fixtures_dir()).unwrap();
     let mut count = 0;
+
+    // Everything the oracle still owns: candidate filtering, tab choice,
+    // chunking, deferral. Not a re-placement inside a tab the pane already
+    // sits in — that is the issue #79 shape decision.
+    fn landing(
+        ops: &serde_json::Value,
+        panes: &[quaqua::grid::types::Pane],
+    ) -> Vec<serde_json::Value> {
+        let mut out: Vec<serde_json::Value> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|op| {
+                let pane = op["pane"].as_str().unwrap_or("");
+                let tab = op["target"]["tab"].as_str();
+                !panes
+                    .iter()
+                    .any(|p| p.pane_id == pane && p.tab_id.as_deref() == tab)
+            })
+            .map(|op| {
+                serde_json::json!({
+                    "op": op["op"],
+                    "pane": op["pane"],
+                    "deferred": op["deferred"],
+                    "kind": op["target"]["kind"],
+                    "label": op["target"]["label"],
+                    "tab": op["target"]["tab"],
+                })
+            })
+            .collect();
+        // Placement order inside a tab is the issue #79 decision; parity is per
+        // pane (who lands where), not the sequence.
+        out.sort_by_key(|op| op["pane"].as_str().unwrap_or("").to_string());
+        out
+    }
 
     for entry in entries {
         let path = entry.unwrap().path();
@@ -281,8 +321,9 @@ fn test_differential_all_fixtures_against_plan_jq() {
                 serde_json::from_slice(&jq_out.stdout).unwrap_or(serde_json::Value::Null);
 
             assert_eq!(
-                rust_json, jq_json,
-                "fixture {filename}: differential mismatch!\nRust:\n{}\njq:\n{}",
+                landing(&rust_json, &snap.panes),
+                landing(&jq_json, &snap.panes),
+                "fixture {filename}: pane/tab parity with plan.jq broke\nRust:\n{}\njq:\n{}",
                 serde_json::to_string_pretty(&rust_json).unwrap(),
                 serde_json::to_string_pretty(&jq_json).unwrap(),
             );
@@ -294,7 +335,7 @@ fn test_differential_all_fixtures_against_plan_jq() {
         count >= 23,
         "expected at least 23 fixtures tested, got {count}"
     );
-    println!("Differential test passed for all {count} fixtures against plan.jq");
+    println!("Pane/tab parity passed for all {count} fixtures against plan.jq");
 }
 
 #[test]
