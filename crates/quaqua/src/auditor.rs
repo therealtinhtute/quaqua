@@ -20,9 +20,10 @@ report — the CoS routes it.
 
 Audit five things:
 1. Drift in CoS activity. Read memory/ files from the last 2 days, projects/*.md,
-   and recent `git log` (last ~30 commits). Flag: claimed outcomes the code or
-   git history does not back; project "Now"/"Log" entries contradicted by repo
-   state; memory rules or lessons that rest on stale facts.
+   and `git log` (last ~30 commits) of each repo listed in projects/INDEX.md.
+   Flag: claimed outcomes the code or git history does not back; project
+   "Now"/"Log" entries contradicted by repo state; memory rules or lessons that
+   rest on stale facts.
 2. Stale docs vs real code/scripts. Flag: AGENTS.md, memory/rules.md, models.md,
    rules/ entries that reference removed scripts/behaviors or describe a flow the
    scripts no longer implement; scripts or docs/plans that contradict each other;
@@ -318,9 +319,6 @@ fn resolve_auditor_root(explicit: Option<&Path>) -> PathBuf {
     let ws = crate::workspace::workspace_root();
     if ws.join("projects/INDEX.md").is_file() || ws.join("projects").is_dir() {
         return ws;
-    }
-    if let Ok(found) = crate::workspace::find_quaqua_root() {
-        return found;
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -849,6 +847,7 @@ mod tests {
         assert!(PROMPT_TEMPLATE.contains("memory/"));
         assert!(PROMPT_TEMPLATE.contains("projects/"));
         assert!(PROMPT_TEMPLATE.contains("git log"));
+        assert!(PROMPT_TEMPLATE.contains("each repo listed in projects/INDEX.md"));
         assert!(PROMPT_TEMPLATE.contains("## Unhandled"));
         assert!(PROMPT_TEMPLATE.contains("[audit]"));
         assert!(PROMPT_TEMPLATE.contains("## Lessons"));
