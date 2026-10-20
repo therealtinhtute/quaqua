@@ -928,9 +928,9 @@ fn test_cost_budget_parser_and_reader() {
     std::env::remove_var("PROMPT_WORKER_COST_FILE");
     let _ = std::fs::remove_file(&tmp);
 
-    // Non-opencode without fixture returns None
+    // Non-opencode without a matching omp session dir returns None
     assert_eq!(
-        read_worker_cost("sude-test", "ses_123", "/tmp", "omp"),
+        read_worker_cost("sude-test", "ses_123", "/nonexistent/omp-worktree", "omp"),
         None
     );
 }
