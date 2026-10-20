@@ -793,8 +793,8 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         ..Default::default()
     };
 
-    let mut parent_outcome = if !is_resume {
-        let initial_state = PipelineWorkflowState::new(input.clone());
+    // The replay base of a later --resume: without it, replay starts from a fresh Plan state.
+    let seed_snapshot = |journal: &mut SqliteJournal, initial_state: &PipelineWorkflowState| {
         if journal
             .load_latest_snapshot(&parent_wf_id)
             .map(|s| s.is_none())
@@ -802,7 +802,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         {
             let snap = SnapshotRecord::new(
                 0,
-                serde_json::to_string(&initial_state).map_err(|e| {
+                serde_json::to_string(initial_state).map_err(|e| {
                     (1, format!("cannot serialize initial state snapshot: {e}\n"))
                 })?,
             );
@@ -810,6 +810,12 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 (1, format!("cannot append initial snapshot: {e}\n"))
             })?;
         }
+        Ok::<(), (i32, String)>(())
+    };
+
+    let mut parent_outcome = if !is_resume {
+        let initial_state = PipelineWorkflowState::new(input.clone());
+        seed_snapshot(&mut journal, &initial_state)?;
         runner::run_until_blocked(
             &workflow,
             &parent_wf_id,
@@ -823,6 +829,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         .map_err(|e| (1, format!("workflow error: {e}\n")))?
     } else if parent_events.is_empty() {
         let init_state = seed_state_from_pipeline_state(input.clone(), &state, &runs_dir);
+        seed_snapshot(&mut journal, &init_state)?;
         runner::run_until_blocked(
             &workflow,
             &parent_wf_id,
@@ -1035,6 +1042,8 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 if started_count >= 2 {
                     state.prompted = 1;
                 }
+                // A resumed 'spawn' state still owes the grid arrange; the phase is overwritten next.
+                let resumed_spawn = state.phase == "spawn";
                 let kind = classify_child(&child_id, &state.builder, &state.reviewer, &ctx.task);
                 match kind {
                     ChildKind::Plan => state.phase = "plan".to_string(),
@@ -1222,7 +1231,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     }
                 }
 
-                if is_fresh_spawn || state.phase == "spawn" {
+                if is_fresh_spawn || resumed_spawn {
                     let prev_qo = std::env::var("QUAQUA_OWNER").ok();
                     let prev_pr = std::env::var("PIPELINE_REPO").ok();
                     std::env::set_var("QUAQUA_OWNER", &ctx.grid_owner);
@@ -1582,107 +1591,116 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                             if child_report_path.exists() {
                                 let _ = std::fs::rename(&child_report_path, &build_md);
                             }
-
-                            let wt_path = Path::new(&state.wt);
-                            let rev_out = ctx.git.run_in(wt_path, &["rev-parse", "HEAD"]);
-                            let head = match rev_out {
-                                Ok(o) if o.status.success() => {
-                                    String::from_utf8_lossy(&o.stdout).trim().to_string()
-                                }
-                                _ => "?".to_string(),
-                            };
-                            let st_out = ctx.git.run_in(wt_path, &["status", "--porcelain"]);
-                            let dirty = match st_out {
-                                Ok(o) if o.status.success() => {
-                                    String::from_utf8_lossy(&o.stdout).trim().to_string()
-                                }
-                                _ => "?".to_string(),
-                            };
-
-                            if head == "?" || dirty == "?" {
-                                let b = format!(
-                                    "cannot inspect {} (git rev-parse/status failed) — fix the worktree, then 'quaqua pipeline --resume {} {}'",
-                                    state.wt, ctx.task, state.repo
-                                );
-                                return ctx.finish(&mut state, "blocked", 3, Some(&b)).map(|_| ());
-                            }
-
-                            if !dirty.is_empty() {
-                                let mut pcontent =
-                                    std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
-                                pcontent.push_str(&format!(
-                                    "- uncommitted/untracked in {}:\n{}\n",
-                                    state.wt, dirty
-                                ));
-                                let _ = std::fs::write(&ctx.pfile, pcontent);
-                                let b = format!(
-                                    "worktree dirty — the files above are missing from quaqua/{}-{}, so the gate and the reviewer would see a different snapshot. Commit or clean them, then 'quaqua pipeline --resume {} {}'",
-                                    state.builder, ctx.task, ctx.task, state.repo
-                                );
-                                return ctx.finish(&mut state, "blocked", 3, Some(&b)).map(|_| ());
-                            }
-
                             let rep_content =
                                 std::fs::read_to_string(&build_md).unwrap_or_default();
-                            let (changed_lines, top_dirs) = if head != state.base_sha
-                                && review_strategy == ReviewStrategy::Auto
+                            // A challenged or unfinished report stops before the worktree is
+                            // inspected (aa056d6 order); the engine owns that decision.
+                            if rep_content.lines().any(|l| l.trim().starts_with("## Challenge"))
+                                || report_is_unfinished(&rep_content).is_some()
                             {
-                                diff_gate_stats(ctx.git, wt_path, &state.base_sha, &head)
+                                child_output_json["report_path"] =
+                                    serde_json::Value::String(build_md.to_string_lossy().to_string());
                             } else {
-                                (0, 0)
-                            };
-                            // The one build-gate decision; the engine only honours its wire value.
-                            let gate = decide_build_gate(
-                                &BuildFacts::new(
-                                    &head,
-                                    &state.base_sha,
-                                    report_has_outcome_no_changes(&rep_content),
-                                    review_strategy,
-                                    changed_lines,
-                                    top_dirs,
-                                    ctx.review_lines,
-                                )
-                                .with_context(&state.builder, &ctx.task, &state.repo),
-                            );
-                            if let BuildGate::Blocked(b) = &gate {
-                                return ctx.finish(&mut state, "blocked", 3, Some(b)).map(|_| ());
-                            }
 
-                            let mut pcontent =
-                                std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
-                            if !gate.is_no_changes() {
-                                state.head_sha = head.clone();
-                                state.commit = if head.len() >= 7 {
-                                    head[..7].to_string()
-                                } else {
-                                    head.clone()
+                                let wt_path = Path::new(&state.wt);
+                                let rev_out = ctx.git.run_in(wt_path, &["rev-parse", "HEAD"]);
+                                let head = match rev_out {
+                                    Ok(o) if o.status.success() => {
+                                        String::from_utf8_lossy(&o.stdout).trim().to_string()
+                                    }
+                                    _ => "?".to_string(),
                                 };
-                                pcontent.push_str(&format!(
-                                    "- build: commit {} ({}.build.md)\n",
-                                    state.commit, child_input.name
-                                ));
-                                if review_strategy == ReviewStrategy::Auto {
-                                    pcontent.push_str(&format!(
-                                        "- review gate: {changed_lines} changed lines, {top_dirs} top-level dirs (run if >{} or >1)\n",
-                                        ctx.review_lines
-                                    ));
-                                }
-                                state.review_run =
-                                    if gate.is_review() { "run" } else { "skip" }.to_string();
-                            }
-                            if let Some(line) = gate.pfile_line() {
-                                pcontent.push_str(&line);
-                            }
-                            let _ = std::fs::write(&ctx.pfile, pcontent);
-                            let _ = state.save(&ctx.state_file);
+                                let st_out = ctx.git.run_in(wt_path, &["status", "--porcelain"]);
+                                let dirty = match st_out {
+                                    Ok(o) if o.status.success() => {
+                                        String::from_utf8_lossy(&o.stdout).trim().to_string()
+                                    }
+                                    _ => "?".to_string(),
+                                };
 
-                            child_output_json["report_path"] =
-                                serde_json::Value::String(build_md.to_string_lossy().to_string());
-                            child_output_json["gate"] =
-                                serde_json::Value::String(gate.wire_gate().to_string());
-                            child_output_json["skip_review"] =
-                                serde_json::Value::Bool(!gate.is_review());
-                            child_output_json["commit"] = serde_json::Value::String(head);
+                                if head == "?" || dirty == "?" {
+                                    let b = format!(
+                                        "cannot inspect {} (git rev-parse/status failed) — fix the worktree, then 'quaqua pipeline --resume {} {}'",
+                                        state.wt, ctx.task, state.repo
+                                    );
+                                    return ctx.finish(&mut state, "blocked", 3, Some(&b)).map(|_| ());
+                                }
+
+                                if !dirty.is_empty() {
+                                    let mut pcontent =
+                                        std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                                    pcontent.push_str(&format!(
+                                        "- uncommitted/untracked in {}:\n{}\n",
+                                        state.wt, dirty
+                                    ));
+                                    let _ = std::fs::write(&ctx.pfile, pcontent);
+                                    let b = format!(
+                                        "worktree dirty — the files above are missing from quaqua/{}-{}, so the gate and the reviewer would see a different snapshot. Commit or clean them, then 'quaqua pipeline --resume {} {}'",
+                                        state.builder, ctx.task, ctx.task, state.repo
+                                    );
+                                    return ctx.finish(&mut state, "blocked", 3, Some(&b)).map(|_| ());
+                                }
+
+                                let (changed_lines, top_dirs) = if head != state.base_sha
+                                    && review_strategy == ReviewStrategy::Auto
+                                {
+                                    diff_gate_stats(ctx.git, wt_path, &state.base_sha, &head)
+                                } else {
+                                    (0, 0)
+                                };
+                                // The one build-gate decision; the engine only honours its wire value.
+                                let gate = decide_build_gate(
+                                    &BuildFacts::new(
+                                        &head,
+                                        &state.base_sha,
+                                        report_has_outcome_no_changes(&rep_content),
+                                        review_strategy,
+                                        changed_lines,
+                                        top_dirs,
+                                        ctx.review_lines,
+                                    )
+                                    .with_context(&state.builder, &ctx.task, &state.repo),
+                                );
+                                if let BuildGate::Blocked(b) = &gate {
+                                    return ctx.finish(&mut state, "blocked", 3, Some(b)).map(|_| ());
+                                }
+
+                                let mut pcontent =
+                                    std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                                if !gate.is_no_changes() {
+                                    state.head_sha = head.clone();
+                                    state.commit = if head.len() >= 7 {
+                                        head[..7].to_string()
+                                    } else {
+                                        head.clone()
+                                    };
+                                    pcontent.push_str(&format!(
+                                        "- build: commit {} ({}.build.md)\n",
+                                        state.commit, child_input.name
+                                    ));
+                                    if review_strategy == ReviewStrategy::Auto {
+                                        pcontent.push_str(&format!(
+                                            "- review gate: {changed_lines} changed lines, {top_dirs} top-level dirs (run if >{} or >1)\n",
+                                            ctx.review_lines
+                                        ));
+                                    }
+                                    state.review_run =
+                                        if gate.is_review() { "run" } else { "skip" }.to_string();
+                                }
+                                if let Some(line) = gate.pfile_line() {
+                                    pcontent.push_str(&line);
+                                }
+                                let _ = std::fs::write(&ctx.pfile, pcontent);
+                                let _ = state.save(&ctx.state_file);
+
+                                child_output_json["report_path"] =
+                                    serde_json::Value::String(build_md.to_string_lossy().to_string());
+                                child_output_json["gate"] =
+                                    serde_json::Value::String(gate.wire_gate().to_string());
+                                child_output_json["skip_review"] =
+                                    serde_json::Value::Bool(!gate.is_review());
+                                child_output_json["commit"] = serde_json::Value::String(head);
+                            }
                         } else if is_reviewer {
                             let rev_content =
                                 std::fs::read_to_string(&child_report_path).unwrap_or_default();
@@ -1736,8 +1754,11 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
 
                             state.reviewer_spawned = 0;
                             state.rounds_run = state.round;
-                            if matches!(parse_report_content(&rev_content), Ok((n, _)) if n > 0) {
-                                state.review_changed = true;
+                            if let Ok((n, _)) = parse_report_content(&rev_content) {
+                                state.last_findings = n;
+                                if n > 0 {
+                                    state.review_changed = true;
+                                }
                             }
                             let _ = state.save(&ctx.state_file);
 
@@ -3860,6 +3881,40 @@ mod tests {
     }
     static PIPELINE_DRIVER_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Driver tests drive spawn/git through process-global env (HOME, PATH,
+    /// QUAQUA_*, HERDR_*) that engine:: tests mutate under their own lock.
+    /// The parent re-runs `name` alone in a child test process built from the
+    /// process's start-up env; returns true only inside that child.
+    fn in_isolated_driver_process(name: &str) -> bool {
+        const MARK: &str = "QUAQUA_DRIVER_TEST_CHILD";
+        if std::env::var_os(MARK).is_some() {
+            return true;
+        }
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([name, "--exact", "--nocapture", "--test-threads=1"]);
+        // /proc/self/environ keeps the exec-time env, untouched by set_var.
+        if let Ok(raw) = std::fs::read("/proc/self/environ") {
+            use std::os::unix::ffi::OsStrExt;
+            cmd.env_clear();
+            for kv in raw.split(|b| *b == 0).filter(|kv| !kv.is_empty()) {
+                if let Some(i) = kv.iter().position(|b| *b == b'=') {
+                    cmd.env(
+                        std::ffi::OsStr::from_bytes(&kv[..i]),
+                        std::ffi::OsStr::from_bytes(&kv[i + 1..]),
+                    );
+                }
+            }
+        }
+        let out = cmd.env(MARK, "1").output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "isolated {name} failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        false
+    }
+
     struct TestEnvVarGuard {
         key: &'static str,
         prev: Option<String>,
@@ -4051,6 +4106,9 @@ esac
 
     #[test]
     fn test_finding2_driver_unparseable_verdict_fails_closed() {
+        if !in_isolated_driver_process("pipeline::tests::test_finding2_driver_unparseable_verdict_fails_closed") {
+            return;
+        }
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) = setup_test_pipeline_workspace("f2-bad");
 
@@ -4272,6 +4330,9 @@ esac
 
     #[test]
     fn test_finding5_handle_pipeline_e2e_integration() {
+        if !in_isolated_driver_process("pipeline::tests::test_finding5_handle_pipeline_e2e_integration") {
+            return;
+        }
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) = setup_test_pipeline_workspace("f5-e2e");
 
@@ -4766,6 +4827,9 @@ esac
 
     #[test]
     fn test_design_test_7_child_watchdog_exit_4_opens_attempt_2_no_second_prompt() {
+        if !in_isolated_driver_process("pipeline::tests::test_design_test_7_child_watchdog_exit_4_opens_attempt_2_no_second_prompt") {
+            return;
+        }
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) = setup_test_pipeline_workspace("d7-wd");
 
