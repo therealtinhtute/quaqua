@@ -303,24 +303,32 @@ pub fn run_auditor(opts: AuditorRunOptions) -> Result<i32, (i32, String)> {
 }
 
 fn resolve_auditor_root(explicit: Option<&Path>) -> PathBuf {
+    resolve_auditor_root_from(
+        explicit,
+        crate::workspace::env_path("AUDITOR_REPO").as_deref(),
+        crate::workspace::env_path("QUAQUA_HOME").as_deref(),
+        crate::workspace::env_path("QUAQUA_ROOT").as_deref(),
+        crate::workspace::env_path("HOME").as_deref(),
+    )
+}
+
+/// `--repo` first, then `AUDITOR_REPO`, then the one workspace root
+/// (`QUAQUA_HOME` > `QUAQUA_ROOT` > `$HOME/quaqua`). Pure — testable without
+/// `set_var`.
+fn resolve_auditor_root_from(
+    explicit: Option<&Path>,
+    auditor_repo: Option<&Path>,
+    quaqua_home: Option<&Path>,
+    quaqua_root: Option<&Path>,
+    home: Option<&Path>,
+) -> PathBuf {
     if let Some(p) = explicit {
         return p.to_path_buf();
     }
-    if let Ok(r) = std::env::var("AUDITOR_REPO").or_else(|_| std::env::var("QUAQUA_ROOT")) {
-        if !r.is_empty() {
-            return PathBuf::from(r);
-        }
+    if let Some(p) = auditor_repo {
+        return p.to_path_buf();
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        if cwd.join("projects/INDEX.md").is_file() || (cwd.join("projects").is_dir() && cwd.join("memory").is_dir()) {
-            return cwd;
-        }
-    }
-    let ws = crate::workspace::workspace_root();
-    if ws.join("projects/INDEX.md").is_file() || ws.join("projects").is_dir() {
-        return ws;
-    }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    crate::workspace::workspace_root_from_env(quaqua_home, quaqua_root, home)
 }
 
 fn resolve_out_path(root: &Path, explicit: Option<&Path>) -> PathBuf {
@@ -840,6 +848,46 @@ pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quaqua_home_wins_over_quaqua_root() {
+        // QUAQUA_HOME=A QUAQUA_ROOT=B must audit A, like every other command
+        // (the auditor used to read QUAQUA_ROOT first).
+        assert_eq!(
+            resolve_auditor_root_from(
+                None,
+                None,
+                Some(Path::new("A")),
+                Some(Path::new("B")),
+                Some(Path::new("home")),
+            ),
+            PathBuf::from("A"),
+        );
+    }
+
+    #[test]
+    fn explicit_and_auditor_repo_win_over_the_workspace() {
+        assert_eq!(
+            resolve_auditor_root_from(
+                Some(Path::new("cli")),
+                Some(Path::new("env")),
+                Some(Path::new("A")),
+                None,
+                None,
+            ),
+            PathBuf::from("cli"),
+        );
+        assert_eq!(
+            resolve_auditor_root_from(
+                None,
+                Some(Path::new("env")),
+                Some(Path::new("A")),
+                None,
+                None,
+            ),
+            PathBuf::from("env"),
+        );
+    }
 
     #[test]
     fn test_prompt_template_has_all_keywords() {
