@@ -52,14 +52,11 @@ case " $* " in
   *"diff --numstat"*) printf '200\t10\tsrc/a.c\n' ;;
   *"diff --name-only"*) printf 'src/a.c\n' ;;
   *"rev-parse HEAD"*)
-    cf="$T/git_call_count"
-    c=$(cat "$cf" 2>/dev/null || echo 0)
-    c=$(( c + 1 ))
-    echo "$c" > "$cf"
-    if (( c <= 1 )); then
-      echo "ba5eba5000000000000000000000000000000000"
-    else
+    # the builder commits during BUILD: HEAD moves off base only after it
+    if [[ -f "$T/built" ]]; then
       echo "c0ffee1deadbeef0000000000000000000000000"
+    else
+      echo "ba5eba5000000000000000000000000000000000"
     fi
     ;;
   *) exit 0 ;;
@@ -83,6 +80,7 @@ case "${1:-} ${2:-}" in
       *"phase: PLAN"*)
         printf 'plan\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$w.md" ;;
       *"phase: BUILD"*)
+        : > "$T/built"
         printf 'build\n\n## Lessons\n- none\n' > "$HOME/quaqua/runs/$w.md" ;;
       *"phase: REVIEW"*)
         printf 'Verdict: clean\n' > "$HOME/quaqua/runs/$w.md" ;;
