@@ -480,7 +480,12 @@ impl Activity for PromptActivities {
 
                     if !self.is_resume && self.land_sec > 0 {
                         let mut pl = self.prompt_landed.lock().unwrap();
-                        if !*pl {
+                        let has_report = self.runs_dir.join(format!("{name}.md")).is_file();
+                        if has_report {
+                            *pl = true;
+                            *self.prompt_recovered.lock().unwrap() = false;
+                            *self.prompt_not_landed.lock().unwrap() = false;
+                        } else if !*pl {
                             let is_waiting = lead_waiting(&self.runs_dir, name, &o.watcher_pane);
                             if o.status == "working" || o.status == "blocked" || is_waiting {
                                 *pl = true;
@@ -1057,8 +1062,10 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         }
         3 => {
             let now = now_sec();
-            let is_pnl =
-                *acts.prompt_not_landed.lock().unwrap() || *acts.prompt_recovered.lock().unwrap();
+            let has_report = out.is_file();
+            let is_pnl = !has_report
+                && (*acts.prompt_not_landed.lock().unwrap()
+                    || *acts.prompt_recovered.lock().unwrap());
             let st = final_obs
                 .as_ref()
                 .map(|o| o.status.as_str())

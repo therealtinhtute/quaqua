@@ -361,13 +361,22 @@ impl Workflow for SingleWorkerWorkflow {
                     }
                     StepDecision::Continue
                 } else if id.starts_with("check_report_") {
-                    if let ActivityResult::ReportFile(ReportFileResult::MtimeMs(mtime)) = result {
+                    let mtime_opt = match result {
+                        ActivityResult::ReportFile(ReportFileResult::MtimeMs(mtime)) => Some(mtime),
+                        ActivityResult::ReportFile(ReportFileResult::Exists(exists)) => {
+                            Some(if exists { 1 } else { 0 })
+                        }
+                        _ => None,
+                    };
+                    if let Some(mtime) = mtime_opt {
                         if mtime == 0 {
                             state.report_mtime_ms = 0;
                             state.report_mtime_stable = false;
                         } else if state.report_mtime_ms == mtime {
                             // Two consecutive matching mtime samples -> stable
                             state.report_mtime_stable = true;
+                            state.prompt_landed = true;
+                            state.prompt_recovered = false;
                             ctx.schedule_activity(
                                 format!("read_report_{}", state.poll_count),
                                 ActivityRequest::ReportFile(ReportFileRequest::Read {
@@ -378,6 +387,8 @@ impl Workflow for SingleWorkerWorkflow {
                             // First sample or modified mtime
                             state.report_mtime_ms = mtime;
                             state.report_mtime_stable = false;
+                            state.prompt_landed = true;
+                            state.prompt_recovered = false;
                         }
                     }
                     StepDecision::Continue
@@ -459,6 +470,7 @@ impl Workflow for SingleWorkerWorkflow {
                         };
                         if !is_waiting
                             && state.poll_count > 0
+                            && state.report_mtime_ms == 0
                             && now.saturating_sub(stall_baseline) >= state.config.stall_sec * 1000
                         {
                             return complete_step(state, now, 3);
@@ -574,15 +586,22 @@ impl Workflow for SingleWorkerWorkflow {
                         )
                     };
 
+                    if state.report_mtime_ms > 0 {
+                        state.prompt_landed = true;
+                        state.prompt_recovered = false;
+                    }
+
                     if !state.prompt_landed && state.config.land_sec > 0 {
                         if state.agent_status == "working"
                             || state.agent_status == "blocked"
                             || is_waiting
+                            || state.report_mtime_ms > 0
                         {
                             state.prompt_landed = true;
+                            state.prompt_recovered = false;
                         } else if state.agent_status == "idle" || state.agent_status == "done" {
                             if state.prompt_recovered {
-                                if now >= state.recover_deadline_ms {
+                                if now >= state.recover_deadline_ms && state.report_mtime_ms == 0 {
                                     return complete_step(state, now, 3);
                                 }
                             } else if now >= state.start_ms + state.config.land_sec * 1000 {
@@ -612,7 +631,9 @@ impl Workflow for SingleWorkerWorkflow {
                             } else {
                                 state.config.idle_sec
                             };
-                        if now.saturating_sub(state.idle_since_ms) >= effective_idle_sec * 1000 {
+                        if state.report_mtime_ms == 0
+                            && now.saturating_sub(state.idle_since_ms) >= effective_idle_sec * 1000
+                        {
                             return complete_step(state, now, 3);
                         }
                     } else {
@@ -1866,5 +1887,204 @@ mod tests {
         .expect("workflow should complete with exit 3 after pane.exited");
 
         assert_eq!(out.exit, 3);
+    }
+    #[test]
+    fn test_fast_finish_report_valid_before_second_poll_exits_0() {
+        let workflow = SingleWorkerWorkflow::new();
+        let mut clock = VirtualClock::new(100_000);
+        let mut activities = MockActivities::new();
+        let mut journal = InMemoryJournal::new();
+
+        let input = sample_input("worker-fast-0", 1800);
+        let report_path = PathBuf::from("runs/worker-fast-0.md");
+        let mut config = WatchdogConfig::default();
+        config.poll_sec = 30;
+        config.land_sec = 15;
+        let initial_state = SingleWorkerState::new(input).with_config(config);
+
+        // Poll 0 (t=0): report already on disk with mtime 1000, agent done
+        mock_poll(
+            &mut activities,
+            "worker-fast-0",
+            0,
+            1000,
+            "done",
+            "done",
+            "dh0",
+            Some("omp"),
+            true,
+            vec![],
+        );
+        // Poll 1 (t=30s): matching mtime 1000 -> stable before second timer poll (poll 2)!
+        mock_poll(
+            &mut activities,
+            "worker-fast-0",
+            1,
+            1000,
+            "done",
+            "done",
+            "dh0",
+            Some("omp"),
+            true,
+            vec![],
+        );
+        activities.register(
+            "read_report_1",
+            ActivityResult::ReportFile(ReportFileResult::Content(
+                "# Report\nFast done!\n\n## Lessons\n- none\n".to_string(),
+            )),
+        );
+
+        let out = run_to_completion(
+            &workflow,
+            "test-fast-exit-0",
+            initial_state,
+            &mut clock,
+            &mut activities,
+            &mut journal,
+        )
+        .expect("workflow should complete with exit 0");
+
+        assert_eq!(out.exit, 0);
+        assert_eq!(out.report_path, report_path);
+        // Completed at poll 1 (t=30s), before poll 2!
+        assert_eq!(clock.now_ms(), 100_000 + 30_000);
+    }
+
+    #[test]
+    fn test_fast_finish_landing_timer_expiry_with_valid_report_exits_0() {
+        let workflow = SingleWorkerWorkflow::new();
+        let mut clock = VirtualClock::new(100_000);
+        let mut activities = MockActivities::new();
+        let mut journal = InMemoryJournal::new();
+
+        let input = sample_input("worker-fast-land", 1800);
+        let report_path = PathBuf::from("runs/worker-fast-land.md");
+        let mut config = WatchdogConfig::default();
+        config.poll_sec = 30;
+        config.land_sec = 15;
+        let initial_state = SingleWorkerState::new(input).with_config(config);
+
+        // Poll 0 (t=0): report not yet on disk (mtime 0), agent done
+        mock_poll(
+            &mut activities,
+            "worker-fast-land",
+            0,
+            0,
+            "done",
+            "done",
+            "dh0",
+            Some("omp"),
+            true,
+            vec![],
+        );
+        // Poll 1 (t=30s): report appears on disk (mtime 1000, sample 1), agent done
+        mock_poll(
+            &mut activities,
+            "worker-fast-land",
+            1,
+            1000,
+            "done",
+            "done",
+            "dh0",
+            Some("omp"),
+            true,
+            vec![],
+        );
+        // Poll 2 (t=60s): recover_deadline_ms (45s) is expired!
+        // But report is on disk (mtime 1000, sample 2 -> stable!)
+        mock_poll(
+            &mut activities,
+            "worker-fast-land",
+            2,
+            1000,
+            "done",
+            "done",
+            "dh0",
+            Some("omp"),
+            true,
+            vec![],
+        );
+        activities.register(
+            "read_report_2",
+            ActivityResult::ReportFile(ReportFileResult::Content(
+                "# Report\nFast done after poll 0!\n\n## Lessons\n- none\n".to_string(),
+            )),
+        );
+
+        let out = run_to_completion(
+            &workflow,
+            "test-fast-land-exit-0",
+            initial_state,
+            &mut clock,
+            &mut activities,
+            &mut journal,
+        )
+        .expect("workflow should complete with exit 0");
+
+        assert_eq!(out.exit, 0);
+        assert_eq!(out.report_path, report_path);
+    }
+
+    #[test]
+    fn test_fast_finish_malformed_report_exits_6() {
+        let workflow = SingleWorkerWorkflow::new();
+        let mut clock = VirtualClock::new(100_000);
+        let mut activities = MockActivities::new();
+        let mut journal = InMemoryJournal::new();
+
+        let input = sample_input("worker-fast-bad", 1800);
+        let report_path = PathBuf::from("runs/worker-fast-bad.md");
+        let mut config = WatchdogConfig::default();
+        config.poll_sec = 30;
+        config.land_sec = 15;
+        let initial_state = SingleWorkerState::new(input).with_config(config);
+
+        // Poll 0 (t=0): report already on disk (mtime 1000), agent done
+        mock_poll(
+            &mut activities,
+            "worker-fast-bad",
+            0,
+            1000,
+            "done",
+            "done",
+            "dh0",
+            Some("omp"),
+            true,
+            vec![],
+        );
+        // Poll 1 (t=30s): matching mtime 1000 -> stable!
+        mock_poll(
+            &mut activities,
+            "worker-fast-bad",
+            1,
+            1000,
+            "done",
+            "done",
+            "dh0",
+            Some("omp"),
+            true,
+            vec![],
+        );
+        // Malformed content: missing `## Lessons`
+        activities.register(
+            "read_report_1",
+            ActivityResult::ReportFile(ReportFileResult::Content(
+                "# Report\nFast done but malformed!\n".to_string(),
+            )),
+        );
+
+        let out = run_to_completion(
+            &workflow,
+            "test-fast-exit-6",
+            initial_state,
+            &mut clock,
+            &mut activities,
+            &mut journal,
+        )
+        .expect("workflow should complete with exit 6");
+
+        assert_eq!(out.exit, 6);
+        assert_eq!(out.report_path, report_path);
     }
 }
