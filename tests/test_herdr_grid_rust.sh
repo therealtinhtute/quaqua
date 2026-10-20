@@ -90,9 +90,24 @@ else
         fail "fixture $name: plan.jq succeeded but quaqua grid plan failed (rc=$rust_err):\n  $rust_out"
       fi
 
-      # Normalize both outputs with jq for comparison
-      norm_jq=$(printf '%s' "$jq_out" | jq -c -S .)
-      norm_rust=$(printf '%s' "$rust_out" | jq -c -S .)
+      # plan.jq is the retired bash planner kept as an oracle; it pins the old
+      # 3-pane layout (A|B top + C below), which issue #79 replaced with A│B/C.
+      # Parity therefore covers who lands in which tab, their deferral and the
+      # new_tab label — not the split geometry or the placement order inside a
+      # tab (both are the issue #79 decision, pinned by the Rust unit tests).
+      normalize() {
+        /usr/bin/jq -c -S --slurpfile f "$fix" '
+          . as $ops
+          | ([$f[0].snapshot.panes[] | {key: .pane_id, value: .tab_id}] | from_entries) as $tabs
+          | [ $ops[]
+              | select((.target.kind == "split" and .target.tab == ($tabs[.pane] // "")) | not)
+              | {op, pane, deferred, kind: .target.kind, label: .target.label, tab: .target.tab} ]
+          | sort_by(.pane)
+        '
+      }
+
+      norm_jq=$(printf '%s' "$jq_out" | normalize)
+      norm_rust=$(printf '%s' "$rust_out" | normalize)
 
       if [ "$norm_jq" = "$norm_rust" ]; then
         echo "ok: $name ($norm_rust)"
