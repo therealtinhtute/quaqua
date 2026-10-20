@@ -202,7 +202,8 @@ fn complete_step(
 ) -> StepDecision<SingleWorkerOutput> {
     if state.start_ms > 0 && now_ms >= state.start_ms {
         let added = now_ms - state.start_ms;
-        state.prev_elapsed_ms = (state.prev_elapsed_ms + added).min(state.input.budget_sec * 1000);
+        state.prev_elapsed_ms =
+            (state.prev_elapsed_ms + added).min(state.input.time_budget_sec * 1000);
         state.start_ms = now_ms;
     }
     StepDecision::Complete(
@@ -267,7 +268,7 @@ impl Workflow for SingleWorkerWorkflow {
             state.start_ms = ctx.now_ms();
             let rem_budget = state
                 .input
-                .budget_sec
+                .time_budget_sec
                 .saturating_sub(state.prev_elapsed_ms / 1000)
                 .max(1);
             let rem_cap = state
@@ -536,7 +537,7 @@ impl Workflow for SingleWorkerWorkflow {
                             && now.saturating_sub(state.last_progress_ms)
                                 <= state.config.poll_sec * 2 * 1000
                         {
-                            let mut grace_ms = (state.input.budget_sec / 4).max(1) * 1000;
+                            let mut grace_ms = (state.input.time_budget_sec / 4).max(1) * 1000;
                             if state.allowance_deadline_ms + grace_ms > state.cap_deadline_ms {
                                 grace_ms = state
                                     .cap_deadline_ms
@@ -549,13 +550,14 @@ impl Workflow for SingleWorkerWorkflow {
                         }
 
                         // Auto-extension (+25% steps up to +50% total) keys strictly to diff hash changes
-                        let max_autoext_ms = (state.input.budget_sec / 2) * 1000;
+                        let max_autoext_ms = (state.input.time_budget_sec / 2) * 1000;
                         if state.extension_total_ms < max_autoext_ms
                             && !state.current_diff_hash.is_empty()
                             && state.current_diff_hash != state.last_autoext_diff_hash
                         {
                             let rem = max_autoext_ms.saturating_sub(state.extension_total_ms);
-                            let mut ext_ms = ((state.input.budget_sec / 4).max(1) * 1000).min(rem);
+                            let mut ext_ms =
+                                ((state.input.time_budget_sec / 4).max(1) * 1000).min(rem);
                             if state.allowance_deadline_ms + ext_ms > state.cap_deadline_ms {
                                 ext_ms = state
                                     .cap_deadline_ms
@@ -639,7 +641,7 @@ impl Workflow for SingleWorkerWorkflow {
 
                     // 7. Nudge check (non-terminal)
                     let nudge_thresh_ms =
-                        (state.input.budget_sec * state.config.nudge_pct / 100) * 1000;
+                        (state.input.time_budget_sec * state.config.nudge_pct / 100) * 1000;
                     let nudge_at_ms =
                         state.start_ms + nudge_thresh_ms.saturating_sub(state.prev_elapsed_ms);
                     if !state.nudged && now >= nudge_at_ms {

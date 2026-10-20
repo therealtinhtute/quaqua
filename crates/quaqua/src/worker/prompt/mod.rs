@@ -788,7 +788,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 s.input.repo.clone(),
                 s.input.kind.clone(),
                 s.input.brief.clone(),
-                s.input.budget_sec,
+                s.input.time_budget_sec,
                 s.prev_elapsed_ms / 1000,
                 s.overrun_granted,
                 s.extension_total_ms / 1000,
@@ -831,7 +831,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             let wf_id = format!("worker:{name}#{k_max}");
             let budget = last_snap
                 .as_ref()
-                .map(|s| s.input.budget_sec)
+                .map(|s| s.input.time_budget_sec)
                 .unwrap_or_else(|| resolve_budget_sec("").0);
             exec_action = ExecAction::Resume { wf_id, budget };
         } else {
@@ -852,7 +852,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                     s.input.repo.clone(),
                     s.input.kind.clone(),
                     s.input.brief.clone(),
-                    s.input.budget_sec,
+                    s.input.time_budget_sec,
                     s.prev_elapsed_ms / 1000,
                     s.overrun_granted,
                     s.extension_total_ms / 1000,
