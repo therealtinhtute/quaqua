@@ -84,33 +84,31 @@ pub const USAGE: &str = "\
 #   disables (tests).";
 
 pub fn resolve_project_slug_from_repo(repo: &Path) -> Option<String> {
-    if let Ok(root) = crate::workspace::find_quaqua_root() {
+    if let Ok(root) = crate::workspace::workspace_root_checked() {
         let index = root.join("projects/INDEX.md");
-        if index.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&index) {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with('|') {
-                        let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
-                        if parts.len() >= 3 && parts[2] != "repo" {
-                            let slug = parts[1];
-                            let r = parts[2];
-                            let p = if let Some(stripped) = r.strip_prefix("~/") {
-                                format!("{}/{}", home, stripped)
-                            } else if r == "~" {
-                                home.clone()
-                            } else {
-                                r.to_string()
-                            };
-                            if let Ok(c_repo) = std::fs::canonicalize(Path::new(&p)) {
-                                if c_repo == repo {
-                                    return Some(slug.to_string());
-                                }
-                            }
-                            if Path::new(&p) == repo {
+        if let Ok(content) = std::fs::read_to_string(&index) {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('|') {
+                    let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
+                    if parts.len() >= 3 && parts[2] != "repo" {
+                        let slug = parts[1];
+                        let r = parts[2];
+                        let p = if let Some(stripped) = r.strip_prefix("~/") {
+                            format!("{}/{}", home, stripped)
+                        } else if r == "~" {
+                            home.clone()
+                        } else {
+                            r.to_string()
+                        };
+                        if let Ok(c_repo) = std::fs::canonicalize(Path::new(&p)) {
+                            if c_repo == repo {
                                 return Some(slug.to_string());
                             }
+                        }
+                        if Path::new(&p) == repo {
+                            return Some(slug.to_string());
                         }
                     }
                 }
@@ -4094,7 +4092,11 @@ mod tests {
         .unwrap();
 
         let team_file = base_dir.join("team.toml");
-        std::fs::write(&team_file, include_str!("../../../../team.toml")).unwrap();
+        std::fs::write(
+            &team_file,
+            include_str!("../../../../templates/workspace/team.toml"),
+        )
+        .unwrap();
 
         let stub_bin = base_dir.join("herdr-stub");
         let script = r#"#!/bin/sh

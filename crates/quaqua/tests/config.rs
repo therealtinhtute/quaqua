@@ -15,7 +15,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn repo_team() -> String {
-    repo_root().join("team.toml").to_string_lossy().into_owned()
+    repo_root()
+        .join("templates/workspace/team.toml")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn run(args: &[&str]) -> Output {

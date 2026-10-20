@@ -17,7 +17,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd)"
-src="$root/scripts"
+src="$root/templates/workspace/scripts"
 bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
 [[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
 export QUAQUA_BIN="$bin"

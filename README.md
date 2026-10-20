@@ -43,18 +43,18 @@ Rules:
 
 | File | Role |
 |---|---|
-| `AGENTS.md` | Entrypoint: SLP roles, memory policy, worker protocol |
-| `identity.md`, `SOUL.md` | CoS persona and voice |
-| `PEER.md` | Worker contract: boundaries, contract-before-test, git commit gates, handback |
-| `rules/_all/` | Worker rules injected as the system prompt (brief shape, fanout grid, timebox) |
-| `models.md` | Worker roster: nickname → kind / model / effort |
-| `.claude/settings.json` | Denies the built-in `Agent` tool so all workers go through Herdr |
-| `.claude/skills/herdr-orchestration/` | Worker flow + consolidated command, recovery, and assignment/acceptance references |
+| `templates/workspace/AGENTS.md` | Workspace entrypoint: SLP roles, memory policy, worker protocol (the root `AGENTS.md` is an engine contributor stub) |
+| `templates/workspace/identity.md`, `templates/workspace/SOUL.md` | CoS persona and voice |
+| `templates/workspace/PEER.md` | Worker contract: boundaries, contract-before-test, git commit gates, handback |
+| `templates/workspace/rules/_all/` | Worker rules injected as the system prompt (brief shape, fanout grid, timebox) |
+| `templates/workspace/models.md` | Worker roster: nickname → kind / model / effort |
+| `.claude/settings.json` | Engine worktree gate: denies the built-in `Agent` tool and routes Bash through the template hook; `templates/workspace/.claude/settings.json` is the workspace copy |
+| `templates/workspace/.claude/skills/herdr-orchestration/` | Worker flow + consolidated command, recovery, and assignment/acceptance references |
 | `quaqua auditor run` | Auditor: read-only drift + pipeline-run audit → `reports/audit-*.md` |
-| `scripts/auditor/install-auditor.sh`, `scripts/auditor/systemd/`, `scripts/auditor/launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
-| `quaqua init`, `templates/` | Bootstraps a fresh clone's gitignored personal state (dirs + `memory/rules.md`, `projects/INDEX.md`, `_template.md`, `USER.md`); idempotent, never overwrites |
+| `templates/workspace/scripts/auditor/install-auditor.sh`, `templates/workspace/scripts/auditor/systemd/`, `templates/workspace/scripts/auditor/launchd/` | Auditor scheduling: systemd user units (Linux) or a rendered LaunchAgent plist (macOS), 2×/day |
+| `quaqua init`, `templates/workspace/`, `templates/seed/` | Bootstraps a fresh clone's gitignored personal state (dirs + `memory/rules.md`, `projects/INDEX.md`, `_template.md`, `USER.md`); idempotent, never overwrites |
 | `tests/` | Sandboxed test suite: `tests/run.sh` runs every `tests/test_*.sh` (the 2 slow suites only when the change touches a script they cover, or with `--slow`) and exits non-zero on any failure |
-| `USER.example.md` | Template for the per-workspace `USER.md` |
+| `templates/seed/USER.example.md` | Template for the per-workspace `USER.md` |
 | `SETUP-PROMPT.md` | Original prompt used to bootstrap this setup |
 | `docs/slp.png` | Diagram: Principal → CoS → Lead → Peers |
 
@@ -75,7 +75,7 @@ quaqua init
 is safe to re-run after a pull. Then edit `USER.md` for the workspace, add one
 row per project to `projects/INDEX.md` (copy `projects/_template.md` for the
 card), and continue with the auditor install below. Templates live in
-`templates/` under depth-safe names because `.gitignore`'s `memory/` and
+`templates/seed/` under depth-safe names because `.gitignore`'s `memory/` and
 `projects/` patterns match at any depth.
 
 ## Install
@@ -87,7 +87,7 @@ git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
 cargo install --path crates/quaqua --locked   # installs the quaqua binary to ~/.cargo/bin
 ~/.cargo/bin/quaqua --version   # verify; an interactive `quaqua` shell function can shadow the binary, so call it by path
 quaqua init     # dirs + rules.md, INDEX.md, _template.md, USER.md
-bash scripts/auditor/install-auditor.sh  # installs scheduling files; prints manual activation command
+bash templates/workspace/scripts/auditor/install-auditor.sh  # installs scheduling files; prints manual activation command
 ```
 
 Linux: the installer symlinks the user service/timer and calls only
@@ -96,9 +96,9 @@ Linux: the installer symlinks the user service/timer and calls only
 
 macOS: install a current Bash (e.g. `brew install bash`), then put its `bin` directory
 first on PATH (`export PATH="$(brew --prefix bash)/bin:$PATH"` for Homebrew).
-Run `bash scripts/auditor/install-auditor.sh` with `claude` on PATH. The installer requires
+Run `bash templates/workspace/scripts/auditor/install-auditor.sh` with `claude` on PATH. The installer requires
 Bash >= 4.4 from `command -v bash` and refuses the macOS system Bash 3.2.
-It renders `scripts/auditor/launchd/com.quaqua.auditor.plist.in` into
+It renders `templates/workspace/scripts/auditor/launchd/com.quaqua.auditor.plist.in` into
 `~/Library/LaunchAgents/com.quaqua.auditor.plist`, pinning the discovered Bash,
 the resolved `quaqua auditor run` path, and the install-time PATH (including
 claude's directory). Logs go to `~/Library/Logs/quaqua-auditor.log`; reports still go

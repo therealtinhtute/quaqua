@@ -120,7 +120,7 @@ out=$(HERDR_STUB_SNAPSHOT="$fixdir/only-custom-tab.json" QUAQUA_OWNER=cos "$QUAQ
   --tab mono-workers \
   --only sude-isl,suhuynh-islr1 \
   --dry-run \
-  --team-file "$repo_root/team.toml" 2>&1) || rc=$?
+  --team-file "$repo_root/templates/workspace/team.toml" 2>&1) || rc=$?
 if [ "$rc" -ne 0 ]; then
   fail "--check --only with custom --tab mono-workers expected exit 0, got $rc: $out"
 fi
@@ -134,7 +134,7 @@ if err=$(HERDR_STUB_SNAPSHOT="$fixdir/only-custom-tab.json" QUAQUA_OWNER=cos "$Q
   --tab quaqua-workers \
   --only sude-isl,suhuynh-islr1 \
   --dry-run \
-  --team-file "$repo_root/team.toml" 2>&1); then
+  --team-file "$repo_root/templates/workspace/team.toml" 2>&1); then
   fail "--check --only with matching --tab quaqua-workers expected error (pending ops), got success: $err"
 fi
 [[ "$err" == *"pending ops"* ]] || fail "expected pending ops error, got: $err"

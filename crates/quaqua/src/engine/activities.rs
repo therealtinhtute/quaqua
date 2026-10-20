@@ -1594,13 +1594,13 @@ esac
                 .args(["-C", repo_str, "commit", "-m", "initial"])
                 .output();
 
-            // Copy worktree team.toml into temp_repo
+            // Copy the workspace template team.toml into temp_repo
             let team_path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .unwrap()
                 .parent()
                 .unwrap()
-                .join("team.toml");
+                .join("templates/workspace/team.toml");
             let _ = fs::copy(&team_path, temp_repo.join("team.toml"));
             let _guard_team = EnvVarGuard::set("QUAQUA_TEAM_TOML", &team_path);
             let _guard_pipe = EnvVarGuard::set("PIPELINE_TASK", "1");
