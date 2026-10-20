@@ -21,18 +21,31 @@ pub fn resolve_workspace_root(quaqua_home: Option<&Path>, home: Option<&Path>) -
 }
 
 /// A non-empty env var as a path; an empty value counts as unset.
-fn env_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
 }
 
+/// [`workspace_root`] from an already-read env snapshot: `QUAQUA_HOME`, then
+/// its alias `QUAQUA_ROOT`, then `$HOME/quaqua`. Pure — testable without
+/// `set_var`.
+pub(crate) fn workspace_root_from_env(
+    quaqua_home: Option<&Path>,
+    quaqua_root: Option<&Path>,
+    home: Option<&Path>,
+) -> PathBuf {
+    resolve_workspace_root(quaqua_home.or(quaqua_root), home)
+}
+
 /// Read the process env once: `QUAQUA_HOME`, then its alias `QUAQUA_ROOT`,
 /// then `$HOME/quaqua`.
 pub fn workspace_root() -> PathBuf {
-    let quaqua_home = env_path("QUAQUA_HOME").or_else(|| env_path("QUAQUA_ROOT"));
-    let home = env_path("HOME");
-    resolve_workspace_root(quaqua_home.as_deref(), home.as_deref())
+    workspace_root_from_env(
+        env_path("QUAQUA_HOME").as_deref(),
+        env_path("QUAQUA_ROOT").as_deref(),
+        env_path("HOME").as_deref(),
+    )
 }
 
 /// [`workspace_root`], required to be an actual workspace: `projects/INDEX.md`
