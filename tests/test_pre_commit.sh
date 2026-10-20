@@ -37,20 +37,17 @@ chmod +x "$T/bin/herdr"
 export HERDR_BIN_PATH="$T/bin/herdr"
 export HERDR_SOCKET_PATH="$T/herdr.sock"
 export PATH="$T/bin:$PATH"
+# `quaqua init` without a <dir> defaults to workspace_root(); pin it so a stray
+# call can never reach anh iu's real ~/quaqua.
+export QUAQUA_HOME="$T/home"
 
 R="$T/repo"
 mkdir -p "$R"
 git -C "$R" init -q
 git -C "$R" config user.email test@example.invalid
 git -C "$R" config user.name test
-cp -R "$root/templates" "$R/templates"
-# Interim until B2 embeds the template: today's `quaqua init` still seeds from
-# templates/*.md, so keep those sources in the sandbox fixture.
-cp "$root/templates/seed/memory-rules.md" "$root/templates/seed/projects-INDEX.md" \
-   "$root/templates/seed/projects-_template.md" "$R/templates/"
-cp "$root/templates/seed/USER.example.md" "$R/USER.example.md"
 
-( unset HERDR_PANE_ID; cd "$R" && "$QUAQUA_BIN" init ) >"$T/init.log" 2>&1 \
+( unset HERDR_PANE_ID; cd "$R" && "$QUAQUA_BIN" init "$R" ) >"$T/init.log" 2>&1 \
   || fail "quaqua init failed: $(cat "$T/init.log")"
 
 hookdir="$R/.git/quaqua-hooks"
@@ -187,27 +184,22 @@ git -C "$M" init -q
 git -C "$M" config user.email test@example.invalid
 git -C "$M" config user.name test
 git -C "$M" config core.hooksPath "$M/scripts/hooks"
-cp -R "$root/templates" "$M/templates"
-# Interim until B2 embeds the template (same reason as the section above).
-cp "$root/templates/seed/memory-rules.md" "$root/templates/seed/projects-INDEX.md" \
-   "$root/templates/seed/projects-_template.md" "$M/templates/"
-cp "$root/templates/seed/USER.example.md" "$M/USER.example.md"
 
-out=$(unset HERDR_PANE_ID; cd "$M" && "$QUAQUA_BIN" init 2>&1)
+out=$(unset HERDR_PANE_ID; cd "$M" && "$QUAQUA_BIN" init "$M" 2>&1)
 [[ "$(git -C "$M" config --get core.hooksPath)" == "$M/.git/quaqua-hooks" ]] \
   || fail "legacy core.hooksPath was not migrated (got $(git -C "$M" config --get core.hooksPath))"
 [[ $out == *"migrated"* ]] || fail "no migration log on legacy hooksPath: $out"
 [[ -x "$M/.git/quaqua-hooks/pre-commit" ]] || fail "migrated hook is not executable"
 
 # re-run when already pointing to .git/quaqua-hooks: silent and untouched
-out2=$(unset HERDR_PANE_ID; cd "$M" && "$QUAQUA_BIN" init 2>&1)
+out2=$(unset HERDR_PANE_ID; cd "$M" && "$QUAQUA_BIN" init "$M" 2>&1)
 [[ "$(git -C "$M" config --get core.hooksPath)" == "$M/.git/quaqua-hooks" ]] \
   || fail "re-run corrupted core.hooksPath"
 [[ $out2 != *"migrated"* ]] || fail "re-run logged migration when already migrated: $out2"
 
 # overwrite hook with modified content -> quaqua init refreshes it
 echo "# modified" > "$M/.git/quaqua-hooks/pre-commit"
-out3=$(unset HERDR_PANE_ID; cd "$M" && "$QUAQUA_BIN" init 2>&1)
+out3=$(unset HERDR_PANE_ID; cd "$M" && "$QUAQUA_BIN" init "$M" 2>&1)
 [[ $out3 == *"refreshed"* ]] || fail "modified hook was not refreshed with log: $out3"
 cmp -s "$M/.git/quaqua-hooks/pre-commit" "$hook" || fail "refreshed hook content differs from template"
 echo "ok: legacy core.hooksPath migrated and hook refresh idempotent"
