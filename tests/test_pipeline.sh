@@ -269,6 +269,7 @@ run_pipe FAKE_NUMSTAT=$'300\t0\tsrc/a.c' FAKE_NAMES='src/a.c' \
 grep -q 'status=disputed' "$T/out" || fail "dsp: stdout not disputed: $(cat "$T/out")"
 grep -q '## Challenge' "$runsdir/pipeline-dsp.md" || fail "dsp: challenge not copied"
 grep -q 'finding 1 is wrong' "$runsdir/pipeline-dsp.md" || fail "dsp: challenge text missing"
+! grep -q '^## Blockers' "$runsdir/pipeline-dsp.md" || fail "dsp: disputed recorded as a blocker"
 ! grep -q 'agent start suhuynh-dspr2' "$T/calls" || fail "dsp: round-2 reviewer spawned"
 tail -1 "$tele" | grep -q '"status":"disputed"' || fail "dsp: telemetry not disputed"
 echo "ok: disputed -> Challenge copied into pipeline file, stops before round 2"
