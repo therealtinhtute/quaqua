@@ -174,7 +174,7 @@ printf 'just prose\n' > "$T/nobrief.md"
 reject "brief lacks headers"  'Goal.*Hard constraints.*Current design' -- isl "$T/repo" --brief "$T/nobrief.md"
 reject "same harness"         'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder tieude --reviewer suhuynh
 reject "same kind"            'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder suhuynh --reviewer suhuynh
-reject "non-reviewer kind"    'can_review = false in team.toml' -- isl "$T/repo" --brief "$T/brief.md" --builder ni --reviewer sude
+reject "non-reviewer kind"    'can_review = false in team.toml' -- isl "$T/repo" --brief "$T/brief.md" --builder ni --reviewer detu
 reject "bad --review"         'auto|always|skip' -- isl "$T/repo" --brief "$T/brief.md" --review maybe
 reject "--rounds 0"           'integer >= 1' -- isl "$T/repo" --brief "$T/brief.md" --rounds 0
 reject "builder name >20"     'exceeds 20 chars' -- abcdefghijklmnopq "$T/repo" --brief "$T/brief.md"

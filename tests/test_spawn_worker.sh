@@ -230,26 +230,26 @@ for k in sude detu; do
 done
 
 # ── fallback: a failed agent start takes one hop to the kind's fallback ───────
-# sude (omp) falls back to tieude (opencode); the worker name keeps the sude prefix,
+# detu (omp) falls back to tieude (opencode); the worker name keeps the detu prefix,
 # only the harness/model/effort change, and the fallback is a WARN + run metadata.
-spawn sude-fb sude START_FAIL_KIND=omp
+spawn detu-fb detu START_FAIL_KIND=omp
 [[ $rc -eq 0 ]] || fail "fallback: exit $rc, want 0: $(cat "$T/err")"
 grep -qF -- '--kind omp' "$T/calls" || fail "fallback: primary omp not tried: $(cat "$T/calls")"
 grep -qF -- '--kind opencode' "$T/calls" || fail "fallback: fallback opencode not tried: $(cat "$T/calls")"
 [[ $(grep -c 'herdr agent start' "$T/calls") -eq 2 ]] \
   || fail "fallback: expected exactly 2 starts: $(cat "$T/calls")"
-grep -qF 'WARN: fallback: sude→tieude (agent_not_ready)' "$T/err" \
+grep -qF 'WARN: fallback: detu→tieude (agent_not_ready)' "$T/err" \
   || fail "fallback: no WARN with reason: $(cat "$T/err")"
-grep -qF '"fallback":{"from":"sude","to":"tieude","reason":"agent_not_ready"}' \
-  "$T/home/quaqua/runs/sude-fb.srt.json" \
-  || fail "fallback: not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
-grep -qF '"running_kind":"tieude"' "$T/home/quaqua/runs/sude-fb.srt.json" \
-  || fail "fallback: running_kind tieude not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
-grep -qF '"harness":"opencode"' "$T/home/quaqua/runs/sude-fb.srt.json" \
-  || fail "fallback: harness opencode not recorded in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
-grep -qF '"kind":"sude"' "$T/home/quaqua/runs/sude-fb.srt.json" \
-  || fail "fallback: original kind sude not preserved in srt.json: $(cat "$T/home/quaqua/runs/sude-fb.srt.json")"
-grep -q "worker=sude-fb" "$T/out" || fail "fallback: no success line"
+grep -qF '"fallback":{"from":"detu","to":"tieude","reason":"agent_not_ready"}' \
+  "$T/home/quaqua/runs/detu-fb.srt.json" \
+  || fail "fallback: not recorded in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
+grep -qF '"running_kind":"tieude"' "$T/home/quaqua/runs/detu-fb.srt.json" \
+  || fail "fallback: running_kind tieude not recorded in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
+grep -qF '"harness":"opencode"' "$T/home/quaqua/runs/detu-fb.srt.json" \
+  || fail "fallback: harness opencode not recorded in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
+grep -qF '"kind":"detu"' "$T/home/quaqua/runs/detu-fb.srt.json" \
+  || fail "fallback: original kind detu not preserved in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
+grep -q "worker=detu-fb" "$T/out" || fail "fallback: no success line"
 echo "ok: fallback -> omp failed, opencode (tieude) started, WARN + srt fallback recorded"
 
 # one hop max: tieude (opencode) falls back to detu (omp); when both attempts
@@ -392,7 +392,7 @@ expect_reject_review() {  # expect_reject_review <name> <kind> <label>
   echo "ok: $3 -> exit 1, no git/herdr"
 }
 expect_reject_review tieude-revbad tieude "--review on tieude"
-expect_reject_review sude-revbad sude "--review on sude"
+expect_reject_review detu-revbad detu "--review on detu"
 
 # ── --review claude kinds: repo read-only, $HOME/quaqua/runs writable ────────
 # claude has no filesystem sandbox, so the reviewer is held read-only by
