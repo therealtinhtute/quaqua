@@ -988,10 +988,10 @@ fn test_team_toml_harness_routing() {
     );
     assert_eq!(cfg.kinds["detu"].effort.as_deref(), Some("high"));
     assert!(!cfg.kinds["detu"].can_review);
-    // fallback seeds: tieude->detu, detu->tieude, sude->tieude; claude kinds none
+    // fallback seeds: tieude->detu, detu->tieude, sude->suhuynh; claude kinds none
     assert_eq!(cfg.kinds["tieude"].fallback.as_deref(), Some("detu"));
     assert_eq!(cfg.kinds["detu"].fallback.as_deref(), Some("tieude"));
-    assert_eq!(cfg.kinds["sude"].fallback.as_deref(), Some("tieude"));
+    assert_eq!(cfg.kinds["sude"].fallback.as_deref(), Some("suhuynh"));
     for k in ["ni", "suhuynh", "truonglao"] {
         assert_eq!(cfg.kinds[k].fallback, None, "{k} must have no fallback");
     }
@@ -1003,7 +1003,9 @@ fn test_team_toml_harness_routing() {
         "google-antigravity/gemini-3.8-flash"
     );
     assert_eq!(cfg.kinds["sude"].effort.as_deref(), Some("high"));
-    assert!(!cfg.kinds["sude"].can_review);
+    // can_review = true since PR #66 (the repo config, not a policy claim: the kind can
+    // back a reviewer role).
+    assert!(cfg.kinds["sude"].can_review);
 
     // ni is claude with can_review=true
     assert_eq!(cfg.kinds["ni"].harness, "claude");

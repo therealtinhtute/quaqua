@@ -54,7 +54,7 @@ can_review = false
 harness = "omp"
 model = "google-antigravity/gemini-3.8-flash"
 effort = "high"
-fallback = "tieude"
+fallback = "suhuynh"
 can_review = true
 [kinds.ni]
 harness = "claude"
