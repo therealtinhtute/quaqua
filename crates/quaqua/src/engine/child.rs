@@ -2,8 +2,8 @@
 //!
 //! Exposes input and output structures for executing isolated worker tasks as child workflows.
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Input parameters for starting a single task worker child workflow.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12,7 +12,8 @@ pub struct SingleWorkerInput {
     pub kind: String,
     pub repo: String,
     pub brief: String,
-    pub budget_sec: u64,
+    #[serde(rename = "budget_sec")]
+    pub time_budget_sec: u64,
     pub cost_budget: Option<f64>,
 }
 
@@ -22,7 +23,7 @@ impl SingleWorkerInput {
         kind: impl Into<String>,
         repo: impl Into<String>,
         brief: impl Into<String>,
-        budget_sec: u64,
+        time_budget_sec: u64,
         cost_budget: Option<f64>,
     ) -> Self {
         Self {
@@ -30,7 +31,7 @@ impl SingleWorkerInput {
             kind: kind.into(),
             repo: repo.into(),
             brief: brief.into(),
-            budget_sec,
+            time_budget_sec,
             cost_budget,
         }
     }
@@ -57,7 +58,9 @@ impl SingleWorkerOutput {
     pub fn new(exit: i32, report_path: impl Into<PathBuf>) -> Result<Self, String> {
         let valid = exit == 0 || (2..=6).contains(&exit);
         if !valid {
-            return Err(format!("invalid child worker exit code {exit}; expected 0 or 2..=6"));
+            return Err(format!(
+                "invalid child worker exit code {exit}; expected 0 or 2..=6"
+            ));
         }
         Ok(Self {
             exit,

@@ -480,7 +480,12 @@ impl Activity for PromptActivities {
 
                     if !self.is_resume && self.land_sec > 0 {
                         let mut pl = self.prompt_landed.lock().unwrap();
-                        if !*pl {
+                        let has_report = self.runs_dir.join(format!("{name}.md")).is_file();
+                        if has_report {
+                            *pl = true;
+                            *self.prompt_recovered.lock().unwrap() = false;
+                            *self.prompt_not_landed.lock().unwrap() = false;
+                        } else if !*pl {
                             let is_waiting = lead_waiting(&self.runs_dir, name, &o.watcher_pane);
                             if o.status == "working" || o.status == "blocked" || is_waiting {
                                 *pl = true;
@@ -783,7 +788,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 s.input.repo.clone(),
                 s.input.kind.clone(),
                 s.input.brief.clone(),
-                s.input.budget_sec,
+                s.input.time_budget_sec,
                 s.prev_elapsed_ms / 1000,
                 s.overrun_granted,
                 s.extension_total_ms / 1000,
@@ -826,7 +831,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             let wf_id = format!("worker:{name}#{k_max}");
             let budget = last_snap
                 .as_ref()
-                .map(|s| s.input.budget_sec)
+                .map(|s| s.input.time_budget_sec)
                 .unwrap_or_else(|| resolve_budget_sec("").0);
             exec_action = ExecAction::Resume { wf_id, budget };
         } else {
@@ -847,7 +852,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                     s.input.repo.clone(),
                     s.input.kind.clone(),
                     s.input.brief.clone(),
-                    s.input.budget_sec,
+                    s.input.time_budget_sec,
                     s.prev_elapsed_ms / 1000,
                     s.overrun_granted,
                     s.extension_total_ms / 1000,
@@ -1057,8 +1062,10 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         }
         3 => {
             let now = now_sec();
-            let is_pnl =
-                *acts.prompt_not_landed.lock().unwrap() || *acts.prompt_recovered.lock().unwrap();
+            let has_report = out.is_file();
+            let is_pnl = !has_report
+                && (*acts.prompt_not_landed.lock().unwrap()
+                    || *acts.prompt_recovered.lock().unwrap());
             let st = final_obs
                 .as_ref()
                 .map(|o| o.status.as_str())

@@ -1,10 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
-use crate::engine::activity::{
-    ActivityRequest, ActivityResult, GitRequest, GitResult,
-};
+use crate::engine::activity::{ActivityRequest, ActivityResult, GitRequest, GitResult};
 use crate::engine::activity::{HerdrEventRequest, HerdrEventResult, HerdrRequest, HerdrResult};
 use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
 use crate::engine::guard::{
@@ -12,8 +10,8 @@ use crate::engine::guard::{
 };
 use crate::engine::journal::{EventRecord, Journal, SnapshotRecord};
 use crate::engine::telemetry::{
-    GenAiSpan, GEN_AI_AGENT_NAME, GEN_AI_AGENT_ROLE, GEN_AI_OPERATION_NAME,
-    GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS,
+    GenAiSpan, GEN_AI_AGENT_NAME, GEN_AI_AGENT_ROLE, GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL,
+    GEN_AI_SYSTEM, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS,
 };
 use crate::engine::testkit::{
     run_to_completion, InMemoryJournal, MockActivities, TestkitError, VirtualClock,
@@ -128,14 +126,21 @@ fn test_toy_workflow_runs_deterministically_twice() {
     assert_eq!(res2, Ok("TOY_SUCCESS".to_string()));
 
     // Verify exact event ordering and content matching
-    assert_eq!(events1.len(), events2.len(), "event sequence length mismatch");
+    assert_eq!(
+        events1.len(),
+        events2.len(),
+        "event sequence length mismatch"
+    );
     assert!(!events1.is_empty(), "expected recorded journal events");
 
     for (i, (e1, e2)) in events1.iter().zip(events2.iter()).enumerate() {
         assert_eq!(e1.seq, e2.seq, "seq mismatch at event index {i}");
         assert_eq!(e1.ts_ms, e2.ts_ms, "timestamp mismatch at event index {i}");
         assert_eq!(e1.kind, e2.kind, "kind mismatch at event index {i}");
-        assert_eq!(e1.payload_json, e2.payload_json, "payload mismatch at event index {i}");
+        assert_eq!(
+            e1.payload_json, e2.payload_json,
+            "payload mismatch at event index {i}"
+        );
     }
 
     // Verify the expected sequence of kinds
@@ -162,17 +167,23 @@ fn test_journal_trait_is_object_safe() {
     let journal: &mut dyn Journal = &mut in_mem;
 
     let event = EventRecord::new(1, 100, "test_event", r#"{"hello":"world"}"#);
-    let seq = journal.append_event("wf-1", &event).expect("append_event failed");
+    let seq = journal
+        .append_event("wf-1", &event)
+        .expect("append_event failed");
     assert_eq!(seq, 1);
 
     let snapshot = SnapshotRecord::new(1, r#"{"state":"init"}"#);
-    journal.append_snapshot("wf-1", &snapshot).expect("append_snapshot failed");
+    journal
+        .append_snapshot("wf-1", &snapshot)
+        .expect("append_snapshot failed");
 
     let loaded_events = journal.load_events("wf-1", 1).expect("load_events failed");
     assert_eq!(loaded_events.len(), 1);
     assert_eq!(loaded_events[0].kind, "test_event");
 
-    let loaded_snap = journal.load_latest_snapshot("wf-1").expect("load_snapshot failed");
+    let loaded_snap = journal
+        .load_latest_snapshot("wf-1")
+        .expect("load_snapshot failed");
     assert!(loaded_snap.is_some());
     assert_eq!(loaded_snap.unwrap().state_json, r#"{"state":"init"}"#);
 }
@@ -195,19 +206,15 @@ fn test_child_worker_output_validation() {
     // Invalid exit codes
     for invalid_exit in [-1, 1, 7, 10, 127] {
         let out = SingleWorkerOutput::new(invalid_exit, PathBuf::from("runs/test.md"));
-        assert!(out.is_err(), "expected exit code {invalid_exit} to be rejected");
+        assert!(
+            out.is_err(),
+            "expected exit code {invalid_exit} to be rejected"
+        );
     }
 
-    let input = SingleWorkerInput::new(
-        "worker-1",
-        "sude",
-        "quaqua",
-        "build task",
-        1800,
-        Some(3.5),
-    );
+    let input = SingleWorkerInput::new("worker-1", "sude", "quaqua", "build task", 1800, Some(3.5));
     assert_eq!(input.name, "worker-1");
-    assert_eq!(input.budget_sec, 1800);
+    assert_eq!(input.time_budget_sec, 1800);
     assert_eq!(input.cost_budget, Some(3.5));
 }
 
@@ -217,18 +224,46 @@ fn test_child_worker_output_validation() {
 
 #[test]
 fn test_telemetry_genai_attributes() {
-    let span = GenAiSpan::new("trace-1", "span-1", "pipeline_plan", "anthropic", 1000, 2500)
-        .with_model("claude-3-5-sonnet")
-        .with_usage(500, 120)
-        .with_agent("sude-arch-w0", "builder");
+    let span = GenAiSpan::new(
+        "trace-1",
+        "span-1",
+        "pipeline_plan",
+        "anthropic",
+        1000,
+        2500,
+    )
+    .with_model("claude-3-5-sonnet")
+    .with_usage(500, 120)
+    .with_agent("sude-arch-w0", "builder");
 
-    assert_eq!(span.attributes.get(GEN_AI_SYSTEM), Some(&"anthropic".to_string()));
-    assert_eq!(span.attributes.get(GEN_AI_OPERATION_NAME), Some(&"pipeline_plan".to_string()));
-    assert_eq!(span.attributes.get(GEN_AI_REQUEST_MODEL), Some(&"claude-3-5-sonnet".to_string()));
-    assert_eq!(span.attributes.get(GEN_AI_USAGE_INPUT_TOKENS), Some(&"500".to_string()));
-    assert_eq!(span.attributes.get(GEN_AI_USAGE_OUTPUT_TOKENS), Some(&"120".to_string()));
-    assert_eq!(span.attributes.get(GEN_AI_AGENT_NAME), Some(&"sude-arch-w0".to_string()));
-    assert_eq!(span.attributes.get(GEN_AI_AGENT_ROLE), Some(&"builder".to_string()));
+    assert_eq!(
+        span.attributes.get(GEN_AI_SYSTEM),
+        Some(&"anthropic".to_string())
+    );
+    assert_eq!(
+        span.attributes.get(GEN_AI_OPERATION_NAME),
+        Some(&"pipeline_plan".to_string())
+    );
+    assert_eq!(
+        span.attributes.get(GEN_AI_REQUEST_MODEL),
+        Some(&"claude-3-5-sonnet".to_string())
+    );
+    assert_eq!(
+        span.attributes.get(GEN_AI_USAGE_INPUT_TOKENS),
+        Some(&"500".to_string())
+    );
+    assert_eq!(
+        span.attributes.get(GEN_AI_USAGE_OUTPUT_TOKENS),
+        Some(&"120".to_string())
+    );
+    assert_eq!(
+        span.attributes.get(GEN_AI_AGENT_NAME),
+        Some(&"sude-arch-w0".to_string())
+    );
+    assert_eq!(
+        span.attributes.get(GEN_AI_AGENT_ROLE),
+        Some(&"builder".to_string())
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -240,24 +275,43 @@ fn test_determinism_detector_fires_on_positive_fixture() {
     let bad_code = include_str!("fixtures/bad_workflow.txt");
     let violations = scan_source_for_determinism_violations(bad_code, "fixtures/bad_workflow.txt");
 
-    assert_eq!(violations.len(), 3, "expected exactly 3 violations, got {violations:?}");
+    assert_eq!(
+        violations.len(),
+        3,
+        "expected exactly 3 violations, got {violations:?}"
+    );
 
-    let patterns: Vec<&str> = violations.iter().map(|v| v.forbidden_pattern.as_str()).collect();
+    let patterns: Vec<&str> = violations
+        .iter()
+        .map(|v| v.forbidden_pattern.as_str())
+        .collect();
     assert!(patterns.contains(&"std::fs"), "missing std::fs detection");
-    assert!(patterns.contains(&"std::process"), "missing std::process detection");
+    assert!(
+        patterns.contains(&"std::process"),
+        "missing std::process detection"
+    );
     assert!(patterns.contains(&"std::net"), "missing std::net detection");
 
     // Line numbers in fixtures/bad_workflow.txt:
     // line 8: std::fs
     // line 19: std::process
     // line 30: std::net
-    let fs_violation = violations.iter().find(|v| v.forbidden_pattern == "std::fs").unwrap();
+    let fs_violation = violations
+        .iter()
+        .find(|v| v.forbidden_pattern == "std::fs")
+        .unwrap();
     assert_eq!(fs_violation.line, 8);
 
-    let proc_violation = violations.iter().find(|v| v.forbidden_pattern == "std::process").unwrap();
+    let proc_violation = violations
+        .iter()
+        .find(|v| v.forbidden_pattern == "std::process")
+        .unwrap();
     assert_eq!(proc_violation.line, 19);
 
-    let net_violation = violations.iter().find(|v| v.forbidden_pattern == "std::net").unwrap();
+    let net_violation = violations
+        .iter()
+        .find(|v| v.forbidden_pattern == "std::net")
+        .unwrap();
     assert_eq!(net_violation.line, 30);
 }
 
@@ -270,7 +324,8 @@ fn test_all_crate_workflows_pass_determinism_guard() {
         .expect("failed to scan crate source directory");
 
     if !violations.is_empty() {
-        let mut err = String::from("Determinism violations found in crate Workflow implementations:\n");
+        let mut err =
+            String::from("Determinism violations found in crate Workflow implementations:\n");
         for v in &violations {
             err.push_str(&format!("  {v}\n"));
         }
@@ -337,7 +392,11 @@ fn find_owners_file() -> PathBuf {
 #[test]
 fn test_w1_owners_table_parses() {
     let owners_path = find_owners_file();
-    assert!(owners_path.is_file(), "OWNERS.md must exist at {}", owners_path.display());
+    assert!(
+        owners_path.is_file(),
+        "OWNERS.md must exist at {}",
+        owners_path.display()
+    );
 
     let content = std::fs::read_to_string(&owners_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", owners_path.display()));
@@ -347,9 +406,7 @@ fn test_w1_owners_table_parses() {
 
     // Must cover all 12 W1 targets: E1..E4, K1..K4, P1..P4
     let expected_targets = [
-        "E1", "E2", "E3", "E4",
-        "K1", "K2", "K3", "K4",
-        "P1", "P2", "P3", "P4",
+        "E1", "E2", "E3", "E4", "K1", "K2", "K3", "K4", "P1", "P2", "P3", "P4",
     ];
 
     for expected in expected_targets {
@@ -388,7 +445,10 @@ fn test_w1_owners_files_exist() {
     for entry in entries {
         let path = workspace_root.join(&entry.file_path);
         if !path.exists() {
-            missing.push(format!("Target {} missing file: {}", entry.target, entry.file_path));
+            missing.push(format!(
+                "Target {} missing file: {}",
+                entry.target, entry.file_path
+            ));
         }
     }
 
@@ -588,7 +648,9 @@ fn test_context_scheduling_activities_and_children() {
     let workflow = FanoutWorkflow;
     let mut clock = VirtualClock::new(100);
     let mut activities = MockActivities::new();
-    activities.set_default(ActivityResult::Git(GitResult::Sha("default_sha".to_string())));
+    activities.set_default(ActivityResult::Git(GitResult::Sha(
+        "default_sha".to_string(),
+    )));
     let mut journal = InMemoryJournal::new();
 
     let initial_state = FanoutState {
@@ -616,11 +678,18 @@ fn test_virtual_clock_advance_and_mock_defaults() {
     clock.schedule_timer("timer_1", Duration::from_millis(150));
 
     let expired_early = clock.advance(Duration::from_millis(100));
-    assert!(expired_early.is_empty(), "timer should not have expired at 1100ms");
+    assert!(
+        expired_early.is_empty(),
+        "timer should not have expired at 1100ms"
+    );
     assert_eq!(clock.now_ms(), 1100);
 
     let expired_later = clock.advance(Duration::from_millis(100));
-    assert_eq!(expired_later, vec!["timer_1"], "timer should expire by 1200ms");
+    assert_eq!(
+        expired_later,
+        vec!["timer_1"],
+        "timer should expire by 1200ms"
+    );
     assert_eq!(clock.now_ms(), 1200);
 }
 
@@ -710,7 +779,10 @@ fn test_testkit_git_diff_hash_flows_through_mock_activities() {
 
     assert_eq!(
         result,
-        Ok(("canned_hash_12345".to_string(), "3 files changed".to_string()))
+        Ok((
+            "canned_hash_12345".to_string(),
+            "3 files changed".to_string()
+        ))
     );
     assert_eq!(activities.call_count(), 1);
     assert_eq!(
@@ -910,10 +982,7 @@ fn test_testkit_herdr_scoped_events_flows_through_mock_activities() {
         &mut journal,
     );
 
-    assert_eq!(
-        result,
-        Ok(vec!["blocked".to_string(), "idle".to_string()])
-    );
+    assert_eq!(result, Ok(vec!["blocked".to_string(), "idle".to_string()]));
     assert_eq!(activities.call_count(), 1);
     assert_eq!(
         activities.calls()[0],

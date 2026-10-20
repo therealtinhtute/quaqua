@@ -1,9 +1,9 @@
 //! Pipeline engine (`quaqua pipeline`).
 //! Implements build -> review -> fix orchestration state machine.
 
+pub mod gate;
 pub mod phases;
 pub mod state;
-pub mod gate;
 pub use gate::{decide_build_gate, BuildFacts, BuildGate};
 
 use crate::engine::activities::SystemActivities;
@@ -23,8 +23,8 @@ pub use phases::{
     pipeline_finished, select_default_reviewer, PipelineContext, StepResult,
 };
 pub use state::{
-    PipelineInput, PipelineOutput, PipelinePhase, PipelineState, PipelineWorkflowState,
-    ResumeDirective, ReviewStrategy, parse_blocked_gate,
+    parse_blocked_gate, PipelineInput, PipelineOutput, PipelinePhase, PipelineState,
+    PipelineWorkflowState, ResumeDirective, ReviewStrategy,
 };
 use std::collections::HashMap;
 
@@ -218,7 +218,10 @@ fn seed_state_from_pipeline_state(
         "fix" => {
             init_state.phase = PipelinePhase::Fix;
             init_state.round = state.round.max(1);
-            let revname = format!("{}-{}r{}", init_state.input.reviewer, init_state.input.task, init_state.round);
+            let revname = format!(
+                "{}-{}r{}",
+                init_state.input.reviewer, init_state.input.task, init_state.round
+            );
             let rev_report = runs_dir.join(format!("{revname}.md"));
             if let Ok(content) = std::fs::read_to_string(&rev_report) {
                 if let Ok((findings, _)) = parse_report_content(&content) {
@@ -229,7 +232,13 @@ fn seed_state_from_pipeline_state(
         }
         _ => {}
     }
-    init_state.round = state.round.max(if state.phase == "review" || state.phase == "fix" { 1 } else { 0 });
+    init_state.round = state
+        .round
+        .max(if state.phase == "review" || state.phase == "fix" {
+            1
+        } else {
+            0
+        });
     init_state.rounds_run = state.rounds_run;
     init_state.last_findings = review_findings.max(state.last_findings);
     init_state.review_changed = state.review_changed;
@@ -752,7 +761,11 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
     let resolved_base_sha = if !state.base_sha.is_empty() {
         state.base_sha.clone()
     } else {
-        let base_ref = if state.base.is_empty() { "HEAD" } else { &state.base };
+        let base_ref = if state.base.is_empty() {
+            "HEAD"
+        } else {
+            &state.base
+        };
         ctx.git
             .run_in(&repo_path, &["rev-parse", base_ref])
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -802,13 +815,12 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         {
             let snap = SnapshotRecord::new(
                 0,
-                serde_json::to_string(initial_state).map_err(|e| {
-                    (1, format!("cannot serialize initial state snapshot: {e}\n"))
-                })?,
+                serde_json::to_string(initial_state)
+                    .map_err(|e| (1, format!("cannot serialize initial state snapshot: {e}\n")))?,
             );
-            journal.append_snapshot(&parent_wf_id, &snap).map_err(|e| {
-                (1, format!("cannot append initial snapshot: {e}\n"))
-            })?;
+            journal
+                .append_snapshot(&parent_wf_id, &snap)
+                .map_err(|e| (1, format!("cannot append initial snapshot: {e}\n")))?;
         }
         Ok::<(), (i32, String)>(())
     };
@@ -848,13 +860,16 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         for rec in &parent_events {
             if rec.kind == "pause_for_approval" {
                 pause_count += 1;
-                let r = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
-                    val.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string())
-                } else if let Some(r_str) = rec.payload_json.strip_prefix("reason=") {
-                    Some(r_str.to_string())
-                } else {
-                    Some(rec.payload_json.clone())
-                };
+                let r =
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
+                        val.get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else if let Some(r_str) = rec.payload_json.strip_prefix("reason=") {
+                        Some(r_str.to_string())
+                    } else {
+                        Some(rec.payload_json.clone())
+                    };
                 latest_pause_reason = r;
             } else if rec.kind == "approval_resolved" {
                 resolved_count += 1;
@@ -942,14 +957,12 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     }
                     // Rounds exhausted and an unfinished worker report are the Lead's call:
                     // terminal blocked, exit 0 (aa056d6 phases contract).
-                    let actual_code = if rest.contains("review rounds exhausted")
-                        || unfinished
-                        || code == 0
-                    {
-                        0
-                    } else {
-                        code
-                    };
+                    let actual_code =
+                        if rest.contains("review rounds exhausted") || unfinished || code == 0 {
+                            0
+                        } else {
+                            code
+                        };
                     return ctx
                         .finish(&mut state, "blocked", actual_code, Some(&reason))
                         .map(|_| ());
@@ -1032,7 +1045,8 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     }
                 }
 
-                let Some((child_id, _wf_type, mut child_input, started_count)) = pending_child else {
+                let Some((child_id, _wf_type, mut child_input, started_count)) = pending_child
+                else {
                     return Err((
                         1,
                         format!("pipeline blocked with no pending child or approval: {reason}\n"),
@@ -1060,7 +1074,6 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 }
                 let _ = state.save(&ctx.state_file);
 
-
                 let is_reviewer = matches!(kind, ChildKind::Review(_));
 
                 let el = state.start_elapsed + (now_sec() - ctx.inv_start);
@@ -1069,15 +1082,15 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 } else {
                     0
                 };
-                let mut budget = if rem < child_input.budget_sec {
+                let mut budget = if rem < child_input.time_budget_sec {
                     rem
                 } else {
-                    child_input.budget_sec
+                    child_input.time_budget_sec
                 };
                 if budget < 1 {
                     budget = 1;
                 }
-                child_input.budget_sec = budget;
+                child_input.time_budget_sec = budget;
                 let mut is_fresh_spawn = false;
                 if is_reviewer {
                     if state.round == 0 {
@@ -1298,13 +1311,9 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 }
 
                 let already_delivered = child_report_path.is_file() && {
-                    let content =
-                        std::fs::read_to_string(&child_report_path).unwrap_or_default();
-                    crate::worker::prompt::watchdog::validate_report_content(
-                        &content,
-                        is_reviewer,
-                    )
-                    .is_ok()
+                    let content = std::fs::read_to_string(&child_report_path).unwrap_or_default();
+                    crate::worker::prompt::watchdog::validate_report_content(&content, is_reviewer)
+                        .is_ok()
                         || content
                             .lines()
                             .any(|l| l.trim().starts_with("## Challenge"))
@@ -1425,23 +1434,6 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                             if child_report_path.exists() {
                                 ctx.archive_stale(&child_report_path);
                             }
-
-                            let _ = std::fs::write(
-                                ctx.runs_dir.join(format!(".{}.budget", child_input.name)),
-                                format!("{budget}\n"),
-                            );
-                            let _ = std::fs::remove_file(
-                                ctx.runs_dir.join(format!(".{}.elapsed", child_input.name)),
-                            );
-                            let _ = std::fs::remove_file(
-                                ctx.runs_dir.join(format!(".{}.grace", child_input.name)),
-                            );
-                            let _ = std::fs::remove_file(
-                                ctx.runs_dir.join(format!(".{}.nudged", child_input.name)),
-                            );
-                            let _ = std::fs::remove_file(
-                                ctx.runs_dir.join(format!(".{}.autoext", child_input.name)),
-                            );
 
                             let prompt_body = format!(
                                     "{}. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/{}.md (publish it atomically, never a partial file); reply only the path.",
@@ -1584,7 +1576,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                             let _ = std::fs::write(&ctx.pfile, pcontent);
                             let _ = state.save(&ctx.state_file);
                             child_output_json["report_path"] =
-                                 serde_json::Value::String(planfile.to_string_lossy().to_string());
+                                serde_json::Value::String(planfile.to_string_lossy().to_string());
                         } else if kind == ChildKind::Build {
                             let build_md =
                                 ctx.runs_dir.join(format!("{}.build.md", child_input.name));
@@ -1595,13 +1587,15 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 std::fs::read_to_string(&build_md).unwrap_or_default();
                             // A challenged or unfinished report stops before the worktree is
                             // inspected (aa056d6 order); the engine owns that decision.
-                            if rep_content.lines().any(|l| l.trim().starts_with("## Challenge"))
+                            if rep_content
+                                .lines()
+                                .any(|l| l.trim().starts_with("## Challenge"))
                                 || report_is_unfinished(&rep_content).is_some()
                             {
-                                child_output_json["report_path"] =
-                                    serde_json::Value::String(build_md.to_string_lossy().to_string());
+                                child_output_json["report_path"] = serde_json::Value::String(
+                                    build_md.to_string_lossy().to_string(),
+                                );
                             } else {
-
                                 let wt_path = Path::new(&state.wt);
                                 let rev_out = ctx.git.run_in(wt_path, &["rev-parse", "HEAD"]);
                                 let head = match rev_out {
@@ -1623,7 +1617,9 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                         "cannot inspect {} (git rev-parse/status failed) — fix the worktree, then 'quaqua pipeline --resume {} {}'",
                                         state.wt, ctx.task, state.repo
                                     );
-                                    return ctx.finish(&mut state, "blocked", 3, Some(&b)).map(|_| ());
+                                    return ctx
+                                        .finish(&mut state, "blocked", 3, Some(&b))
+                                        .map(|_| ());
                                 }
 
                                 if !dirty.is_empty() {
@@ -1638,7 +1634,9 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                         "worktree dirty — the files above are missing from quaqua/{}-{}, so the gate and the reviewer would see a different snapshot. Commit or clean them, then 'quaqua pipeline --resume {} {}'",
                                         state.builder, ctx.task, ctx.task, state.repo
                                     );
-                                    return ctx.finish(&mut state, "blocked", 3, Some(&b)).map(|_| ());
+                                    return ctx
+                                        .finish(&mut state, "blocked", 3, Some(&b))
+                                        .map(|_| ());
                                 }
 
                                 let (changed_lines, top_dirs) = if head != state.base_sha
@@ -1659,10 +1657,16 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                         top_dirs,
                                         ctx.review_lines,
                                     )
-                                    .with_context(&state.builder, &ctx.task, &state.repo),
+                                    .with_context(
+                                        &state.builder,
+                                        &ctx.task,
+                                        &state.repo,
+                                    ),
                                 );
                                 if let BuildGate::Blocked(b) = &gate {
-                                    return ctx.finish(&mut state, "blocked", 3, Some(b)).map(|_| ());
+                                    return ctx
+                                        .finish(&mut state, "blocked", 3, Some(b))
+                                        .map(|_| ());
                                 }
 
                                 let mut pcontent =
@@ -1693,8 +1697,9 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 let _ = std::fs::write(&ctx.pfile, pcontent);
                                 let _ = state.save(&ctx.state_file);
 
-                                child_output_json["report_path"] =
-                                    serde_json::Value::String(build_md.to_string_lossy().to_string());
+                                child_output_json["report_path"] = serde_json::Value::String(
+                                    build_md.to_string_lossy().to_string(),
+                                );
                                 child_output_json["gate"] =
                                     serde_json::Value::String(gate.wire_gate().to_string());
                                 child_output_json["skip_review"] =
@@ -2025,7 +2030,6 @@ impl PipelineWorkflow {
         (child_id, input_val)
     }
 
-
     fn handle_review_verdict(
         &self,
         state: &mut PipelineWorkflowState,
@@ -2095,7 +2099,6 @@ fn block(
         reason: format!("blocked {code}: {reason_str}"),
     }
 }
-
 
 impl Workflow for PipelineWorkflow {
     type Input = PipelineInput;
@@ -2183,94 +2186,95 @@ impl Workflow for PipelineWorkflow {
                     }
                 }
             },
-            Some(WorkflowEvent::ApprovalResolved { approved, reason }) => {
-                match state.phase {
-                    PipelinePhase::PlanReadyGate => {
-                        if approved {
-                            state.phase = PipelinePhase::Build;
-                            let (child_id, input_val) = self.build_build_child(state);
-                            state.active_child_id = Some(child_id.clone());
-                            StepDecision::StartChild {
-                                id: child_id,
-                                workflow_type: "single_worker".to_string(),
-                                input: input_val,
-                            }
-                        } else {
-                            state.phase = PipelinePhase::Failed;
-                            StepDecision::Fail {
-                                code: 1,
-                                reason: reason.unwrap_or_else(|| "plan approval rejected".to_string()),
-                            }
+            Some(WorkflowEvent::ApprovalResolved { approved, reason }) => match state.phase {
+                PipelinePhase::PlanReadyGate => {
+                    if approved {
+                        state.phase = PipelinePhase::Build;
+                        let (child_id, input_val) = self.build_build_child(state);
+                        state.active_child_id = Some(child_id.clone());
+                        StepDecision::StartChild {
+                            id: child_id,
+                            workflow_type: "single_worker".to_string(),
+                            input: input_val,
+                        }
+                    } else {
+                        state.phase = PipelinePhase::Failed;
+                        StepDecision::Fail {
+                            code: 1,
+                            reason: reason.unwrap_or_else(|| "plan approval rejected".to_string()),
                         }
                     }
-                    PipelinePhase::Blocked => {
-                        if !approved {
-                            state.phase = PipelinePhase::Failed;
-                            return StepDecision::Fail {
-                                code: 1,
-                                reason: reason.unwrap_or_else(|| "blocked gate aborted".to_string()),
-                            };
-                        }
-                        match state.blocked_kind {
-                            Some(state::BlockedKind::RoundsExhausted) => {
-                                if let Some(r) = reason.as_deref() {
-                                    if let Ok(directive) = serde_json::from_str::<state::ResumeDirective>(r) {
-                                        state.input.max_rounds = state.input.max_rounds.max(directive.max_rounds);
-                                    }
-                                }
-                                if state.round < state.input.max_rounds {
-                                    state.phase = PipelinePhase::Fix;
-                                    state.blocked_kind = None;
-                                    state.blocked_from = None;
-                                    state.blocked_code = 0;
-                                    state.blocked_reason = None;
-                                    let (child_id, input_val) = self.build_fix_child(state);
-                                    state.active_child_id = Some(child_id.clone());
-                                    StepDecision::StartChild {
-                                        id: child_id,
-                                        workflow_type: "single_worker".to_string(),
-                                        input: input_val,
-                                    }
-                                } else {
-                                    let reason = format!(
-                                        "review rounds exhausted ({} rounds, {} findings remain) — Lead decides how to proceed",
-                                        state.round, state.last_findings
-                                    );
-                                    block(
-                                        state,
-                                        PipelinePhase::Review,
-                                        state::BlockedKind::RoundsExhausted,
-                                        5,
-                                        reason,
-                                    )
+                }
+                PipelinePhase::Blocked => {
+                    if !approved {
+                        state.phase = PipelinePhase::Failed;
+                        return StepDecision::Fail {
+                            code: 1,
+                            reason: reason.unwrap_or_else(|| "blocked gate aborted".to_string()),
+                        };
+                    }
+                    match state.blocked_kind {
+                        Some(state::BlockedKind::RoundsExhausted) => {
+                            if let Some(r) = reason.as_deref() {
+                                if let Ok(directive) =
+                                    serde_json::from_str::<state::ResumeDirective>(r)
+                                {
+                                    state.input.max_rounds =
+                                        state.input.max_rounds.max(directive.max_rounds);
                                 }
                             }
-                            Some(state::BlockedKind::Restart) | None => {
-                                let from_phase = state.blocked_from.unwrap_or(PipelinePhase::Plan);
-                                state.phase = from_phase;
+                            if state.round < state.input.max_rounds {
+                                state.phase = PipelinePhase::Fix;
                                 state.blocked_kind = None;
                                 state.blocked_from = None;
                                 state.blocked_code = 0;
                                 state.blocked_reason = None;
-                                let (child_id, input_val) = match from_phase {
-                                    PipelinePhase::Plan => self.build_plan_child(state),
-                                    PipelinePhase::Build => self.build_build_child(state),
-                                    PipelinePhase::Review => self.build_review_child(state),
-                                    PipelinePhase::Fix => self.build_fix_child(state),
-                                    _ => self.build_plan_child(state),
-                                };
+                                let (child_id, input_val) = self.build_fix_child(state);
                                 state.active_child_id = Some(child_id.clone());
                                 StepDecision::StartChild {
                                     id: child_id,
                                     workflow_type: "single_worker".to_string(),
                                     input: input_val,
                                 }
+                            } else {
+                                let reason = format!(
+                                        "review rounds exhausted ({} rounds, {} findings remain) — Lead decides how to proceed",
+                                        state.round, state.last_findings
+                                    );
+                                block(
+                                    state,
+                                    PipelinePhase::Review,
+                                    state::BlockedKind::RoundsExhausted,
+                                    5,
+                                    reason,
+                                )
+                            }
+                        }
+                        Some(state::BlockedKind::Restart) | None => {
+                            let from_phase = state.blocked_from.unwrap_or(PipelinePhase::Plan);
+                            state.phase = from_phase;
+                            state.blocked_kind = None;
+                            state.blocked_from = None;
+                            state.blocked_code = 0;
+                            state.blocked_reason = None;
+                            let (child_id, input_val) = match from_phase {
+                                PipelinePhase::Plan => self.build_plan_child(state),
+                                PipelinePhase::Build => self.build_build_child(state),
+                                PipelinePhase::Review => self.build_review_child(state),
+                                PipelinePhase::Fix => self.build_fix_child(state),
+                                _ => self.build_plan_child(state),
+                            };
+                            state.active_child_id = Some(child_id.clone());
+                            StepDecision::StartChild {
+                                id: child_id,
+                                workflow_type: "single_worker".to_string(),
+                                input: input_val,
                             }
                         }
                     }
-                    _ => StepDecision::Continue,
                 }
-            }
+                _ => StepDecision::Continue,
+            },
             Some(WorkflowEvent::ChildCompleted { id, output }) => {
                 if let Some(active_id) = &state.active_child_id {
                     if id != *active_id {
@@ -2298,18 +2302,15 @@ impl Workflow for PipelineWorkflow {
                 let worker_output: SingleWorkerOutput = match serde_json::from_value(output) {
                     Ok(o) => o,
                     Err(err) => {
-                        let reason = format!(
-                            "child worker {id} returned invalid output contract: {err}"
-                        );
+                        let reason =
+                            format!("child worker {id} returned invalid output contract: {err}");
                         return block(state, state.phase, state::BlockedKind::Restart, 6, reason);
                     }
                 };
 
                 if worker_output.exit != 0 {
-                    let reason = format!(
-                        "child worker {id} failed with exit {}",
-                        worker_output.exit
-                    );
+                    let reason =
+                        format!("child worker {id} failed with exit {}", worker_output.exit);
                     return block(
                         state,
                         state.phase,
@@ -2515,13 +2516,7 @@ impl Workflow for PipelineWorkflow {
                             let reason = format!(
                                 "activity reading {pending_path} failed or returned unexpected result: {other:?}"
                             );
-                            block(
-                                state,
-                                state.phase,
-                                state::BlockedKind::Restart,
-                                3,
-                                reason,
-                            )
+                            block(state, state.phase, state::BlockedKind::Restart, 3, reason)
                         }
                     }
                 } else {
@@ -2535,7 +2530,13 @@ impl Workflow for PipelineWorkflow {
                     }
                 }
                 state.active_child_id = None;
-                block(state, state.phase, state::BlockedKind::Restart, code, reason)
+                block(
+                    state,
+                    state.phase,
+                    state::BlockedKind::Restart,
+                    code,
+                    reason,
+                )
             }
             Some(WorkflowEvent::TimerFired { id: _ }) => StepDecision::Continue,
         }
@@ -2554,7 +2555,11 @@ enum ChildKind {
 /// Classifies a child id by the exact ids `PipelineWorkflow` builds, so a task slug
 /// containing `review`/`fix`/`build` cannot be mistaken for another phase.
 fn classify_child(child_id: &str, builder: &str, reviewer: &str, task: &str) -> ChildKind {
-    let round = |prefix: String| child_id.strip_prefix(&prefix).and_then(|r| r.parse::<u32>().ok());
+    let round = |prefix: String| {
+        child_id
+            .strip_prefix(&prefix)
+            .and_then(|r| r.parse::<u32>().ok())
+    };
     if child_id == format!("{builder}-{task}-plan") {
         ChildKind::Plan
     } else if child_id == format!("{builder}-{task}-build") {
@@ -3328,7 +3333,10 @@ mod tests {
             other => panic!("expected PauseForApproval (blocked 5), got {other:?}"),
         }
         assert_eq!(state.phase, PipelinePhase::Blocked);
-        assert_eq!(state.blocked_kind, Some(state::BlockedKind::RoundsExhausted));
+        assert_eq!(
+            state.blocked_kind,
+            Some(state::BlockedKind::RoundsExhausted)
+        );
         assert_eq!(state.blocked_code, 5);
         assert_eq!(state.blocked_from, Some(PipelinePhase::Review));
     }
@@ -3611,7 +3619,11 @@ mod tests {
         v
     }
 
-    fn drive_build(state: &mut PipelineWorkflowState, gate: Option<&str>, report: &str) -> StepDecision<PipelineOutput> {
+    fn drive_build(
+        state: &mut PipelineWorkflowState,
+        gate: Option<&str>,
+        report: &str,
+    ) -> StepDecision<PipelineOutput> {
         let wf = PipelineWorkflow;
         let mut ctx = WorkflowContext::new(1000);
         let id = format!("{}-{}-build", state.input.builder, state.input.task);
@@ -3620,7 +3632,10 @@ mod tests {
         let _ = wf.step(
             state,
             &mut ctx,
-            Some(WorkflowEvent::ChildCompleted { id: id.clone(), output: build_output("runs/b.md", gate) }),
+            Some(WorkflowEvent::ChildCompleted {
+                id: id.clone(),
+                output: build_output("runs/b.md", gate),
+            }),
         );
         wf.step(
             state,
@@ -3636,7 +3651,15 @@ mod tests {
     fn test_design_test_10_build_gate_wiring_and_no_changes() {
         let declared = "# Build\nOutcome: no changes\n## Lessons\nnone";
         // Case 1: always + commits + declared no-op -> the driver's gate (review) wins.
-        let g1 = decide_build_gate(&BuildFacts::new("h1", "b0", true, ReviewStrategy::Always, 0, 0, 50));
+        let g1 = decide_build_gate(&BuildFacts::new(
+            "h1",
+            "b0",
+            true,
+            ReviewStrategy::Always,
+            0,
+            0,
+            50,
+        ));
         assert_eq!(g1.wire_gate(), "review");
         let mut input = PipelineInput::new("t10", "/repo", "sude", "suhuynh", "brief");
         input.review_strategy = ReviewStrategy::Always;
@@ -3648,11 +3671,21 @@ mod tests {
         assert_eq!(st.build_gate.as_deref(), Some("review"));
 
         // Case 2: head == base + declared -> NoChanges, exact pfile line, clean with 0 rounds.
-        let g2 = decide_build_gate(&BuildFacts::new("b0", "b0", true, ReviewStrategy::Always, 0, 0, 50));
+        let g2 = decide_build_gate(&BuildFacts::new(
+            "b0",
+            "b0",
+            true,
+            ReviewStrategy::Always,
+            0,
+            0,
+            50,
+        ));
         assert!(g2.is_no_changes());
         assert_eq!(
             g2.pfile_line().as_deref(),
-            Some("- build: no commits — builder declared 'Outcome: no changes'; nothing to review\n")
+            Some(
+                "- build: no commits — builder declared 'Outcome: no changes'; nothing to review\n"
+            )
         );
         let mut st = PipelineWorkflowState::new(input);
         match drive_build(&mut st, Some(g2.wire_gate()), declared) {
@@ -3681,7 +3714,9 @@ mod tests {
         input.review_strategy = ReviewStrategy::Skip;
         let mut st = PipelineWorkflowState::new(input.clone());
         match drive_build(&mut st, None, "# Build\nDone.\n## Lessons\nnone") {
-            StepDecision::Complete(out) => assert_eq!((out.status.as_str(), out.rounds), ("clean", 0)),
+            StepDecision::Complete(out) => {
+                assert_eq!((out.status.as_str(), out.rounds), ("clean", 0))
+            }
             other => panic!("expected Complete clean, got {other:?}"),
         }
 
@@ -3697,15 +3732,35 @@ mod tests {
     fn test_classify_child_is_structural() {
         // Task slugs containing phase words must not leak into another phase.
         let task = "fix-review-build";
-        assert_eq!(classify_child("sude-fix-review-build-plan", "sude", "suhuynh", task), ChildKind::Plan);
-        assert_eq!(classify_child("sude-fix-review-build-build", "sude", "suhuynh", task), ChildKind::Build);
         assert_eq!(
-            classify_child("suhuynh-fix-review-build-review-r2", "sude", "suhuynh", task),
+            classify_child("sude-fix-review-build-plan", "sude", "suhuynh", task),
+            ChildKind::Plan
+        );
+        assert_eq!(
+            classify_child("sude-fix-review-build-build", "sude", "suhuynh", task),
+            ChildKind::Build
+        );
+        assert_eq!(
+            classify_child(
+                "suhuynh-fix-review-build-review-r2",
+                "sude",
+                "suhuynh",
+                task
+            ),
             ChildKind::Review(2)
         );
-        assert_eq!(classify_child("sude-fix-review-build-fix-r1", "sude", "suhuynh", task), ChildKind::Fix(1));
-        assert_eq!(classify_child("sude-fix-review-build-review-r1", "sude", "suhuynh", task), ChildKind::Unknown);
-        assert_eq!(classify_child("suhuynh-other-review-r1", "sude", "suhuynh", task), ChildKind::Unknown);
+        assert_eq!(
+            classify_child("sude-fix-review-build-fix-r1", "sude", "suhuynh", task),
+            ChildKind::Fix(1)
+        );
+        assert_eq!(
+            classify_child("sude-fix-review-build-review-r1", "sude", "suhuynh", task),
+            ChildKind::Unknown
+        );
+        assert_eq!(
+            classify_child("suhuynh-other-review-r1", "sude", "suhuynh", task),
+            ChildKind::Unknown
+        );
     }
 
     #[test]
@@ -3723,7 +3778,10 @@ mod tests {
         let input = PipelineInput::new("tseed", "/repo", "sude", "suhuynh", "brief");
         let st = seed_state_from_pipeline_state(input, &ps, &runs);
         let path = st.last_review_report.clone().unwrap();
-        assert!(Path::new(&path).is_absolute(), "review path must be absolute: {path}");
+        assert!(
+            Path::new(&path).is_absolute(),
+            "review path must be absolute: {path}"
+        );
         assert_eq!(PathBuf::from(&path), runs.join("suhuynh-tseedr1.md"));
         assert_eq!(st.last_findings, 3);
         let _ = std::fs::remove_dir_all(&runs);
@@ -3861,7 +3919,8 @@ mod tests {
         state.blocked_from = Some(PipelinePhase::Review);
         state.blocked_code = 5;
 
-        let directive_json = serde_json::to_string(&state::ResumeDirective { max_rounds: 3 }).unwrap();
+        let directive_json =
+            serde_json::to_string(&state::ResumeDirective { max_rounds: 3 }).unwrap();
         let d2 = wf.step(
             &mut state,
             &mut ctx,
@@ -3937,7 +3996,9 @@ mod tests {
         }
     }
 
-    fn setup_test_pipeline_workspace(test_name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+    fn setup_test_pipeline_workspace(
+        test_name: &str,
+    ) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
         let pid = std::process::id();
         let base_dir = std::env::temp_dir().join(format!("quaqua-test-{test_name}-{pid}"));
         let _ = std::fs::remove_dir_all(&base_dir);
@@ -4091,7 +4152,10 @@ esac
         assert_eq!(parse_verdict_str("Verdict: 1 finding"), Ok((1, false)));
         assert_eq!(parse_verdict_str("Verdict: 2 findings"), Ok((2, false)));
         assert_eq!(parse_verdict_str("Verdict: 3 findings."), Ok((3, false)));
-        assert_eq!(parse_verdict_str("Verdict: 2 findings (see details)"), Ok((2, false)));
+        assert_eq!(
+            parse_verdict_str("Verdict: 2 findings (see details)"),
+            Ok((2, false))
+        );
 
         // Strict parser failures (findings #2)
         assert!(parse_verdict_str("Verdict: not clean").is_err());
@@ -4106,11 +4170,14 @@ esac
 
     #[test]
     fn test_finding2_driver_unparseable_verdict_fails_closed() {
-        if !in_isolated_driver_process("pipeline::tests::test_finding2_driver_unparseable_verdict_fails_closed") {
+        if !in_isolated_driver_process(
+            "pipeline::tests::test_finding2_driver_unparseable_verdict_fails_closed",
+        ) {
             return;
         }
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
-        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) = setup_test_pipeline_workspace("f2-bad");
+        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
+            setup_test_pipeline_workspace("f2-bad");
 
         let _guard_team = TestEnvVarGuard::set("QUAQUA_TEAM_TOML", team_file.to_str().unwrap());
         let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_bin.to_str().unwrap());
@@ -4119,7 +4186,9 @@ esac
         let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
         let _guard_owner = TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
         let git = Git::new();
-        let herdr = Herdr { bin: stub_bin.to_string_lossy().to_string() };
+        let herdr = Herdr {
+            bin: stub_bin.to_string_lossy().to_string(),
+        };
         let brief_file = repo_dir.join("brief.md");
 
         let task = "f2-bad";
@@ -4127,7 +4196,8 @@ esac
         std::fs::write(
             runs_dir.join(format!("sude-{task}.md")),
             "# Plan\nImplementation steps.\n## Lessons\nnone\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let args = vec![
             task.to_string(),
@@ -4138,7 +4208,11 @@ esac
             "always".to_string(),
         ];
         let plan_res = handle_pipeline(&args, &git, &herdr);
-        assert_eq!(plan_res, Err((5, String::new())), "plan pause must return exit 5");
+        assert_eq!(
+            plan_res,
+            Err((5, String::new())),
+            "plan pause must return exit 5"
+        );
 
         // 2. Setup build commit in worktree and unparseable review report
         let wt_dir = base_dir.join(".wt").join(format!("sude-{task}"));
@@ -4150,18 +4224,21 @@ esac
         std::fs::write(
             runs_dir.join(format!("sude-{task}.md")),
             "# Build\nImplemented.\n## Lessons\nnone\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         // A report predating the fresh review prompt is archived, never consumed (#6):
         // the stale clean verdict must not finish the pipeline.
         std::fs::write(
             runs_dir.join(format!("suhuynh-{task}r1.md")),
             "# Review\nVerdict: clean\n## Lessons\nnone\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(
             runs_dir.join("stub_review_r1"),
             "# Review\nVerdict: not clean\n## Lessons\nnone\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         // 3. Resume invocation
         let resume_args = vec![
@@ -4171,29 +4248,56 @@ esac
         ];
         let resume_res = handle_pipeline(&resume_args, &git, &herdr);
         // Must end blocked with non-zero exit code 6 (malformed report / unparseable verdict), NEVER clean exit 0!
-        assert_eq!(resume_res, Err((6, String::new())), "unparseable verdict line must fail closed with exit 6");
+        assert_eq!(
+            resume_res,
+            Err((6, String::new())),
+            "unparseable verdict line must fail closed with exit 6"
+        );
 
-        let pfile_content = std::fs::read_to_string(runs_dir.join(format!("pipeline-{task}.md"))).unwrap();
-        assert!(pfile_content.contains("- status: blocked"), "pfile must record blocked status");
-        assert!(!pfile_content.contains("- status: clean"), "pfile must not record clean status");
+        let pfile_content =
+            std::fs::read_to_string(runs_dir.join(format!("pipeline-{task}.md"))).unwrap();
+        assert!(
+            pfile_content.contains("- status: blocked"),
+            "pfile must record blocked status"
+        );
+        assert!(
+            !pfile_content.contains("- status: clean"),
+            "pfile must not record clean status"
+        );
         let stale = std::fs::read_dir(&runs_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().starts_with(&format!("suhuynh-{task}r1.md.stale.")));
-        assert!(stale, "pre-existing review report must be archived before the fresh prompt");
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("suhuynh-{task}r1.md.stale."))
+            });
+        assert!(
+            stale,
+            "pre-existing review report must be archived before the fresh prompt"
+        );
 
         // 4. Fix review report in place (post-prompt, so the restart consumes it)
         std::fs::write(
             runs_dir.join(format!("suhuynh-{task}r1.md")),
             "# Review\nVerdict: clean\n## Lessons\nnone\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         // 5. Resume invocation after fix -> clean exit 0
         let resume_res2 = handle_pipeline(&resume_args, &git, &herdr);
-        assert_eq!(resume_res2, Ok(()), "resuming after fixing verdict must exit 0 clean");
+        assert_eq!(
+            resume_res2,
+            Ok(()),
+            "resuming after fixing verdict must exit 0 clean"
+        );
 
-        let pfile_clean = std::fs::read_to_string(runs_dir.join(format!("pipeline-{task}.md"))).unwrap();
-        assert!(pfile_clean.contains("- status: clean"), "pfile must record clean status after fix");
+        let pfile_clean =
+            std::fs::read_to_string(runs_dir.join(format!("pipeline-{task}.md"))).unwrap();
+        assert!(
+            pfile_clean.contains("- status: clean"),
+            "pfile must record clean status after fix"
+        );
 
         // 6. Verify journal holds 2 child_started for the review id
         let db_path = runs_dir.join("quaqua.db");
@@ -4202,12 +4306,12 @@ esac
         let review_child_id = format!("suhuynh-{task}-review-r1");
         let review_starts = events
             .iter()
-            .filter(|e| {
-                e.kind == "child_started"
-                    && e.payload_json.contains(&review_child_id)
-            })
+            .filter(|e| e.kind == "child_started" && e.payload_json.contains(&review_child_id))
             .count();
-        assert_eq!(review_starts, 2, "journal must record 2 child_started attempts for review child");
+        assert_eq!(
+            review_starts, 2,
+            "journal must record 2 child_started attempts for review child"
+        );
 
         let _ = std::fs::remove_dir_all(&base_dir);
     }
@@ -4217,7 +4321,8 @@ esac
         let wf = PipelineWorkflow;
 
         // Case A: base_sha is set
-        let mut input_with_sha = PipelineInput::new("task-f3a", "/repo", "sude", "suhuynh", "sample brief");
+        let mut input_with_sha =
+            PipelineInput::new("task-f3a", "/repo", "sude", "suhuynh", "sample brief");
         input_with_sha.base_sha = Some("gated-base-sha-1234".to_string());
         let mut state_a = PipelineWorkflowState::new(input_with_sha);
         state_a.round = 1;
@@ -4225,13 +4330,18 @@ esac
         let (_id_a, val_a) = wf.build_review_child(&state_a);
         let prompt_a = val_a["brief"].as_str().unwrap();
         assert!(
-            prompt_a.contains("diff between base gated-base-sha-1234 and branch quaqua/sude-task-f3a"),
+            prompt_a
+                .contains("diff between base gated-base-sha-1234 and branch quaqua/sude-task-f3a"),
             "review prompt must contain gated base SHA, got: {prompt_a}"
         );
-        assert!(!prompt_a.contains("base  and branch"), "review prompt must not contain empty base");
+        assert!(
+            !prompt_a.contains("base  and branch"),
+            "review prompt must not contain empty base"
+        );
 
         // Case B: base_sha is None and base is empty string -> falls back to HEAD, never empty string!
-        let mut input_empty_base = PipelineInput::new("task-f3b", "/repo", "sude", "suhuynh", "sample brief");
+        let mut input_empty_base =
+            PipelineInput::new("task-f3b", "/repo", "sude", "suhuynh", "sample brief");
         input_empty_base.base = String::new();
         input_empty_base.base_sha = None;
         let mut state_b = PipelineWorkflowState::new(input_empty_base);
@@ -4243,7 +4353,10 @@ esac
             prompt_b.contains("diff between base HEAD and branch quaqua/sude-task-f3b"),
             "review prompt with empty base must fallback to HEAD, got: {prompt_b}"
         );
-        assert!(!prompt_b.contains("base  and branch"), "review prompt must not contain empty base");
+        assert!(
+            !prompt_b.contains("base  and branch"),
+            "review prompt must not contain empty base"
+        );
     }
 
     #[test]
@@ -4275,7 +4388,8 @@ esac
             Some(WorkflowEvent::ActivityCompleted {
                 id: "read-report-r1".to_string(),
                 result: ActivityResult::ReportFile(ReportFileResult::Content(
-                    "# Review\n## Findings\n1. Issue one\nVerdict: 1 finding\n## Lessons\nnone".to_string(),
+                    "# Review\n## Findings\n1. Issue one\nVerdict: 1 finding\n## Lessons\nnone"
+                        .to_string(),
                 )),
             }),
         );
@@ -4330,11 +4444,14 @@ esac
 
     #[test]
     fn test_finding5_handle_pipeline_e2e_integration() {
-        if !in_isolated_driver_process("pipeline::tests::test_finding5_handle_pipeline_e2e_integration") {
+        if !in_isolated_driver_process(
+            "pipeline::tests::test_finding5_handle_pipeline_e2e_integration",
+        ) {
             return;
         }
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
-        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) = setup_test_pipeline_workspace("f5-e2e");
+        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
+            setup_test_pipeline_workspace("f5-e2e");
 
         let _guard_team = TestEnvVarGuard::set("QUAQUA_TEAM_TOML", team_file.to_str().unwrap());
         let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_bin.to_str().unwrap());
@@ -4347,7 +4464,9 @@ esac
         let _guard_idle = TestEnvVarGuard::set("PROMPT_WORKER_IDLE_SEC", "10");
 
         let git = Git::new();
-        let herdr = Herdr { bin: stub_bin.to_string_lossy().to_string() };
+        let herdr = Herdr {
+            bin: stub_bin.to_string_lossy().to_string(),
+        };
         let brief_file = repo_dir.join("brief.md");
 
         let task = "f5-e2e";
@@ -4364,7 +4483,11 @@ esac
 
         // 1. Initial invocation runs Plan, pauses with exit 5 (plan-ready)
         let plan_res = handle_pipeline(&args, &git, &herdr);
-        assert_eq!(plan_res, Err((5, String::new())), "plan pause must return exit 5 (plan-ready)");
+        assert_eq!(
+            plan_res,
+            Err((5, String::new())),
+            "plan pause must return exit 5 (plan-ready)"
+        );
 
         // 2. Resume invocation drives Build -> Review r1 (1 finding) -> Fix r1 -> Review r2 (clean)
         let resume_args = vec![
@@ -4374,13 +4497,30 @@ esac
         ];
 
         let final_res = handle_pipeline(&resume_args, &git, &herdr);
-        assert_eq!(final_res, Ok(()), "full pipeline run must finish with Ok(()) / clean exit 0");
+        assert_eq!(
+            final_res,
+            Ok(()),
+            "full pipeline run must finish with Ok(()) / clean exit 0"
+        );
 
-        let pfile_content = std::fs::read_to_string(runs_dir.join(format!("pipeline-{task}.md"))).unwrap();
-        assert!(pfile_content.contains("- status: clean"), "pipeline md must report clean status");
-        assert!(pfile_content.contains("- review round 1:"), "pipeline md must log review round 1");
-        assert!(pfile_content.contains("- fix 1:"), "pipeline md must log fix 1");
-        assert!(pfile_content.contains("- review round 2:"), "pipeline md must log review round 2");
+        let pfile_content =
+            std::fs::read_to_string(runs_dir.join(format!("pipeline-{task}.md"))).unwrap();
+        assert!(
+            pfile_content.contains("- status: clean"),
+            "pipeline md must report clean status"
+        );
+        assert!(
+            pfile_content.contains("- review round 1:"),
+            "pipeline md must log review round 1"
+        );
+        assert!(
+            pfile_content.contains("- fix 1:"),
+            "pipeline md must log fix 1"
+        );
+        assert!(
+            pfile_content.contains("- review round 2:"),
+            "pipeline md must log review round 2"
+        );
 
         let _ = std::fs::remove_dir_all(&base_dir);
     }
@@ -4396,12 +4536,22 @@ esac
         // Journal B: Snapshot at pause_for_approval
         let mut journal_b = InMemoryJournal::new();
 
-        let mut act_a = PipelineActivities { system: SystemActivities::new() };
-        let mut act_b = PipelineActivities { system: SystemActivities::new() };
+        let mut act_a = PipelineActivities {
+            system: SystemActivities::new(),
+        };
+        let mut act_b = PipelineActivities {
+            system: SystemActivities::new(),
+        };
         let mut clock_a = RealClock::new();
         let mut clock_b = RealClock::new();
-        let opts_no_snap = RunnerOptions { snapshot_at_blocked: false, ..Default::default() };
-        let opts_with_snap = RunnerOptions { snapshot_at_blocked: true, ..Default::default() };
+        let opts_no_snap = RunnerOptions {
+            snapshot_at_blocked: false,
+            ..Default::default()
+        };
+        let opts_with_snap = RunnerOptions {
+            snapshot_at_blocked: true,
+            ..Default::default()
+        };
 
         // Run to Plan pause in both
         let out_a1 = runner::run_until_blocked(
@@ -4413,7 +4563,8 @@ esac
             &mut clock_a,
             &opts_no_snap,
             vec![],
-        ).unwrap();
+        )
+        .unwrap();
 
         let out_b1 = runner::run_until_blocked(
             &wf,
@@ -4424,14 +4575,19 @@ esac
             &mut clock_b,
             &opts_with_snap,
             vec![],
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(out_a1, out_b1);
 
         let tmp_runs = std::env::temp_dir().join(format!("quaqua-f6-runs-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp_runs);
         let plan_file = tmp_runs.join("sude-task-f6.plan.md");
-        std::fs::write(&plan_file, "# Plan\nImplementation steps.\n## Lessons\nnone\n").unwrap();
+        std::fs::write(
+            &plan_file,
+            "# Plan\nImplementation steps.\n## Lessons\nnone\n",
+        )
+        .unwrap();
         let plan_out = SingleWorkerOutput::new(0, &plan_file).unwrap();
 
         let _ = runner::run_until_blocked(
@@ -4442,13 +4598,12 @@ esac
             &mut act_a,
             &mut clock_a,
             &opts_no_snap,
-            vec![
-                WorkflowEvent::ChildCompleted {
-                    id: "sude-task-f6-plan".to_string(),
-                    output: serde_json::to_value(&plan_out).unwrap(),
-                },
-            ],
-        ).unwrap();
+            vec![WorkflowEvent::ChildCompleted {
+                id: "sude-task-f6-plan".to_string(),
+                output: serde_json::to_value(&plan_out).unwrap(),
+            }],
+        )
+        .unwrap();
 
         let _ = runner::run_until_blocked(
             &wf,
@@ -4458,20 +4613,28 @@ esac
             &mut act_b,
             &mut clock_b,
             &opts_with_snap,
-            vec![
-                WorkflowEvent::ChildCompleted {
-                    id: "sude-task-f6-plan".to_string(),
-                    output: serde_json::to_value(&plan_out).unwrap(),
-                },
-            ],
-        ).unwrap();
+            vec![WorkflowEvent::ChildCompleted {
+                id: "sude-task-f6-plan".to_string(),
+                output: serde_json::to_value(&plan_out).unwrap(),
+            }],
+        )
+        .unwrap();
 
         // Verify Journal B has a snapshot while Journal A has none
-        assert!(journal_a.load_latest_snapshot("pipeline:task-f6").unwrap().is_none());
-        assert!(journal_b.load_latest_snapshot("pipeline:task-f6").unwrap().is_some());
+        assert!(journal_a
+            .load_latest_snapshot("pipeline:task-f6")
+            .unwrap()
+            .is_none());
+        assert!(journal_b
+            .load_latest_snapshot("pipeline:task-f6")
+            .unwrap()
+            .is_some());
 
         // Resume both with ApprovalResolved: both must yield identical Build state and child decision!
-        let resume_event = vec![WorkflowEvent::ApprovalResolved { approved: true, reason: None }];
+        let resume_event = vec![WorkflowEvent::ApprovalResolved {
+            approved: true,
+            reason: None,
+        }];
         let res_a = runner::run_until_blocked(
             &wf,
             "pipeline:task-f6",
@@ -4481,7 +4644,8 @@ esac
             &mut clock_a,
             &opts_no_snap,
             resume_event.clone(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let res_b = runner::run_until_blocked(
             &wf,
@@ -4492,7 +4656,8 @@ esac
             &mut clock_b,
             &opts_with_snap,
             resume_event,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(res_a, res_b);
         match res_a {
@@ -4505,41 +4670,124 @@ esac
         let build_file = tmp_runs.join("sude-task-f6.md");
         std::fs::write(&build_file, "# Build\nImplemented.\n## Lessons\nnone\n").unwrap();
         let build_out = SingleWorkerOutput::new(0, &build_file).unwrap();
-        let build_events = vec![
-            WorkflowEvent::ChildCompleted {
-                id: "sude-task-f6-build".to_string(),
-                output: serde_json::to_value(&build_out).unwrap(),
-            },
-        ];
-        let _ = runner::run_until_blocked(&wf, "pipeline:task-f6", Some(initial_state.clone()), &mut journal_a, &mut act_a, &mut clock_a, &opts_no_snap, build_events.clone()).unwrap();
-        let _ = runner::run_until_blocked(&wf, "pipeline:task-f6", Some(initial_state.clone()), &mut journal_b, &mut act_b, &mut clock_b, &opts_with_snap, build_events).unwrap();
+        let build_events = vec![WorkflowEvent::ChildCompleted {
+            id: "sude-task-f6-build".to_string(),
+            output: serde_json::to_value(&build_out).unwrap(),
+        }];
+        let _ = runner::run_until_blocked(
+            &wf,
+            "pipeline:task-f6",
+            Some(initial_state.clone()),
+            &mut journal_a,
+            &mut act_a,
+            &mut clock_a,
+            &opts_no_snap,
+            build_events.clone(),
+        )
+        .unwrap();
+        let _ = runner::run_until_blocked(
+            &wf,
+            "pipeline:task-f6",
+            Some(initial_state.clone()),
+            &mut journal_b,
+            &mut act_b,
+            &mut clock_b,
+            &opts_with_snap,
+            build_events,
+        )
+        .unwrap();
 
         // Review child completes with unparseable verdict -> enters Blocked gate
         let review_file = tmp_runs.join("suhuynh-task-f6r1.md");
-        std::fs::write(&review_file, "# Review\nVerdict: not clean\n## Lessons\nnone\n").unwrap();
+        std::fs::write(
+            &review_file,
+            "# Review\nVerdict: not clean\n## Lessons\nnone\n",
+        )
+        .unwrap();
         let rev_out = SingleWorkerOutput::new(0, &review_file).unwrap();
-        let rev_events = vec![
-            WorkflowEvent::ChildCompleted {
-                id: "suhuynh-task-f6-review-r1".to_string(),
-                output: serde_json::to_value(&rev_out).unwrap(),
-            },
-        ];
-        let blocked_a = runner::run_until_blocked(&wf, "pipeline:task-f6", Some(initial_state.clone()), &mut journal_a, &mut act_a, &mut clock_a, &opts_no_snap, rev_events.clone()).unwrap();
-        let blocked_b = runner::run_until_blocked(&wf, "pipeline:task-f6", Some(initial_state.clone()), &mut journal_b, &mut act_b, &mut clock_b, &opts_with_snap, rev_events).unwrap();
+        let rev_events = vec![WorkflowEvent::ChildCompleted {
+            id: "suhuynh-task-f6-review-r1".to_string(),
+            output: serde_json::to_value(&rev_out).unwrap(),
+        }];
+        let blocked_a = runner::run_until_blocked(
+            &wf,
+            "pipeline:task-f6",
+            Some(initial_state.clone()),
+            &mut journal_a,
+            &mut act_a,
+            &mut clock_a,
+            &opts_no_snap,
+            rev_events.clone(),
+        )
+        .unwrap();
+        let blocked_b = runner::run_until_blocked(
+            &wf,
+            "pipeline:task-f6",
+            Some(initial_state.clone()),
+            &mut journal_b,
+            &mut act_b,
+            &mut clock_b,
+            &opts_with_snap,
+            rev_events,
+        )
+        .unwrap();
         assert_eq!(blocked_a, blocked_b);
         assert!(matches!(&blocked_a, RunnerOutcome::Blocked(r) if r.contains("blocked 6:")));
 
         // Resume both with directive
         let directive = ResumeDirective { max_rounds: 2 };
         let directive_json = serde_json::to_string(&directive).unwrap();
-        let resume_blocked = vec![WorkflowEvent::ApprovalResolved { approved: true, reason: Some(directive_json) }];
-        let res_a2 = runner::run_until_blocked(&wf, "pipeline:task-f6", Some(initial_state.clone()), &mut journal_a, &mut act_a, &mut clock_a, &opts_no_snap, resume_blocked.clone()).unwrap();
-        let res_b2 = runner::run_until_blocked(&wf, "pipeline:task-f6", Some(initial_state.clone()), &mut journal_b, &mut act_b, &mut clock_b, &opts_with_snap, resume_blocked).unwrap();
+        let resume_blocked = vec![WorkflowEvent::ApprovalResolved {
+            approved: true,
+            reason: Some(directive_json),
+        }];
+        let res_a2 = runner::run_until_blocked(
+            &wf,
+            "pipeline:task-f6",
+            Some(initial_state.clone()),
+            &mut journal_a,
+            &mut act_a,
+            &mut clock_a,
+            &opts_no_snap,
+            resume_blocked.clone(),
+        )
+        .unwrap();
+        let res_b2 = runner::run_until_blocked(
+            &wf,
+            "pipeline:task-f6",
+            Some(initial_state.clone()),
+            &mut journal_b,
+            &mut act_b,
+            &mut clock_b,
+            &opts_with_snap,
+            resume_blocked,
+        )
+        .unwrap();
         assert_eq!(res_a2, res_b2);
 
         // Replay parity check: re-run both with no incoming events -> identical state & sequence
-        let replay_a = runner::run_until_blocked(&wf, "pipeline:task-f6", Some(initial_state.clone()), &mut journal_a, &mut act_a, &mut clock_a, &opts_no_snap, vec![]).unwrap();
-        let replay_b = runner::run_until_blocked(&wf, "pipeline:task-f6", Some(initial_state.clone()), &mut journal_b, &mut act_b, &mut clock_b, &opts_with_snap, vec![]).unwrap();
+        let replay_a = runner::run_until_blocked(
+            &wf,
+            "pipeline:task-f6",
+            Some(initial_state.clone()),
+            &mut journal_a,
+            &mut act_a,
+            &mut clock_a,
+            &opts_no_snap,
+            vec![],
+        )
+        .unwrap();
+        let replay_b = runner::run_until_blocked(
+            &wf,
+            "pipeline:task-f6",
+            Some(initial_state.clone()),
+            &mut journal_b,
+            &mut act_b,
+            &mut clock_b,
+            &opts_with_snap,
+            vec![],
+        )
+        .unwrap();
         assert_eq!(replay_a, replay_b);
 
         let events_a = journal_a.load_events("pipeline:task-f6", 1).unwrap();
@@ -4560,9 +4808,14 @@ esac
         input.max_rounds = 2;
         let wf_id = "pipeline:task-d3";
         let mut journal = InMemoryJournal::new();
-        let mut act = PipelineActivities { system: SystemActivities::new() };
+        let mut act = PipelineActivities {
+            system: SystemActivities::new(),
+        };
         let mut clock = RealClock::new();
-        let opts = RunnerOptions { snapshot_at_blocked: false, ..Default::default() };
+        let opts = RunnerOptions {
+            snapshot_at_blocked: false,
+            ..Default::default()
+        };
 
         let tmp_runs = std::env::temp_dir().join(format!("quaqua-d3-runs-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp_runs);
@@ -4571,59 +4824,158 @@ esac
         let build_file = tmp_runs.join("sude-task-d3.md");
         std::fs::write(&build_file, "# Build\nImplemented.\n## Lessons\nnone\n").unwrap();
         let rev1_file = tmp_runs.join("suhuynh-task-d3r1.md");
-        std::fs::write(&rev1_file, "# Review\nVerdict: 1 finding\n## Lessons\nnone\n").unwrap();
+        std::fs::write(
+            &rev1_file,
+            "# Review\nVerdict: 1 finding\n## Lessons\nnone\n",
+        )
+        .unwrap();
         let fix1_file = tmp_runs.join("sude-task-d3-fix-r1.md");
         std::fs::write(&fix1_file, "# Fix\nFixed.\n## Lessons\nnone\n").unwrap();
         let rev2_file = tmp_runs.join("suhuynh-task-d3r2.md");
-        std::fs::write(&rev2_file, "# Review\nVerdict: 1 finding\n## Lessons\nnone\n").unwrap();
+        std::fs::write(
+            &rev2_file,
+            "# Review\nVerdict: 1 finding\n## Lessons\nnone\n",
+        )
+        .unwrap();
 
         let init_state = PipelineWorkflowState::new(input.clone());
         let snap = SnapshotRecord::new(0, serde_json::to_string(&init_state).unwrap());
         journal.append_snapshot(wf_id, &snap).unwrap();
 
         // 1. Initial run -> starts plan child
-        let out = runner::run_until_blocked(&wf, wf_id, Some(init_state), &mut journal, &mut act, &mut clock, &opts, vec![]).unwrap();
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            Some(init_state),
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![],
+        )
+        .unwrap();
         assert!(matches!(out, RunnerOutcome::Blocked(_)));
 
         // Plan child completes -> pauses at PlanReadyGate
-        let plan_out = SingleWorkerOutput { exit: 0, report_path: plan_file };
-        let out = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ChildCompleted { id: "sude-task-d3-plan".to_string(), output: serde_json::to_value(&plan_out).unwrap() },
-        ]).unwrap();
+        let plan_out = SingleWorkerOutput {
+            exit: 0,
+            report_path: plan_file,
+        };
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ChildCompleted {
+                id: "sude-task-d3-plan".to_string(),
+                output: serde_json::to_value(&plan_out).unwrap(),
+            }],
+        )
+        .unwrap();
         assert!(matches!(&out, RunnerOutcome::Blocked(r) if r.contains("approve")));
 
         // Plan approved -> starts build child
-        let out = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ApprovalResolved { approved: true, reason: None },
-        ]).unwrap();
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: None,
+            }],
+        )
+        .unwrap();
         assert!(matches!(out, RunnerOutcome::Blocked(_)));
 
         // Build child completes
-        let build_out = SingleWorkerOutput { exit: 0, report_path: build_file };
-        let out = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ChildCompleted { id: "sude-task-d3-build".to_string(), output: serde_json::to_value(&build_out).unwrap() },
-        ]).unwrap();
+        let build_out = SingleWorkerOutput {
+            exit: 0,
+            report_path: build_file,
+        };
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ChildCompleted {
+                id: "sude-task-d3-build".to_string(),
+                output: serde_json::to_value(&build_out).unwrap(),
+            }],
+        )
+        .unwrap();
         assert!(matches!(out, RunnerOutcome::Blocked(_)));
 
         // Review r1 completes with 1 finding -> starts fix r1
-        let rev1_out = SingleWorkerOutput { exit: 0, report_path: rev1_file };
-        let out = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ChildCompleted { id: "suhuynh-task-d3-review-r1".to_string(), output: serde_json::to_value(&rev1_out).unwrap() },
-        ]).unwrap();
+        let rev1_out = SingleWorkerOutput {
+            exit: 0,
+            report_path: rev1_file,
+        };
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ChildCompleted {
+                id: "suhuynh-task-d3-review-r1".to_string(),
+                output: serde_json::to_value(&rev1_out).unwrap(),
+            }],
+        )
+        .unwrap();
         assert!(matches!(out, RunnerOutcome::Blocked(_)));
 
         // Fix r1 completes -> starts review r2
-        let fix1_out = SingleWorkerOutput { exit: 0, report_path: fix1_file };
-        let out = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ChildCompleted { id: "sude-task-d3-fix-r1".to_string(), output: serde_json::to_value(&fix1_out).unwrap() },
-        ]).unwrap();
+        let fix1_out = SingleWorkerOutput {
+            exit: 0,
+            report_path: fix1_file,
+        };
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ChildCompleted {
+                id: "sude-task-d3-fix-r1".to_string(),
+                output: serde_json::to_value(&fix1_out).unwrap(),
+            }],
+        )
+        .unwrap();
         assert!(matches!(out, RunnerOutcome::Blocked(_)));
 
         // Review r2 completes with 1 finding -> rounds exhausted! (round 2 >= max_rounds 2)
-        let rev2_out = SingleWorkerOutput { exit: 0, report_path: rev2_file };
-        let out = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ChildCompleted { id: "suhuynh-task-d3-review-r2".to_string(), output: serde_json::to_value(&rev2_out).unwrap() },
-        ]).unwrap();
+        let rev2_out = SingleWorkerOutput {
+            exit: 0,
+            report_path: rev2_file,
+        };
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ChildCompleted {
+                id: "suhuynh-task-d3-review-r2".to_string(),
+                output: serde_json::to_value(&rev2_out).unwrap(),
+            }],
+        )
+        .unwrap();
         // Must be paused at blocked gate with exit 5 and rounds exhausted
         match &out {
             RunnerOutcome::Blocked(reason) => {
@@ -4635,13 +4987,27 @@ esac
         }
 
         let events_at_exhausted = journal.load_events(wf_id, 1).unwrap();
-        let child_starts_before = events_at_exhausted.iter().filter(|e| e.kind == "child_started").count();
+        let child_starts_before = events_at_exhausted
+            .iter()
+            .filter(|e| e.kind == "child_started")
+            .count();
 
         // 2. Plain resume (no raised rounds -> directive has max_rounds: 2) -> still blocked, no new child
         let plain_directive = serde_json::to_string(&ResumeDirective { max_rounds: 2 }).unwrap();
-        let out = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ApprovalResolved { approved: true, reason: Some(plain_directive) },
-        ]).unwrap();
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: Some(plain_directive),
+            }],
+        )
+        .unwrap();
         match &out {
             RunnerOutcome::Blocked(reason) => {
                 let (code, msg) = parse_blocked_gate(reason).expect("must parse as blocked gate");
@@ -4651,14 +5017,31 @@ esac
             other => panic!("expected Blocked gate again, got {other:?}"),
         }
         let events_after_plain = journal.load_events(wf_id, 1).unwrap();
-        let child_starts_after_plain = events_after_plain.iter().filter(|e| e.kind == "child_started").count();
-        assert_eq!(child_starts_before, child_starts_after_plain, "no new child must start on plain resume");
+        let child_starts_after_plain = events_after_plain
+            .iter()
+            .filter(|e| e.kind == "child_started")
+            .count();
+        assert_eq!(
+            child_starts_before, child_starts_after_plain,
+            "no new child must start on plain resume"
+        );
 
         // 3. Resume with --rounds 3 -> directive has max_rounds: 3 -> fix round 2 child started
         let raised_directive = serde_json::to_string(&ResumeDirective { max_rounds: 3 }).unwrap();
-        let out = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ApprovalResolved { approved: true, reason: Some(raised_directive) },
-        ]).unwrap();
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: Some(raised_directive),
+            }],
+        )
+        .unwrap();
         match &out {
             RunnerOutcome::Blocked(reason) => {
                 assert!(reason.contains("no pending events"));
@@ -4666,10 +5049,23 @@ esac
             other => panic!("expected Blocked waiting on fix child, got {other:?}"),
         }
         let events_after_raised = journal.load_events(wf_id, 1).unwrap();
-        let child_starts_after_raised = events_after_raised.iter().filter(|e| e.kind == "child_started").count();
-        assert_eq!(child_starts_after_raised, child_starts_before + 1, "fix child must start after rounds raised");
-        let last_child_event = events_after_raised.iter().filter(|e| e.kind == "child_started").last().unwrap();
-        assert!(last_child_event.payload_json.contains("sude-task-d3-fix-r2"));
+        let child_starts_after_raised = events_after_raised
+            .iter()
+            .filter(|e| e.kind == "child_started")
+            .count();
+        assert_eq!(
+            child_starts_after_raised,
+            child_starts_before + 1,
+            "fix child must start after rounds raised"
+        );
+        let last_child_event = events_after_raised
+            .iter()
+            .filter(|e| e.kind == "child_started")
+            .last()
+            .unwrap();
+        assert!(last_child_event
+            .payload_json
+            .contains("sude-task-d3-fix-r2"));
         let _ = std::fs::remove_dir_all(&tmp_runs);
     }
 
@@ -4680,10 +5076,16 @@ esac
         input.max_rounds = 2;
         let wf_id = "pipeline:task-d4";
         let mut journal = InMemoryJournal::new();
-        let mut act = PipelineActivities { system: SystemActivities::new() };
+        let mut act = PipelineActivities {
+            system: SystemActivities::new(),
+        };
         let mut clock = RealClock::new();
         // Snapshot interval 2 and snapshot at blocked -> periodic and blocked snapshots captured
-        let opts = RunnerOptions { snapshot_at_blocked: true, snapshot_interval: 2, ..Default::default() };
+        let opts = RunnerOptions {
+            snapshot_at_blocked: true,
+            snapshot_interval: 2,
+            ..Default::default()
+        };
 
         let tmp_runs = std::env::temp_dir().join(format!("quaqua-d4-runs-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp_runs);
@@ -4692,67 +5094,191 @@ esac
         let build_file = tmp_runs.join("sude-task-d4.md");
         std::fs::write(&build_file, "# Build\nImplemented.\n## Lessons\nnone\n").unwrap();
         let rev1_file = tmp_runs.join("suhuynh-task-d4r1.md");
-        std::fs::write(&rev1_file, "# Review\nVerdict: 1 finding\n## Lessons\nnone\n").unwrap();
+        std::fs::write(
+            &rev1_file,
+            "# Review\nVerdict: 1 finding\n## Lessons\nnone\n",
+        )
+        .unwrap();
         let fix1_file = tmp_runs.join("sude-task-d4-fix-r1.md");
         std::fs::write(&fix1_file, "# Fix\nFixed.\n## Lessons\nnone\n").unwrap();
         let rev2_file = tmp_runs.join("suhuynh-task-d4r2.md");
-        std::fs::write(&rev2_file, "# Review\nVerdict: 1 finding\n## Lessons\nnone\n").unwrap();
+        std::fs::write(
+            &rev2_file,
+            "# Review\nVerdict: 1 finding\n## Lessons\nnone\n",
+        )
+        .unwrap();
 
         let init_state = PipelineWorkflowState::new(input.clone());
         let snap = SnapshotRecord::new(0, serde_json::to_string(&init_state).unwrap());
         journal.append_snapshot(wf_id, &snap).unwrap();
 
         // Initial run -> plan child
-        let _ = runner::run_until_blocked(&wf, wf_id, Some(init_state), &mut journal, &mut act, &mut clock, &opts, vec![]).unwrap();
+        let _ = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            Some(init_state),
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![],
+        )
+        .unwrap();
 
         // Plan completes
-        let plan_out = SingleWorkerOutput { exit: 0, report_path: plan_file };
-        let _ = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ChildCompleted { id: "sude-task-d4-plan".to_string(), output: serde_json::to_value(&plan_out).unwrap() },
-        ]).unwrap();
+        let plan_out = SingleWorkerOutput {
+            exit: 0,
+            report_path: plan_file,
+        };
+        let _ = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ChildCompleted {
+                id: "sude-task-d4-plan".to_string(),
+                output: serde_json::to_value(&plan_out).unwrap(),
+            }],
+        )
+        .unwrap();
 
         // Plan approved
-        let _ = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ApprovalResolved { approved: true, reason: None },
-        ]).unwrap();
+        let _ = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: None,
+            }],
+        )
+        .unwrap();
 
         // Build child completes
-        let build_out = SingleWorkerOutput { exit: 0, report_path: build_file };
-        let _ = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ChildCompleted { id: "sude-task-d4-build".to_string(), output: serde_json::to_value(&build_out).unwrap() },
-        ]).unwrap();
+        let build_out = SingleWorkerOutput {
+            exit: 0,
+            report_path: build_file,
+        };
+        let _ = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ChildCompleted {
+                id: "sude-task-d4-build".to_string(),
+                output: serde_json::to_value(&build_out).unwrap(),
+            }],
+        )
+        .unwrap();
 
         // Review r1 completes with 1 finding
-        let rev1_out = SingleWorkerOutput { exit: 0, report_path: rev1_file };
-        let _ = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ChildCompleted { id: "suhuynh-task-d4-review-r1".to_string(), output: serde_json::to_value(&rev1_out).unwrap() },
-        ]).unwrap();
+        let rev1_out = SingleWorkerOutput {
+            exit: 0,
+            report_path: rev1_file,
+        };
+        let _ = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ChildCompleted {
+                id: "suhuynh-task-d4-review-r1".to_string(),
+                output: serde_json::to_value(&rev1_out).unwrap(),
+            }],
+        )
+        .unwrap();
 
         // Fix r1 completes
-        let fix1_out = SingleWorkerOutput { exit: 0, report_path: fix1_file };
-        let _ = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ChildCompleted { id: "sude-task-d4-fix-r1".to_string(), output: serde_json::to_value(&fix1_out).unwrap() },
-        ]).unwrap();
+        let fix1_out = SingleWorkerOutput {
+            exit: 0,
+            report_path: fix1_file,
+        };
+        let _ = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ChildCompleted {
+                id: "sude-task-d4-fix-r1".to_string(),
+                output: serde_json::to_value(&fix1_out).unwrap(),
+            }],
+        )
+        .unwrap();
 
         // Review r2 completes with 1 finding -> rounds exhausted!
-        let rev2_out = SingleWorkerOutput { exit: 0, report_path: rev2_file };
-        let out = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ChildCompleted { id: "suhuynh-task-d4-review-r2".to_string(), output: serde_json::to_value(&rev2_out).unwrap() },
-        ]).unwrap();
+        let rev2_out = SingleWorkerOutput {
+            exit: 0,
+            report_path: rev2_file,
+        };
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ChildCompleted {
+                id: "suhuynh-task-d4-review-r2".to_string(),
+                output: serde_json::to_value(&rev2_out).unwrap(),
+            }],
+        )
+        .unwrap();
 
-        assert!(matches!(&out, RunnerOutcome::Blocked(r) if r.contains("blocked 5: review rounds exhausted")));
-        assert!(journal.load_latest_snapshot(wf_id).unwrap().is_some(), "snapshot must exist in journal");
+        assert!(
+            matches!(&out, RunnerOutcome::Blocked(r) if r.contains("blocked 5: review rounds exhausted"))
+        );
+        assert!(
+            journal.load_latest_snapshot(wf_id).unwrap().is_some(),
+            "snapshot must exist in journal"
+        );
 
         // Resume with raised rounds (--rounds 3) -> directive raises max_rounds despite snapshot presence
         let raised_directive = serde_json::to_string(&ResumeDirective { max_rounds: 3 }).unwrap();
-        let out = runner::run_until_blocked(&wf, wf_id, None, &mut journal, &mut act, &mut clock, &opts, vec![
-            WorkflowEvent::ApprovalResolved { approved: true, reason: Some(raised_directive) },
-        ]).unwrap();
+        let out = runner::run_until_blocked(
+            &wf,
+            wf_id,
+            None,
+            &mut journal,
+            &mut act,
+            &mut clock,
+            &opts,
+            vec![WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: Some(raised_directive),
+            }],
+        )
+        .unwrap();
         assert!(matches!(&out, RunnerOutcome::Blocked(r) if r.contains("no pending events")));
 
         let events = journal.load_events(wf_id, 1).unwrap();
-        let last_child_event = events.iter().filter(|e| e.kind == "child_started").last().unwrap();
-        assert!(last_child_event.payload_json.contains("sude-task-d4-fix-r2"), "fix round 2 child must start");
+        let last_child_event = events
+            .iter()
+            .filter(|e| e.kind == "child_started")
+            .last()
+            .unwrap();
+        assert!(
+            last_child_event
+                .payload_json
+                .contains("sude-task-d4-fix-r2"),
+            "fix round 2 child must start"
+        );
         let _ = std::fs::remove_dir_all(&tmp_runs);
     }
 
@@ -4773,13 +5299,16 @@ esac
         for rec in &parent_events_a {
             if rec.kind == "pause_for_approval" {
                 pause_count += 1;
-                let r = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
-                    val.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string())
-                } else if let Some(r_str) = rec.payload_json.strip_prefix("reason=") {
-                    Some(r_str.to_string())
-                } else {
-                    Some(rec.payload_json.clone())
-                };
+                let r =
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
+                        val.get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else if let Some(r_str) = rec.payload_json.strip_prefix("reason=") {
+                        Some(r_str.to_string())
+                    } else {
+                        Some(rec.payload_json.clone())
+                    };
                 latest_pause_reason = r;
             } else if rec.kind == "approval_resolved" {
                 resolved_count += 1;
@@ -4791,12 +5320,30 @@ esac
                 .unwrap_or("")
                 .starts_with("blocked ")
             && parse_blocked_gate(latest_pause_reason.as_deref().unwrap_or("")).is_none();
-        assert!(is_plan_gate, "must detect plan gate even when earlier pause_for_approval existed in history");
+        assert!(
+            is_plan_gate,
+            "must detect plan gate even when earlier pause_for_approval existed in history"
+        );
 
         let parent_events_b = vec![
-            EventRecord::new(1, 1000, "pause_for_approval", json!({ "reason": "approve plan then resume" }).to_string()),
-            EventRecord::new(2, 1010, "approval_resolved", json!({ "approved": true, "reason": null }).to_string()),
-            EventRecord::new(3, 1020, "pause_for_approval", json!({ "reason": "blocked 6: unparseable review verdict" }).to_string()),
+            EventRecord::new(
+                1,
+                1000,
+                "pause_for_approval",
+                json!({ "reason": "approve plan then resume" }).to_string(),
+            ),
+            EventRecord::new(
+                2,
+                1010,
+                "approval_resolved",
+                json!({ "approved": true, "reason": null }).to_string(),
+            ),
+            EventRecord::new(
+                3,
+                1020,
+                "pause_for_approval",
+                json!({ "reason": "blocked 6: unparseable review verdict" }).to_string(),
+            ),
         ];
         let mut pause_count_b = 0usize;
         let mut resolved_count_b = 0usize;
@@ -4804,13 +5351,16 @@ esac
         for rec in &parent_events_b {
             if rec.kind == "pause_for_approval" {
                 pause_count_b += 1;
-                let r = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
-                    val.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string())
-                } else if let Some(r_str) = rec.payload_json.strip_prefix("reason=") {
-                    Some(r_str.to_string())
-                } else {
-                    Some(rec.payload_json.clone())
-                };
+                let r =
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
+                        val.get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else if let Some(r_str) = rec.payload_json.strip_prefix("reason=") {
+                        Some(r_str.to_string())
+                    } else {
+                        Some(rec.payload_json.clone())
+                    };
                 latest_pause_reason_b = r;
             } else if rec.kind == "approval_resolved" {
                 resolved_count_b += 1;
@@ -4822,7 +5372,10 @@ esac
                 .unwrap_or("")
                 .starts_with("blocked ")
             && parse_blocked_gate(latest_pause_reason_b.as_deref().unwrap_or("")).is_none();
-        assert!(!is_plan_gate_b, "blocked gate must not be detected as plan gate");
+        assert!(
+            !is_plan_gate_b,
+            "blocked gate must not be detected as plan gate"
+        );
     }
 
     #[test]
@@ -4831,7 +5384,8 @@ esac
             return;
         }
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
-        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) = setup_test_pipeline_workspace("d7-wd");
+        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
+            setup_test_pipeline_workspace("d7-wd");
 
         let _guard_team = TestEnvVarGuard::set("QUAQUA_TEAM_TOML", team_file.to_str().unwrap());
         let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_bin.to_str().unwrap());
@@ -4840,7 +5394,9 @@ esac
         let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
         let _guard_owner = TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
         let git = Git::new();
-        let herdr = Herdr { bin: stub_bin.to_string_lossy().to_string() };
+        let herdr = Herdr {
+            bin: stub_bin.to_string_lossy().to_string(),
+        };
         let brief_file = repo_dir.join("brief.md");
 
         let task = "d7-wd";
@@ -4848,7 +5404,8 @@ esac
         std::fs::write(
             runs_dir.join(format!("sude-{task}.md")),
             "# Plan\nImplementation steps.\n## Lessons\nnone\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let args = vec![
             task.to_string(),
@@ -4859,7 +5416,11 @@ esac
             "always".to_string(),
         ];
         let plan_res = handle_pipeline(&args, &git, &herdr);
-        assert_eq!(plan_res, Err((5, String::new())), "plan pause must return exit 5");
+        assert_eq!(
+            plan_res,
+            Err((5, String::new())),
+            "plan pause must return exit 5"
+        );
 
         // 2. Simulate build child started and child journal 1 ending with watchdog exit 4
         let db_path = runs_dir.join("quaqua.db");
@@ -4904,16 +5465,21 @@ esac
         let journal = SqliteJournal::open(&db_path).unwrap();
         let child_wf_id_2 = format!("pipeline:{task}:sude-{task}-build#2");
         let events_2 = journal.load_events(&child_wf_id_2, 1).unwrap();
-        assert!(!events_2.is_empty(), "child journal attempt #2 must have been opened and journaled");
+        assert!(
+            !events_2.is_empty(),
+            "child journal attempt #2 must have been opened and journaled"
+        );
 
         // Verify no second prompt was sent to herdr
         if prompts_log.exists() {
             let content = std::fs::read_to_string(&prompts_log).unwrap();
-            let prompt_count = content.lines().filter(|l| l.contains(&format!("sude-{task}"))).count();
+            let prompt_count = content
+                .lines()
+                .filter(|l| l.contains(&format!("sude-{task}")))
+                .count();
             assert_eq!(prompt_count, 0, "no second prompt must be sent on restart");
         }
 
         let _ = std::fs::remove_dir_all(&base_dir);
     }
-
 }

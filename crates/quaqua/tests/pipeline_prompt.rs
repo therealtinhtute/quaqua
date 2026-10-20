@@ -100,14 +100,35 @@ impl Fixture {
             self.root.display(),
         );
         fs::write(self.runs.join(format!("pipeline-{task}.state")), state).unwrap();
-        fs::write(self.runs.join(format!("pipeline-{task}.md")), format!("# pipeline {task}\n")).unwrap();
+        fs::write(
+            self.runs.join(format!("pipeline-{task}.md")),
+            format!("# pipeline {task}\n"),
+        )
+        .unwrap();
         let wt = self.root.join(format!(".wt/sude-{task}"));
         fs::create_dir_all(&wt).unwrap();
-        let _ = Command::new("git").args(["init", "-q"]).current_dir(&self.repo).status();
-        let _ = Command::new("git").args(["init", "-q"]).current_dir(&wt).status();
-        let _ = Command::new("git").args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init", "--allow-empty"]).current_dir(&wt).status();
+        let _ = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&self.repo)
+            .status();
+        let _ = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&wt)
+            .status();
+        let _ = Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "init",
+                "--allow-empty",
+            ])
+            .current_dir(&wt)
+            .status();
     }
-
 
     fn state_field(&self, task: &str, key: &str) -> String {
         let content = fs::read_to_string(self.runs.join(format!("pipeline-{task}.state"))).unwrap();
@@ -467,7 +488,9 @@ fn pipeline_grid_hook_explicit_grid_tab_wins() {
     assert_eq!(out.status.code(), Some(5));
     let calls = f.calls();
     assert!(
-        calls.iter().any(|c| c.contains("pane move %b --new-tab --label custom-tab --no-focus")),
+        calls
+            .iter()
+            .any(|c| c.contains("pane move %b --new-tab --label custom-tab --no-focus")),
         "explicit GRID_TAB must override lead default tab: {:?}",
         calls,
     );
@@ -492,7 +515,9 @@ fn pipeline_grid_hook_cos_uses_repo_default_tab() {
     assert_eq!(out.status.code(), Some(5));
     let calls = f.calls();
     assert!(
-        calls.iter().any(|c| c.contains("pane move %b --new-tab --label repo-workers --no-focus")),
+        calls
+            .iter()
+            .any(|c| c.contains("pane move %b --new-tab --label repo-workers --no-focus")),
         "cos owner must retain repo default tab: {:?}",
         calls,
     );
@@ -535,11 +560,19 @@ fn pipeline_resume_at_phase_review_with_delivered_report_avoids_exit_6() {
         f.root.display(),
     );
     fs::write(f.runs.join(format!("pipeline-{task}.state")), state).unwrap();
-    fs::write(f.runs.join(format!("pipeline-{task}.md")), format!("# pipeline {task}\n")).unwrap();
+    fs::write(
+        f.runs.join(format!("pipeline-{task}.md")),
+        format!("# pipeline {task}\n"),
+    )
+    .unwrap();
 
     // Already-delivered reviewer report with findings, but NO srt.json exists (post-cleanup)
     let revname = format!("suhuynh-{task}r1");
-    fs::write(f.runs.join(format!("{revname}.md")), "findings\nVerdict: 2 findings\n").unwrap();
+    fs::write(
+        f.runs.join(format!("{revname}.md")),
+        "findings\nVerdict: 2 findings\n",
+    )
+    .unwrap();
     assert!(!f.runs.join(format!("{revname}.srt.json")).exists());
 
     // Fake prompt-worker.sh: if wait_file is called on the reviewer (--resume),
@@ -610,28 +643,20 @@ fn pipeline_per_phase_budget_reset_grants_fresh_allowance() {
     )
     .unwrap();
 
-    let worker = format!("sude-{task}");
-    // Simulate previous phase (plan) having spent 962s with budget 900s and grace granted
-    fs::write(f.runs.join(format!(".{worker}.elapsed")), "962\n").unwrap();
-    fs::write(f.runs.join(format!(".{worker}.budget")), "900\n").unwrap();
-    fs::write(f.runs.join(format!(".{worker}.grace")), "1\n").unwrap();
-
     // Resume pipeline at phase build
     let out = f.resume(task, false);
 
     // Verify per-phase budget reset:
-    // 1) .budget must be updated to build phase budget (2700s default)
-    let budget_str = fs::read_to_string(f.runs.join(format!(".{worker}.budget"))).unwrap();
-    assert_eq!(budget_str.trim(), "2700", "new phase must receive its own fresh budget allowance");
-
-    // 2) .grace must have been reset/removed
-    assert!(!f.runs.join(format!(".{worker}.grace")).exists(), "grace must be reset for new phase");
-
-    // 3) Worker must NOT have starved with rem=max(900-962,1)=1s; prompt was sent cleanly
+    // Fresh phase receives its own fresh budget allowance (2700s default) without inheriting starving budget
     eprintln!(
         "stdout: {}, stderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("budget 2700s"),
+        "child input must receive fresh phase budget (2700s), got: {stderr}"
+    );
 }

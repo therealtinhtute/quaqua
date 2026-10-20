@@ -260,7 +260,9 @@ pub fn scan_orchestration<H: HerdrOps>(
         let read_marker_path = runs_dir.join(format!(".{name}.read"));
         let is_unread = if report_exists {
             let marker_valid = if read_marker_path.is_file() {
-                if let (Ok(m_meta), Ok(r_meta)) = (read_marker_path.metadata(), report_path.metadata()) {
+                if let (Ok(m_meta), Ok(r_meta)) =
+                    (read_marker_path.metadata(), report_path.metadata())
+                {
                     if let (Ok(m_mtime), Ok(r_mtime)) = (m_meta.modified(), r_meta.modified()) {
                         m_mtime >= r_mtime
                     } else {
@@ -320,9 +322,31 @@ pub fn scan_orchestration<H: HerdrOps>(
             flags.push(WarningFlag::DoneNotCleaned);
         }
 
-        let has_budget = WorkerMetadata::budget_path(runs_dir, &name).exists();
+        let has_session = {
+            let db_path = runs_dir.join("quaqua.db");
+            if db_path.exists() {
+                rusqlite::Connection::open_with_flags(
+                    &db_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .ok()
+                .and_then(|conn| {
+                    let pattern = format!("worker:{name}#%");
+                    conn.query_row(
+                        "SELECT 1 FROM events WHERE workflow_id LIKE ? LIMIT 1;",
+                        [&pattern],
+                        |_| Ok(()),
+                    )
+                    .ok()
+                })
+                .is_some()
+            } else {
+                false
+            }
+        };
         let has_progress = WorkerMetadata::progress_path(runs_dir, &name).exists();
-        if is_task_worker_name(&name) && agent_status == "idle" && !has_budget && !has_progress {
+        if is_task_worker_name(&name) && agent_status == "idle" && !has_session && !has_progress {
             flags.push(WarningFlag::IdleUnprompted);
         }
 
