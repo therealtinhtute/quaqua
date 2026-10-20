@@ -29,7 +29,9 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/home/quaqua/rules/_all"
 cp "$repo/templates/workspace/team.toml" "$T/team.toml"
-export QUAQUA_ROOT="$T"
+# State lives in $HOME/quaqua/runs; QUAQUA_HOME pins the workspace so a leaked
+# QUAQUA_ROOT/QUAQUA_HOME from the caller cannot redirect the run.
+export QUAQUA_HOME="$T/home/quaqua"
 export QUAQUA_TEAM_TOML="$T/team.toml"
 export QUAQUA_OWNER=cos
 export HOME="$T/home"
