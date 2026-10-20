@@ -1,0 +1,1 @@
+- Infer caller identity from the harness (herdr pane get/agent list), never ambient env; fail closed — 2026-10-15, runs/tieude-orchtag2.md

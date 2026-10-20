@@ -332,6 +332,7 @@ impl HerdrOps for MockActivitiesHerdr {
             name: name.to_string(),
             kind: kind.to_string(),
             repo: pane.to_string(),
+            approve_kinds: Vec::new(),
         });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute(&format!("herdr.agent_start:{kind}"), &req) {
@@ -372,6 +373,7 @@ impl HerdrOps for MockActivitiesHerdr {
             name: owner.to_string(),
             kind: "split".to_string(),
             repo: cwd.to_string(),
+            approve_kinds: Vec::new(),
         });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.pane_split", &req) {
@@ -656,6 +658,7 @@ fn test_unknown_harness_rejected_before_split_n4() {
             effort: None,
             fallback: None,
             can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
         },
     );
 
@@ -687,6 +690,7 @@ fn test_missing_effort_rejected_before_split() {
             effort: None,
             fallback: None,
             can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
         },
     );
 
@@ -717,6 +721,7 @@ fn test_unsupported_effort_rejected_before_split() {
             effort: Some("banana".to_string()),
             fallback: None,
             can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
         },
     );
 
@@ -1431,6 +1436,7 @@ fn kind(harness: &str, model: &str, effort: Option<&str>) -> config::Kind {
         effort: effort.map(str::to_string),
         fallback: None,
         can_review: false,
+        spawn: config::SPAWN_AUTO.to_string(),
     }
 }
 
@@ -1669,6 +1675,7 @@ fn test_fallback_kind_resolution() {
             effort: Some("max".to_string()),
             fallback: Some("detu".to_string()),
             can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
         },
     );
     cfg.kinds.insert(
@@ -1679,6 +1686,7 @@ fn test_fallback_kind_resolution() {
             effort: Some("max".to_string()),
             fallback: None,
             can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
         },
     );
 
@@ -1777,6 +1785,7 @@ fn test_cfg_with_fallback() -> config::Config {
             effort: Some("high".to_string()),
             fallback: Some("detu".to_string()),
             can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
         },
     );
     cfg.kinds.insert(
@@ -1787,6 +1796,7 @@ fn test_cfg_with_fallback() -> config::Config {
             effort: Some("max".to_string()),
             fallback: Some("tieude".to_string()),
             can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
         },
     );
     cfg.kinds.insert(
@@ -1797,6 +1807,7 @@ fn test_cfg_with_fallback() -> config::Config {
             effort: Some("low".to_string()),
             fallback: None,
             can_review: true,
+            spawn: config::SPAWN_AUTO.to_string(),
         },
     );
     cfg
@@ -2048,6 +2059,73 @@ fn test_spawn_worker_fallback_scenarios() {
             "must not attempt start of non-review fallback kind"
         );
     }
+
+    std::env::remove_var("QUAQUA_RUNS_DIR");
+    std::env::remove_var("QUAQUA_TEST");
+    std::env::remove_var("GRID_SKIP");
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+/// A kind with `spawn = "approve"` must refuse a plain spawn (red) and start
+/// once `--approve-kind <kind>` is given (green); the flag must never leak to
+/// other kinds.
+#[test]
+fn test_spawn_worker_approve_policy_gate() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-approve-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = test_cfg_with_fallback();
+    cfg.kinds.insert(
+        "truonglao".to_string(),
+        config::Kind {
+            harness: "claude".to_string(),
+            model: "opus".to_string(),
+            effort: Some("high".to_string()),
+            fallback: None,
+            can_review: true,
+            spawn: config::SPAWN_APPROVE.to_string(),
+        },
+    );
+
+    let git = SpawnTestGit;
+    let repo = repo_dir.to_str().unwrap().to_string();
+
+    // Red: no flag -> refused before any pane/agent start.
+    let herdr = MockActivitiesHerdr::for_spawn();
+    let opts = parse_spawn_args(&[
+        "truonglao-approvet".to_string(),
+        "truonglao".to_string(),
+        repo.clone(),
+    ])
+    .unwrap();
+    let err = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr).unwrap_err();
+    assert!(err.1.contains("--approve-kind truonglao"), "{}", err.1);
+    assert!(
+        !herdr.has_call("herdr.agent_start:claude"),
+        "refused spawn must not start an agent"
+    );
+
+    // Green: the explicit flag parsed from the CLI approves exactly this kind.
+    let herdr = MockActivitiesHerdr::for_spawn();
+    let opts = parse_spawn_args(&[
+        "--approve-kind".to_string(),
+        "truonglao".to_string(),
+        "truonglao-approvet".to_string(),
+        "truonglao".to_string(),
+        repo,
+    ])
+    .unwrap();
+    assert_eq!(opts.approve_kinds, vec!["truonglao".to_string()]);
+    quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr)
+        .expect("approved spawn should start");
+    assert!(herdr.has_call("herdr.agent_start:claude"));
 
     std::env::remove_var("QUAQUA_RUNS_DIR");
     std::env::remove_var("QUAQUA_TEST");

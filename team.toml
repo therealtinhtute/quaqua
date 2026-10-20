@@ -64,13 +64,14 @@ can_review = true
 [kinds.suhuynh]
 harness = "opencode"
 model = "opencode-go/deepseek-v4.1-flash"
-effort = "max"                    # Claude out (anh iu, 2026-10-17): reviewer on opencode
+effort = "max"                    # back to opencode reviewer (anh iu, 2026-10-19; claude opus-5.5 medium = alt)
 can_review = true
 [kinds.truonglao]
 harness = "claude"
 model = "opus-5.5"
 effort = "high"
 can_review = true
+spawn = "auto"                    # "auto" = spawn freely (anh iu, 2026-10-19); "approve" = needs --approve-kind truonglao
 [taskforce.advisor]
 members = ["suhuynh"]
 read_only = true

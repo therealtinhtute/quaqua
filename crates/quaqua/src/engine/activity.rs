@@ -41,6 +41,8 @@ pub enum HerdrRequest {
         name: String,
         kind: String,
         repo: String,
+        #[serde(default)]
+        approve_kinds: Vec<String>,
     },
     Cleanup {
         name: String,
@@ -68,12 +70,24 @@ pub enum HerdrRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HerdrResult {
-    Spawned { name: String },
-    Cleaned { name: String },
-    Prompted { name: String },
-    KeysSent { name: String },
-    Stopped { name: String },
-    AgentOutput { content: String },
+    Spawned {
+        name: String,
+    },
+    Cleaned {
+        name: String,
+    },
+    Prompted {
+        name: String,
+    },
+    KeysSent {
+        name: String,
+    },
+    Stopped {
+        name: String,
+    },
+    AgentOutput {
+        content: String,
+    },
     AgentInfo {
         name: String,
         status: String,
@@ -106,10 +120,7 @@ pub enum HerdrEventResult {
     Subscribed { agent: String },
     Unsubscribed { agent: String },
     Events(Vec<String>),
-    ScopedEvents {
-        agent: String,
-        events: Vec<String>,
-    },
+    ScopedEvents { agent: String, events: Vec<String> },
 }
 
 // ----------------------------------------------------------------------------
@@ -150,10 +161,7 @@ pub enum GitResult {
     Committed { sha: String },
     Merged { sha: String },
     Sha(String),
-    DiffHash {
-        hash: String,
-        stat: String,
-    },
+    DiffHash { hash: String, stat: String },
 }
 
 // ----------------------------------------------------------------------------
