@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Snapshot {
     #[serde(default)]
     pub workspaces: Vec<Workspace>,
@@ -120,9 +120,7 @@ pub struct Op {
 #[serde(tag = "kind")]
 pub enum Target {
     #[serde(rename = "new_tab")]
-    NewTab {
-        label: String,
-    },
+    NewTab { label: String },
     #[serde(rename = "split")]
     Split {
         tab: String,

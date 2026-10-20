@@ -1,10 +1,5 @@
 //! Pipeline execution phases and shared context.
 
-pub mod build;
-pub mod fix;
-pub mod plan;
-pub mod review;
-pub mod spawn;
 
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
@@ -41,21 +36,6 @@ pub struct PipelineContext<'a, G: GitOps, H: HerdrOps> {
 }
 
 impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
-    pub fn run_grid_hook(&self) -> bool {
-        if std::env::var("GRID_SKIP").as_deref() == Ok("1")
-            && std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
-        {
-            return true;
-        }
-        match crate::grid::run_grid_repair(&self.grid_tab, Some(&self.grid_owner)) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("warning: grid check failed ({e}); arrange panes manually");
-                false
-            }
-        }
-    }
-
     pub fn finish(
         &self,
         state: &mut PipelineState,
@@ -128,7 +108,10 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
         }
     }
 
-    pub fn check_clock(&self, state: &mut PipelineState) -> Option<Result<StepResult, (i32, String)>> {
+    pub fn check_clock(
+        &self,
+        state: &mut PipelineState,
+    ) -> Option<Result<StepResult, (i32, String)>> {
         let el = state.start_elapsed + (now_sec() - self.inv_start);
         if el > self.max_sec {
             let b = format!(
@@ -152,223 +135,8 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
             let _ = std::fs::write(&self.pfile, pcontent);
         }
     }
-
-    pub fn wait_file(
-        &self,
-        state: &mut PipelineState,
-        worker: &str,
-        prompt: &str,
-        budget_sec: u64,
-    ) -> Result<(), (i32, String)> {
-        let el = state.start_elapsed + (now_sec() - self.inv_start);
-        let rem = if self.max_sec > el {
-            self.max_sec - el
-        } else {
-            0
-        };
-        let mut budget = if rem < budget_sec { rem } else { budget_sec };
-        if budget < 1 {
-            budget = 1;
-        }
-
-        let report_file = self.runs_dir.join(format!("{worker}.md"));
-        let budget_file = self.runs_dir.join(format!(".{worker}.budget"));
-        let elapsed_file = self.runs_dir.join(format!(".{worker}.elapsed"));
-        let grace_file = self.runs_dir.join(format!(".{worker}.grace"));
-        let sentinel = self.runs_dir.join(format!(".{worker}.nudged"));
-        let autoext_file = self.runs_dir.join(format!(".{worker}.autoext"));
-
-        let rc: i32;
-        let mut prompt_never_sent = false;
-
-        if state.prompted == 0 {
-            if report_file.exists() {
-                self.archive_stale(&report_file);
-            }
-
-            // Per-phase budget reset: grant fresh allowance for this phase
-            let _ = std::fs::write(&budget_file, format!("{budget}\n"));
-            let _ = std::fs::remove_file(&elapsed_file);
-            let _ = std::fs::remove_file(&grace_file);
-            let _ = std::fs::remove_file(&sentinel);
-            let _ = std::fs::remove_file(&autoext_file);
-
-            state.prompted = 1;
-            state.prompt_ts = now_sec();
-            let _ = state.save(&self.state_file);
-
-            let _prev_b = std::env::var("PROMPT_WORKER_BUDGET_SEC").ok();
-            std::env::set_var("PROMPT_WORKER_BUDGET_SEC", budget.to_string());
-            rc = match crate::worker::prompt::prompt_worker(
-                worker,
-                Some(prompt),
-                false,
-                None,
-                self.git,
-                self.herdr,
-            ) {
-                Ok(()) => 0,
-                Err((c, _)) => c,
-            };
-            if let Some(pb) = _prev_b {
-                std::env::set_var("PROMPT_WORKER_BUDGET_SEC", pb);
-            } else {
-                std::env::remove_var("PROMPT_WORKER_BUDGET_SEC");
-            }
-            prompt_never_sent = rc == 1;
-
-            if prompt_never_sent {
-                state.prompted = 0;
-                let _ = state.save(&self.state_file);
-            }
-        } else {
-            // Resume mid-phase: keep existing .elapsed and .budget
-            if report_file.is_file() && file_mtime(&report_file) < state.prompt_ts {
-                self.archive_stale(&report_file);
-            }
-            let _prev_b = std::env::var("PROMPT_WORKER_BUDGET_SEC").ok();
-            std::env::set_var("PROMPT_WORKER_BUDGET_SEC", budget.to_string());
-            rc = match crate::worker::prompt::prompt_worker(
-                worker,
-                None,
-                true,
-                None,
-                self.git,
-                self.herdr,
-            ) {
-                Ok(()) => 0,
-                Err((c, _)) => c,
-            };
-            if let Some(pb) = _prev_b {
-                std::env::set_var("PROMPT_WORKER_BUDGET_SEC", pb);
-            } else {
-                std::env::remove_var("PROMPT_WORKER_BUDGET_SEC");
-            }
-        }
-
-        if rc != 0 {
-            let b = if prompt_never_sent {
-                format!(
-                    "prompt dispatch failed for {worker} (exit 1 before send) — state left prompted=0 so '--resume' re-sends the prompt instead of waiting on an idle worker; run 'quaqua pipeline --resume {} {}'",
-                    self.task, state.repo
-                )
-            } else {
-                format!(
-                    "{} wait for {worker}: watchdog exit {rc} — fix the cause ('quaqua worker prompt --resume {worker}' keeps a live wait going), then 'quaqua pipeline --resume {} {}'",
-                    state.phase, self.task, state.repo
-                )
-            };
-            let _ = self.finish(state, "blocked", rc, Some(&b));
-            return Err((rc, String::new()));
-        }
-        Ok(())
-    }
-
-    pub fn check_impl(
-        &self,
-        state: &mut PipelineState,
-        report_path: &Path,
-        prev: Option<&str>,
-    ) -> Result<Option<StepResult>, (i32, String)> {
-        let wt_path = Path::new(&state.wt);
-        let rev_out = self.git.run_in(wt_path, &["rev-parse", "HEAD"]);
-        let head = match rev_out {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).trim().to_string()
-            }
-            _ => "?".to_string(),
-        };
-
-        let st_out = self.git.run_in(wt_path, &["status", "--porcelain"]);
-        let dirty = match st_out {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).trim().to_string()
-            }
-            _ => "?".to_string(),
-        };
-
-        if head == "?" || dirty == "?" {
-            let b = format!(
-                "cannot inspect {} (git rev-parse/status failed) — fix the worktree, then 'quaqua pipeline --resume {} {}'",
-                state.wt, self.task, state.repo
-            );
-            let _ = self.finish(state, "blocked", 3, Some(&b));
-            return Err((3, String::new()));
-        }
-
-        state.head_sha = head.clone();
-        state.commit = if head.len() >= 7 {
-            head[..7].to_string()
-        } else {
-            head.clone()
-        };
-
-        if let Some(p) = prev {
-            if head == p {
-                let prev7 = if p.len() >= 7 { &p[..7] } else { p };
-                let b = format!(
-                    "fix produced no commits past {prev7} on quaqua/{}-{} — a no-op answer to findings belongs in '## Challenge'. Commit the fixes, then 'quaqua pipeline --resume {} {}'",
-                    state.builder, self.task, self.task, state.repo
-                );
-                let _ = self.finish(state, "blocked", 3, Some(&b));
-                return Err((3, String::new()));
-            }
-        } else if head == state.base_sha {
-            if dirty.is_empty() {
-                if let Ok(rep_content) = std::fs::read_to_string(report_path) {
-                    for line in rep_content.lines() {
-                        let t = line.trim();
-                        if let Some(rest) =
-                            t.strip_prefix("Outcome:").or_else(|| t.strip_prefix("outcome:"))
-                        {
-                            let rest_upper = rest.trim().to_ascii_uppercase();
-                            if rest_upper.starts_with("NO CHANGES")
-                                || rest_upper.starts_with("NO-OP")
-                                || rest_upper.starts_with("NO OP")
-                            {
-                                let mut pcontent =
-                                    std::fs::read_to_string(&self.pfile).unwrap_or_default();
-                                pcontent.push_str(
-                                    "- build: no commits — builder declared 'Outcome: no changes'; nothing to review\n",
-                                );
-                                let _ = std::fs::write(&self.pfile, pcontent);
-                                return self.finish(state, "clean", 0, None).map(Some);
-                            }
-                        }
-                    }
-                }
-            }
-            let base7 = if state.base_sha.len() >= 7 {
-                &state.base_sha[..7]
-            } else {
-                &state.base_sha
-            };
-            let b = format!(
-                "builder produced no commits on quaqua/{}-{} (HEAD == base {base7}) and did not declare 'Outcome: no changes' — commit the work (or fix the report), then 'quaqua pipeline --resume {} {}'",
-                state.builder, self.task, self.task, state.repo
-            );
-            let _ = self.finish(state, "blocked", 3, Some(&b));
-            return Err((3, String::new()));
-        }
-
-        if !dirty.is_empty() {
-            let mut pcontent = std::fs::read_to_string(&self.pfile).unwrap_or_default();
-            pcontent.push_str(&format!(
-                "- uncommitted/untracked in {}:\n{}\n",
-                state.wt, dirty
-            ));
-            let _ = std::fs::write(&self.pfile, pcontent);
-            let b = format!(
-                "worktree dirty — the files above are missing from quaqua/{}-{}, so the gate and the reviewer would see a different snapshot. Commit or clean them, then 'quaqua pipeline --resume {} {}'",
-                state.builder, self.task, self.task, state.repo
-            );
-            let _ = self.finish(state, "blocked", 3, Some(&b));
-            return Err((3, String::new()));
-        }
-
-        Ok(None)
-    }
 }
+
 
 pub fn pipeline_finished(final_st: &str, code: i32) -> bool {
     code == 0 && final_st != "blocked"
@@ -402,8 +170,9 @@ pub fn has_real_blockers(content: &str) -> bool {
                 .unwrap_or(item);
 
             // Strip markdown emphasis (*, _, `), trailing dots/ellipsis, and whitespace
-            let core = first_part
-                .trim_matches(|c: char| c == '*' || c == '_' || c == '`' || c == '.' || c == '…' || c.is_whitespace());
+            let core = first_part.trim_matches(|c: char| {
+                c == '*' || c == '_' || c == '`' || c == '.' || c == '…' || c.is_whitespace()
+            });
             // If the declaration is "none" (e.g. "None", "None. All done...", "**None**. All 9..."),
             // it is an informational note, NOT a blocker.
             if !core.is_empty() && core.eq_ignore_ascii_case("none") {
@@ -584,9 +353,7 @@ pub fn file_mtime(path: &Path) -> u64 {
 pub fn iso_timestamp() -> String {
     let sec = now_sec();
     let dt = match Command::new("date").arg("-Iseconds").output() {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
         _ => {
             format!("{sec}")
         }

@@ -1,5 +1,6 @@
 //! Pipeline execution state persistence (`PipelineState`).
 
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default)]
@@ -119,7 +120,10 @@ impl PipelineState {
         out.push_str(&format!("prompt_ts={}\n", self.prompt_ts));
         out.push_str(&format!("rounds_run={}\n", self.rounds_run));
         out.push_str(&format!("review_run={}\n", self.review_run));
-        out.push_str(&format!("review_changed={}\n", if self.review_changed { "true" } else { "false" }));
+        out.push_str(&format!(
+            "review_changed={}\n",
+            if self.review_changed { "true" } else { "false" }
+        ));
         out.push_str(&format!("last_findings={}\n", self.last_findings));
         out.push_str(&format!("finished={}\n", self.finished));
         out.push_str(&format!("start_elapsed={}\n", self.start_elapsed));
@@ -130,5 +134,218 @@ impl PipelineState {
         out.push_str(&format!("pipeline_pid={}\n", self.pipeline_pid));
         out.push_str(&format!("approve_kinds={}\n", self.approve_kinds.join(",")));
         std::fs::write(path, out)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelinePhase {
+    Plan,
+    PlanReadyGate,
+    Build,
+    Review,
+    Fix,
+    Complete,
+    Failed,
+    Disputed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedKind {
+    Restart,
+    RoundsExhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeDirective {
+    pub max_rounds: u32,
+}
+
+pub fn parse_blocked_gate(reason: &str) -> Option<(i32, String)> {
+    let s = reason
+        .strip_prefix("pause_for_approval: ")
+        .unwrap_or(reason);
+    let s = s.strip_prefix("blocked ")?;
+    let (code_str, rest) = s.split_once(':')?;
+    let code: i32 = code_str.trim().parse().ok()?;
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    Some((code, rest.to_string()))
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStrategy {
+    Auto,
+    Always,
+    Skip,
+}
+
+fn default_review_strategy() -> ReviewStrategy {
+    ReviewStrategy::Auto
+}
+fn default_max_rounds() -> u32 {
+    2
+}
+fn default_plan_budget() -> u64 {
+    900
+}
+fn default_build_budget() -> u64 {
+    2700
+}
+fn default_review_budget() -> u64 {
+    900
+}
+fn default_fix_budget() -> u64 {
+    1200
+}
+fn default_base() -> String {
+    "main".to_string()
+}
+fn default_brief_path() -> String {
+    "brief.md".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PipelineInput {
+    pub task: String,
+    pub repo: String,
+    pub builder: String,
+    pub reviewer: String,
+    pub brief: String,
+    #[serde(default = "default_brief_path")]
+    pub brief_path: String,
+    #[serde(default = "default_base")]
+    pub base: String,
+    #[serde(default = "default_review_strategy")]
+    pub review_strategy: ReviewStrategy,
+    #[serde(default = "default_max_rounds")]
+    pub max_rounds: u32,
+    #[serde(default = "default_plan_budget")]
+    pub plan_budget_sec: u64,
+    #[serde(default = "default_build_budget")]
+    pub build_budget_sec: u64,
+    #[serde(default = "default_review_budget")]
+    pub review_budget_sec: u64,
+    #[serde(default = "default_fix_budget")]
+    pub fix_budget_sec: u64,
+    #[serde(default)]
+    pub base_sha: Option<String>,
+}
+
+impl PipelineInput {
+    pub fn new(
+        task: impl Into<String>,
+        repo: impl Into<String>,
+        builder: impl Into<String>,
+        reviewer: impl Into<String>,
+        brief: impl Into<String>,
+    ) -> Self {
+        Self {
+            task: task.into(),
+            repo: repo.into(),
+            builder: builder.into(),
+            reviewer: reviewer.into(),
+            brief: brief.into(),
+            brief_path: "brief.md".to_string(),
+            base: "main".to_string(),
+            review_strategy: ReviewStrategy::Auto,
+            max_rounds: 2,
+            plan_budget_sec: 900,
+            build_budget_sec: 2700,
+            review_budget_sec: 900,
+            fix_budget_sec: 1200,
+            base_sha: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PipelineWorkflowState {
+    pub input: PipelineInput,
+    pub phase: PipelinePhase,
+    pub round: u32,
+    pub rounds_run: u32,
+    pub last_findings: u32,
+    pub review_changed: bool,
+    pub planfile: Option<String>,
+    pub head_sha: Option<String>,
+    pub active_child_id: Option<String>,
+    pub pending_report_read: Option<String>,
+    pub last_review_report: Option<String>,
+    #[serde(default)]
+    pub review_skip: bool,
+    #[serde(default)]
+    pub blocked_from: Option<PipelinePhase>,
+    #[serde(default)]
+    pub blocked_kind: Option<BlockedKind>,
+    #[serde(default)]
+    pub blocked_code: i32,
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
+    /// Build gate decided once by the driver (`BuildGate::wire_gate`); `None` on old journals.
+    #[serde(default)]
+    pub build_gate: Option<String>,
+}
+
+impl PipelineWorkflowState {
+    pub fn new(input: PipelineInput) -> Self {
+        Self {
+            input,
+            phase: PipelinePhase::Plan,
+            round: 0,
+            rounds_run: 0,
+            last_findings: 0,
+            review_changed: false,
+            planfile: None,
+            head_sha: None,
+            active_child_id: None,
+            pending_report_read: None,
+            last_review_report: None,
+            review_skip: false,
+            blocked_from: None,
+            blocked_kind: None,
+            blocked_code: 0,
+            blocked_reason: None,
+            build_gate: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PipelineOutput {
+    pub status: String,
+    pub rounds: u32,
+    pub review_changed: bool,
+    pub commit: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_blocked_gate() {
+        assert_eq!(
+            parse_blocked_gate("pause_for_approval: blocked 5: review rounds exhausted"),
+            Some((5, "review rounds exhausted".to_string()))
+        );
+        assert_eq!(
+            parse_blocked_gate("blocked 6: invalid output contract"),
+            Some((6, "invalid output contract".to_string()))
+        );
+        assert_eq!(
+            parse_blocked_gate("pause_for_approval: approve plan then resume"),
+            None
+        );
+        assert_eq!(parse_blocked_gate("something else"), None);
+    }
+
+    #[test]
+    fn test_resume_directive_serde() {
+        let d = ResumeDirective { max_rounds: 3 };
+        let s = serde_json::to_string(&d).unwrap();
+        let back: ResumeDirective = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.max_rounds, 3);
     }
 }

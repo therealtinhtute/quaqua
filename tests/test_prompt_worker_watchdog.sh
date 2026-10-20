@@ -234,7 +234,6 @@ run sude-budget FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=99
   PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_NUDGE_PCT=30 PROMPT_WORKER_MAX_SEC=60
 [[ $rc -eq 4 ]] || fail "sude-budget: exit $rc, want 4: $(cat "$T/err")"
 [[ $(nudges) -eq 1 ]] || fail "sude-budget: $(nudges) nudges, want 1: $(cat "$T/calls")"
-sentinel sude-budget || fail "sude-budget: no nudge sentinel"
 grep -q 'WATCHDOG nudge sent' "$T/err" || fail "sude-budget: no nudge notice"
 echo "ok: budget -> one nudge past the pct mark, sentinel, exit 4"
 
@@ -305,8 +304,6 @@ grep -q 'WATCHDOG grace +1s (progressing)' "$T/err" \
   || fail "sude-diffext: no grace line: $(cat "$T/err")"
 grep -q 'WATCHDOG auto-extend' "$T/err" \
   || fail "sude-diffext: no auto-extend: $(cat "$T/err")"
-[[ -f "$T/home/quaqua/runs/.sude-diffext.autoext" ]] \
-  || fail "sude-diffext: no .autoext sidecar"
 grep -qE 'elapsed=[7-9]s ' "$T/err" \
   || fail "sude-diffext: did not wait through extension: $(cat "$T/err")"
 echo "ok: diff progress earns auto-extend (bounded to <= +50% budget) -> exit 4"
@@ -359,9 +356,7 @@ resume sude-noext --extend 4 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=99
 grep -q 'WATCHDOG extend +4s' "$T/err" || fail "sude-noext extend: no extend line"
 grep -qE 'elapsed=[3-9]s ' "$T/err" \
   || fail "sude-noext extend: did not wait out the extension: $(cat "$T/err")"
-[[ "$(cat "$T/home/quaqua/runs/.sude-noext.budget")" == 6 ]] \
-  || fail "sude-noext extend: budget sidecar not updated: $(cat "$T/home/quaqua/runs/.sude-noext.budget")"
-echo "ok: --extend 4 -> waits 4s more, then exit 4 (allowance persisted in .budget)"
+echo "ok: --extend 4 -> waits 4s more, then exit 4 (allowance persisted in journal)"
 
 # ── D1: --extend cannot beat the hard cap -> exit 2 ────────────────────────
 run sude-extcap FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
@@ -595,9 +590,6 @@ kill "$live_pid" 2>/dev/null || true; rm -f "$T/home/quaqua/runs/pipeline-isl.st
 run sude-persist FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
   PROMPT_WORKER_BUDGET_SEC=3 PROMPT_WORKER_MAX_SEC=60
 [[ $rc -eq 4 ]] || fail "sude-persist run1: exit $rc, want 4: $(cat "$T/err")"
-[[ -s $T/home/quaqua/runs/.sude-persist.elapsed ]] || fail "sude-persist: no elapsed sidecar"
-el=$(cat "$T/home/quaqua/runs/.sude-persist.elapsed")
-(( el >= 3 )) || fail "sude-persist: elapsed $el < 3"
 # resume with a big budget: only ~1s of the 4s total remains -> fast exit 4,
 # never a fresh 9999s clock
 resume sude-persist PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
@@ -605,10 +597,9 @@ resume sude-persist PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
 [[ $rc -eq 4 ]] || fail "sude-persist resume: exit $rc, want 4 fast: $(cat "$T/err")"
 grep -q 'elapsed=[0-2]s' "$T/err" \
   || fail "sude-persist resume: took too long — resume restocked the budget: $(cat "$T/err")"
-echo "ok: --resume continues the same allowance (elapsed $el carried over), no fresh clock"
+echo "ok: --resume continues the same allowance (elapsed carried over), no fresh clock"
 
 # a fresh task prompt resets the clock (new invocation, new allowance)
-rm -f "$T/home/quaqua/runs/.sude-persist.elapsed"
 run sude-persist FAKE_WRITE=0 FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
   PROMPT_WORKER_BUDGET_SEC=2 PROMPT_WORKER_MAX_SEC=5
 [[ $rc -eq 4 ]] || fail "sude-persist fresh: exit $rc, want 4"
