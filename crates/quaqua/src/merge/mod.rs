@@ -3,7 +3,7 @@
 
 use crate::config::load_team_config;
 use crate::git::{Git, GitOps};
-use crate::workspace::find_quaqua_root;
+use crate::workspace::workspace_root_checked;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -82,30 +82,28 @@ fn resolve_project_repo(slug: &str, explicit_repo: Option<&Path>) -> Result<Path
         }
     }
 
-    let root = find_quaqua_root()?;
+    let root = workspace_root_checked()?;
     let index = root.join("projects/INDEX.md");
-    if index.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&index) {
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with('|') {
-                    let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
-                    if parts.len() >= 3 && parts[1] == slug && parts[2] != "repo" {
-                        let r = parts[2];
-                        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                        let p = if let Some(stripped) = r.strip_prefix("~/") {
-                            format!("{}/{}", home, stripped)
-                        } else if r == "~" {
-                            home
-                        } else {
-                            r.to_string()
-                        };
-                        let pb = PathBuf::from(&p);
-                        if pb.is_dir() {
-                            return Ok(pb);
-                        } else {
-                            return Err((1, format!("project repo '{}' for slug '{slug}' does not exist\n", pb.display())));
-                        }
+    if let Ok(content) = std::fs::read_to_string(&index) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('|') {
+                let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
+                if parts.len() >= 3 && parts[1] == slug && parts[2] != "repo" {
+                    let r = parts[2];
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                    let p = if let Some(stripped) = r.strip_prefix("~/") {
+                        format!("{}/{}", home, stripped)
+                    } else if r == "~" {
+                        home
+                    } else {
+                        r.to_string()
+                    };
+                    let pb = PathBuf::from(&p);
+                    if pb.is_dir() {
+                        return Ok(pb);
+                    } else {
+                        return Err((1, format!("project repo '{}' for slug '{slug}' does not exist\n", pb.display())));
                     }
                 }
             }

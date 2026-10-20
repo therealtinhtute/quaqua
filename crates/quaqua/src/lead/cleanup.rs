@@ -1,8 +1,8 @@
 //! Project Lead cleanup logic (`quaqua lead cleanup <slug>`).
 
-use super::spawn::find_quaqua_root;
 use crate::herdr::HerdrOps;
 use crate::state::WorkerMetadata;
+use crate::workspace::workspace_root_checked;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -38,7 +38,7 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
         return Err((1, format!("{}\n", USAGE)));
     }
 
-    let root = find_quaqua_root()?;
+    let root = workspace_root_checked()?;
     let runs_dir = std::env::var("QUAQUA_RUNS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| root.join("runs"));

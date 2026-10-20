@@ -1,7 +1,10 @@
 //! The one workspace root.
 //!
 //! Every workspace path the binary resolves (rules, runs, team.toml) goes
-//! through [`workspace_root`]: `QUAQUA_HOME` first, else `$HOME/quaqua`.
+//! through [`workspace_root`]: `QUAQUA_HOME` first (with `QUAQUA_ROOT` kept as
+//! an alias for one release), else `$HOME/quaqua`. There is no discovery from
+//! the cwd or the executable path. Code that needs a real workspace calls
+//! [`workspace_root_checked`], which requires `projects/INDEX.md`.
 
 use std::path::{Path, PathBuf};
 
@@ -17,64 +20,39 @@ pub fn resolve_workspace_root(quaqua_home: Option<&Path>, home: Option<&Path>) -
     }
 }
 
-/// Read the process env once. An empty `QUAQUA_HOME`/`HOME` counts as unset.
+/// A non-empty env var as a path; an empty value counts as unset.
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Read the process env once: `QUAQUA_HOME`, then its alias `QUAQUA_ROOT`,
+/// then `$HOME/quaqua`.
 pub fn workspace_root() -> PathBuf {
-    let quaqua_home = std::env::var_os("QUAQUA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty());
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty());
+    let quaqua_home = env_path("QUAQUA_HOME").or_else(|| env_path("QUAQUA_ROOT"));
+    let home = env_path("HOME");
     resolve_workspace_root(quaqua_home.as_deref(), home.as_deref())
 }
 
-/// Discover the quaqua repository checkout root containing `projects/INDEX.md`.
-/// Checks `QUAQUA_ROOT`, `QUAQUA_SCRIPT_DIR`, current directory ancestors, and current exe ancestors.
-pub fn find_quaqua_root() -> Result<PathBuf, (i32, String)> {
-    if let Ok(r) = std::env::var("QUAQUA_ROOT") {
-        if !r.is_empty() {
-            let p = PathBuf::from(r);
-            if p.join("projects/INDEX.md").is_file() {
-                return Ok(p);
-            }
-        }
+/// [`workspace_root`], required to be an actual workspace: `projects/INDEX.md`
+/// must exist. A missing index is an error — never a cwd fallback.
+pub fn workspace_root_checked() -> Result<PathBuf, (i32, String)> {
+    ensure_workspace_root(workspace_root())
+}
+
+fn ensure_workspace_root(root: PathBuf) -> Result<PathBuf, (i32, String)> {
+    if root.join("projects/INDEX.md").is_file() {
+        Ok(root)
+    } else {
+        Err((
+            1,
+            format!(
+                "no quaqua workspace at {}: projects/INDEX.md is missing (set QUAQUA_HOME or QUAQUA_ROOT)\n",
+                root.display()
+            ),
+        ))
     }
-    if let Ok(script_dir) = std::env::var("QUAQUA_SCRIPT_DIR") {
-        let p = PathBuf::from(script_dir);
-        if let Some(parent2) = p.parent().and_then(|p| p.parent()) {
-            if parent2.join("projects/INDEX.md").is_file() {
-                return Ok(parent2.to_path_buf());
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut cur = cwd.clone();
-        loop {
-            if cur.join("projects/INDEX.md").is_file() {
-                return Ok(cur);
-            }
-            if !cur.pop() {
-                break;
-            }
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let mut cur = parent.to_path_buf();
-            loop {
-                if cur.join("projects/INDEX.md").is_file() {
-                    return Ok(cur);
-                }
-                if !cur.pop() {
-                    break;
-                }
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        return Ok(cwd);
-    }
-    Ok(PathBuf::from("."))
 }
 
 #[cfg(test)]
@@ -100,5 +78,23 @@ mod tests {
     #[test]
     fn no_env_falls_back_to_cwd() {
         assert_eq!(resolve_workspace_root(None, None), PathBuf::from("."));
+    }
+
+    #[test]
+    fn checked_root_requires_projects_index() {
+        let dir =
+            std::env::temp_dir().join(format!("quaqua-workspace-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = ensure_workspace_root(dir.clone()).unwrap_err();
+        assert_eq!(err.0, 1);
+        assert!(err.1.contains("projects/INDEX.md"), "{}", err.1);
+
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        std::fs::write(dir.join("projects/INDEX.md"), "# Projects\n").unwrap();
+        assert_eq!(ensure_workspace_root(dir.clone()).unwrap(), dir);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -160,6 +160,15 @@ expect_reject ghost 'unknown slug' "unknown project slug 'ghost'"
 expect_reject no-card 'row but no card' 'no project card'
 expect_reject aaaaaaaaaaaaaaaaaaaaaaaaaaaa 'lead name >32 chars (registered slug)' 'at most 32'
 
+# ── no workspace at the root: error, never a cwd/ancestor fallback ──────────
+mkdir -p "$T/nows"
+spawn coucou-island QUAQUA_ROOT="$T/nows"
+[[ $rc -eq 1 ]] || fail "no workspace: exit $rc, want 1: $(cat "$T/err")"
+grep -q 'projects/INDEX.md is missing' "$T/err" \
+  || fail "no workspace: unclear error: $(cat "$T/err")"
+[[ ! -s "$T/calls" ]] || fail "no workspace: herdr/git called: $(cat "$T/calls")"
+echo "ok: root without projects/INDEX.md -> exit 1, no fallback, no side effects"
+
 # ── boundary: 27-char slug -> 32-char Lead name is still accepted ───────────
 spawn aaaaaaaaaaaaaaaaaaaaaaaaaaa
 [[ $rc -eq 0 ]] || fail "boundary: exit $rc, want 0: $(cat "$T/err")"

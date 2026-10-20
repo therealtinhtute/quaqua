@@ -31,7 +31,7 @@ pub const USAGE: &str = "\
 #   Env: LEAD_KIND (overrides strategy.lead_kind in team.toml).
 #   --approve-kind <kind>  approve a lead kind whose team.toml spawn = \"approve\"";
 
-pub use crate::workspace::find_quaqua_root;
+use crate::workspace::workspace_root_checked;
 
 /// Resolve the lead kind and launch settings from config and optional LEAD_KIND override.
 /// On missing or unknown lead_kind, defaults to "tieude".
@@ -112,13 +112,9 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         ));
     }
 
-    let root = find_quaqua_root()?;
+    let root = workspace_root_checked()?;
     let index = root.join("projects/INDEX.md");
     let card = root.join("projects").join(format!("{slug}.md"));
-
-    if !index.is_file() {
-        return Err((1, format!("no projects/INDEX.md in {}\n", root.display())));
-    }
 
     let index_content = std::fs::read_to_string(&index)
         .map_err(|e| (1, format!("cannot read {}: {e}\n", index.display())))?;
