@@ -470,7 +470,6 @@ impl Workflow for SingleWorkerWorkflow {
                         };
                         if !is_waiting
                             && state.poll_count > 0
-                            && state.report_mtime_ms == 0
                             && now.saturating_sub(stall_baseline) >= state.config.stall_sec * 1000
                         {
                             return complete_step(state, now, 3);
@@ -631,9 +630,7 @@ impl Workflow for SingleWorkerWorkflow {
                             } else {
                                 state.config.idle_sec
                             };
-                        if state.report_mtime_ms == 0
-                            && now.saturating_sub(state.idle_since_ms) >= effective_idle_sec * 1000
-                        {
+                        if now.saturating_sub(state.idle_since_ms) >= effective_idle_sec * 1000 {
                             return complete_step(state, now, 3);
                         }
                     } else {
