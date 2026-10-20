@@ -4185,6 +4185,9 @@ esac
         let _guard_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
         let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
         let _guard_owner = TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+        // Four driver children poll a stub that already has its report in place;
+        // the production 30 s poll interval would spend 4 x 30 s doing nothing.
+        let _guard_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
         let git = Git::new();
         let herdr = Herdr {
             bin: stub_bin.to_string_lossy().to_string(),
