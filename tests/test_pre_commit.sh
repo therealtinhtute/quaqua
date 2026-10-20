@@ -44,6 +44,10 @@ git -C "$R" init -q
 git -C "$R" config user.email test@example.invalid
 git -C "$R" config user.name test
 cp -R "$root/templates" "$R/templates"
+# Interim until B2 embeds the template: today's `quaqua init` still seeds from
+# templates/*.md, so keep those sources in the sandbox fixture.
+cp "$root/templates/seed/memory-rules.md" "$root/templates/seed/projects-INDEX.md" \
+   "$root/templates/seed/projects-_template.md" "$R/templates/"
 cp "$root/templates/seed/USER.example.md" "$R/USER.example.md"
 
 ( unset HERDR_PANE_ID; cd "$R" && "$QUAQUA_BIN" init ) >"$T/init.log" 2>&1 \
@@ -184,6 +188,9 @@ git -C "$M" config user.email test@example.invalid
 git -C "$M" config user.name test
 git -C "$M" config core.hooksPath "$M/scripts/hooks"
 cp -R "$root/templates" "$M/templates"
+# Interim until B2 embeds the template (same reason as the section above).
+cp "$root/templates/seed/memory-rules.md" "$root/templates/seed/projects-INDEX.md" \
+   "$root/templates/seed/projects-_template.md" "$M/templates/"
 cp "$root/templates/seed/USER.example.md" "$M/USER.example.md"
 
 out=$(unset HERDR_PANE_ID; cd "$M" && "$QUAQUA_BIN" init 2>&1)
