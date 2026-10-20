@@ -210,7 +210,7 @@ echo "ok: pipeline counts as 2 -> owner with 7 workers cannot start pipeline (ne
 # memory/ is tracked in this repo (upstream gitignores it): dated logs record the
 # old name as history — excluding them is intentional, not a gap in the check.
 legacy_pat="super""visor"
-dangling=$(rg "$legacy_pat" "$root" --glob '!AGENTS.md' --glob '!tests/test_*.sh' --glob '!memory/' || true)
+dangling=$(rg "$legacy_pat" "$root" --glob '!templates/workspace/AGENTS.md' --glob '!tests/test_*.sh' --glob '!memory/' || true)
 [[ -z "$dangling" ]] || fail "dangling legacy references found:\n$dangling"
 echo "ok: rename leaves no dangling refs ($legacy_pat)"
 

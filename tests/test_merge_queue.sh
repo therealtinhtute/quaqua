@@ -29,7 +29,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # Setup sandbox project repo and team.toml
 mkdir -p "$T/repo" "$T/projects" "$T/runs"
-cp "$repo/team.toml" "$T/team.toml"
+cp "$repo/templates/workspace/team.toml" "$T/team.toml"
 export QUAQUA_ROOT="$T"
 export QUAQUA_TEAM_TOML="$T/team.toml"
 export HOME="$T"

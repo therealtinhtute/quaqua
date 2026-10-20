@@ -972,7 +972,8 @@ fn test_runs_dir_resolution_n5() {
 
 #[test]
 fn test_team_toml_harness_routing() {
-    let team_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../team.toml");
+    let team_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates/workspace/team.toml");
     let cfg = config::load(&team_path).expect("valid team.toml");
 
     // tieude is opencode at effort max
@@ -1036,7 +1037,8 @@ fn test_team_toml_harness_routing() {
 
 #[test]
 fn test_lead_launch_uses_strategy_lead_kind_and_override() {
-    let team_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../team.toml");
+    let team_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates/workspace/team.toml");
     let cfg = config::load(&team_path).expect("valid team.toml");
 
     // 1. Default lead launch uses strategy.lead_kind ("tieude" on opencode)

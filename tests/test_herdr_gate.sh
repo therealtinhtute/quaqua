@@ -5,7 +5,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$(cd "$here/.." && pwd)/scripts"
+src="$(cd "$here/.." && pwd)/templates/workspace/scripts"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 gate() {  # gate <command>; prints the hook's exit code
   local rc=0
