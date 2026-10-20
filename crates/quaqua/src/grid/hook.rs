@@ -298,10 +298,13 @@ pub fn reconcile_step<D: HerdrDriver>(
     }
 
     // Live mode: filter runnable ops using the shared convergence engine from reconcile.rs.
-    // Pass owner=None to preserve legacy hook semantics (arranging all candidate workers in workspace).
+    // Owner/workspace stay unscoped here (the hook has no caller pane and must
+    // repair every owner's layout); the planner already arranges one workspace
+    // at a time, so no op can cross a workspace boundary.
     let mut non_deferred: Vec<Op> = filter_ops_for_check(
         &ops,
         &snap,
+        None,
         None,
         None,
         None,
