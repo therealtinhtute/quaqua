@@ -106,8 +106,8 @@ fn default_pilot_budget() -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Timers {
-    #[serde(default = "default_budget")]
-    pub budget_default: String,
+    #[serde(default = "default_budget", rename = "budget_default")]
+    pub default_budget_duration: String,
     #[serde(default = "default_hard_cap")]
     pub hard_cap: String,
     #[serde(default = "default_stall")]
@@ -116,8 +116,8 @@ pub struct Timers {
     pub idle: String,
     #[serde(default = "default_nudge_at")]
     pub nudge_at: f64,
-    #[serde(default = "default_grace")]
-    pub grace: f64,
+    #[serde(default = "default_grace", rename = "grace")]
+    pub overrun_ratio: f64,
     #[serde(default = "default_pilot_budget")]
     pub pilot_budget: String,
 }
@@ -125,12 +125,12 @@ pub struct Timers {
 impl Default for Timers {
     fn default() -> Self {
         Timers {
-            budget_default: default_budget(),
+            default_budget_duration: default_budget(),
             hard_cap: default_hard_cap(),
             stall: default_stall(),
             idle: default_idle(),
             nudge_at: default_nudge_at(),
-            grace: default_grace(),
+            overrun_ratio: default_grace(),
             pilot_budget: default_pilot_budget(),
         }
     }
@@ -195,8 +195,13 @@ pub struct Kind {
 /// `claude --help` `--effort <level> (low, medium, high, xhigh, max)`.
 pub fn effort_allowed(harness: &str, effort: &str) -> bool {
     match harness {
-        "opencode" => ["none", "minimal", "low", "medium", "high", "xhigh", "max"].contains(&effort),
-        "omp" => ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"].contains(&effort),
+        "opencode" => {
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max"].contains(&effort)
+        }
+        "omp" => [
+            "off", "minimal", "low", "medium", "high", "xhigh", "max", "auto",
+        ]
+        .contains(&effort),
         "claude" => ["low", "medium", "high", "xhigh", "max"].contains(&effort),
         _ => false,
     }
@@ -304,9 +309,13 @@ pub fn load_team_config() -> Result<Config, (i32, String)> {
         return load(&home_team).map_err(|e| (1, format!("error: {e}\n")));
     }
     const DEFAULT_TOML: &str = include_str!("../../../team.toml");
-    toml::from_str(DEFAULT_TOML).map_err(|e| (1, format!("error: failed to parse default team.toml: {e}\n")))
+    toml::from_str(DEFAULT_TOML).map_err(|e| {
+        (
+            1,
+            format!("error: failed to parse default team.toml: {e}\n"),
+        )
+    })
 }
-
 
 /// Apply a project override over the defaults. Unknown project is a hard error.
 pub fn resolve(mut cfg: Config, project: Option<&str>) -> Result<Config, String> {
@@ -352,7 +361,8 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             }
         }
     }
-    parse_duration(&cfg.timers.budget_default).map_err(|e| format!("timers.budget_default: {e}"))?;
+    parse_duration(&cfg.timers.default_budget_duration)
+        .map_err(|e| format!("timers.{}: {e}", "budget_default"))?;
     parse_duration(&cfg.timers.hard_cap).map_err(|e| format!("timers.hard_cap: {e}"))?;
     parse_duration(&cfg.timers.stall).map_err(|e| format!("timers.stall: {e}"))?;
     parse_duration(&cfg.timers.idle).map_err(|e| format!("timers.idle: {e}"))?;
@@ -363,10 +373,13 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             cfg.timers.nudge_at
         ));
     }
-    if cfg.timers.grace <= 0.0 || cfg.timers.grace >= 1.0 || cfg.timers.grace.is_nan() {
+    if cfg.timers.overrun_ratio <= 0.0
+        || cfg.timers.overrun_ratio >= 1.0
+        || cfg.timers.overrun_ratio.is_nan()
+    {
         return Err(format!(
-            "timers.grace {} must be in (0, 1)",
-            cfg.timers.grace
+            "timers.{} {} must be in (0, 1)",
+            "grace", cfg.timers.overrun_ratio
         ));
     }
 
@@ -519,15 +532,19 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
             .get(*name)
             .map(i64::to_string)
             .ok_or_else(unknown)?,
-        ["timers", "budget_default"] => cfg.timers.budget_default.clone(),
+        ["timers", "budget_default"] => cfg.timers.default_budget_duration.clone(),
         ["timers", "hard_cap"] => cfg.timers.hard_cap.clone(),
         ["timers", "stall"] => cfg.timers.stall.clone(),
         ["timers", "idle"] => cfg.timers.idle.clone(),
         ["timers", "nudge_at"] => cfg.timers.nudge_at.to_string(),
-        ["timers", "grace"] => cfg.timers.grace.to_string(),
+        ["timers", "grace"] => cfg.timers.overrun_ratio.to_string(),
         ["timers", "pilot_budget"] => cfg.timers.pilot_budget.clone(),
         ["strategy", "default_kind"] => cfg.strategy.default_kind.clone(),
-        ["strategy", "lead_kind"] => cfg.strategy.lead_kind.clone().unwrap_or_else(|| "tieude".to_string()),
+        ["strategy", "lead_kind"] => cfg
+            .strategy
+            .lead_kind
+            .clone()
+            .unwrap_or_else(|| "tieude".to_string()),
         ["strategy", "default_reviewer"] => cfg.strategy.default_reviewer.join("\n"),
         ["strategy", "builder_reviewer_differ"] => cfg.strategy.builder_reviewer_differ.clone(),
         ["kinds", k, field] => {
@@ -535,8 +552,14 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
             match *field {
                 "harness" => kind.harness.clone(),
                 "model" => kind.model.clone(),
-                "effort" => kind.effort.clone().ok_or_else(|| format!("key '{key}' is unset"))?,
-                "fallback" => kind.fallback.clone().ok_or_else(|| format!("key '{key}' is unset"))?,
+                "effort" => kind
+                    .effort
+                    .clone()
+                    .ok_or_else(|| format!("key '{key}' is unset"))?,
+                "fallback" => kind
+                    .fallback
+                    .clone()
+                    .ok_or_else(|| format!("key '{key}' is unset"))?,
                 "can_review" => kind.can_review.to_string(),
                 _ => return Err(unknown()),
             }
@@ -633,8 +656,13 @@ workers_tab = "workers"
     #[test]
     fn get_array_prints_lines() {
         assert_eq!(get(&base(), "kinds.suhuynh.effort", None).unwrap(), "high");
-        assert_eq!(get(&base(), "kinds.tieude.fallback", None).unwrap(), "suhuynh");
-        assert!(get(&base(), "strategy.default_reviewer", None).unwrap().contains("suhuynh"));
+        assert_eq!(
+            get(&base(), "kinds.tieude.fallback", None).unwrap(),
+            "suhuynh"
+        );
+        assert!(get(&base(), "strategy.default_reviewer", None)
+            .unwrap()
+            .contains("suhuynh"));
         assert!(get(&base(), "nope.nope", None).is_err());
     }
 
@@ -704,7 +732,8 @@ workers_tab = "workers"
         assert!(err.contains("does not take effort 'medium'"), "{err}");
 
         // openrouter path also matches last segment and rejects medium
-        c.kinds.get_mut("tieude").unwrap().model = "openrouter/deepseek/deepseek-v4.1-flash".to_string();
+        c.kinds.get_mut("tieude").unwrap().model =
+            "openrouter/deepseek/deepseek-v4.1-flash".to_string();
         c.kinds.get_mut("tieude").unwrap().effort = Some("medium".to_string());
         let err = validate(&c).unwrap_err();
         assert!(err.contains("does not take effort 'medium'"), "{err}");
