@@ -39,7 +39,7 @@ pub const USAGE: &str = "\
 #        quaqua worker prompt --resume <name> [--extend <sec>]
 #                                             keep waiting; --extend adds <sec> to
 #                                             this name's allowance (persisted in
-#                                             runs/.<name>.budget; the cap still wins)
+#                                             journal; the cap still wins)
 #        quaqua worker prompt --check-brief \"<task>\"   validate a brief + print its budget";
 
 pub fn brief_headers_ok(text: &str) -> bool {
@@ -326,7 +326,7 @@ impl crate::engine::runner::RunnerClock for PromptClock {
 struct PromptActivities {
     inner: SystemActivities,
     runs_dir: PathBuf,
-    budget: u64,
+    time_budget_sec: u64,
     nudge_pct: u64,
     heartbeat_sec: u64,
     land_sec: u64,
@@ -519,7 +519,7 @@ impl Activity for PromptActivities {
                 if task.starts_with("Time check: you are past") {
                     eprintln!(
                         "WATCHDOG nudge sent (once, at {}% of {}s budget)",
-                        self.nudge_pct, self.budget
+                        self.nudge_pct, self.time_budget_sec
                     );
                 }
             }
@@ -774,8 +774,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             brief,
             old_budget,
             prev_elapsed,
-            grace_used,
-            autoext_total,
+            overrun_granted,
+            extension_total,
             nudged,
             last_progress,
         ) = if let Some(s) = &last_snap {
@@ -785,8 +785,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 s.input.brief.clone(),
                 s.input.budget_sec,
                 s.prev_elapsed_ms / 1000,
-                s.grace_used,
-                s.autoext_total_ms / 1000,
+                s.overrun_granted,
+                s.extension_total_ms / 1000,
                 s.nudged,
                 s.last_progress_ms / 1000,
             )
@@ -811,8 +811,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             .with_config(config.clone())
             .resumed(
                 prev_elapsed,
-                grace_used,
-                autoext_total,
+                overrun_granted,
+                extension_total,
                 nudged,
                 last_progress,
             );
@@ -838,8 +838,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 brief,
                 budget,
                 prev_elapsed,
-                grace_used,
-                autoext_total,
+                overrun_granted,
+                extension_total,
                 nudged,
                 last_progress,
             ) = if let Some(s) = &last_snap {
@@ -849,8 +849,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                     s.input.brief.clone(),
                     s.input.budget_sec,
                     s.prev_elapsed_ms / 1000,
-                    s.grace_used,
-                    s.autoext_total_ms / 1000,
+                    s.overrun_granted,
+                    s.extension_total_ms / 1000,
                     s.nudged,
                     s.last_progress_ms / 1000,
                 )
@@ -873,8 +873,8 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                 .with_config(config.clone())
                 .resumed(
                     prev_elapsed,
-                    grace_used,
-                    autoext_total,
+                    overrun_granted,
+                    extension_total,
                     nudged,
                     last_progress,
                 );
@@ -912,7 +912,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let prompt_acts = PromptActivities {
         inner: sys_acts,
         runs_dir: runs_dir.clone(),
-        budget: active_budget,
+        time_budget_sec: active_budget,
         nudge_pct,
         heartbeat_sec,
         land_sec,
@@ -972,16 +972,19 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     // Check if grace or autoext was granted during this execution
     if let Ok(Some(snap)) = journal.load_latest_snapshot(&active_wf_id) {
         if let Ok(state) = serde_json::from_str::<SingleWorkerState>(&snap.state_json) {
-            let prior_grace = last_snap.as_ref().map(|s| s.grace_used).unwrap_or(false);
-            if state.grace_used && !prior_grace {
+            let prior_grace = last_snap
+                .as_ref()
+                .map(|s| s.overrun_granted)
+                .unwrap_or(false);
+            if state.overrun_granted && !prior_grace {
                 let grace_sec = (active_budget / 4).max(1);
                 eprintln!("WATCHDOG grace +{grace_sec}s (progressing)");
             }
             let prior_autoext = last_snap
                 .as_ref()
-                .map(|s| s.autoext_total_ms / 1000)
+                .map(|s| s.extension_total_ms / 1000)
                 .unwrap_or(0);
-            let cur_autoext = state.autoext_total_ms / 1000;
+            let cur_autoext = state.extension_total_ms / 1000;
             if cur_autoext > prior_autoext {
                 let diff = cur_autoext - prior_autoext;
                 let max_autoext = active_budget / 2;

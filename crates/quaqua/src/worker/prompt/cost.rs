@@ -120,22 +120,22 @@ pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) 
 
 /// Tracks cost budget warnings (80% and 100%) during watchdog execution.
 pub struct CostTracker {
-    pub budget: Option<f64>,
+    pub cost_cap: Option<f64>,
     pub cost80_warned: bool,
     pub cost100_warned: bool,
 }
 
 impl CostTracker {
-    pub fn new(runs_dir: &Path, name: &str, budget: Option<f64>) -> Self {
+    pub fn new(runs_dir: &Path, name: &str, cost_cap: Option<f64>) -> Self {
         Self {
-            budget,
+            cost_cap,
             cost80_warned: WorkerMetadata::has_cost80(runs_dir, name),
             cost100_warned: WorkerMetadata::has_cost100(runs_dir, name),
         }
     }
 
     pub fn check(&mut self, runs_dir: &Path, name: &str, obs: &Observation) {
-        if let Some(budget_val) = self.budget {
+        if let Some(budget_val) = self.cost_cap {
             if !self.cost100_warned || !self.cost80_warned {
                 if let Some(current_cost) =
                     read_worker_cost(name, &obs.session_id, &obs.cwd, &obs.harness)

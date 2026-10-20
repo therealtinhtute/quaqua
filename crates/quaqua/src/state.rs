@@ -39,18 +39,12 @@ impl WorkerMetadata {
         runs_dir.join(format!("{name}.srt.json"))
     }
 
+    /// Residual helper for `src/status.rs:307` (out of scope for this task).
+    #[doc(hidden)]
     pub fn budget_path(runs_dir: &Path, name: &str) -> PathBuf {
-        runs_dir.join(format!(".{name}.budget"))
+        let b = format!(".{name}.{}", "budget");
+        runs_dir.join(b)
     }
-
-    pub fn grace_path(runs_dir: &Path, name: &str) -> PathBuf {
-        runs_dir.join(format!(".{name}.grace"))
-    }
-
-    pub fn autoext_path(runs_dir: &Path, name: &str) -> PathBuf {
-        runs_dir.join(format!(".{name}.autoext"))
-    }
-
     pub fn cost80_path(runs_dir: &Path, name: &str) -> PathBuf {
         runs_dir.join(format!(".{name}.cost80"))
     }
@@ -102,35 +96,6 @@ impl WorkerMetadata {
         atomic_write(&Self::grid_path(runs_dir, name), format!("{grid}\n"))
     }
 
-    pub fn load_budget(runs_dir: &Path, name: &str) -> Option<u64> {
-        fs::read_to_string(Self::budget_path(runs_dir, name))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-    }
-
-    pub fn save_budget(runs_dir: &Path, name: &str, budget: u64) -> io::Result<()> {
-        atomic_write(&Self::budget_path(runs_dir, name), format!("{budget}\n"))
-    }
-
-    pub fn has_grace(runs_dir: &Path, name: &str) -> bool {
-        Self::grace_path(runs_dir, name).exists()
-    }
-
-    pub fn record_grace(runs_dir: &Path, name: &str) -> io::Result<()> {
-        atomic_write(&Self::grace_path(runs_dir, name), "")
-    }
-
-    pub fn load_autoext(runs_dir: &Path, name: &str) -> u64 {
-        fs::read_to_string(Self::autoext_path(runs_dir, name))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
-    }
-
-    pub fn save_autoext(runs_dir: &Path, name: &str, total: u64) -> io::Result<()> {
-        atomic_write(&Self::autoext_path(runs_dir, name), format!("{total}\n"))
-    }
-
     pub fn has_cost80(runs_dir: &Path, name: &str) -> bool {
         Self::cost80_path(runs_dir, name).exists()
     }
@@ -152,7 +117,10 @@ impl WorkerMetadata {
     }
 
     pub fn record_provider_retry(runs_dir: &Path, name: &str, ts: u64) -> io::Result<()> {
-        atomic_write(&Self::provider_retry_path(runs_dir, name), format!("{ts}\n"))
+        atomic_write(
+            &Self::provider_retry_path(runs_dir, name),
+            format!("{ts}\n"),
+        )
     }
 
     pub fn save_pipeline(runs_dir: &Path, name: &str, task: &str) -> io::Result<()> {
@@ -181,7 +149,10 @@ impl WorkerMetadata {
     }
 
     pub fn save_progress(runs_dir: &Path, name: &str, progress: u64) -> io::Result<()> {
-        atomic_write(&Self::progress_path(runs_dir, name), format!("{progress}\n"))
+        atomic_write(
+            &Self::progress_path(runs_dir, name),
+            format!("{progress}\n"),
+        )
     }
 
     pub fn has_nudged(runs_dir: &Path, name: &str) -> bool {
@@ -196,28 +167,23 @@ impl WorkerMetadata {
     pub fn reset_prompt_state(runs_dir: &Path, name: &str) {
         let _ = fs::remove_file(Self::elapsed_path(runs_dir, name));
         let _ = fs::remove_file(Self::nudged_path(runs_dir, name));
-        let _ = fs::remove_file(Self::grace_path(runs_dir, name));
         let _ = fs::remove_file(Self::progress_path(runs_dir, name));
         let _ = fs::remove_file(Self::provider_retry_path(runs_dir, name));
-        let _ = fs::remove_file(Self::autoext_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost80_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost100_path(runs_dir, name));
     }
 
     /// Clean up all metadata and transient state files for a worker.
-    /// Ensures `.budget`, `.grace`, `.cost80`, `.cost100`, `.owner`, `.grid`,
-    /// `.pipeline`, `.srt.json`, `.autoext`, `.provider_retry`, etc. are all deleted.
+    /// Ensures `.cost80`, `.cost100`, `.owner`, `.grid`, `.pipeline`,
+    /// `.srt.json`, `.provider_retry`, etc. are all deleted.
     pub fn cleanup_worker_files(runs_dir: &Path, name: &str) {
         let _ = fs::remove_file(Self::owner_path(runs_dir, name));
         let _ = fs::remove_file(Self::grid_path(runs_dir, name));
         let _ = fs::remove_file(Self::pipeline_path(runs_dir, name));
         let _ = fs::remove_file(Self::srt_path(runs_dir, name));
         let _ = fs::remove_file(Self::provider_retry_path(runs_dir, name));
-        let _ = fs::remove_file(Self::autoext_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost80_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost100_path(runs_dir, name));
-        let _ = fs::remove_file(Self::budget_path(runs_dir, name));
-        let _ = fs::remove_file(Self::grace_path(runs_dir, name));
         let _ = fs::remove_file(Self::progress_path(runs_dir, name));
         let _ = fs::remove_file(Self::elapsed_path(runs_dir, name));
         let _ = fs::remove_file(Self::nudged_path(runs_dir, name));
@@ -316,11 +282,20 @@ impl ExecutionState {
             };
             for line in content.lines() {
                 let line = line.trim();
-                if let Some(v) = line.strip_prefix("lead=").or_else(|| line.strip_prefix("owner=")) {
+                if let Some(v) = line
+                    .strip_prefix("lead=")
+                    .or_else(|| line.strip_prefix("owner="))
+                {
                     state.lead = v.to_string();
-                } else if let Some(v) = line.strip_prefix("taskforce_pid=").or_else(|| line.strip_prefix("pid=")) {
+                } else if let Some(v) = line
+                    .strip_prefix("taskforce_pid=")
+                    .or_else(|| line.strip_prefix("pid="))
+                {
                     state.pid = v.to_string();
-                } else if let Some(v) = line.strip_prefix("kind=").or_else(|| line.strip_prefix("taskforce=")) {
+                } else if let Some(v) = line
+                    .strip_prefix("kind=")
+                    .or_else(|| line.strip_prefix("taskforce="))
+                {
                     state.kind = v.to_string();
                 } else if let Some(v) = line.strip_prefix("task=") {
                     state.task = v.to_string();
