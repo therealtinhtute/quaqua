@@ -41,6 +41,112 @@ pub fn resolve_cost_budget(task: &str) -> Option<f64> {
     brief_cost_budget(task)
 }
 
+/// True when this worker reported spend through omp session transcripts.
+fn is_omp_worker(harness: &str, name: &str) -> bool {
+    harness == "omp"
+        || (harness.is_empty() && (name.starts_with("sude-") || name.starts_with("detu-")))
+}
+
+/// omp's session directory name for a worktree path: `$HOME` is stripped, then
+/// every `/` becomes `-` (the leading dash is kept).
+///
+/// `/home/me/.wt/sude-x` -> `-.wt-sude-x`, `/tmp/x` -> `-tmp-x`.
+fn omp_session_dir_name(cwd: &str, home: &str) -> String {
+    let path = Path::new(cwd);
+    let rel = if home.is_empty() {
+        path
+    } else {
+        path.strip_prefix(home).unwrap_or(path)
+    };
+    let rel = rel.to_string_lossy();
+    // `strip_prefix` drops the separator; omp keeps it as the leading dash.
+    let rel = if rel.starts_with('/') || rel.is_empty() {
+        rel.into_owned()
+    } else {
+        format!("/{rel}")
+    };
+    rel.replace('/', "-")
+}
+
+/// Reads one `cost.total` from a session line, preferring the known
+/// `message.usage.cost.total` location and falling back to the first
+/// `cost.total` object if omp moves it.
+fn session_line_cost(v: &serde_json::Value) -> Option<f64> {
+    if let Some(c) = v
+        .pointer("/message/usage/cost/total")
+        .and_then(|c| c.as_f64())
+    {
+        return Some(c);
+    }
+    fn find(v: &serde_json::Value) -> Option<f64> {
+        match v {
+            serde_json::Value::Object(map) => {
+                if let Some(c) = map
+                    .get("cost")
+                    .and_then(|c| c.get("total"))
+                    .and_then(|t| t.as_f64())
+                {
+                    return Some(c);
+                }
+                map.values().find_map(find)
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(find),
+            _ => None,
+        }
+    }
+    find(v)
+}
+
+/// Sums `cost.total` over every `.jsonl` line of omp's session directory that
+/// matches `cwd`. Read-only; one directory, at most a few files.
+fn omp_cost_in(root: &Path, cwd: &str, home: &str) -> Option<f64> {
+    use std::io::BufRead;
+    let dir = root.join(omp_session_dir_name(cwd, home));
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut total = 0.0;
+    let mut found = false;
+    for entry in entries.flatten() {
+        if entry.path().extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(entry.path()) else {
+            continue;
+        };
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            if !line.contains("\"cost\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if let Some(c) = session_line_cost(&v) {
+                total += c;
+                found = true;
+            }
+        }
+    }
+    if found {
+        Some(total)
+    } else {
+        None
+    }
+}
+
+/// omp spend for a worker worktree, from `~/.omp/agent/sessions/<dir>/*.jsonl`.
+fn read_omp_cost(cwd: &str) -> Option<f64> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let root = match std::env::var("OMP_SESSIONS_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir),
+        _ => {
+            if home.is_empty() {
+                return None;
+            }
+            Path::new(&home).join(".omp/agent/sessions")
+        }
+    };
+    omp_cost_in(&root, cwd, &home)
+}
+
 pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) -> Option<f64> {
     if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
         if let Ok(content) = std::fs::read_to_string(&cost_file) {
@@ -49,6 +155,10 @@ pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) 
             }
         }
         return None;
+    }
+
+    if is_omp_worker(harness, name) {
+        return read_omp_cost(cwd);
     }
 
     if harness != "opencode" && !name.starts_with("tieude-") {
@@ -578,5 +688,81 @@ mod tests {
 
         let non_report = ActivityResult::Cost(CostResult::Spend(1.0));
         assert_eq!(report_state_from_activity(None, &non_report, None), None);
+    }
+
+    #[test]
+    fn test_omp_session_dir_name() {
+        assert_eq!(
+            omp_session_dir_name("/home/me/.wt/sude-x", "/home/me"),
+            "-.wt-sude-x"
+        );
+        assert_eq!(
+            omp_session_dir_name("/tmp/opencode/.wt/sude-y", "/home/me"),
+            "-tmp-opencode-.wt-sude-y"
+        );
+        // The home prefix must match on a path boundary, never a string prefix.
+        assert_eq!(
+            omp_session_dir_name("/home/mel/x", "/home/me"),
+            "-home-mel-x"
+        );
+        assert_eq!(omp_session_dir_name("/tmp/x", ""), "-tmp-x");
+    }
+
+    #[test]
+    fn test_omp_cost_sums_session_jsonl() {
+        let tmp = std::env::temp_dir().join(format!("omp-cost-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("sessions");
+        let cwd = tmp.join("worktree");
+        let dir = root.join(cwd.to_string_lossy().replace('/', "-"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.jsonl"),
+            concat!(
+                r#"{"type":"session","cwd":"ignored"}"#,
+                "\n",
+                r#"{"type":"message","message":{"usage":{"cost":{"input":0.01,"output":0.02,"total":0.03}}}}"#,
+                "\n",
+                r#"{"type":"message","message":{"usage":{"cost":{"input":0.1,"output":0.2,"total":0.3}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        // A resumed session for the same worktree adds its own transcript.
+        std::fs::write(
+            dir.join("b.jsonl"),
+            r#"{"type":"message","message":{"usage":{"cost":{"total":0.04}}}}"#,
+        )
+        .unwrap();
+        // Non-jsonl siblings are ignored.
+        std::fs::write(
+            dir.join("a.log"),
+            r#"{"type":"message","message":{"usage":{"cost":{"total":99}}}}"#,
+        )
+        .unwrap();
+
+        let cost = omp_cost_in(&root, cwd.to_str().unwrap(), "").unwrap();
+        assert!((cost - 0.37).abs() < 1e-9, "expected 0.37, got {cost}");
+
+        // Unknown worktree -> None, never a silent 0.
+        assert_eq!(
+            omp_cost_in(&root, tmp.join("other").to_str().unwrap(), ""),
+            None
+        );
+
+        // Home-relative worktrees resolve to omp's stripped dir name.
+        let home = tmp.join("home");
+        let hcwd = home.join(".wt/sude-z");
+        let hdir = root.join("-.wt-sude-z");
+        std::fs::create_dir_all(&hdir).unwrap();
+        std::fs::write(
+            hdir.join("s.jsonl"),
+            r#"{"type":"message","message":{"usage":{"cost":{"total":0.05}}}}"#,
+        )
+        .unwrap();
+        let c = omp_cost_in(&root, hcwd.to_str().unwrap(), home.to_str().unwrap()).unwrap();
+        assert!((c - 0.05).abs() < 1e-9, "expected 0.05, got {c}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
