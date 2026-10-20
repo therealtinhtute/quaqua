@@ -201,7 +201,12 @@ impl SystemActivities {
                     name: name.clone(),
                 }))
             }
-            HerdrRequest::Spawn { name, kind, repo } => {
+            HerdrRequest::Spawn {
+                name,
+                kind,
+                repo,
+                approve_kinds,
+            } => {
                 let base_cfg = crate::config::load_team_config().map_err(|(code, msg)| {
                     ActivityError::ExecutionFailed(format!(
                         "load team config failed (exit {code}): {msg}"
@@ -214,12 +219,24 @@ impl SystemActivities {
                     base_cfg
                 };
 
+                let kind_info = cfg.kinds.get(kind).ok_or_else(|| {
+                    ActivityError::ExecutionFailed(format!(
+                        "spawn failed (exit 1): error: unknown kind '{kind}' in team.toml\n"
+                    ))
+                })?;
+                crate::config::check_spawn_policy(kind, kind_info, approve_kinds).map_err(
+                    |(code, msg)| {
+                        ActivityError::ExecutionFailed(format!("spawn failed (exit {code}): {msg}"))
+                    },
+                )?;
+
                 let opts = crate::worker::spawn::SpawnOptions {
                     base: None,
                     review: false,
                     name: name.clone(),
                     kind: kind.clone(),
                     repo_path: PathBuf::from(repo),
+                    approve_kinds: approve_kinds.clone(),
                 };
 
                 crate::worker::spawn::spawn_worker(opts, &cfg, &self.git, &self.herdr).map_err(
@@ -1533,6 +1550,7 @@ esac
             name: "invalid-name".to_string(),
             kind: "nonexistent-kind".to_string(),
             repo: ".".to_string(),
+            approve_kinds: Vec::new(),
         });
         let err = activities.execute(&req).unwrap_err();
         match err {
@@ -1590,6 +1608,7 @@ esac
                 name: "sude-spawn-act".to_string(),
                 kind: "sude".to_string(),
                 repo: temp_repo.to_string_lossy().to_string(),
+                approve_kinds: Vec::new(),
             });
             let res = activities
                 .execute(&req)
@@ -1600,6 +1619,111 @@ esac
                     name: "sude-spawn-act".to_string(),
                 })
             );
+            let _ = fs::remove_dir_all(&base_dir);
+        });
+    }
+
+    #[test]
+    fn test_activity_spawn_approve_policy_gate() {
+        with_herdr_stub(|activities, _log| {
+            let pid = std::process::id();
+            let base_dir = std::env::temp_dir().join(format!("quaqua-act-spawn-gate-{}", pid));
+            let _ = fs::remove_dir_all(&base_dir);
+            let temp_repo = base_dir.join("repo");
+            let _ = fs::create_dir_all(&temp_repo);
+
+            let repo_str = temp_repo.to_str().unwrap();
+            let _ = Command::new("git")
+                .args(["init", "-b", "main"])
+                .arg(&temp_repo)
+                .output();
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "config", "user.email", "test@quaqua.local"])
+                .output();
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "config", "user.name", "Test User"])
+                .output();
+            let dummy = temp_repo.join("dummy.txt");
+            let _ = fs::write(&dummy, "hello");
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "add", "dummy.txt"])
+                .output();
+            let _ = Command::new("git")
+                .args(["-C", repo_str, "commit", "-m", "initial"])
+                .output();
+
+            let team_toml_content = r#"
+schema_version = 2
+[limits]
+max_workers_per_orchestrator = 8
+[kinds.truonglao]
+harness = "claude"
+model = "opus-5.5"
+effort = "high"
+can_review = true
+spawn = "approve"
+[kinds.sude]
+harness = "omp"
+model = "google-antigravity/gemini-3.8-flash"
+effort = "high"
+can_review = false
+spawn = "auto"
+"#;
+            let team_file = base_dir.join("team.toml");
+            let _ = fs::write(&team_file, team_toml_content);
+            let _guard_team = EnvVarGuard::set("QUAQUA_TEAM_TOML", &team_file);
+            let _guard_pipe = EnvVarGuard::set("PIPELINE_TASK", "1");
+
+            // 1. Refused without --approve-kind
+            let req_unapproved = ActivityRequest::Herdr(HerdrRequest::Spawn {
+                name: "truonglao-spawn-act".to_string(),
+                kind: "truonglao".to_string(),
+                repo: temp_repo.to_string_lossy().to_string(),
+                approve_kinds: Vec::new(),
+            });
+            let err = activities.execute(&req_unapproved).unwrap_err();
+            match err {
+                ActivityError::ExecutionFailed(msg) => {
+                    assert!(
+                        msg.contains("--approve-kind truonglao"),
+                        "must refuse unapproved spawn with exact hint: {msg}"
+                    );
+                }
+                other => panic!("expected ExecutionFailed, got: {other:?}"),
+            }
+
+            // 2. Allowed with --approve-kind
+            let req_approved = ActivityRequest::Herdr(HerdrRequest::Spawn {
+                name: "truonglao-spawn-act".to_string(),
+                kind: "truonglao".to_string(),
+                repo: temp_repo.to_string_lossy().to_string(),
+                approve_kinds: vec!["truonglao".to_string()],
+            });
+            let res = activities
+                .execute(&req_approved)
+                .expect("approved spawn succeeds");
+            assert_eq!(
+                res,
+                ActivityResult::Herdr(HerdrResult::Spawned {
+                    name: "truonglao-spawn-act".to_string(),
+                })
+            );
+
+            // 3. Auto kind allowed without approve_kinds
+            let req_auto = ActivityRequest::Herdr(HerdrRequest::Spawn {
+                name: "sude-spawn-act".to_string(),
+                kind: "sude".to_string(),
+                repo: temp_repo.to_string_lossy().to_string(),
+                approve_kinds: Vec::new(),
+            });
+            let res_auto = activities.execute(&req_auto).expect("auto spawn succeeds");
+            assert_eq!(
+                res_auto,
+                ActivityResult::Herdr(HerdrResult::Spawned {
+                    name: "sude-spawn-act".to_string(),
+                })
+            );
+
             let _ = fs::remove_dir_all(&base_dir);
         });
     }

@@ -38,8 +38,8 @@ use std::path::{Path, PathBuf};
 
 pub const USAGE: &str = "\
 # Usage: quaqua pipeline <task> <repo> --brief <file> [--builder sude] [--reviewer suhuynh]
-#                    [--review auto|always|skip] [--rounds 2] [--base <ref>]
-#        quaqua pipeline --resume <task> <repo> [--rounds 2]
+#                    [--review auto|always|skip] [--rounds 2] [--base <ref>] [--approve-kind <kind>...]
+#        quaqua pipeline --resume <task> <repo> [--rounds 2] [--approve-kind <kind>...]
 #   Build -> review -> fix loop on top of
 #   quaqua worker {spawn,prompt,cleanup}; counts as 2 workers
 #   toward the cap. <task> is a slug ([a-z0-9-]): builder <builder>-<task>, a
@@ -339,6 +339,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
     let is_resume = !args.is_empty() && args[0] == "--resume";
     if is_resume {
         let mut resume_rounds: Option<u32> = None;
+        let mut resume_approve: Vec<String> = Vec::new();
         let mut pos = Vec::new();
         let mut i = 1;
         while i < args.len() {
@@ -363,6 +364,22 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     return Err((1, "--rounds must be an integer >= 1\n".to_string()));
                 }
                 resume_rounds = Some(r);
+                i += 1;
+            } else if arg == "--approve-kind" {
+                if i + 1 >= args.len() {
+                    return Err((1, format!("{}\n", USAGE)));
+                }
+                let val = &args[i + 1];
+                if val.is_empty() || val.starts_with('-') {
+                    return Err((1, format!("{}\n", USAGE)));
+                }
+                resume_approve.push(val.clone());
+                i += 2;
+            } else if let Some(v) = arg.strip_prefix("--approve-kind=") {
+                if v.is_empty() || v.starts_with('-') {
+                    return Err((1, format!("{}\n", USAGE)));
+                }
+                resume_approve.push(v.to_string());
                 i += 1;
             } else if arg.starts_with('-') {
                 return Err((1, format!("{}\n", USAGE)));
@@ -425,6 +442,11 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
 
         state.pipeline_pid = std::process::id();
         state.lead_pane = std::env::var("HERDR_PANE_ID").unwrap_or_default();
+        for k in resume_approve {
+            if !state.approve_kinds.contains(&k) {
+                state.approve_kinds.push(k);
+            }
+        }
         if let Some(r) = resume_rounds {
             if r > state.rounds {
                 state.rounds = r;
@@ -448,6 +470,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         let mut rounds = 2u32;
         let mut brief_opt: Option<PathBuf> = None;
         let mut base = String::new();
+        let mut approve_kinds: Vec<String> = Vec::new();
         let mut pos = Vec::new();
 
         let mut i = 0;
@@ -510,6 +533,22 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 i += 2;
             } else if let Some(v) = arg.strip_prefix("--base=") {
                 base = v.to_string();
+                i += 1;
+            } else if arg == "--approve-kind" {
+                if i + 1 >= args.len() {
+                    return Err((1, format!("{}\n", USAGE)));
+                }
+                let val = &args[i + 1];
+                if val.is_empty() || val.starts_with('-') {
+                    return Err((1, format!("{}\n", USAGE)));
+                }
+                approve_kinds.push(val.clone());
+                i += 2;
+            } else if let Some(v) = arg.strip_prefix("--approve-kind=") {
+                if v.is_empty() || v.starts_with('-') {
+                    return Err((1, format!("{}\n", USAGE)));
+                }
+                approve_kinds.push(v.to_string());
                 i += 1;
             } else if arg.starts_with('-') {
                 return Err((1, format!("{}\n", USAGE)));
@@ -613,6 +652,11 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
             ));
         }
 
+        // Spawn-policy gate (same function every spawn path uses): fail before
+        // writing state so a missing approval does not leave a stuck pipeline.
+        crate::config::check_spawn_policy(&builder, &cfg.kinds[&builder], &approve_kinds)?;
+        crate::config::check_spawn_policy(&reviewer, &cfg.kinds[&reviewer], &approve_kinds)?;
+
         let owner = std::env::var("PIPELINE_LEAD")
             .or_else(|_| std::env::var("QUAQUA_OWNER"))
             .unwrap_or_else(|_| "cos".to_string());
@@ -668,6 +712,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 .unwrap_or_default(),
             lead_pane: std::env::var("HERDR_PANE_ID").unwrap_or_default(),
             pipeline_pid: std::process::id(),
+            approve_kinds: approve_kinds.clone(),
         };
 
         let _ = state.save(&state_file);
@@ -712,6 +757,18 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
     } else {
         base_cfg
     };
+
+    // Resume path: approvals requested now, or persisted from the first run,
+    // must cover both kinds this pipeline can spawn.
+    for kind_name in [&state.builder, &state.reviewer] {
+        let kind = cfg.kinds.get(kind_name.as_str()).ok_or_else(|| {
+            (
+                1,
+                format!("error: unknown kind '{kind_name}' in team.toml\n"),
+            )
+        })?;
+        crate::config::check_spawn_policy(kind_name, kind, &state.approve_kinds)?;
+    }
 
     let ctx = PipelineContext {
         task: task.clone(),
@@ -1131,7 +1188,8 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                         std::env::set_var("GRID_SKIP", "1");
 
                         let spawn_res = (|| -> Result<(), (i32, String)> {
-                            let opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
+                            let mut opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
+                            opts.approve_kinds = state.approve_kinds.clone();
                             crate::worker::spawn::spawn_worker(opts, &ctx.cfg, ctx.git, ctx.herdr)
                         })();
 
@@ -1197,7 +1255,8 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                         std::env::set_var("GRID_SKIP", "1");
 
                         let spawn_res = (|| -> Result<(), (i32, String)> {
-                            let opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
+                            let mut opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
+                            opts.approve_kinds = state.approve_kinds.clone();
                             crate::worker::spawn::spawn_worker(opts, &ctx.cfg, ctx.git, ctx.herdr)
                         })();
 

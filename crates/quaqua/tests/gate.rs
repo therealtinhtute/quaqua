@@ -1,8 +1,9 @@
 //! `quaqua gate` policy tests — every case from `tests/test_herdr_gate.sh`,
-//! checked in-process against the ported tokenizer + policy, plus one test that
-//! drives the built binary through the stdin hook-JSON contract.
+//! checked in-process against the ported tokenizer + policy, plus the outward
+//! classifier (`git push` / gh writes → ask, force+main → deny), and tests
+//! that drive the built binary through the stdin hook-JSON contract.
 
-use quaqua::gate::{check, Verdict};
+use quaqua::gate::{check, check_ctx, Verdict};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -180,6 +181,283 @@ fn empty_substitution_words_still_resolve_the_executable() {
         Verdict::Block,
         "empty-word",
     );
+}
+
+#[test]
+fn outward_pushes_and_gh_writes_ask() {
+    for c in [
+        "git push",
+        "git push origin",
+        "git push origin feature",
+        "git push origin HEAD:feature",
+        "git push origin refs/heads/topic:refs/heads/topic",
+        "git push -u origin feature",
+        "git push --tags origin",
+        "git push -o ci.skip origin feature",
+        "git push --repo origin origin feature",
+        "git -C ~/repo push origin feature",
+        "git -c push.default=current push origin feature",
+        "git --no-pager push origin feature",
+        "sudo git push origin feature",
+        "env GIT_SSH_COMMAND=ssh git push origin feature",
+        "cd ~/repo && git push origin feature",
+        "bash -c 'git push origin feature'",
+        "echo started; git push origin feature",
+        "git push origin feature | cat",
+        "gh pr create --title t --body b",
+        "gh pr edit 42 --title t",
+        "gh pr close 42",
+        "gh pr comment 42 --body hi",
+        "gh pr ready 42",
+        "gh pr merge 42 --squash",
+        "gh pr merge --auto 42",
+        "gh issue create --title t",
+        "gh issue edit 3 --title t",
+        "gh issue close 3",
+        "gh issue comment 3 --body hi",
+        "gh release create v1.0",
+        "gh release upload v1.0 dist/x.zip",
+        "gh repo create --private",
+        "gh repo delete --yes",
+        "gh repo sync x/y",
+        "gh -R x/y pr comment 42 --body hi",
+        "cd /tmp && gh repo transfer x/y z",
+    ] {
+        assert!(
+            matches!(check(c), Verdict::Ask(_)),
+            "want ask, got {:?}: {c:?}",
+            check(c)
+        );
+    }
+    let Verdict::Ask(r) = check("git push origin feature") else {
+        panic!("want ask");
+    };
+    assert!(r.contains("AGENTS.md rule 3"), "{r}");
+}
+
+#[test]
+fn force_pushes_and_main_are_denied() {
+    for c in [
+        "git push -f origin feature",
+        "git push --force",
+        "git push --force-with-lease origin feature",
+        "git push --force-with-lease=main origin feature",
+        "git push --force-if-includes origin feature",
+        "git push origin +feature",
+        "git push origin +main",
+        "git push origin main",
+        "git push origin master",
+        "git push origin HEAD:main",
+        "git push origin feature:main",
+        "git push origin refs/heads/feature:refs/heads/master",
+        "git push origin :main",
+        "git push --delete origin main",
+        "git push --all origin",
+        "git push --mirror",
+        "git push -uf origin main",
+        "cd ~/repo && git push --force-with-lease",
+        "sudo git push origin main",
+        "git -C /repo push origin main",
+        "git -c push.default=current push origin main",
+        "gh pr merge main",
+        "gh pr merge master --squash",
+        "gh pr merge refs/heads/main",
+    ] {
+        assert!(
+            matches!(check(c), Verdict::Deny(_)),
+            "want deny, got {:?}: {c:?}",
+            check(c)
+        );
+    }
+    let Verdict::Deny(r) = check("git push -f") else {
+        panic!("want deny");
+    };
+    assert!(r.contains("force push"), "{r}");
+    let Verdict::Deny(r) = check("git push origin main") else {
+        panic!("want deny");
+    };
+    assert!(r.contains("main"), "{r}");
+}
+
+#[test]
+fn read_only_git_and_gh_stay_allowed() {
+    for c in [
+        "git status",
+        "git status --short",
+        "git log --oneline -5",
+        "git fetch origin",
+        "git diff HEAD~1",
+        "git show --stat HEAD",
+        "git branch --show-current",
+        "git rev-parse HEAD",
+        "git worktree list",
+        "git remote -v",
+        "git push --help",
+        "git push -h",
+        "git --help",
+        "gh pr view 42",
+        "gh pr list",
+        "gh pr status",
+        "gh pr diff 42",
+        "gh pr checks 42",
+        "gh issue view 3",
+        "gh issue list",
+        "gh release list",
+        "gh release view v1",
+        "gh release download v1",
+        "gh repo view x/y",
+        "gh repo list",
+        "gh repo clone x/y",
+        "gh run list",
+        "gh run view 12",
+        "gh api repos/x/y",
+        "gh auth status",
+        "gh pr create --help",
+        "gh pr -h",
+        "gh -h",
+        "git -C /repo status",
+        "sudo git fetch origin",
+        "cd /repo && git fetch",
+        // outward spellings inside argument text or a heredoc body stay quiet
+        "printf '%s\\n' 'git push origin main'",
+        "echo \"run git push to deploy\"",
+        "grep -rn \"git push\" README.md",
+        "cat <<EOF\ngit push --force origin main\nEOF",
+        "cat <<EOF; git status\nbody\nEOF",
+    ] {
+        assert_eq!(check(c), Verdict::Allow, "case {c:?}");
+    }
+}
+
+#[test]
+fn outward_decisions_compose_over_compounds() {
+    // a prompt inside a compound command still fires
+    for c in [
+        "cd ~/repo && gh issue comment 3 --body y",
+        "git push origin feature; ls",
+        "mkdir -p out && gh release create v2",
+    ] {
+        assert!(matches!(check(c), Verdict::Ask(_)), "want ask: {c:?}");
+    }
+    // deny outranks ask; the herdr block outranks ask too (an approval must
+    // not let a pane/workspace spawn through as a side effect)
+    assert!(matches!(
+        check("git push origin main && gh pr create"),
+        Verdict::Deny(_)
+    ));
+    assert!(matches!(
+        check("herdr pane split && git push origin feature"),
+        Verdict::Block
+    ));
+    assert!(matches!(
+        check("herdr pane split && gh pr create"),
+        Verdict::Block
+    ));
+    assert!(matches!(
+        check("git push -f && herdr pane split"),
+        Verdict::Deny(_)
+    ));
+}
+
+#[test]
+fn bare_push_resolves_the_checked_out_branch() {
+    let dir = std::env::temp_dir().join(format!("quaqua-gate-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+
+    // no refspec in the command text: the branch the push would send decides
+    git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+    let cwd = dir.to_str().expect("utf8 temp dir");
+    assert!(matches!(check_ctx("git push", Some(cwd)), Verdict::Deny(_)));
+    assert!(matches!(
+        check_ctx("git push origin", Some(cwd)),
+        Verdict::Deny(_)
+    ));
+    assert!(matches!(
+        check_ctx("git push -u origin", Some(cwd)),
+        Verdict::Deny(_)
+    ));
+    git(&["symbolic-ref", "HEAD", "refs/heads/feature"]);
+    assert!(matches!(check_ctx("git push", Some(cwd)), Verdict::Ask(_)));
+    assert!(matches!(
+        check_ctx("git push origin", Some(cwd)),
+        Verdict::Ask(_)
+    ));
+    // `git -C <dir>` moves the lookup to that repository
+    assert!(matches!(
+        check_ctx(&format!("git -C {} push", dir.display()), Some("/")),
+        Verdict::Ask(_)
+    ));
+    // no cwd (hook without cwd): the branch is unknown, so the push asks
+    assert!(matches!(check_ctx("git push", None), Verdict::Ask(_)));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn binary_emits_pretooluse_json_for_outward_actions() {
+    let bin = env!("CARGO_BIN_EXE_quaqua");
+    let run = |json: &str| -> (Option<i32>, String) {
+        let mut child = Command::new(bin)
+            .arg("gate")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn the quaqua binary");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(json.as_bytes())
+            .expect("write hook json");
+        let out = child.wait_with_output().expect("wait");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )
+    };
+    let decision = |stdout: &str| -> serde_json::Value {
+        serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {stdout:?}"))
+    };
+
+    let (code, stdout) =
+        run(r#"{"tool_name":"Bash","tool_input":{"command":"git push origin feature"}}"#);
+    assert_eq!(code, Some(0), "ask must exit 0");
+    let v = decision(&stdout);
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "ask");
+    assert!(v["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason")
+        .contains("AGENTS.md rule 3"));
+
+    let (code, stdout) = run(
+        r#"{"tool_name":"Bash","tool_input":{"command":"gh pr create --title x"},"cwd":"/tmp"}"#,
+    );
+    assert_eq!(code, Some(0), "ask must exit 0");
+    assert_eq!(decision(&stdout)["hookSpecificOutput"]["permissionDecision"], "ask");
+
+    let (code, stdout) =
+        run(r#"{"tool_name":"Bash","tool_input":{"command":"git push --force origin"}}"#);
+    assert_eq!(code, Some(0), "deny must exit 0");
+    assert_eq!(decision(&stdout)["hookSpecificOutput"]["permissionDecision"], "deny");
+
+    // read-only commands keep the silent exit 0
+    let (code, stdout) = run(r#"{"tool_name":"Bash","tool_input":{"command":"git status"}}"#);
+    assert_eq!(code, Some(0));
+    assert!(stdout.trim().is_empty(), "no decision output: {stdout:?}");
 }
 
 #[test]
