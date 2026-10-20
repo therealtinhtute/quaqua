@@ -204,8 +204,10 @@ impl Activity for PipelineActivities {
 fn seed_state_from_pipeline_state(
     input: PipelineInput,
     state: &PipelineState,
+    runs_dir: &Path,
 ) -> PipelineWorkflowState {
     let mut init_state = PipelineWorkflowState::new(input);
+    let mut review_findings = 0;
     match state.phase.as_str() {
         "plan" => init_state.phase = PipelinePhase::Plan,
         "build" => init_state.phase = PipelinePhase::Build,
@@ -217,13 +219,19 @@ fn seed_state_from_pipeline_state(
             init_state.phase = PipelinePhase::Fix;
             init_state.round = state.round.max(1);
             let revname = format!("{}-{}r{}", init_state.input.reviewer, init_state.input.task, init_state.round);
-            init_state.last_review_report = Some(format!("{revname}.md"));
+            let rev_report = runs_dir.join(format!("{revname}.md"));
+            if let Ok(content) = std::fs::read_to_string(&rev_report) {
+                if let Ok((findings, _)) = parse_report_content(&content) {
+                    review_findings = findings;
+                }
+            }
+            init_state.last_review_report = Some(rev_report.to_string_lossy().to_string());
         }
         _ => {}
     }
     init_state.round = state.round.max(if state.phase == "review" || state.phase == "fix" { 1 } else { 0 });
     init_state.rounds_run = state.rounds_run;
-    init_state.last_findings = state.last_findings;
+    init_state.last_findings = review_findings.max(state.last_findings);
     init_state.review_changed = state.review_changed;
     if !state.head_sha.is_empty() {
         init_state.head_sha = Some(state.head_sha.clone());
@@ -814,7 +822,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         )
         .map_err(|e| (1, format!("workflow error: {e}\n")))?
     } else if parent_events.is_empty() {
-        let init_state = seed_state_from_pipeline_state(input.clone(), &state);
+        let init_state = seed_state_from_pipeline_state(input.clone(), &state, &runs_dir);
         runner::run_until_blocked(
             &workflow,
             &parent_wf_id,
@@ -883,6 +891,8 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         .map_err(|e| (1, format!("workflow error: {e}\n")))?
     };
 
+    // Report of the last child this invocation fed to the parent: evidence for the pfile.
+    let mut last_report: Option<PathBuf> = None;
     loop {
         if let Some(res) = ctx.check_clock(&mut state) {
             return res.map(|_| ());
@@ -895,12 +905,12 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 }
                 state.rounds_run = out.rounds;
                 state.review_changed = out.review_changed;
-                let b = if out.status == "disputed" {
-                    Some("disputed")
-                } else {
-                    None
-                };
-                return ctx.finish(&mut state, &out.status, 0, b).map(|_| ());
+                if out.status == "disputed" {
+                    if let Some(rp) = &last_report {
+                        log_challenge(rp, &ctx.pfile);
+                    }
+                }
+                return ctx.finish(&mut state, &out.status, 0, None).map(|_| ());
             }
             RunnerOutcome::Failed { code, reason } => {
                 let actual_code = if reason.contains("review rounds exhausted") {
@@ -914,7 +924,21 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
             }
             RunnerOutcome::Blocked(reason) => {
                 if let Some((code, rest)) = parse_blocked_gate(&reason) {
-                    let actual_code = if rest.contains("review rounds exhausted") || code == 0 {
+                    if rest.contains("review rounds exhausted") {
+                        state.rounds_run = state.round.max(state.rounds_run);
+                    }
+                    let unfinished = rest.contains("report unfinished");
+                    if unfinished {
+                        if let Some(rp) = &last_report {
+                            log_blockers(rp, &ctx.pfile);
+                        }
+                    }
+                    // Rounds exhausted and an unfinished worker report are the Lead's call:
+                    // terminal blocked, exit 0 (aa056d6 phases contract).
+                    let actual_code = if rest.contains("review rounds exhausted")
+                        || unfinished
+                        || code == 0
+                    {
                         0
                     } else {
                         code
@@ -1011,29 +1035,24 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 if started_count >= 2 {
                     state.prompted = 1;
                 }
-                if child_id.ends_with("-plan") {
-                    state.phase = "plan".to_string();
-                } else if child_id.ends_with("-build") {
-                    state.phase = "build".to_string();
-                } else if child_id.contains("-review-") {
-                    state.phase = "review".to_string();
-                    if let Some(r_idx) = child_id.rfind("-review-r") {
-                        if let Ok(r) = child_id[r_idx + 9..].parse::<u32>() {
-                            state.round = r;
-                        }
+                let kind = classify_child(&child_id, &state.builder, &state.reviewer, &ctx.task);
+                match kind {
+                    ChildKind::Plan => state.phase = "plan".to_string(),
+                    ChildKind::Build => state.phase = "build".to_string(),
+                    ChildKind::Review(r) => {
+                        state.phase = "review".to_string();
+                        state.round = r;
                     }
-                } else if child_id.contains("-fix-") {
-                    state.phase = "fix".to_string();
-                    if let Some(f_idx) = child_id.rfind("-fix-r") {
-                        if let Ok(r) = child_id[f_idx + 7..].parse::<u32>() {
-                            state.round = r;
-                        }
+                    ChildKind::Fix(r) => {
+                        state.phase = "fix".to_string();
+                        state.round = r;
                     }
+                    ChildKind::Unknown => {}
                 }
                 let _ = state.save(&ctx.state_file);
 
 
-                let is_reviewer = child_id.contains("-review-");
+                let is_reviewer = matches!(kind, ChildKind::Review(_));
 
                 let el = state.start_elapsed + (now_sec() - ctx.inv_start);
                 let rem = if ctx.max_sec > el {
@@ -1059,8 +1078,9 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                         is_fresh_spawn = true;
                         let rev_report = ctx.runs_dir.join(format!("{}.md", child_input.name));
                         if rev_report.is_file()
-                            && state.prompt_ts > 0
-                            && file_mtime(&rev_report) < state.prompt_ts
+                            && (state.prompted == 0
+                                || (state.prompt_ts > 0
+                                    && file_mtime(&rev_report) < state.prompt_ts))
                         {
                             ctx.archive_stale(&rev_report);
                         }
@@ -1247,10 +1267,23 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                     }
                 }
 
+                let mut cur_k = started_count;
+                let mut child_wf_id = if cur_k <= 1 {
+                    format!("pipeline:{}:{}", ctx.task, child_id)
+                } else {
+                    format!("pipeline:{}:{}#{}", ctx.task, child_id, cur_k)
+                };
+                let mut child_events = journal
+                    .load_events(&child_wf_id, 1)
+                    .map_err(|e| (1, format!("journal error: {e}\n")))?;
+
+                // A fresh phase start (never prompted, no child journal) must never consume a
+                // pre-existing report.
                 let child_report_path = ctx.runs_dir.join(format!("{}.md", child_input.name));
                 if child_report_path.is_file()
-                    && state.prompt_ts > 0
-                    && file_mtime(&child_report_path) < state.prompt_ts
+                    && ((state.prompted == 0 && child_events.is_empty())
+                        || (state.prompt_ts > 0
+                            && file_mtime(&child_report_path) < state.prompt_ts))
                 {
                     ctx.archive_stale(&child_report_path);
                 }
@@ -1267,16 +1300,6 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                             .lines()
                             .any(|l| l.trim().starts_with("## Challenge"))
                 };
-
-                let mut cur_k = started_count;
-                let mut child_wf_id = if cur_k <= 1 {
-                    format!("pipeline:{}:{}", ctx.task, child_id)
-                } else {
-                    format!("pipeline:{}:{}#{}", ctx.task, child_id, cur_k)
-                };
-                let mut child_events = journal
-                    .load_events(&child_wf_id, 1)
-                    .map_err(|e| (1, format!("journal error: {e}\n")))?;
 
                 while !already_delivered {
                     let mut is_terminal_err = false;
@@ -1535,7 +1558,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
 
                         let mut child_output_json = serde_json::to_value(&child_out).unwrap();
 
-                        if child_id.ends_with("-plan") {
+                        if kind == ChildKind::Plan {
                             let planfile =
                                 ctx.runs_dir.join(format!("{}.plan.md", child_input.name));
                             if child_report_path.exists() {
@@ -1553,7 +1576,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                             let _ = state.save(&ctx.state_file);
                             child_output_json["report_path"] =
                                  serde_json::Value::String(planfile.to_string_lossy().to_string());
-                        } else if child_id.ends_with("-build") {
+                        } else if kind == ChildKind::Build {
                             let build_md =
                                 ctx.runs_dir.join(format!("{}.build.md", child_input.name));
                             if child_report_path.exists() {
@@ -1599,115 +1622,67 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 return ctx.finish(&mut state, "blocked", 3, Some(&b)).map(|_| ());
                             }
 
-                            let mut skip_review = false;
                             let rep_content =
                                 std::fs::read_to_string(&build_md).unwrap_or_default();
-                            let has_no_changes = report_has_outcome_no_changes(&rep_content);
-
-                            if head == state.base_sha {
-                                if !has_no_changes {
-                                    let base7 = if state.base_sha.len() >= 7 {
-                                        &state.base_sha[..7]
-                                    } else {
-                                        &state.base_sha
-                                    };
-                                    let b = format!(
-                                        "builder produced no commits on quaqua/{}-{} (HEAD == base {base7}) and did not declare 'Outcome: no changes' — commit the work (or fix the report), then 'quaqua pipeline --resume {} {}'",
-                                        state.builder, ctx.task, ctx.task, state.repo
-                                    );
-                                    return ctx
-                                        .finish(&mut state, "blocked", 3, Some(&b))
-                                        .map(|_| ());
-                                }
-                                skip_review = true;
+                            let (changed_lines, top_dirs) = if head != state.base_sha
+                                && review_strategy == ReviewStrategy::Auto
+                            {
+                                diff_gate_stats(ctx.git, wt_path, &state.base_sha, &head)
                             } else {
+                                (0, 0)
+                            };
+                            // The one build-gate decision; the engine only honours its wire value.
+                            let gate = decide_build_gate(
+                                &BuildFacts::new(
+                                    &head,
+                                    &state.base_sha,
+                                    report_has_outcome_no_changes(&rep_content),
+                                    review_strategy,
+                                    changed_lines,
+                                    top_dirs,
+                                    ctx.review_lines,
+                                )
+                                .with_context(&state.builder, &ctx.task, &state.repo),
+                            );
+                            if let BuildGate::Blocked(b) = &gate {
+                                return ctx.finish(&mut state, "blocked", 3, Some(b)).map(|_| ());
+                            }
+
+                            let mut pcontent =
+                                std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                            if !gate.is_no_changes() {
                                 state.head_sha = head.clone();
                                 state.commit = if head.len() >= 7 {
                                     head[..7].to_string()
                                 } else {
                                     head.clone()
                                 };
-
-                                let mut pcontent =
-                                    std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
                                 pcontent.push_str(&format!(
                                     "- build: commit {} ({}.build.md)\n",
                                     state.commit, child_input.name
                                 ));
-                                let _ = std::fs::write(&ctx.pfile, pcontent);
-
-                                if state.review == "auto" {
-                                    let numstat_out = ctx.git.run_in(
-                                        wt_path,
-                                        &["diff", "--numstat", &state.base_sha, &state.head_sha],
-                                    );
-                                    let mut total_lines = 0;
-                                    if let Ok(o) = numstat_out {
-                                        for line in String::from_utf8_lossy(&o.stdout).lines() {
-                                            let parts: Vec<&str> =
-                                                line.split_whitespace().collect();
-                                            if parts.len() >= 2 {
-                                                let add: usize = parts[0].parse().unwrap_or(0);
-                                                let del: usize = parts[1].parse().unwrap_or(0);
-                                                total_lines += add + del;
-                                            }
-                                        }
-                                    }
-                                    let names_out = ctx.git.run_in(
-                                        wt_path,
-                                        &["diff", "--name-only", &state.base_sha, &state.head_sha],
-                                    );
-                                    let mut dirs = std::collections::BTreeSet::new();
-                                    if let Ok(o) = names_out {
-                                        for line in String::from_utf8_lossy(&o.stdout).lines() {
-                                            let path = line.trim();
-                                            if let Some(idx) = path.find('/') {
-                                                dirs.insert(path[..idx].to_string());
-                                            } else if !path.is_empty() {
-                                                dirs.insert(".".to_string());
-                                            }
-                                        }
-                                    }
-                                    let mut pcontent =
-                                        std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
+                                if review_strategy == ReviewStrategy::Auto {
                                     pcontent.push_str(&format!(
-                                        "- review gate: {total_lines} changed lines, {} top-level dirs (run if >{} or >1)\n",
-                                        dirs.len(),
+                                        "- review gate: {changed_lines} changed lines, {top_dirs} top-level dirs (run if >{} or >1)\n",
                                         ctx.review_lines
                                     ));
-                                    if total_lines > ctx.review_lines || dirs.len() > 1 {
-                                        state.review_run = "run".to_string();
-                                    } else {
-                                        state.review_run = "skip".to_string();
-                                        skip_review = true;
-                                        pcontent.push_str(&format!(
-                                            "- review: skipped (gate: {})\n",
-                                            state.review
-                                        ));
-                                    }
-                                    let _ = std::fs::write(&ctx.pfile, pcontent);
-                                } else if state.review == "always" {
-                                    state.review_run = "run".to_string();
-                                } else {
-                                    state.review_run = "skip".to_string();
-                                    skip_review = true;
-                                    let mut pcontent =
-                                        std::fs::read_to_string(&ctx.pfile).unwrap_or_default();
-                                    pcontent.push_str(&format!(
-                                        "- review: skipped (gate: {})\n",
-                                        state.review
-                                    ));
-                                    let _ = std::fs::write(&ctx.pfile, pcontent);
                                 }
+                                state.review_run =
+                                    if gate.is_review() { "run" } else { "skip" }.to_string();
                             }
+                            if let Some(line) = gate.pfile_line() {
+                                pcontent.push_str(&line);
+                            }
+                            let _ = std::fs::write(&ctx.pfile, pcontent);
                             let _ = state.save(&ctx.state_file);
 
                             child_output_json["report_path"] =
                                 serde_json::Value::String(build_md.to_string_lossy().to_string());
+                            child_output_json["gate"] =
+                                serde_json::Value::String(gate.wire_gate().to_string());
                             child_output_json["skip_review"] =
-                                serde_json::Value::Bool(skip_review);
-                            child_output_json["commit"] =
-                                serde_json::Value::String(state.head_sha.clone());
+                                serde_json::Value::Bool(!gate.is_review());
+                            child_output_json["commit"] = serde_json::Value::String(head);
                         } else if is_reviewer {
                             let rev_content =
                                 std::fs::read_to_string(&child_report_path).unwrap_or_default();
@@ -1760,12 +1735,16 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                             let _ = std::fs::write(&ctx.pfile, pcontent);
 
                             state.reviewer_spawned = 0;
+                            state.rounds_run = state.round;
+                            if matches!(parse_report_content(&rev_content), Ok((n, _)) if n > 0) {
+                                state.review_changed = true;
+                            }
                             let _ = state.save(&ctx.state_file);
 
                             child_output_json["report_path"] = serde_json::Value::String(
                                 child_report_path.to_string_lossy().to_string(),
                             );
-                        } else if child_id.contains("-fix-") {
+                        } else if matches!(kind, ChildKind::Fix(_)) {
                             let fix_md = ctx
                                 .runs_dir
                                 .join(format!("{}.fix{}.md", child_input.name, state.round));
@@ -1848,6 +1827,10 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 serde_json::Value::String(state.head_sha.clone());
                         }
 
+                        last_report = child_output_json
+                            .get("report_path")
+                            .and_then(|v| v.as_str())
+                            .map(PathBuf::from);
                         parent_outcome = runner::run_until_blocked(
                             &workflow,
                             &parent_wf_id,
@@ -2284,6 +2267,12 @@ impl Workflow for PipelineWorkflow {
                         state.head_sha = Some(commit.to_string());
                     }
                 }
+                if state.phase == PipelinePhase::Build {
+                    state.build_gate = output
+                        .get("gate")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                }
 
                 let worker_output: SingleWorkerOutput = match serde_json::from_value(output) {
                     Ok(o) => o,
@@ -2410,21 +2399,29 @@ impl Workflow for PipelineWorkflow {
                                             format!("build report unfinished: {reason}"),
                                         );
                                     }
-                                    if report_has_outcome_no_changes(&content) {
-                                        state.phase = PipelinePhase::Complete;
-                                        return StepDecision::Complete(PipelineOutput {
-                                            status: "clean".to_string(),
-                                            rounds: 0,
-                                            review_changed: false,
-                                            commit: state.head_sha.clone(),
-                                        });
-                                    }
                                     if let Some(commit) = extract_commit_from_report(&content) {
                                         state.head_sha = Some(commit);
                                     }
-                                    if state.input.review_strategy == ReviewStrategy::Skip
-                                        || state.review_skip
-                                    {
+                                    // The driver decided the gate once; an old journal without
+                                    // one falls back to the review strategy, never to the report.
+                                    let skip = match state.build_gate.as_deref() {
+                                        Some("no_changes") | Some("skip") => true,
+                                        Some("review") => false,
+                                        Some(other) => {
+                                            return block(
+                                                state,
+                                                PipelinePhase::Build,
+                                                state::BlockedKind::Restart,
+                                                3,
+                                                format!("unknown build gate '{other}'"),
+                                            );
+                                        }
+                                        None => {
+                                            state.input.review_strategy == ReviewStrategy::Skip
+                                                || state.review_skip
+                                        }
+                                    };
+                                    if skip {
                                         state.phase = PipelinePhase::Complete;
                                         return StepDecision::Complete(PipelineOutput {
                                             status: "clean".to_string(),
@@ -2524,6 +2521,64 @@ impl Workflow for PipelineWorkflow {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildKind {
+    Plan,
+    Build,
+    Review(u32),
+    Fix(u32),
+    Unknown,
+}
+
+/// Classifies a child id by the exact ids `PipelineWorkflow` builds, so a task slug
+/// containing `review`/`fix`/`build` cannot be mistaken for another phase.
+fn classify_child(child_id: &str, builder: &str, reviewer: &str, task: &str) -> ChildKind {
+    let round = |prefix: String| child_id.strip_prefix(&prefix).and_then(|r| r.parse::<u32>().ok());
+    if child_id == format!("{builder}-{task}-plan") {
+        ChildKind::Plan
+    } else if child_id == format!("{builder}-{task}-build") {
+        ChildKind::Build
+    } else if let Some(r) = round(format!("{reviewer}-{task}-review-r")) {
+        ChildKind::Review(r)
+    } else if let Some(r) = round(format!("{builder}-{task}-fix-r")) {
+        ChildKind::Fix(r)
+    } else {
+        ChildKind::Unknown
+    }
+}
+
+/// Changed lines (added + deleted) and distinct top-level dirs between `base` and `head`.
+fn diff_gate_stats<G: crate::git::GitOps>(
+    git: &G,
+    wt: &Path,
+    base: &str,
+    head: &str,
+) -> (usize, usize) {
+    let mut total_lines = 0;
+    if let Ok(o) = git.run_in(wt, &["diff", "--numstat", base, head]) {
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let add: usize = parts[0].parse().unwrap_or(0);
+                let del: usize = parts[1].parse().unwrap_or(0);
+                total_lines += add + del;
+            }
+        }
+    }
+    let mut dirs = std::collections::BTreeSet::new();
+    if let Ok(o) = git.run_in(wt, &["diff", "--name-only", base, head]) {
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            let path = line.trim();
+            if let Some(idx) = path.find('/') {
+                dirs.insert(path[..idx].to_string());
+            } else if !path.is_empty() {
+                dirs.insert(".".to_string());
+            }
+        }
+    }
+    (total_lines, dirs.len())
+}
+
 fn report_is_unfinished(content: &str) -> Option<&'static str> {
     for line in content.lines() {
         let t = line.trim();
@@ -2577,14 +2632,8 @@ fn parse_verdict_str(verdict_line: &str) -> Result<(u32, bool), String> {
         trimmed
     };
 
-    let rest_lower = rest.to_ascii_lowercase();
-    if rest_lower == "clean"
-        || rest_lower.starts_with("clean ")
-        || rest_lower.starts_with("clean.")
-        || rest_lower.starts_with("clean,")
-        || rest_lower.starts_with("clean:")
-        || rest_lower.starts_with("clean -")
-    {
+    // Only an exact 'clean' is clean; any trailing text fails closed.
+    if rest.eq_ignore_ascii_case("clean") {
         return Ok((0, false));
     }
 
@@ -3508,10 +3557,7 @@ mod tests {
             &mut ctx,
             Some(WorkflowEvent::ChildCompleted {
                 id: "sude-task-nochange-build".to_string(),
-                output: serde_json::to_value(
-                    SingleWorkerOutput::new(0, "runs/build-nochange.md").unwrap(),
-                )
-                .unwrap(),
+                output: build_output("runs/build-nochange.md", Some("no_changes")),
             }),
         );
 
@@ -3534,6 +3580,132 @@ mod tests {
             other => panic!("expected Complete clean with 0 rounds, got {other:?}"),
         }
         assert_eq!(state.phase, PipelinePhase::Complete);
+    }
+
+    fn build_output(report: &str, gate: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::to_value(SingleWorkerOutput::new(0, report).unwrap()).unwrap();
+        if let Some(g) = gate {
+            v["gate"] = json!(g);
+        }
+        v
+    }
+
+    fn drive_build(state: &mut PipelineWorkflowState, gate: Option<&str>, report: &str) -> StepDecision<PipelineOutput> {
+        let wf = PipelineWorkflow;
+        let mut ctx = WorkflowContext::new(1000);
+        let id = format!("{}-{}-build", state.input.builder, state.input.task);
+        state.phase = PipelinePhase::Build;
+        state.active_child_id = Some(id.clone());
+        let _ = wf.step(
+            state,
+            &mut ctx,
+            Some(WorkflowEvent::ChildCompleted { id: id.clone(), output: build_output("runs/b.md", gate) }),
+        );
+        wf.step(
+            state,
+            &mut ctx,
+            Some(WorkflowEvent::ActivityCompleted {
+                id: format!("read-build-{id}"),
+                result: ActivityResult::ReportFile(ReportFileResult::Content(report.to_string())),
+            }),
+        )
+    }
+
+    #[test]
+    fn test_design_test_10_build_gate_wiring_and_no_changes() {
+        let declared = "# Build\nOutcome: no changes\n## Lessons\nnone";
+        // Case 1: always + commits + declared no-op -> the driver's gate (review) wins.
+        let g1 = decide_build_gate(&BuildFacts::new("h1", "b0", true, ReviewStrategy::Always, 0, 0, 50));
+        assert_eq!(g1.wire_gate(), "review");
+        let mut input = PipelineInput::new("t10", "/repo", "sude", "suhuynh", "brief");
+        input.review_strategy = ReviewStrategy::Always;
+        let mut st = PipelineWorkflowState::new(input.clone());
+        match drive_build(&mut st, Some(g1.wire_gate()), declared) {
+            StepDecision::StartChild { id, .. } => assert_eq!(id, "suhuynh-t10-review-r1"),
+            other => panic!("expected review child, got {other:?}"),
+        }
+        assert_eq!(st.build_gate.as_deref(), Some("review"));
+
+        // Case 2: head == base + declared -> NoChanges, exact pfile line, clean with 0 rounds.
+        let g2 = decide_build_gate(&BuildFacts::new("b0", "b0", true, ReviewStrategy::Always, 0, 0, 50));
+        assert!(g2.is_no_changes());
+        assert_eq!(
+            g2.pfile_line().as_deref(),
+            Some("- build: no commits — builder declared 'Outcome: no changes'; nothing to review\n")
+        );
+        let mut st = PipelineWorkflowState::new(input);
+        match drive_build(&mut st, Some(g2.wire_gate()), declared) {
+            StepDecision::Complete(out) => {
+                assert_eq!(out.status, "clean");
+                assert_eq!(out.rounds, 0);
+            }
+            other => panic!("expected Complete clean, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_old_journal_missing_gate_falls_back_to_strategy() {
+        let declared = "# Build\nOutcome: no changes\n## Lessons\nnone";
+        // Always: a declared no-op in an old journal (no gate) is never inferred -> review.
+        let mut input = PipelineInput::new("toj", "/repo", "sude", "suhuynh", "brief");
+        input.review_strategy = ReviewStrategy::Always;
+        let mut st = PipelineWorkflowState::new(input.clone());
+        match drive_build(&mut st, None, declared) {
+            StepDecision::StartChild { id, .. } => assert_eq!(id, "suhuynh-toj-review-r1"),
+            other => panic!("expected review child, got {other:?}"),
+        }
+        assert_eq!(st.build_gate, None);
+
+        // Skip: falls back to the strategy -> clean, 0 rounds.
+        input.review_strategy = ReviewStrategy::Skip;
+        let mut st = PipelineWorkflowState::new(input.clone());
+        match drive_build(&mut st, None, "# Build\nDone.\n## Lessons\nnone") {
+            StepDecision::Complete(out) => assert_eq!((out.status.as_str(), out.rounds), ("clean", 0)),
+            other => panic!("expected Complete clean, got {other:?}"),
+        }
+
+        // Unknown gate value fails closed.
+        let mut st = PipelineWorkflowState::new(input);
+        match drive_build(&mut st, Some("bogus"), declared) {
+            StepDecision::PauseForApproval { reason } => assert!(reason.starts_with("blocked 3:")),
+            other => panic!("expected blocked 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_child_is_structural() {
+        // Task slugs containing phase words must not leak into another phase.
+        let task = "fix-review-build";
+        assert_eq!(classify_child("sude-fix-review-build-plan", "sude", "suhuynh", task), ChildKind::Plan);
+        assert_eq!(classify_child("sude-fix-review-build-build", "sude", "suhuynh", task), ChildKind::Build);
+        assert_eq!(
+            classify_child("suhuynh-fix-review-build-review-r2", "sude", "suhuynh", task),
+            ChildKind::Review(2)
+        );
+        assert_eq!(classify_child("sude-fix-review-build-fix-r1", "sude", "suhuynh", task), ChildKind::Fix(1));
+        assert_eq!(classify_child("sude-fix-review-build-review-r1", "sude", "suhuynh", task), ChildKind::Unknown);
+        assert_eq!(classify_child("suhuynh-other-review-r1", "sude", "suhuynh", task), ChildKind::Unknown);
+    }
+
+    #[test]
+    fn test_seed_fix_phase_uses_absolute_review_path_and_real_findings() {
+        let runs = std::env::temp_dir().join(format!("quaqua-seed-runs-{}", std::process::id()));
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::write(
+            runs.join("suhuynh-tseedr1.md"),
+            "# Review\n1. a\n2. b\n3. c\nVerdict: 3 findings\n## Lessons\nnone\n",
+        )
+        .unwrap();
+        let mut ps = PipelineState::default();
+        ps.phase = "fix".to_string();
+        ps.round = 1;
+        let input = PipelineInput::new("tseed", "/repo", "sude", "suhuynh", "brief");
+        let st = seed_state_from_pipeline_state(input, &ps, &runs);
+        let path = st.last_review_report.clone().unwrap();
+        assert!(Path::new(&path).is_absolute(), "review path must be absolute: {path}");
+        assert_eq!(PathBuf::from(&path), runs.join("suhuynh-tseedr1.md"));
+        assert_eq!(st.last_findings, 3);
+        let _ = std::fs::remove_dir_all(&runs);
     }
 
     #[test]
@@ -3803,6 +3975,10 @@ REPEOF
             exit 0
             ;;
           suhuynh-*r1)
+            if [ -f "$QUAQUA_RUNS_DIR/stub_review_r1" ]; then
+              cp "$QUAQUA_RUNS_DIR/stub_review_r1" "$QUAQUA_RUNS_DIR/$NAME.md"
+              exit 0
+            fi
             cat <<'REPEOF' > "$QUAQUA_RUNS_DIR/$NAME.md"
 # Review
 ## Findings
@@ -3855,7 +4031,6 @@ esac
     #[test]
     fn test_verdict_parser_strict() {
         assert_eq!(parse_verdict_str("Verdict: clean"), Ok((0, false)));
-        assert_eq!(parse_verdict_str("Verdict: clean."), Ok((0, false)));
         assert_eq!(parse_verdict_str("verdict: clean"), Ok((0, false)));
         assert_eq!(parse_verdict_str("Verdict: 0 findings"), Ok((0, false)));
         assert_eq!(parse_verdict_str("Verdict: 1 finding"), Ok((1, false)));
@@ -3865,6 +4040,8 @@ esac
 
         // Strict parser failures (findings #2)
         assert!(parse_verdict_str("Verdict: not clean").is_err());
+        assert!(parse_verdict_str("Verdict: clean.").is_err());
+        assert!(parse_verdict_str("Verdict: clean but see finding 2").is_err());
         assert!(parse_verdict_str("Verdict: 0 of 3 findings addressed").is_err());
         assert!(parse_verdict_str("Verdict: findings below").is_err());
         assert!(parse_verdict_str("Verdict: see above").is_err());
@@ -3917,8 +4094,14 @@ esac
             "# Build\nImplemented.\n## Lessons\nnone\n",
         ).unwrap();
 
+        // A report predating the fresh review prompt is archived, never consumed (#6):
+        // the stale clean verdict must not finish the pipeline.
         std::fs::write(
             runs_dir.join(format!("suhuynh-{task}r1.md")),
+            "# Review\nVerdict: clean\n## Lessons\nnone\n",
+        ).unwrap();
+        std::fs::write(
+            runs_dir.join("stub_review_r1"),
             "# Review\nVerdict: not clean\n## Lessons\nnone\n",
         ).unwrap();
 
@@ -3935,8 +4118,13 @@ esac
         let pfile_content = std::fs::read_to_string(runs_dir.join(format!("pipeline-{task}.md"))).unwrap();
         assert!(pfile_content.contains("- status: blocked"), "pfile must record blocked status");
         assert!(!pfile_content.contains("- status: clean"), "pfile must not record clean status");
+        let stale = std::fs::read_dir(&runs_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with(&format!("suhuynh-{task}r1.md.stale.")));
+        assert!(stale, "pre-existing review report must be archived before the fresh prompt");
 
-        // 4. Fix review report in place
+        // 4. Fix review report in place (post-prompt, so the restart consumes it)
         std::fs::write(
             runs_dir.join(format!("suhuynh-{task}r1.md")),
             "# Review\nVerdict: clean\n## Lessons\nnone\n",

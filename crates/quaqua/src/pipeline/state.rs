@@ -272,6 +272,9 @@ pub struct PipelineWorkflowState {
     pub blocked_code: i32,
     #[serde(default)]
     pub blocked_reason: Option<String>,
+    /// Build gate decided once by the driver (`BuildGate::wire_gate`); `None` on old journals.
+    #[serde(default)]
+    pub build_gate: Option<String>,
 }
 
 impl PipelineWorkflowState {
@@ -293,6 +296,7 @@ impl PipelineWorkflowState {
             blocked_kind: None,
             blocked_code: 0,
             blocked_reason: None,
+            build_gate: None,
         }
     }
 }
