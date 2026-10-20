@@ -76,7 +76,8 @@ pub struct SingleWorkerState {
     pub config: WatchdogConfig,
     pub start_ms: u64,
     pub prev_elapsed_ms: u64,
-    pub budget_deadline_ms: u64,
+    #[serde(default, alias = "budget_deadline_ms")]
+    pub allowance_deadline_ms: u64,
     pub cap_deadline_ms: u64,
     pub last_progress_ms: u64,
     pub first_progress_seen: bool,
@@ -89,8 +90,10 @@ pub struct SingleWorkerState {
     pub hook_active: bool,
     pub idle_since_ms: u64,
     pub gone_since_ms: u64,
-    pub grace_used: bool,
-    pub autoext_total_ms: u64,
+    #[serde(default, alias = "grace_used")]
+    pub overrun_granted: bool,
+    #[serde(default, alias = "autoext_total_ms")]
+    pub extension_total_ms: u64,
     pub poll_count: u64,
     pub nudged: bool,
     pub initialized: bool,
@@ -122,7 +125,7 @@ impl SingleWorkerState {
             config,
             start_ms: 0,
             prev_elapsed_ms: 0,
-            budget_deadline_ms: 0,
+            allowance_deadline_ms: 0,
             cap_deadline_ms: 0,
             last_progress_ms: 0,
             first_progress_seen: false,
@@ -135,8 +138,8 @@ impl SingleWorkerState {
             hook_active: true,
             idle_since_ms: 0,
             gone_since_ms: 0,
-            grace_used: false,
-            autoext_total_ms: 0,
+            overrun_granted: false,
+            extension_total_ms: 0,
             poll_count: 0,
             nudged: false,
             initialized: false,
@@ -162,14 +165,14 @@ impl SingleWorkerState {
     pub fn resumed(
         mut self,
         prev_elapsed_sec: u64,
-        grace_used: bool,
-        autoext_total_sec: u64,
+        overrun_granted: bool,
+        extension_total_sec: u64,
         nudged: bool,
         last_progress_sec: u64,
     ) -> Self {
         self.prev_elapsed_ms = prev_elapsed_sec * 1000;
-        self.grace_used = grace_used;
-        self.autoext_total_ms = autoext_total_sec * 1000;
+        self.overrun_granted = overrun_granted;
+        self.extension_total_ms = extension_total_sec * 1000;
         self.nudged = nudged;
         if last_progress_sec > 0 {
             self.last_progress_ms = last_progress_sec * 1000;
@@ -272,7 +275,7 @@ impl Workflow for SingleWorkerWorkflow {
                 .hard_cap_sec
                 .saturating_sub(state.prev_elapsed_ms / 1000)
                 .max(1);
-            state.budget_deadline_ms = state.start_ms + rem_budget * 1000;
+            state.allowance_deadline_ms = state.start_ms + rem_budget * 1000;
             state.cap_deadline_ms = state.start_ms + rem_cap * 1000;
 
             // Subscribe once on the first step for scoped events (pane.exited)
@@ -429,7 +432,6 @@ impl Workflow for SingleWorkerWorkflow {
                             compute_fingerprint(&state.latest_pane_text, &state.current_diff_hash);
                         if state.poll_count == 0 {
                             state.last_progress_fp = fp;
-                            state.last_progress_ms = ctx.now_ms();
                         } else if fp != state.last_progress_fp {
                             state.last_progress_fp = fp;
                             state.last_progress_ms = ctx.now_ms();
@@ -516,46 +518,46 @@ impl Workflow for SingleWorkerWorkflow {
                     }
 
                     // 4. Budget deadline check (exit 4, with grace and autoext) - checked BEFORE idle and stall
-                    if now >= state.budget_deadline_ms {
+                    if now >= state.allowance_deadline_ms {
                         // Grace (+25% once) keys to progress fingerprint advancement within 2 polls
-                        if !state.grace_used
+                        if !state.overrun_granted
                             && state.last_progress_ms > 0
                             && now.saturating_sub(state.last_progress_ms)
                                 <= state.config.poll_sec * 2 * 1000
                         {
                             let mut grace_ms = (state.input.budget_sec / 4).max(1) * 1000;
-                            if state.budget_deadline_ms + grace_ms > state.cap_deadline_ms {
+                            if state.allowance_deadline_ms + grace_ms > state.cap_deadline_ms {
                                 grace_ms = state
                                     .cap_deadline_ms
-                                    .saturating_sub(state.budget_deadline_ms);
+                                    .saturating_sub(state.allowance_deadline_ms);
                             }
                             if grace_ms > 0 {
-                                state.budget_deadline_ms += grace_ms;
-                                state.grace_used = true;
+                                state.allowance_deadline_ms += grace_ms;
+                                state.overrun_granted = true;
                             }
                         }
 
                         // Auto-extension (+25% steps up to +50% total) keys strictly to diff hash changes
                         let max_autoext_ms = (state.input.budget_sec / 2) * 1000;
-                        if state.autoext_total_ms < max_autoext_ms
+                        if state.extension_total_ms < max_autoext_ms
                             && !state.current_diff_hash.is_empty()
                             && state.current_diff_hash != state.last_autoext_diff_hash
                         {
-                            let rem = max_autoext_ms.saturating_sub(state.autoext_total_ms);
+                            let rem = max_autoext_ms.saturating_sub(state.extension_total_ms);
                             let mut ext_ms = ((state.input.budget_sec / 4).max(1) * 1000).min(rem);
-                            if state.budget_deadline_ms + ext_ms > state.cap_deadline_ms {
+                            if state.allowance_deadline_ms + ext_ms > state.cap_deadline_ms {
                                 ext_ms = state
                                     .cap_deadline_ms
-                                    .saturating_sub(state.budget_deadline_ms);
+                                    .saturating_sub(state.allowance_deadline_ms);
                             }
                             if ext_ms > 0 {
-                                state.budget_deadline_ms += ext_ms;
-                                state.autoext_total_ms += ext_ms;
+                                state.allowance_deadline_ms += ext_ms;
+                                state.extension_total_ms += ext_ms;
                                 state.last_autoext_diff_hash = state.current_diff_hash.clone();
                             }
                         }
 
-                        if now >= state.budget_deadline_ms {
+                        if now >= state.allowance_deadline_ms {
                             return complete_step(state, now, 4);
                         }
                     }

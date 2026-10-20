@@ -356,7 +356,7 @@ resume sude-noext --extend 4 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=99
 grep -q 'WATCHDOG extend +4s' "$T/err" || fail "sude-noext extend: no extend line"
 grep -qE 'elapsed=[3-9]s ' "$T/err" \
   || fail "sude-noext extend: did not wait out the extension: $(cat "$T/err")"
-echo "ok: --extend 4 -> waits 4s more, then exit 4 (allowance persisted in .budget)"
+echo "ok: --extend 4 -> waits 4s more, then exit 4 (allowance persisted in journal)"
 
 # ── D1: --extend cannot beat the hard cap -> exit 2 ────────────────────────
 run sude-extcap FAKE_DELAY=0 PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
