@@ -6,8 +6,8 @@ Status: locked, awaiting approval → to-plan
 The Rust engine lives in its own checkout `~/Lab/quaqua`. `~/quaqua` holds only the workspace and uses the installed `quaqua` binary. The workspace is the md files, memory, runs, rules, team.toml and the hooks.
 
 ## Decisions (anh iu, 2026-10-16)
-- Repo (anh iu, 2026-10-19): one upstream `therealtinhtute/quaqua` — engine on branch `engine`, workspace on `main`. Locally two dirs: the codebase checkout `~/Lab/quaqua` (named `~/Lab/quaqua-rs` on other machines; per-machine path lives in `projects/INDEX.md`, never hardcoded) and the consuming workspace `~/quaqua`.
-- History: keep it with `git subtree split` (blame and PR #42 stay traceable)
+- Repo (anh iu, 2026-10-19): one upstream `therealtinhtute/quaqua` — engine on branch `engine`, workspace on `main`. Locally two dirs: the codebase checkout `~/Lab/quaqua` (named `~/Lab/quaqua-rs` on other machines; per-machine path lives in `projects/INDEX.md`, never hardcoded) and the consuming workspace `~/quaqua`. *Branch roles superseded 2026-10-20 — see Phase 2.*
+- History: keep it with `git subtree split` (blame and PR #42 stay traceable). *Superseded 2026-10-20: one repo, nothing is split.*
 - Grid: port `grid-workers.sh` to Rust before the split
 - Order: lock the plan and run to-plan for both phases first, then build
 
@@ -22,18 +22,128 @@ The Rust engine lives in its own checkout `~/Lab/quaqua`. `~/quaqua` holds only 
   - no Rust code shells out to `grid-workers.sh`
   - cargo tests pass, and the grid tests and the targeted bash suites pass
 
-## Phase 2: split the repo
-- `git subtree split` `crates/`, `Cargo.*` and the engine tests into a new branch `engine` (history kept), push it to the same upstream `therealtinhtute/quaqua`, and clone that branch to `~/Lab/quaqua`. No new GitHub repo.
-- Install from the new repo with `cargo install --path ~/Lab/quaqua/crates/quaqua`.
-- In `~/quaqua`:
-  - `.claude/settings.json` calls `quaqua gate` directly
-  - `scripts/*` become thin shims or are removed
-  - `crates/` is removed in a reviewed commit
-- Split tests by owner: engine tests go with the code, workspace and docs tests stay in `~/quaqua`.
-- Register `quaqua-rs` in `projects/INDEX.md` with path `~/Lab/quaqua`.
-- Done when a fresh `cargo install` from `~/Lab/quaqua` plus `~/quaqua` with no `crates/` passes:
-  - a worker spawn → prompt → cleanup smoke run
-  - the gate hook
+## Phase 2: one repo, embedded workspace template
+> **Decision (anh iu, 2026-10-20)**: one upstream `main` holds the Rust engine **and** a base workspace template. No `engine`/`workspace` branches: the fork-and-prune plan (`quaqua/truonglao-p2split`, a4ebcce) is superseded. The template is embedded in the binary, so `quaqua init <dir>` needs no clone. A consuming workspace is **not** a git repo. Code moves to `~/Lab/quaqua`; `~/quaqua` becomes a consuming workspace and keeps its private state.
+
+### What goes where
+| Path in the repo (after B1) | Role | Note |
+|---|---|---|
+| `templates/workspace/**` | **managed** template, embedded | mirrors the workspace root: `AGENTS.md`, `identity.md`, `SOUL.md`, `PEER.md`, `models.md`, `team.toml`, `rules/_all/**`, `.claude/settings.json`, `.claude/rules/**`, `.claude/skills/herdr-orchestration/**`, `scripts/hooks/herdr-gate.sh`, `scripts/auditor/**` |
+| `templates/seed/**` | **seed-once**, embedded | today's `templates/memory-rules.md`, `projects-INDEX.md`, `projects-_template.md` + `USER.example.md`; copied only when the target is missing (`init.rs:104-109`), never updated |
+| `crates/**`, `Cargo.*`, `plugins/**`, `tests/**`, `.github/**`, `docs/**`, `LICENSE`, `README.md`, `SETUP-PROMPT.md` | engine-only | never copied into a workspace |
+| `AGENTS.md` (new, root) | engine-only | ≤20-line contributor stub for workers in engine worktrees: the CoS doc is `templates/workspace/AGENTS.md`; worker rules arrive via `runs/<name>.rules.md` (`worker/spawn.rs:309`) |
+| `.claude/settings.json` (root) | engine-only | same gate, path `"$CLAUDE_PROJECT_DIR"/templates/workspace/scripts/hooks/herdr-gate.sh` — engine worktrees keep the PreToolUse gate (the gap a4ebcce accepted) |
+| `memory/`, `projects/`, `runs/`, `raw/`, `reports/`, `USER.md`, `rules/<slug>/`, `docs/plans/` | private, workspace-only | never in the template; `init` never writes them except the seeds |
+
+- **One `team.toml`.** `templates/workspace/team.toml` is both the embedded default and the workspace's starting config. Re-point `include_str!("../../../team.toml")` (`config.rs:322`, `main.rs:198`, `pipeline/mod.rs:4097` as `../../../../team.toml`), `engine/activities.rs:1598-1603`, `tests/worker_unit.rs:975,1039`, `tests/config.rs:18`. Side win: a worker cwd in an engine worktree no longer finds a stray `./team.toml` first (`config.rs:315`).
+- **Gitignore trap** (`rules/_all/git-hygiene.md:1`): `memory/`, `projects/`, `runs/`, `raw/`, `reports/`, `USER.md` in `.gitignore:2-9` match at any depth. The template must hold none of those names — that is why seeds stay flat in `templates/seed/`. `rules/*/` and `docs/plans/` are anchored (middle slash), so `templates/workspace/rules/_all/` is trackable. Guard: `git check-ignore` over every embedded path (extend `test_init_workspace.sh` §0).
+- The workspace gets no `.gitignore`: it is not a repo.
+
+### Embedding + `quaqua init`
+- **Today** (`init.rs:84-139`): `run()` resolves the root from the shim's `QUAQUA_SCRIPT_DIR/../..`, else the nearest cwd ancestor with `templates/`, and fails without it. The shim (`scripts/workspace/`) no longer exists in the tree. It then creates the private dirs, copies seeds, wires `core.hooksPath` (`init.rs:178`, git repos only) and tags the CoS pane (`init.rs:311`).
+- **After** (B2):
+  - `crates/quaqua/build.rs` walks `templates/{workspace,seed}` and generates `static TEMPLATE: &[Entry { path, bytes: include_bytes!(..), mode, kind: Managed|Seed }]`, with `cargo:rerun-if-changed` on both dirs. No new crate dependency. Works for `cargo install --path` and `--git` (both build in a full checkout); `cargo publish` would not (crates.io is out of scope).
+  - `quaqua init [<dir>] [--update] [--dry-run]`. `<dir>` defaults to `workspace_root()`. The `QUAQUA_SCRIPT_DIR` and cwd-`templates/` resolution is deleted; nothing is read from disk but the target.
+  - Plain `init`: create the private dirs, write every missing managed + seed file, keep modes (`herdr-gate.sh`, `install-auditor.sh` stay 0755), write `<dir>/.quaqua/template.lock`. An existing file is never touched (today's idempotence).
+  - `wire_hooks` stays a no-op on a non-git target (already `init.rs:179-181`). `INSTALL_LINE` (`init.rs:15`) becomes `cargo install --path <checkout>/crates/quaqua --locked`.
+  - Proof of "no clone needed": `test_init_workspace.sh` stops copying `templates/` into its sandbox (`:43`) and runs `quaqua init "$T/ws"` in an empty temp dir.
+
+### `init --update` rule
+`.quaqua/template.lock` (JSON): `{ "engine": "<CARGO_PKG_VERSION>+<git sha from build.rs>", "files": { "<path>": { "md5": "<hex>", "mode": 420 } } }`, hashed with the existing `hash::md5_hex` (change detection, not security). Per managed file, with `L` = lock hash, `W` = workspace hash, `T` = new template hash:
+
+| Case | Action |
+|---|---|
+| file missing in workspace | write `T`, record |
+| `W == T` | record only |
+| `W == L`, `T != L` (untouched locally) | overwrite with `T`, record |
+| `W != L` (changed locally), or no lock entry and `W != T` | **never overwrite**: print `diff -u <path> <new>`, save `T` to `.quaqua/pending/<path>`, keep `L` |
+| path in lock, gone from template | never delete; list as `removed upstream` |
+| seed file | never updated |
+
+- Exit `0` = nothing pending; exit `3` = at least one conflict (summary line `N conflicts — see .quaqua/pending/`). The CoS decides per file: take it (`cp .quaqua/pending/<p> <p>` then re-run `--update`, which records `W == T`) or keep the local one and upstream it (below).
+- `.quaqua/pending/` is outside `rules/`, so the rule loaders (`worker/spawn.rs:317-336`, `lead/spawn.rs:245`, `.md` only) never read a pending copy.
+- `--dry-run` prints the table's decisions and writes nothing.
+- Local edits drift until upstreamed: a CoS lesson promoted into `rules/_all/` is also landed in `templates/workspace/rules/_all/` by a worker on `~/Lab/quaqua`, so the next `--update` sees `W == T`. That commit is the history and the cross-machine sync the no-git workspace no longer has.
+
+### How the binary finds the workspace at runtime
+- `workspace_root()` (`workspace.rs:21`): `QUAQUA_HOME` → `$HOME/quaqua`. Already repo-independent after P1; runs/rules/team.toml/journal go through it (`worker/spawn.rs:309`, `config.rs:318`, `engine/journal_sqlite.rs:20`, `status.rs:497`, `engine/telemetry_otel.rs:138`).
+- Still repo-shaped, fixed in B3:
+  - `find_quaqua_root()` (`workspace.rs:33`): `QUAQUA_ROOT` → shim dir → cwd ancestors → **exe ancestors** → silent cwd, keyed on `projects/INDEX.md`. Used by `lead/spawn.rs:115`, `lead/cleanup.rs:41`, `pipeline/mod.rs:87`, `auditor.rs:322`. Fold into `workspace_root()` (`QUAQUA_ROOT` kept as an alias of `QUAQUA_HOME` for one release); a missing `projects/INDEX.md` is an error, not a cwd fallback.
+  - `quaqua config get|validate` (`main.rs:153-161`) defaults to `./team.toml` only → errors outside `~/quaqua`. Default to `config::load_team_config` order. Drop the duplicate `load_spawn_config` (`main.rs:187-199`) for `config::load_team_config` (`config.rs:311`).
+  - Auditor: `resolve_auditor_root` (`auditor.rs:304`) keeps its order minus `find_quaqua_root`. Prompt step 1 reads "recent `git log`" of the workspace (`auditor.rs:23`) → read `git log` of each repo in `projects/INDEX.md` instead.
+- `scripts/hooks/herdr-gate.sh:24-27` resolves `$QUAQUA_BIN` → `quaqua` on PATH: no repo assumption. `scripts/auditor/install-auditor.sh:8` takes root from its own location (`dirname/../..`) = the workspace: fine.
+
+### Builders (CoS drives; sequential, no Lead — one owner of `crates/quaqua/src/` at a time)
+Each is one pipeline (sude build, suhuynh review, one round) from `quaqua/p2tmpl-integ` (cut from `main` after W2 lands, or W2 parked). The integ branch is **not** merged to `main` until M2: once root `AGENTS.md` moves, a `git pull` in today's `~/quaqua` would delete the live CoS doc.
+
+| # | Task | Owns | Targeted test |
+|---|---|---|---|
+| B1 | `template-move`: `git mv` the managed files into `templates/workspace/`, seeds into `templates/seed/`; new root `AGENTS.md` stub + root `.claude/settings.json`; re-point every `team.toml` read listed above; retarget `test_docs.sh` (`:22-82` read root `AGENTS.md`, `scripts/`, `rules/_all`), `test_config.sh`, `test_gate_shim.sh`, `test_herdr_gate.sh`, `test_install_auditor.sh` to `templates/workspace/` | `templates/**`, root md files, `.claude/**`, `rules/_all/**`, `scripts/**`, `team.toml`, the `include_str!`/`CARGO_MANIFEST_DIR` sites, `tests/*.sh` path lines | `cargo test --locked -p quaqua config` · `bash tests/test_docs.sh` · `bash tests/test_config.sh` · `git ls-files templates \| git check-ignore --stdin` → empty |
+| B2 | `embed-init`: `build.rs` table, `init [<dir>] --update --dry-run`, `.quaqua/template.lock`, the update rule, delete `QUAQUA_SCRIPT_DIR`/cwd resolution | `crates/quaqua/build.rs`, `crates/quaqua/Cargo.toml`, `src/init.rs`, `src/main.rs` (`Init` arm only, `:74`, `:495`), `tests/init.rs`, `tests/test_init_workspace.sh` | `cargo test --locked -p quaqua --test init` (one case per table row + `--dry-run` writes nothing + exit 3) · `bash tests/test_init_workspace.sh` |
+| B3 | `root-resolve`: fold `find_quaqua_root` into `workspace_root`, `config` default + dedupe, auditor root + prompt | `src/workspace.rs`, `src/config.rs` (load fn), `src/main.rs` (`:153-199`), `src/lead/{spawn,cleanup}.rs` (root lines), `src/pipeline/mod.rs:87`, `src/auditor.rs`, `tests/test_spawn_lead.sh`, `tests/test_cleanup_lead.sh` | `cargo test --locked -p quaqua workspace` · `cargo test --locked -p quaqua auditor` · `bash tests/test_spawn_lead.sh` |
+| gate | suhuynh reviews `p2tmpl-integ`; the CoS runs `bash tests/run.sh --slow` once | — | 0 fail |
+
+Done when: `rg -n 'QUAQUA_SCRIPT_DIR|find_quaqua_root' crates/quaqua/src` is empty; `cd "$(mktemp -d)" && quaqua init ws && test -f ws/AGENTS.md -a -x ws/scripts/hooks/herdr-gate.sh -a -f ws/.quaqua/template.lock` with the installed binary and no checkout on cwd; `bash tests/run.sh --slow` 0 fail.
+
+### `~/quaqua` migration (after the gate; nothing here runs before anh iu says go)
+Gate smoke `G`, run from `~/quaqua` (same as a4ebcce):
+```
+g() { jq -nc --arg c "$1" '{tool_name:"Bash",tool_input:{command:$c}}' | bash ~/quaqua/scripts/hooks/herdr-gate.sh >/dev/null 2>&1; echo $?; }
+[ "$(g 'herdr pane split --current --direction right')" = 2 ] && [ "$(g 'quaqua worker spawn x tieude ~/Lab/quaqua')" = 0 ]
+```
+Convert **in place**, never rename-and-swap: live panes (the CoS, herdr-restored panes) hold `~/quaqua` as their cwd inode, so a swapped dir would leave them writing relative paths into the old one while the binary writes to `$HOME/quaqua`.
+
+- **M0 preconditions** (CoS): no Lead alive (`herdr agent list` has no `*-lead`); `git -C ~/quaqua worktree list` shows only `~/quaqua` (every `~/.wt/*` of this repo cleaned — removing `.git` would orphan them); tracked tree clean or the dirty files listed (2026-10-20: ` M rules/_all/worker-timebox.md`, kept as a local edit → a conflict in M5); `git -C ~/quaqua branch --no-merged origin/main --list 'quaqua/*'` recorded in the card.
+- **M1 backup** (CoS):
+  - `git -C ~/quaqua bundle create ~/quaqua-pre-p2-<date>.bundle --all` + `git bundle verify` (every local branch, incl. unpushed `quaqua/*`).
+  - `tar --zstd -cf ~/quaqua-pre-p2-<date>.tar.zst -C ~ --exclude=quaqua/target quaqua` + `tar -tf … | grep -c '^quaqua/memory/'` > 0.
+  - Private-state manifest: `(cd ~/quaqua && find memory projects runs raw reports rules docs/plans USER.md -type f -print0 | sort -z | xargs -0 md5sum) > ~/quaqua-pre-p2-<date>.md5`.
+- **M2 merge + push** — **anh iu approves/runs**: PR `quaqua/p2tmpl-integ` → `main`, merge, push. `~/quaqua` does **not** pull it.
+- **M3 engine checkout + install** (CoS): `~/Lab/quaqua` is the existing clean clone (old `main` 3889cc8, checked 2026-10-20 in a4ebcce; re-check `git -C ~/Lab/quaqua status --porcelain --ignored` → empty). `git -C ~/Lab/quaqua pull --ff-only origin main`; import local branches: `git -C ~/Lab/quaqua fetch ~/quaqua 'refs/heads/quaqua/*:refs/heads/quaqua/*'`; `cargo install --path ~/Lab/quaqua/crates/quaqua --locked`. Verify: `cargo install --list` shows the `~/Lab/quaqua` path; `G` passes (`~/quaqua` still has its own shim); `cargo test --locked` in `~/Lab/quaqua`.
+- **M4 herdr plugin** (CoS): `~/.config/herdr/plugins.json` points at `~/quaqua/plugins/herdr-grid` (old name, read 2026-10-20). Re-register it from `~/Lab/quaqua/plugins/herdr-quaqua` with herdr's plugin command (exact subcommand unverified — check `herdr plugin --help` first). Smoke in isolation per `rules/_all/herdr-plugin-smoke.md`, then live: `quaqua grid reconcile --tab quaqua-workers --dry-run`.
+- **M5 convert** — **anh iu says go** (CoS runs; changes the live workspace):
+  1. `quaqua init --update ~/quaqua --dry-run`: expect "record only" for every managed file except local edits (conflicts). Stop on anything else.
+  2. `mv ~/quaqua/.git ~/quaqua-pre-p2-<date>.git` (kept, it is the fast rollback).
+  3. `trash` the engine-only paths, from `git -C ~/quaqua-pre-p2-<date>.git --work-tree ~/quaqua ls-files` minus the managed/seed list: `crates/ Cargo.toml Cargo.lock plugins/ tests/ .github/ docs/research/ templates/ LICENSE README.md SETUP-PROMPT.md .gitignore target/`. Never `scripts/` or `.claude/` (the live hook path), never `docs/plans/` (private). Abort if the list is empty or contains a private path.
+  4. `quaqua init --update ~/quaqua` → writes `.quaqua/template.lock`; resolve the printed conflicts.
+  - Verify: `test ! -e ~/quaqua/.git -a ! -e ~/quaqua/crates`; private manifest unchanged (`md5sum -c ~/quaqua-pre-p2-<date>.md5` → all OK); `G` passes; `quaqua config get kinds.suhuynh.model` gives the same value from `~/quaqua` and from `/`.
+- **M6 smoke** (CoS): `quaqua worker spawn tieude-p2smoke tieude ~/Lab/quaqua` → a one-line brief through `quaqua worker prompt` writes `~/quaqua/runs/tieude-p2smoke.md` → `quaqua worker cleanup tieude-p2smoke ~/Lab/quaqua`. Then a fresh Claude session in `~/quaqua`: `herdr pane split` is blocked (proves `CLAUDE_PROJECT_DIR` hooks work in a non-git dir).
+- **M7 register** (CoS, workspace md): `projects/INDEX.md` quaqua row → `~/Lab/quaqua`; `AGENTS.md` protocol uses `~/Lab/quaqua` for engine workers; `rules/_all/config-dynamic.md` (embedded default = `templates/workspace/team.toml`), `rules/_all/portable-paths.md` ("the repo syncs" → the template syncs). Upstream the same edits via a worker on `~/Lab/quaqua` so the next `--update` is clean.
+
+**Rollback**
+- Before M5: reinstall from `~/quaqua` (`cargo install --path ~/quaqua/crates/quaqua --locked`), re-point the plugin back.
+- After M5: `mv ~/quaqua-pre-p2-<date>.git ~/quaqua/.git && git -C ~/quaqua checkout -- .` (restores every trashed tracked file at `M`), `trash ~/quaqua/.quaqua`, reinstall from `~/quaqua`, plugin back. Private state was never touched; if it was, `tar -xf` the M1 archive.
+- After M2: `main` keeps the template layout; reverting it needs anh iu (push).
+
+**Live herdr panes and hooks during the switch**
+- The CoS Claude session: its hook command `"$CLAUDE_PROJECT_DIR"/scripts/hooks/herdr-gate.sh` resolves to the same file before and after M5 (step 3 never touches `scripts/`, the template copy is byte-identical). Settings content is unchanged, so no `/hooks` re-review.
+- Binary missing mid-M3 reinstall → the shim's fail-closed fallback blocks only the guarded/outward commands (`herdr-gate.sh:31-46`). Do M3 while no worker spawns.
+- Workers of other projects (`~/.wt/*` of other repos) keep running: they reach the workspace only through `workspace_root()` absolute paths, which do not change.
+- herdr session restore: panes restored with cwd `~/quaqua` still find the dir (same inode).
+
+### Needs anh iu
+- Approve this plan and the B1 layout (`templates/workspace` + `templates/seed`).
+- M2: merge `p2tmpl-integ` → `main` and push.
+- M5: go for the in-place conversion of `~/quaqua` (deletes `.git` there, kept as `~/quaqua-pre-p2-<date>.git`).
+- When to delete the M1 backups and `~/quaqua-pre-p2-<date>.git`.
+- A periodic backup for the non-git workspace (see Challenge 1).
+
+### Challenge
+1. **No-git workspace drops history and sync for CoS-edited workspace files.** Private state (`memory/`, `projects/`, …) was never in git (`.gitignore:2-9`), so it loses nothing. What loses history is the CoS's local edits to `AGENTS.md`/`rules/_all/` between upstreams, and `rules/_all/portable-paths.md` assumes "the repo syncs across machines". Mitigation in the plan: upstream every local edit to the template (M7, update rule). Gap: a disk loss before upstream loses those edits and all private state, exactly as today. Recommend a `tar --zstd` systemd user timer beside the auditor's (`~/quaqua-backups/`, 14 kept) as a follow-up — anh iu decides.
+2. **`quaqua worker spawn … ~/quaqua` stops working** (a worktree needs git). Every engine or docs task targets `~/Lab/quaqua` after M5; the CoS's own md edits stay direct (AGENTS.md rule 4). M7 updates the docs that name the repo.
+3. **herdr plugin registry points into `~/quaqua`** (`~/.config/herdr/plugins.json` → `~/quaqua/plugins/herdr-grid`, a dir name the tree no longer has). It must be re-pointed (M4) or the grid hook silently disappears once `plugins/` is trashed.
+4. **Accepted:** the engine clone gets no portable-paths `pre-commit` (`init.rs:178` wires only the init target). Follow-up: a `quaqua init --git-hooks <repo>` flag, out of this phase.
+
+### P2 risks
+| Step | Risk | Mitigation |
+|---|---|---|
+| B1 | a moved file still read from the old path (tests, `include_str!`) | `cargo test` + `run.sh --slow` at the gate; `rg -n '"\.\./\.\./team\.toml"\|\.\./\.\./\.\./team\.toml' crates` empty |
+| B1–M2 | `~/quaqua` pulls the new `main` and loses its root `AGENTS.md` | integ not merged until M2; M2 note: `~/quaqua` never pulls |
+| B2 | the embedded table misses a file or its exec bit | `init` sandbox test checks `-x` on both scripts and byte-equality against `templates/` |
+| M3 | old clone has local state | `status --porcelain --ignored` empty first |
+| M5 | trash list catches a private or live-hook path | list built from `ls-files` minus template, abort rule, md5 manifest check |
+| M5 | a pane mid-task reads a file being replaced | M0: no Lead alive, no worktree of `~/quaqua` |
+| later | `init --update` overwrites a CoS edit | only when `W == L`; every other case goes to `.quaqua/pending/` |
 
 ## Steps (to-plan 2026-10-16)
 Driver: the Lead `quaqua-rs-lead` (`quaqua lead spawn quaqua-rs`) runs the pipeline in Peer worktrees from `quaqua/quaqua-rs-integ`. The CoS verifies, and anh iu approves every push and every merge to main.
@@ -63,30 +173,8 @@ Driver: the Lead `quaqua-rs-lead` (`quaqua lead spawn quaqua-rs`) runs the pipel
    - Then: PR integ→main, anh iu approves the merge, reinstall the binary.
    - P1 is done here. The system works even if P2 never lands.
 
-### P2: split the repo
-5. **subtree**
-   - Run `git subtree split --prefix=crates -b quaqua-rs-export` on main.
-   - Create `~/Lab/quaqua`: root `Cargo.toml` (workspace), `crates/quaqua` from the export, `.github/workflows/ci.yml`, the engine shell tests.
-   - Verify:
-     - `git log --follow` on one file shows history from before PR #42
-     - `cargo test --locked` passes in the new repo
-6. **remote**
-   - Create a GitHub repo for quaqua-rs and push. This step is outward-facing: ask anh iu for the name, private/public, and approval to push.
-7. **consume**
-   - `cargo install --path ~/Lab/quaqua/crates/quaqua --locked`.
-   - In `~/quaqua`: `.claude/settings.json` calls `quaqua gate` directly.
-   - `scripts/*` stay as shims onto the binary.
-   - Verify: the gate hook still blocks a direct `herdr pane split` and allows `quaqua worker spawn`.
-8. **cut**
-   - Remove `crates/`, `Cargo.*`, and the engine tests moved in step 5 from `~/quaqua`. Use a reviewed PR, delete with `git rm`, and give anh iu the list first.
-   - Verify:
-     - `~/quaqua` contains no `.rs` files
-     - `bash tests/run.sh` (the workspace suites) is green
-     - a spawn → prompt → cleanup smoke run of a small worker succeeds
-9. **register**
-   - `projects/INDEX.md`: point quaqua-rs at path `~/Lab/quaqua`.
-   - Update `AGENTS.md`, `rules/_all/fanout-agent-grid.md` and `rules/_all/hooks.md`: say the binary comes from `~/Lab/quaqua`, and drop the `scripts/*.sh` names where nothing uses them any more.
-   - Rollback: `cargo install` from a `~/quaqua` commit taken before step 8.
+### P2: one repo, embedded template
+Steps B1–B3 and M0–M7 live in Phase 2 above (rewritten 2026-10-20).
 
 ## Fragile assumption
 Every workspace path the binary uses goes through `workspace_root()`. If one is missed, the binary silently reads or writes `~/quaqua`. The Phase 1 rg check is the guard.
