@@ -2515,11 +2515,8 @@ fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
         runs_dir.join(format!("{worker_name}.pipeline")),
         runs_dir.join(format!("{worker_name}.srt.json")),
         runs_dir.join(format!(".{worker_name}.provider_retry")),
-        runs_dir.join(format!(".{worker_name}.autoext")),
         runs_dir.join(format!(".{worker_name}.cost80")),
         runs_dir.join(format!(".{worker_name}.cost100")),
-        runs_dir.join(format!(".{worker_name}.budget")),
-        runs_dir.join(format!(".{worker_name}.grace")),
         runs_dir.join(format!(".{worker_name}.progress")),
         runs_dir.join(format!(".{worker_name}.elapsed")),
         runs_dir.join(format!(".{worker_name}.nudged")),
@@ -2624,18 +2621,6 @@ fn test_state_atomic_write_and_metadata_roundtrip() {
         Some("my-tab".to_string())
     );
     assert_eq!(WorkerMetadata::load_grid(&temp, "nonexistent"), None);
-
-    WorkerMetadata::save_budget(&temp, "worker1", 1800).unwrap();
-    assert_eq!(WorkerMetadata::load_budget(&temp, "worker1"), Some(1800));
-    assert_eq!(WorkerMetadata::load_budget(&temp, "nonexistent"), None);
-
-    assert!(!WorkerMetadata::has_grace(&temp, "worker1"));
-    WorkerMetadata::record_grace(&temp, "worker1").unwrap();
-    assert!(WorkerMetadata::has_grace(&temp, "worker1"));
-
-    assert_eq!(WorkerMetadata::load_autoext(&temp, "worker1"), 0);
-    WorkerMetadata::save_autoext(&temp, "worker1", 600).unwrap();
-    assert_eq!(WorkerMetadata::load_autoext(&temp, "worker1"), 600);
 
     assert_eq!(WorkerMetadata::load_elapsed(&temp, "worker1"), 0);
     WorkerMetadata::save_elapsed(&temp, "worker1", 120).unwrap();
