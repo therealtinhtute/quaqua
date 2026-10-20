@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# R1 gate: `quaqua config validate` / `get` on the repo-root team.toml, every
+# R1 gate: `quaqua config validate` / `get` on the workspace-template team.toml, every
 # invalid fixture rejected with its own error, and the plan's Rule -> key table
 # covers every source rule (40 rows, one per rule).
 # Targeted: builds the crate, runs cases against the real binary; nothing is
@@ -15,32 +15,32 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 bin="$root/target/debug/quaqua"
 
 # ── valid config + get ───────────────────────────────────────────────────────
-[[ "$("$bin" config validate --file "$root/team.toml")" == "ok" ]] \
+[[ "$("$bin" config validate --file "$root/templates/workspace/team.toml")" == "ok" ]] \
   || fail "repo team.toml did not validate"
 echo "ok: repo team.toml validates"
 
-rev=$("$bin" config get strategy.default_reviewer --file "$root/team.toml")
+rev=$("$bin" config get strategy.default_reviewer --file "$root/templates/workspace/team.toml")
 [[ "$rev" == "suhuynh" ]] || fail "default_reviewer = '$rev'"
 echo "ok: config get strategy.default_reviewer = suhuynh"
 
-cap=$("$bin" config get limits.max_workers_per_orchestrator --file "$root/team.toml")
+cap=$("$bin" config get limits.max_workers_per_orchestrator --file "$root/templates/workspace/team.toml")
 [[ "$cap" == "8" ]] || fail "cap = '$cap'"
-zcap=$("$bin" config get limits.max_workers_per_orchestrator --file "$root/team.toml" --project zimage)
+zcap=$("$bin" config get limits.max_workers_per_orchestrator --file "$root/templates/workspace/team.toml" --project zimage)
 [[ "$zcap" == "3" ]] || fail "zimage cap = '$zcap'"
 echo "ok: cap 8, zimage override 3"
 
-[[ "$("$bin" config get kinds.suhuynh.can_review --file "$root/team.toml")" == "true" ]] \
+[[ "$("$bin" config get kinds.suhuynh.can_review --file "$root/templates/workspace/team.toml")" == "true" ]] \
   || fail "suhuynh.can_review"
-[[ "$("$bin" config get kinds.tieude.can_review --file "$root/team.toml")" == "false" ]] \
+[[ "$("$bin" config get kinds.tieude.can_review --file "$root/templates/workspace/team.toml")" == "false" ]] \
   || fail "tieude.can_review"
 echo "ok: kinds.<k>.can_review"
 
 # team.toml is the only source of effort/fallback: tieude=max, sude falls back to suhuynh.
-[[ "$("$bin" config get kinds.tieude.effort --file "$root/team.toml")" == "max" ]] \
+[[ "$("$bin" config get kinds.tieude.effort --file "$root/templates/workspace/team.toml")" == "max" ]] \
   || fail "tieude.effort"
-[[ "$("$bin" config get kinds.detu.effort --file "$root/team.toml")" == "high" ]] \
+[[ "$("$bin" config get kinds.detu.effort --file "$root/templates/workspace/team.toml")" == "high" ]] \
   || fail "detu.effort"
-[[ "$("$bin" config get kinds.sude.fallback --file "$root/team.toml")" == "suhuynh" ]] \
+[[ "$("$bin" config get kinds.sude.fallback --file "$root/templates/workspace/team.toml")" == "suhuynh" ]] \
   || fail "sude.fallback"
 echo "ok: kinds.<k>.effort / .fallback"
 

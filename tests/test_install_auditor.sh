@@ -3,7 +3,7 @@
 # Requires python3 to parse the generated plist independently of the renderer.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-src="$(cd "$here/.." && pwd)/scripts"
+src="$(cd "$here/.." && pwd)/templates/workspace/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-install-auditor.XXXXXX")
 T=$(cd "$T" && pwd -P)
 trap 'rm -rf "$T"' EXIT
@@ -12,8 +12,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 root="$T/repo & <mac> \"quoted\" | back\\slash"
 mkdir -p "$root/scripts/auditor" "$T/bin" "$T/claude & tools" "$T/home"
 cp "$src/auditor/install-auditor.sh" "$root/scripts/auditor/"
-cp -R "$here/../scripts/auditor/systemd" "$root/scripts/auditor/"
-if [[ -d $here/../scripts/auditor/launchd ]]; then cp -R "$here/../scripts/auditor/launchd" "$root/scripts/auditor/"; fi
+cp -R "$here/../templates/workspace/scripts/auditor/systemd" "$root/scripts/auditor/"
+if [[ -d $here/../templates/workspace/scripts/auditor/launchd ]]; then cp -R "$here/../templates/workspace/scripts/auditor/launchd" "$root/scripts/auditor/"; fi
 modern_bash=""
 for b in "$BASH" "$(command -v bash)" /opt/homebrew/bin/bash /opt/zerobrew/bin/bash /usr/local/bin/bash; do
   if [[ -x $b ]] && "$b" -c '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))' 2>/dev/null; then

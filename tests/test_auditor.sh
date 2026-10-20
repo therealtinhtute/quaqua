@@ -9,7 +9,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$(cd "$here/.." && pwd)/scripts"
+src="$(cd "$here/.." && pwd)/templates/workspace/scripts"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-auditor.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -154,19 +154,19 @@ grep -q 'FAILED' "$report" || fail "failure: no failure report written"
 echo "ok: failure -> exit propagates, stub report notes the failure"
 
 # ── F8 packaging: exactly one Auditor entrypoint with all scheduling assets ──
-[[ -f $root/scripts/auditor/systemd/quaqua-auditor.service ]] || fail "pkg: no systemd service shipped"
-[[ -f $root/scripts/auditor/systemd/quaqua-auditor.timer ]] || fail "pkg: no systemd timer shipped"
-grep -q 'auditor run' "$root/scripts/auditor/systemd/quaqua-auditor.service" \
+[[ -f $root/templates/workspace/scripts/auditor/systemd/quaqua-auditor.service ]] || fail "pkg: no systemd service shipped"
+[[ -f $root/templates/workspace/scripts/auditor/systemd/quaqua-auditor.timer ]] || fail "pkg: no systemd timer shipped"
+grep -q 'auditor run' "$root/templates/workspace/scripts/auditor/systemd/quaqua-auditor.service" \
   || fail "pkg: service does not exec quaqua auditor run"
-grep -q 'OnCalendar' "$root/scripts/auditor/systemd/quaqua-auditor.timer" || fail "pkg: timer has no schedule"
+grep -q 'OnCalendar' "$root/templates/workspace/scripts/auditor/systemd/quaqua-auditor.timer" || fail "pkg: timer has no schedule"
 grep -q 'systemd' "$src/auditor/install-auditor.sh" || fail "pkg: installer does not use systemd/"
 [[ ! -d "$root/super""visor" ]] || fail "pkg: legacy runner still installed"
-[[ -f $root/scripts/auditor/launchd/com.quaqua.auditor.plist.in ]] || fail "pkg: no launchd template shipped"
-grep -q 'auditor' "$root/scripts/auditor/launchd/com.quaqua.auditor.plist.in" \
+[[ -f $root/templates/workspace/scripts/auditor/launchd/com.quaqua.auditor.plist.in ]] || fail "pkg: no launchd template shipped"
+grep -q 'auditor' "$root/templates/workspace/scripts/auditor/launchd/com.quaqua.auditor.plist.in" \
   || fail "pkg: launchd template does not use the same auditor entrypoint"
 # README.md is GitHub-side only (not tracked in this repo) — launchd install
 # coverage is asserted via the template + installer instead.
-grep -q 'reports/audit-' "$root/AGENTS.md" \
+grep -q 'reports/audit-' "$root/templates/workspace/AGENTS.md" \
   || fail "pkg: AGENTS session-start glob missing reports/audit-"
 echo "ok: packaging -> systemd + launchd share quaqua auditor run; legacy retired"
 

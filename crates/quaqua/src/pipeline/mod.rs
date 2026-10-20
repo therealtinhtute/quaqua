@@ -4094,7 +4094,11 @@ mod tests {
         .unwrap();
 
         let team_file = base_dir.join("team.toml");
-        std::fs::write(&team_file, include_str!("../../../../team.toml")).unwrap();
+        std::fs::write(
+            &team_file,
+            include_str!("../../../../templates/workspace/team.toml"),
+        )
+        .unwrap();
 
         let stub_bin = base_dir.join("herdr-stub");
         let script = r#"#!/bin/sh

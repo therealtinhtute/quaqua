@@ -24,7 +24,7 @@ export T=$(cd "$T" && pwd -P)
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/home/quaqua/rules/_all"
-cp "$repo/team.toml" "$T/team.toml"
+cp "$repo/templates/workspace/team.toml" "$T/team.toml"
 export QUAQUA_ROOT="$T"
 export QUAQUA_TEAM_TOML="$T/team.toml"
 export HOME="$T/home"

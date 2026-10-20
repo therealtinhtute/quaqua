@@ -319,7 +319,7 @@ pub fn load_team_config() -> Result<Config, (i32, String)> {
     if home_team.is_file() {
         return load(&home_team).map_err(|e| (1, format!("error: {e}\n")));
     }
-    const DEFAULT_TOML: &str = include_str!("../../../team.toml");
+    const DEFAULT_TOML: &str = include_str!("../../../templates/workspace/team.toml");
     toml::from_str(DEFAULT_TOML).map_err(|e| {
         (
             1,

@@ -11,7 +11,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd -P)"
-shim="$root/scripts/hooks/herdr-gate.sh"
+shim="$root/templates/workspace/scripts/hooks/herdr-gate.sh"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-gate-shim.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
