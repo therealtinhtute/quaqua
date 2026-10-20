@@ -1,11 +1,14 @@
-//! `quaqua init` smoke tests: boot temp skeleton roots through the built binary
-//! with `QUAQUA_SCRIPT_DIR` pointing at the shim layout
-//! (`<root>/scripts/workspace`). `PATH` is pointed at a controlled dir so no real
-//! `git`/`herdr` is ever touched unless a test deliberately links `git` in; an
-//! ambient `HERDR_BIN_PATH` cannot leak either — every invocation pins it.
+//! `quaqua init` tests: the embedded-template contract driven through the built
+//! binary. Every test injects its own fixture tree through `QUAQUA_TEMPLATE_DIR`
+//! (the documented test-only override — the production path reads the table
+//! compiled in by `build.rs`) and points `PATH` at an empty dir, so no real
+//! `git`/`herdr` is ever touched unless a test deliberately links `git` in.
+//! `HERDR_BIN_PATH` is pinned per invocation, so an ambient one cannot leak.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+use quaqua::hash::md5_hex;
 
 /// Stub `herdr` for `HERDR_BIN_PATH`: logs argv, answers the pane queries as an
 /// unregistered `claude` agent in this checkout (the pane the CoS tag is for).
@@ -36,251 +39,467 @@ fn write_script(path: &Path, body: &str) {
     }
 }
 
-fn temp_root(tag: &str) -> PathBuf {
-    let pid = std::process::id();
-    let root = std::env::temp_dir().join(format!("quaqua-init-test-{tag}-{pid}"));
-    let _ = std::fs::remove_dir_all(&root);
-    root
+fn write_file(path: &Path, body: &str, mode: u32) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
 }
 
-fn skeleton(root: &Path) {
-    std::fs::create_dir_all(root.join("scripts/workspace")).unwrap();
-    std::fs::create_dir_all(root.join("templates")).unwrap();
-    std::fs::write(root.join("templates/memory-rules.md"), "# rules\n").unwrap();
-    std::fs::write(
-        root.join("templates/projects-INDEX.md"),
-        "| slug | repo | owner |\n",
-    )
-    .unwrap();
-    std::fs::write(
-        root.join("templates/projects-_template.md"),
-        "# p\n\n## Now\n\n## Vision\n",
-    )
-    .unwrap();
-    std::fs::write(root.join("USER.example.md"), "# user\n").unwrap();
+fn path_mode(path: &Path) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        0o644
+    }
 }
 
-struct Invocation {
-    script_dir: PathBuf,
-    cwd: PathBuf,
-    path: PathBuf,
-    extra: Vec<(String, String)>,
+/// One sandbox: a canonical scratch root holding the template fixture, an empty
+/// `PATH` dir, and whatever target workspace a test asks for.
+struct Sandbox {
+    root: PathBuf,
+    tpl: PathBuf,
 }
 
-impl Invocation {
-    fn new(root: &Path) -> Self {
-        let mut inv = Invocation {
-            script_dir: root.join("scripts/workspace"),
-            cwd: PathBuf::from("/"),
-            path: root.join("nobin"),
-            extra: Vec::new(),
+impl Sandbox {
+    fn new(tag: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("quaqua-init-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // macOS /tmp is a symlink: compare against the real path everywhere.
+        let root = std::fs::canonicalize(&root).unwrap();
+        std::fs::create_dir_all(root.join("nobin")).unwrap();
+        let sb = Sandbox {
+            tpl: root.join("tpl"),
+            root,
         };
-        // Pin herdr resolution to a path that does not exist, so an ambient
-        // HERDR_BIN_PATH (a real herdr on the driving machine) is never exec'd
-        // by a test that is not about herdr resolution.
-        inv.extra.push((
-            "HERDR_BIN_PATH".to_string(),
-            root.join("nobin/herdr").to_string_lossy().to_string(),
-        ));
-        inv
+        sb.tpl_write("workspace/AGENTS.md", "# agents v1\n", 0o644);
+        sb.tpl_write("workspace/rules/_all/core.md", "rule v1\n", 0o644);
+        sb.tpl_write("workspace/scripts/hooks/herdr-gate.sh", "#!/bin/sh\n", 0o755);
+        sb.tpl_write("seed/memory-rules.md", "# rules v1\n", 0o644);
+        sb.tpl_write("seed/projects-INDEX.md", "| slug |\n", 0o644);
+        sb.tpl_write("seed/projects-_template.md", "# p\n", 0o644);
+        sb
     }
-    fn run(&self) -> Output {
+
+    fn tpl_write(&self, rel: &str, body: &str, mode: u32) {
+        write_file(&self.tpl.join(rel), body, mode);
+    }
+
+    fn tpl_remove(&self, rel: &str) {
+        std::fs::remove_file(self.tpl.join(rel)).unwrap();
+    }
+
+    fn target(&self, rel: &str) -> PathBuf {
+        self.root.join(rel)
+    }
+
+    /// A `quaqua` command: fixture template, empty PATH, herdr pinned away.
+    fn cmd(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
-        cmd.arg("init")
-            .env("QUAQUA_SCRIPT_DIR", &self.script_dir)
-            .env("PATH", &self.path)
+        cmd.env("QUAQUA_TEMPLATE_DIR", &self.tpl)
+            .env("PATH", self.root.join("nobin"))
+            .env("HERDR_BIN_PATH", self.root.join("nobin/herdr"))
             .env_remove("HERDR_PANE_ID")
-            .current_dir(&self.cwd);
-        for (k, v) in &self.extra {
-            cmd.env(k, v);
-        }
-        cmd.output().expect("failed to spawn the quaqua binary")
+            .env_remove("QUAQUA_HOME")
+            .current_dir(&self.root);
+        cmd
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.cmd()
+            .args(args)
+            .output()
+            .expect("failed to spawn the quaqua binary")
+    }
+
+    fn lock(&self, ws: &Path) -> serde_json::Value {
+        let body = std::fs::read_to_string(ws.join(".quaqua/template.lock")).expect("no lock");
+        serde_json::from_str(&body).expect("lock is not JSON")
     }
 }
 
-fn find_git() -> Option<PathBuf> {
-    let path = std::env::var("PATH").ok()?;
-    for dir in path.split(':') {
-        if dir.is_empty() {
-            continue;
-        }
-        let cand = Path::new(dir).join("git");
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    None
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).to_string()
+}
+
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
 }
 
 #[test]
-fn init_boots_a_skeleton_and_is_idempotent() {
-    let root = temp_root("boot");
-    skeleton(&root);
+fn init_writes_missing_files_with_modes_and_a_lock() {
+    let sb = Sandbox::new("boot");
+    let ws = sb.target("ws");
 
-    let out = Invocation::new(&root).run();
-    assert!(
-        out.status.success(),
-        "init failed: {}",
-        String::from_utf8_lossy(&out.stderr),
-    );
+    let out = sb.run(&["init", ws.to_str().unwrap()]);
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
+
     for d in ["memory", "projects", "raw", "runs", "reports"] {
-        assert!(root.join(d).is_dir(), "missing dir {d}/");
+        assert!(ws.join(d).is_dir(), "missing dir {d}/");
     }
-    for f in [
-        "memory/rules.md",
-        "projects/INDEX.md",
-        "projects/_template.md",
-        "USER.md",
-    ] {
-        assert!(root.join(f).is_file(), "missing seeded file {f}");
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(read(&ws.join("AGENTS.md")), "# agents v1\n");
+    assert_eq!(read(&ws.join("rules/_all/core.md")), "rule v1\n");
+    assert_eq!(read(&ws.join("memory/rules.md")), "# rules v1\n");
+    assert_eq!(read(&ws.join("projects/INDEX.md")), "| slug |\n");
+    assert_eq!(read(&ws.join("projects/_template.md")), "# p\n");
+
+    // the exec bit survives the embed
+    assert_eq!(path_mode(&ws.join("scripts/hooks/herdr-gate.sh")) & 0o111, 0o111);
+    assert_eq!(path_mode(&ws.join("AGENTS.md")) & 0o111, 0);
+
+    let lock = sb.lock(&ws);
+    let files = lock["files"].as_object().expect("lock.files");
+    let agents = &files["AGENTS.md"];
+    assert_eq!(agents["md5"], md5_hex(b"# agents v1\n"));
+    assert_eq!(agents["mode"], 420);
+    assert_eq!(agents["mode"].as_u64(), Some(0o644));
+    assert!(files.contains_key("memory/rules.md"), "seed not recorded");
     assert!(
-        stdout.contains("cargo install --path crates/quaqua"),
-        "install line missing: {stdout}",
+        lock["engine"].as_str().unwrap_or("").starts_with("0.1.0+"),
+        "engine id missing: {lock}",
     );
 
-    // re-run must not clobber local content
-    std::fs::write(root.join("memory/rules.md"), "# mine\n").unwrap();
-    let out = Invocation::new(&root).run();
+    let out = stdout(&out);
+    assert!(out.contains("workspace ready in"), "no ready line: {out}");
+    assert!(
+        out.contains("cargo install --path <checkout>/crates/quaqua --locked"),
+        "install line missing: {out}",
+    );
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+#[test]
+fn init_never_clobbers_an_existing_file() {
+    let sb = Sandbox::new("idempotent");
+    let ws = sb.target("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "# mine\n").unwrap();
+
+    let out = sb.run(&["init", ws.to_str().unwrap()]);
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
+    assert_eq!(read(&ws.join("AGENTS.md")), "# mine\n");
+
+    let out = sb.run(&["init", ws.to_str().unwrap()]);
     assert!(out.status.success(), "re-run failed");
+
+    // the pre-existing divergent file is left out of the lock, so the first
+    // --update reports it instead of overwriting it
+    let lock = sb.lock(&ws);
+    assert!(
+        lock["files"].get("AGENTS.md").is_none(),
+        "a divergent file was baselined into the lock: {lock}",
+    );
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+#[test]
+fn init_defaults_to_the_workspace_root() {
+    let sb = Sandbox::new("default-root");
+    let home = sb.target("home");
+
+    let out = sb
+        .cmd()
+        .env("QUAQUA_HOME", &home)
+        .arg("init")
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
+    assert_eq!(read(&home.join("AGENTS.md")), "# agents v1\n");
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+#[test]
+fn init_resolves_a_relative_dir_against_the_cwd() {
+    let sb = Sandbox::new("relative");
+    let out = sb.run(&["init", "rel/ws"]);
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
+    assert_eq!(read(&sb.target("rel/ws/AGENTS.md")), "# agents v1\n");
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+#[test]
+fn init_fails_closed_on_an_empty_template_dir() {
+    let sb = Sandbox::new("empty-tpl");
+    let empty = sb.target("empty-tpl");
+    std::fs::create_dir_all(&empty).unwrap();
+
+    let out = sb
+        .cmd()
+        .env("QUAQUA_TEMPLATE_DIR", &empty)
+        .args(["init", sb.target("ws").to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success(), "expected a failure");
+    assert!(
+        stderr(&out).contains("holds no workspace/ or seed/ files"),
+        "unclear failure: {}",
+        stderr(&out),
+    );
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+/// Table row 1: file missing in the workspace -> write T, record.
+#[test]
+fn update_writes_a_missing_managed_file() {
+    let sb = Sandbox::new("row1");
+    let ws = sb.target("ws");
+    assert!(sb.run(&["init", ws.to_str().unwrap()]).status.success());
+    std::fs::remove_file(ws.join("rules/_all/core.md")).unwrap();
+
+    let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(read(&ws.join("rules/_all/core.md")), "rule v1\n");
+    assert!(stdout(&out).contains("write rules/_all/core.md"), "{}", stdout(&out));
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+/// Table row 2: W == T -> record only.
+#[test]
+fn update_records_an_already_current_file() {
+    let sb = Sandbox::new("row2");
+    let ws = sb.target("ws");
+    assert!(sb.run(&["init", ws.to_str().unwrap()]).status.success());
+
+    let before = read(&ws.join("AGENTS.md"));
+    let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("record AGENTS.md"), "{}", stdout(&out));
+    assert_eq!(read(&ws.join("AGENTS.md")), before);
+
+    let lock = sb.lock(&ws);
+    assert_eq!(lock["files"]["AGENTS.md"]["md5"], md5_hex(b"# agents v1\n"));
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+/// Table row 3: W == L, T != L (untouched locally) -> overwrite with T, record.
+#[test]
+fn update_overwrites_an_untouched_file() {
+    let sb = Sandbox::new("row3");
+    let ws = sb.target("ws");
+    assert!(sb.run(&["init", ws.to_str().unwrap()]).status.success());
+
+    sb.tpl_write("workspace/AGENTS.md", "# agents v2\n", 0o644);
+    let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("overwrite AGENTS.md"), "{}", stdout(&out));
+    assert_eq!(read(&ws.join("AGENTS.md")), "# agents v2\n");
     assert_eq!(
-        std::fs::read_to_string(root.join("memory/rules.md")).unwrap(),
-        "# mine\n",
-        "re-run clobbered memory/rules.md",
+        sb.lock(&ws)["files"]["AGENTS.md"]["md5"],
+        md5_hex(b"# agents v2\n"),
     );
+    assert!(!ws.join(".quaqua/pending/AGENTS.md").exists());
 
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&sb.root);
 }
 
+/// Table row 4 (a): W != L (changed locally) -> never overwrite; pending + exit 3.
 #[test]
-fn init_fails_loudly_on_a_missing_template() {
-    let root = temp_root("missing");
-    skeleton(&root);
-    std::fs::remove_file(root.join("templates/memory-rules.md")).unwrap();
+fn update_keeps_a_locally_changed_file_and_pends_the_new_one() {
+    let sb = Sandbox::new("row4a");
+    let ws = sb.target("ws");
+    assert!(sb.run(&["init", ws.to_str().unwrap()]).status.success());
+    std::fs::write(ws.join("AGENTS.md"), "# mine\n").unwrap();
 
-    let out = Invocation::new(&root).run();
-    assert!(
-        !out.status.success(),
-        "expected failure on a missing template"
+    sb.tpl_write("workspace/AGENTS.md", "# agents v2\n", 0o644);
+    let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
+    assert_eq!(out.status.code(), Some(3), "expected exit 3: {}", stderr(&out));
+
+    assert_eq!(read(&ws.join("AGENTS.md")), "# mine\n", "local edit lost");
+    assert_eq!(
+        read(&ws.join(".quaqua/pending/AGENTS.md")),
+        "# agents v2\n",
+        "new template not saved to pending/",
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    // the lock keeps L: the conflict is re-reported until resolved
+    assert_eq!(
+        sb.lock(&ws)["files"]["AGENTS.md"]["md5"],
+        md5_hex(b"# agents v1\n"),
+    );
+    let out_text = stdout(&out);
     assert!(
-        stderr.contains("missing template"),
-        "unclear failure: {stderr}",
+        out_text.contains("conflict AGENTS.md -> .quaqua/pending/AGENTS.md"),
+        "{out_text}",
+    );
+    assert!(
+        out_text.contains("1 conflicts — see .quaqua/pending/"),
+        "{out_text}",
     );
 
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&sb.root);
 }
 
-/// Finding 3 (runs/suhuynh-r5r1.md): the root is canonicalized (`pwd -P`), so a
-/// symlinked checkout path seeds the real dir and reports the real path.
+/// Table row 4 (b): no lock entry and W != T -> never overwrite; exit 3.
 #[test]
-fn init_uses_the_canonical_root_for_a_symlinked_path() {
-    let real = temp_root("symlink-real");
-    skeleton(&real);
-    let link = temp_root("symlink-link");
-    std::os::unix::fs::symlink(&real, &link).unwrap();
+fn update_treats_a_preexisting_divergent_file_as_a_conflict() {
+    let sb = Sandbox::new("row4b");
+    let ws = sb.target("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "# foreign\n").unwrap();
 
-    let mut inv = Invocation::new(&real);
-    inv.script_dir = link.join("scripts/workspace");
-    let out = inv.run();
-    assert!(
-        out.status.success(),
-        "init failed through a symlink: {}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    assert!(
-        real.join("memory/rules.md").is_file(),
-        "seeded files not written to the canonical root",
-    );
-    let canonical = std::fs::canonicalize(&real).unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains(&format!("workspace ready in {}", canonical.display())),
-        "root not canonicalized: {stdout}",
-    );
+    let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
+    assert_eq!(out.status.code(), Some(3), "expected exit 3: {}", stderr(&out));
+    assert_eq!(read(&ws.join("AGENTS.md")), "# foreign\n");
+    assert_eq!(read(&ws.join(".quaqua/pending/AGENTS.md")), "# agents v1\n");
 
-    let _ = std::fs::remove_dir_all(&link);
-    let _ = std::fs::remove_dir_all(&real);
+    let _ = std::fs::remove_dir_all(&sb.root);
 }
 
-/// Finding 4 (runs/suhuynh-r5r1.md): a bad `QUAQUA_SCRIPT_DIR` hint has exactly
-/// one candidate (`<hint>/../..`) and fails there — it never silently falls back
-/// to a different checkout found from cwd.
+/// Taking the pending copy and re-running records W == T.
 #[test]
-fn init_fails_when_the_script_dir_hint_has_no_templates() {
-    let cwd_root = temp_root("hint-cwd");
-    skeleton(&cwd_root);
-    let hint = temp_root("hint-bad");
-    std::fs::create_dir_all(hint.join("scripts/workspace")).unwrap();
-
-    let mut inv = Invocation::new(&hint);
-    inv.cwd = cwd_root.clone();
-    let out = inv.run();
-    assert!(
-        !out.status.success(),
-        "expected failure for a hint with no templates/",
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("no templates/ in"),
-        "unclear failure: {stderr}",
-    );
-    assert!(
-        !cwd_root.join("memory").exists(),
-        "init fell back to a different checkout found from cwd",
+fn update_accepts_a_pending_copy_on_the_next_run() {
+    let sb = Sandbox::new("row4-take");
+    let ws = sb.target("ws");
+    assert!(sb.run(&["init", ws.to_str().unwrap()]).status.success());
+    std::fs::write(ws.join("AGENTS.md"), "# mine\n").unwrap();
+    sb.tpl_write("workspace/AGENTS.md", "# agents v2\n", 0o644);
+    assert_eq!(
+        sb.run(&["init", ws.to_str().unwrap(), "--update"])
+            .status
+            .code(),
+        Some(3),
     );
 
-    let _ = std::fs::remove_dir_all(&cwd_root);
-    let _ = std::fs::remove_dir_all(&hint);
+    std::fs::copy(
+        ws.join(".quaqua/pending/AGENTS.md"),
+        ws.join("AGENTS.md"),
+    )
+    .unwrap();
+    let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(read(&ws.join("AGENTS.md")), "# agents v2\n");
+
+    let _ = std::fs::remove_dir_all(&sb.root);
 }
 
-/// Finding 5 (runs/suhuynh-r5r1.md): a failed `git config core.hooksPath` write
-/// fails the run (bash `set -e`), instead of printing `workspace ready` with
-/// unwired hooks.
+/// Table row 5: path in the lock, gone from the template -> never delete.
+#[test]
+fn update_lists_a_file_removed_upstream_and_keeps_it() {
+    let sb = Sandbox::new("row5");
+    let ws = sb.target("ws");
+    assert!(sb.run(&["init", ws.to_str().unwrap()]).status.success());
+    sb.tpl_remove("workspace/rules/_all/core.md");
+
+    let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(ws.join("rules/_all/core.md").is_file(), "file was deleted");
+    assert!(
+        stdout(&out).contains("removed upstream rules/_all/core.md"),
+        "{}",
+        stdout(&out),
+    );
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+/// Table row 6: seed files are never updated.
+#[test]
+fn update_never_touches_a_seed() {
+    let sb = Sandbox::new("row6");
+    let ws = sb.target("ws");
+    assert!(sb.run(&["init", ws.to_str().unwrap()]).status.success());
+    std::fs::write(ws.join("memory/rules.md"), "# mine\n").unwrap();
+
+    sb.tpl_write("seed/memory-rules.md", "# rules v2\n", 0o644);
+    let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(read(&ws.join("memory/rules.md")), "# mine\n");
+    assert!(!ws.join(".quaqua/pending/memory/rules.md").exists());
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+/// `--dry-run` prints the decisions and writes nothing: no pending copy, no
+/// lock, not even the private dirs on a plain init.
+#[test]
+fn dry_run_writes_nothing() {
+    let sb = Sandbox::new("dryrun");
+    let ws = sb.target("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "# foreign\n").unwrap();
+
+    let out = sb.run(&["init", ws.to_str().unwrap(), "--update", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(3), "expected exit 3: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("conflict AGENTS.md"), "{text}");
+    assert!(text.contains("write rules/_all/core.md"), "{text}");
+    assert!(text.contains("nothing written"), "{text}");
+    assert!(!ws.join(".quaqua").exists(), "dry run created .quaqua/");
+    assert_eq!(read(&ws.join("AGENTS.md")), "# foreign\n");
+
+    // plain init --dry-run: no dirs, no files, exit 0
+    let fresh = sb.target("fresh");
+    let out = sb.run(&["init", fresh.to_str().unwrap(), "--dry-run"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(!fresh.exists(), "dry run created the target dir");
+    assert!(stdout(&out).contains("would create memory/"));
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
 #[test]
 fn init_fails_when_it_cannot_wire_hooks() {
     let Some(git) = find_git() else {
         return; // no git on PATH: nothing to assert
     };
-    let root = temp_root("hookfail");
-    skeleton(&root);
+    let sb = Sandbox::new("hookfail");
+    let ws = sb.target("ws");
+    std::fs::create_dir_all(&ws).unwrap();
     let ok = Command::new(&git)
         .args(["init", "-q"])
-        .arg(&root)
+        .arg(&ws)
         .status()
         .expect("git init");
     assert!(ok.success(), "git init failed");
 
     // A controlled PATH with only git, so no real herdr is reachable.
-    let bin = root.join("bin");
+    let bin = sb.target("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::os::unix::fs::symlink(&git, bin.join("git")).unwrap();
     // Point git's config file at a directory: reads report "unset", the write fails.
-    let configdir = root.join("configdir");
+    let configdir = sb.target("configdir");
     std::fs::create_dir_all(&configdir).unwrap();
 
-    let mut inv = Invocation::new(&root);
-    inv.path = bin;
-    inv.extra.push(("GIT_CONFIG".to_string(), configdir.to_string_lossy().to_string()));
-    let out = inv.run();
+    let out = sb
+        .cmd()
+        .env("PATH", &bin)
+        .env("GIT_CONFIG", &configdir)
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn");
     assert!(
         !out.status.success(),
         "expected failure when core.hooksPath cannot be written",
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("failed to set core.hooksPath"),
-        "unclear failure: {stderr}",
+        stderr(&out).contains("failed to set core.hooksPath"),
+        "unclear failure: {}",
+        stderr(&out),
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !stdout.contains("workspace ready"),
-        "run reported success despite unwired hooks: {stdout}",
+        !stdout(&out).contains("workspace ready"),
+        "run reported success despite unwired hooks: {}",
+        stdout(&out),
     );
 
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&sb.root);
 }
 
 #[test]
@@ -288,91 +507,84 @@ fn init_wires_embedded_hook_and_migrates_legacy() {
     let Some(git) = find_git() else {
         return;
     };
-    let root = temp_root("wirehook");
-    skeleton(&root);
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let sb = Sandbox::new("wirehook");
+    let ws = sb.target("ws");
+    std::fs::create_dir_all(&ws).unwrap();
     let ok = Command::new(&git)
         .args(["init", "-q"])
-        .arg(&root)
+        .arg(&ws)
         .status()
         .expect("git init");
     assert!(ok.success(), "git init failed");
 
-    let bin = root.join("bin");
+    let bin = sb.target("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::os::unix::fs::symlink(&git, bin.join("git")).unwrap();
 
-    // 1. Fresh clone: wires .git/quaqua-hooks/pre-commit (+exec) and sets core.hooksPath
-    let mut inv = Invocation::new(&root);
-    inv.path = bin.clone();
-    let out = inv.run();
-    assert!(out.status.success(), "init failed: {}", String::from_utf8_lossy(&out.stderr));
+    let run = |args: &[&str]| {
+        sb.cmd()
+            .env("PATH", &bin)
+            .args(args)
+            .output()
+            .expect("spawn")
+    };
 
-    let hook = root.join(".git/quaqua-hooks/pre-commit");
+    // 1. Fresh target: wires .git/quaqua-hooks/pre-commit (+exec) and sets core.hooksPath
+    let out = run(&["init", ws.to_str().unwrap()]);
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
+
+    let hook = ws.join(".git/quaqua-hooks/pre-commit");
     assert!(hook.is_file(), "hook was not created");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
-        assert_eq!(mode & 0o111, 0o111, "hook is not executable");
-    }
-
-    let hook_content = std::fs::read_to_string(&hook).unwrap();
-    assert!(hook_content.contains("portable-paths.md"));
+    assert_eq!(path_mode(&hook) & 0o111, 0o111, "hook is not executable");
+    assert!(read(&hook).contains("portable-paths.md"));
 
     let hooks_path = Command::new(&git)
         .arg("-C")
-        .arg(&root)
+        .arg(&ws)
         .args(["config", "--get", "core.hooksPath"])
         .output()
         .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&hooks_path.stdout).trim(),
-        root.join(".git/quaqua-hooks").to_string_lossy().trim()
+        ws.join(".git/quaqua-hooks").to_string_lossy().trim()
     );
 
     // 2. Modified hook is refreshed + logged
     std::fs::write(&hook, "tampered").unwrap();
-    let out = inv.run();
+    let out = run(&["init", ws.to_str().unwrap()]);
     assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("hooks: refreshed"), "no refresh log: {stdout}");
-    assert_eq!(std::fs::read_to_string(&hook).unwrap(), hook_content);
+    assert!(
+        stdout(&out).contains("hooks: refreshed"),
+        "no refresh log: {}",
+        stdout(&out),
+    );
+    assert!(read(&hook).contains("portable-paths.md"));
 
     // 3. Legacy migration: core.hooksPath set to scripts/hooks
-    let legacy_path = root.join("scripts/hooks");
+    let legacy = ws.join("scripts/hooks");
     let ok = Command::new(&git)
         .arg("-C")
-        .arg(&root)
-        .args(["config", "core.hooksPath", &legacy_path.to_string_lossy()])
+        .arg(&ws)
+        .args(["config", "core.hooksPath", &legacy.to_string_lossy()])
         .status()
         .unwrap();
     assert!(ok.success());
 
-    let out = inv.run();
+    let out = run(&["init", ws.to_str().unwrap()]);
     assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("migrated core.hooksPath"), "no migration log: {stdout}");
-
-    let hooks_path = Command::new(&git)
-        .arg("-C")
-        .arg(&root)
-        .args(["config", "--get", "core.hooksPath"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&hooks_path.stdout).trim(),
-        root.join(".git/quaqua-hooks").to_string_lossy().trim()
+    assert!(
+        stdout(&out).contains("migrated core.hooksPath"),
+        "no migration log: {}",
+        stdout(&out),
     );
 
     // 4. Idempotent re-run is quiet
-    let out = inv.run();
+    let out = run(&["init", ws.to_str().unwrap()]);
     assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("migrated"), "re-run logged migration: {stdout}");
-    assert!(!stdout.contains("core.hooksPath="), "re-run logged core.hooksPath: {stdout}");
+    assert!(!stdout(&out).contains("migrated"));
+    assert!(!stdout(&out).contains("core.hooksPath="));
 
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&sb.root);
 }
 
 /// Every herdr exec `quaqua init` makes — the pane queries (pane current/get,
@@ -380,31 +592,28 @@ fn init_wires_embedded_hook_and_migrates_legacy() {
 /// `HERDR_BIN_PATH` names, not one found through `PATH`.
 #[test]
 fn init_resolves_herdr_through_herdr_bin_path_only() {
-    let root = temp_root("herdrbin");
-    skeleton(&root);
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let sb = Sandbox::new("herdrbin");
+    let ws = sb.target("ws");
 
-    let stub = root.join("stub/herdr");
+    let stub = sb.target("stub/herdr");
     std::fs::create_dir_all(stub.parent().unwrap()).unwrap();
-    let log = root.join("stub.calls");
+    let log = sb.target("stub.calls");
     write_script(
         &stub,
         &HERDR_STUB
             .replace("@LOG@", &log.display().to_string())
-            .replace("@CWD@", &root.display().to_string()),
+            .replace("@CWD@", &ws.display().to_string()),
     );
 
     // 1. No herdr on PATH at all: only HERDR_BIN_PATH can answer, so every
     //    query and the tag itself must have gone through the stub.
-    let mut inv = Invocation::new(&root);
-    inv.extra
-        .push(("HERDR_BIN_PATH".to_string(), stub.display().to_string()));
-    let out = inv.run();
-    assert!(
-        out.status.success(),
-        "init failed: {}",
-        String::from_utf8_lossy(&out.stderr),
-    );
+    let out = sb
+        .cmd()
+        .env("HERDR_BIN_PATH", &stub)
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     for want in [
         "pane current",
@@ -421,24 +630,22 @@ fn init_resolves_herdr_through_herdr_bin_path_only() {
 
     // 2. A decoy herdr FIRST on PATH: with HERDR_BIN_PATH set it must never be
     //    executed, and the tag must still come from the stub.
-    let marker = root.join("decoy.ran");
-    let decoy_dir = root.join("decoy");
+    let marker = sb.target("decoy.ran");
+    let decoy_dir = sb.target("decoy");
     std::fs::create_dir_all(&decoy_dir).unwrap();
     write_script(
         &decoy_dir.join("herdr"),
         &HERDR_DECOY.replace("@MARKER@", &marker.display().to_string()),
     );
     std::fs::remove_file(&log).unwrap();
-    let mut inv = Invocation::new(&root);
-    inv.path = decoy_dir;
-    inv.extra
-        .push(("HERDR_BIN_PATH".to_string(), stub.display().to_string()));
-    let out = inv.run();
-    assert!(
-        out.status.success(),
-        "init failed: {}",
-        String::from_utf8_lossy(&out.stderr),
-    );
+    let out = sb
+        .cmd()
+        .env("PATH", &decoy_dir)
+        .env("HERDR_BIN_PATH", &stub)
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
     assert!(
         !marker.exists(),
         "the PATH herdr was executed despite HERDR_BIN_PATH",
@@ -449,5 +656,19 @@ fn init_resolves_herdr_through_herdr_bin_path_only() {
         "the HERDR_BIN_PATH binary did not tag the CoS pane: {calls}",
     );
 
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+fn find_git() -> Option<PathBuf> {
+    let path = std::env::var("PATH").ok()?;
+    for dir in path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let cand = Path::new(dir).join("git");
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
 }

@@ -1,18 +1,43 @@
-//! `quaqua init` boots the per-workspace personal state a fresh clone needs
-//! (`memory/`, `projects/`, `raw/`, `runs/`, `reports/`, seeded files), wires
-//! `core.hooksPath`, tags the real CoS pane in herdr, and prints the install line.
+//! `quaqua init` boots a workspace from the template embedded in the binary:
+//! the private dirs (`memory/`, `projects/`, `raw/`, `runs/`, `reports/`), the
+//! managed template files, the seed files, `.quaqua/template.lock`, git hooks
+//! on a repo target, and the CoS pane tag.
 //!
-//! Idempotent: an existing target is never overwritten — every file is copied
-//! only when missing. The repo root is resolved from the shim's
-//! `QUAQUA_SCRIPT_DIR` (the shim lives at `<root>/scripts/workspace/`), else
-//! from cwd, exactly as the bash script resolves it from its own location.
+//! `quaqua init [<dir>] [--update] [--dry-run]`:
+//! - `<dir>` defaults to [`workspace_root`](crate::workspace::workspace_root).
+//!   Nothing but the target is read from disk — the template is embedded
+//!   (`build.rs` → `$OUT_DIR/template_table.rs`), so no checkout is needed.
+//! - plain `init` writes what is missing and never touches an existing file.
+//! - `--update` reconciles managed files against the lock (`.quaqua/template.lock`):
+//!   missing → write; already equal → record; untouched since the lock → overwrite;
+//!   changed locally (or no lock entry) → never overwrite — save the new template
+//!   to `.quaqua/pending/<path>` and exit 3.
+//! - `--dry-run` prints the decisions and writes nothing.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::herdr::{Herdr, HerdrOps};
+use serde::{Deserialize, Serialize};
 
-const INSTALL_LINE: &str = "cargo install --path crates/quaqua";
+use crate::hash::md5_hex;
+use crate::herdr::{Herdr, HerdrOps};
+use crate::workspace::workspace_root;
+
+const INSTALL_LINE: &str = "cargo install --path <checkout>/crates/quaqua --locked";
+
+/// gitignored personal-state dirs (AGENTS.md '## Memory').
+const PRIVATE_DIRS: &[&str] = &["memory", "projects", "raw", "runs", "reports"];
+
+/// Seed files are copied to a workspace path that differs from their template
+/// name; the source names live in `templates/seed/` (flat: the `.gitignore`
+/// patterns `memory/`, `projects/` match at any depth — `rules/_all/git-hygiene.md`).
+const SEED_TARGETS: &[(&str, &str)] = &[
+    ("memory-rules.md", "memory/rules.md"),
+    ("projects-INDEX.md", "projects/INDEX.md"),
+    ("projects-_template.md", "projects/_template.md"),
+    ("USER.example.md", "USER.md"),
+];
 
 const PRE_COMMIT_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # pre-commit — rules/_all/portable-paths.md: reject a commit whose ADDED lines
@@ -81,93 +106,424 @@ done <<<"$diff"
 exit 1
 "#;
 
-pub fn run() -> Result<(), String> {
-    let root = resolve_root()?;
-    if !root.join("templates").is_dir() {
-        return Err(format!("init-workspace: no templates/ in {}", root.display()));
+/// One embedded template file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// Path relative to the template subdir (`workspace/` or `seed/`).
+    pub path: &'static str,
+    pub kind: Kind,
+    /// Permission bits of the source file (`0o755` stays executable).
+    pub mode: u32,
+    pub bytes: &'static [u8],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Mirrors the workspace root; reconciled by `--update`.
+    Managed,
+    /// Copied only when missing; never updated.
+    Seed,
+}
+
+// `ENTRIES` (managed + seed files, in path order) and `ENGINE`
+// (`<CARGO_PKG_VERSION>+<short sha>`) written by build.rs.
+include!(concat!(env!("OUT_DIR"), "/template_table.rs"));
+
+/// `.quaqua/template.lock`: the engine that wrote the workspace and the hash of
+/// every template file as last written. md5 is change detection, not security.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Lock {
+    engine: String,
+    files: BTreeMap<String, LockEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LockEntry {
+    md5: String,
+    mode: u32,
+}
+
+impl Lock {
+    fn load(root: &Path) -> Result<Self, String> {
+        let path = lock_path(root);
+        if !path.is_file() {
+            return Ok(Self::default());
+        }
+        let body = std::fs::read_to_string(&path)
+            .map_err(|e| format!("init: cannot read {}: {e}", path.display()))?;
+        serde_json::from_str(&body)
+            .map_err(|e| format!("init: corrupt {}: {e} (delete it to re-baseline)", path.display()))
     }
 
-    // gitignored personal-state dirs (AGENTS.md '## Memory')
-    for d in ["memory", "projects", "raw", "runs", "reports"] {
+    fn save(&self, root: &Path) -> Result<(), String> {
+        let path = lock_path(root);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("init: cannot create {}: {e}", parent.display()))?;
+        }
+        let mut lock = Lock {
+            engine: self.engine.clone(),
+            files: self.files.clone(),
+        };
+        lock.engine = ENGINE.to_string();
+        let body = serde_json::to_string_pretty(&lock).map_err(|e| format!("init: {e}"))?;
+        std::fs::write(&path, format!("{body}\n"))
+            .map_err(|e| format!("init: cannot write {}: {e}", path.display()))
+    }
+}
+
+fn lock_path(root: &Path) -> PathBuf {
+    root.join(".quaqua/template.lock")
+}
+
+/// Entry point for `quaqua init [<dir>] [--update] [--dry-run]`.
+/// Returns the process exit code: `0` ok, `3` at least one `--update` conflict.
+pub fn run(target: Option<&Path>, update: bool, dry_run: bool) -> Result<i32, String> {
+    let entries = template_entries()?;
+    let root = resolve_target(target, dry_run)?;
+    let mut lock = Lock::load(&root)?;
+
+    if update {
+        run_update(&root, &entries, &mut lock, dry_run)
+    } else {
+        run_init(&root, &entries, &mut lock, dry_run)?;
+        Ok(0)
+    }
+}
+
+/// Plain `init`: create what is missing, never touch an existing file.
+fn run_init(root: &Path, entries: &[Entry], lock: &mut Lock, dry_run: bool) -> Result<(), String> {
+    for d in PRIVATE_DIRS {
         let p = root.join(d);
         if p.is_dir() {
             continue;
         }
-        std::fs::create_dir_all(&p).map_err(|e| format!("init-workspace: cannot create {d}/: {e}"))?;
+        if dry_run {
+            println!("would create {d}/");
+            continue;
+        }
+        std::fs::create_dir_all(&p).map_err(|e| format!("init: cannot create {d}/: {e}"))?;
         println!("created {d}/");
     }
 
-    // seed <repo-relative-source> <repo-relative-target>: copy only when the
-    // target is missing, never clobber an existing local file. The source is
-    // checked first, so a missing template fails loudly even on a populated
-    // workspace.
-    for (src, dst) in [
-        ("templates/memory-rules.md", "memory/rules.md"),
-        ("templates/projects-INDEX.md", "projects/INDEX.md"),
-        ("templates/projects-_template.md", "projects/_template.md"),
-        ("USER.example.md", "USER.md"),
-    ] {
-        seed(&root, src, dst)?;
+    for e in entries {
+        let rel = target_path(e);
+        let dst = root.join(&rel);
+        let want = md5_hex(e.bytes);
+        match md5_file(&dst)? {
+            None => {
+                if dry_run {
+                    println!("create {rel}");
+                    continue;
+                }
+                write_file(&dst, e.bytes, e.mode)?;
+                println!("created {rel}");
+                lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+            }
+            Some(have) if have == want => {
+                // already current — record it, restore the template mode
+                if !dry_run {
+                    apply_mode(&dst, e.mode)?;
+                }
+                lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+            }
+            // Existing and different: left byte-for-byte alone *and* left out of
+            // the lock, so the first `--update` sees "no lock entry, W != T" and
+            // reports a conflict instead of silently overwriting a workspace
+            // that predates the template.
+            Some(_) => {}
+        }
     }
 
-    wire_hooks(&root)?;
-    tag_cos_pane(&root);
-
+    if dry_run {
+        println!("dry run: nothing written");
+        return Ok(());
+    }
+    wire_hooks(root)?;
+    lock.save(root)?;
+    tag_cos_pane(root);
     println!("workspace ready in {}", root.display());
     println!("{INSTALL_LINE}");
     Ok(())
 }
 
-/// Root = the shim's `<QUAQUA_SCRIPT_DIR>/../..` (bash: `dirname($0)/../..`)
-/// when the shim sets the variable, else the nearest cwd ancestor holding
-/// `templates/`. The result is canonicalized (`pwd -P`), so a symlinked
-/// checkout compares equal to herdr's real cwd.
-fn resolve_root() -> Result<PathBuf, String> {
-    if let Ok(sd) = std::env::var("QUAQUA_SCRIPT_DIR") {
-        if !sd.is_empty() {
-            let p = PathBuf::from(&sd);
-            let cand = p
-                .parent()
-                .and_then(|x| x.parent())
-                .map(PathBuf::from)
-                .unwrap_or(p);
-            return Ok(canonical(cand));
+/// `--update`: the lock table from the plan's "init --update rule".
+fn run_update(
+    root: &Path,
+    entries: &[Entry],
+    lock: &mut Lock,
+    dry_run: bool,
+) -> Result<i32, String> {
+    let mut conflicts = 0usize;
+    let mut targets: BTreeSet<String> = BTreeSet::new();
+
+    for e in entries {
+        let rel = target_path(e);
+        targets.insert(rel.clone());
+        let dst = root.join(&rel);
+        let want = md5_hex(e.bytes);
+        let have = md5_file(&dst)?;
+
+        // Seed files: copied only when missing, never updated.
+        if e.kind == Kind::Seed {
+            match have {
+                None => {
+                    if dry_run {
+                        println!("create {rel} (seed)");
+                        continue;
+                    }
+                    write_file(&dst, e.bytes, e.mode)?;
+                    println!("created {rel} (seed)");
+                    lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+                }
+                Some(h) if h == want => {
+                    lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+                }
+                Some(_) => println!("keep {rel} (seed, never updated)"),
+            }
+            continue;
+        }
+
+        let locked = lock.files.get(&rel).map(|x| x.md5.clone());
+
+        match have {
+            // row 1: missing in the workspace -> write T, record
+            None => {
+                if dry_run {
+                    println!("write {rel}");
+                    continue;
+                }
+                write_file(&dst, e.bytes, e.mode)?;
+                println!("write {rel}");
+                lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+            }
+            // row 2: W == T -> record only
+            Some(have) if have == want => {
+                if !dry_run {
+                    apply_mode(&dst, e.mode)?;
+                }
+                println!("record {rel}");
+                lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+            }
+            // row 3: W == L, T != L (untouched locally) -> overwrite with T
+            Some(have) if Some(&have) == locked.as_ref() => {
+                if dry_run {
+                    println!("overwrite {rel}");
+                    continue;
+                }
+                write_file(&dst, e.bytes, e.mode)?;
+                println!("overwrite {rel}");
+                lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+            }
+            // row 4: changed locally, or no lock entry and W != T -> never
+            // overwrite: pending copy + diff, keep L
+            Some(_) => {
+                conflicts += 1;
+                let pending_rel = format!(".quaqua/pending/{rel}");
+                if dry_run {
+                    println!("conflict {rel} -> {pending_rel}");
+                    continue;
+                }
+                let pending = root.join(&pending_rel);
+                write_file(&pending, e.bytes, e.mode)?;
+                println!("conflict {rel} -> {pending_rel}");
+                print_diff(&dst, &pending);
+            }
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(r) = find_root_up(&cwd) {
-            return Ok(canonical(r));
-        }
-        return Ok(canonical(cwd));
-    }
-    Err("init-workspace: no templates/ in repo root".to_string())
-}
 
-fn canonical(p: PathBuf) -> PathBuf {
-    std::fs::canonicalize(&p).unwrap_or(p)
-}
-
-fn find_root_up(start: &Path) -> Option<PathBuf> {
-    for anc in start.ancestors() {
-        if anc.join("templates").is_dir() {
-            return Some(anc.to_path_buf());
+    // row 5: in the lock, gone from the template -> never delete
+    for rel in lock.files.keys() {
+        if !targets.contains(rel) {
+            println!("removed upstream {rel} (kept)");
         }
     }
-    None
+
+    if !dry_run {
+        lock.save(root)?;
+    } else {
+        println!("dry run: nothing written");
+    }
+
+    if conflicts > 0 {
+        println!("{conflicts} conflicts — see .quaqua/pending/");
+        Ok(3)
+    } else {
+        Ok(0)
+    }
 }
 
-fn seed(root: &Path, src_rel: &str, dst_rel: &str) -> Result<(), String> {
-    let src = root.join(src_rel);
-    let dst = root.join(dst_rel);
-    if !src.is_file() {
-        return Err(format!("init-workspace: missing template: {src_rel}"));
+/// The workspace-relative destination of a template entry.
+fn target_path(e: &Entry) -> String {
+    if e.kind == Kind::Seed {
+        if let Some((_, dst)) = SEED_TARGETS.iter().find(|(src, _)| *src == e.path) {
+            return (*dst).to_string();
+        }
     }
-    if dst.exists() {
-        return Ok(());
+    e.path.to_string()
+}
+
+/// The template list: the embedded table, or — for tests — a fixture tree that
+/// mirrors `<repo>/templates/{workspace,seed}`.
+///
+/// Why an env override and not a second build: the integration tests drive the
+/// built binary, so a template has to be injectable at run time. `QUAQUA_TEMPLATE_DIR`
+/// is an explicit absolute path (no cwd ancestors, no shim guess), unset in every
+/// normal run, and a directory with neither `workspace/` nor `seed/` fails closed.
+/// It exercises the same `Entry` list and the same update algorithm as the
+/// embedded table instead of duplicating the rule in the tests.
+fn template_entries() -> Result<Vec<Entry>, String> {
+    if let Some(dir) = std::env::var_os("QUAQUA_TEMPLATE_DIR") {
+        let dir = PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return load_fixture(&dir);
+        }
     }
-    std::fs::copy(&src, &dst).map_err(|e| format!("init-workspace: cannot create {dst_rel}: {e}"))?;
-    println!("created {dst_rel}");
+    if ENTRIES.is_empty() {
+        return Err(
+            "init: this binary has no embedded template (templates/ was missing at build time)"
+                .to_string(),
+        );
+    }
+    Ok(ENTRIES.to_vec())
+}
+
+fn load_fixture(dir: &Path) -> Result<Vec<Entry>, String> {
+    let mut out = Vec::new();
+    for (sub, kind) in [("workspace", Kind::Managed), ("seed", Kind::Seed)] {
+        let base = dir.join(sub);
+        if !base.is_dir() {
+            continue;
+        }
+        load_dir(&base, &base, kind, &mut out)?;
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "init: QUAQUA_TEMPLATE_DIR={} holds no workspace/ or seed/ files",
+            dir.display()
+        ));
+    }
+    out.sort_by(|a, b| a.path.cmp(b.path));
+    Ok(out)
+}
+
+fn load_dir(base: &Path, dir: &Path, kind: Kind, out: &mut Vec<Entry>) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir)
+        .map_err(|e| format!("init: cannot read {}: {e}", dir.display()))?;
+    for ent in rd {
+        let path = ent
+            .map_err(|e| format!("init: cannot read {}: {e}", dir.display()))?
+            .path();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name == ".git" || name == ".DS_Store" {
+            continue;
+        }
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| format!("init: cannot stat {}: {e}", path.display()))?;
+        if meta.is_dir() {
+            load_dir(base, &path, kind, out)?;
+            continue;
+        }
+        if !meta.is_file() {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(base)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or(name);
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("init: cannot read {}: {e}", path.display()))?;
+        // The process is short-lived (one CLI run, one test binary): leaking the
+        // fixture keeps a single `Entry` shape for both sources.
+        let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+        let rel: &'static str = Box::leak(rel.into_boxed_str());
+        out.push(Entry {
+            path: rel,
+            kind,
+            mode: mode_of(&meta),
+            bytes,
+        });
+    }
     Ok(())
+}
+
+/// `<dir>` (relative paths resolve against the cwd) or the workspace root.
+fn resolve_target(target: Option<&Path>, dry_run: bool) -> Result<PathBuf, String> {
+    let raw = match target {
+        Some(p) if !p.as_os_str().is_empty() => {
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| format!("init: cannot read the cwd: {e}"))?
+                    .join(p)
+            }
+        }
+        _ => workspace_root(),
+    };
+    if raw.is_file() {
+        return Err(format!("init: {} is a file, not a directory", raw.display()));
+    }
+    if !dry_run {
+        std::fs::create_dir_all(&raw)
+            .map_err(|e| format!("init: cannot create {}: {e}", raw.display()))?;
+    }
+    Ok(std::fs::canonicalize(&raw).unwrap_or(raw))
+}
+
+fn md5_file(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(md5_hex(&bytes))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("init: cannot read {}: {e}", path.display())),
+    }
+}
+
+fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("init: cannot create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("init: cannot write {}: {e}", path.display()))?;
+    apply_mode(path, mode)
+}
+
+fn apply_mode(path: &Path, mode: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .map_err(|e| format!("init: cannot chmod {}: {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn mode_of(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn mode_of(_meta: &std::fs::Metadata) -> u32 {
+    0o644
+}
+
+/// Show the local file against the pending template, best effort: a missing
+/// `diff` binary must not fail the sync (the pending copy is the contract).
+fn print_diff(local: &Path, pending: &Path) {
+    let _ = Command::new("diff")
+        .arg("-u")
+        .arg(local)
+        .arg(pending)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Wire `core.hooksPath` -> `<root>/.git/quaqua-hooks` on a real git repo, generating

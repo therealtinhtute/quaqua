@@ -70,8 +70,17 @@ enum Command {
     },
     /// PreToolUse(Bash) hook: block direct pane/workspace spawn/move calls.
     Gate,
-    /// Boot the per-workspace personal state a fresh clone needs.
-    Init,
+    /// Boot (or update) a workspace from the embedded template.
+    Init {
+        /// Target workspace (default: the workspace root).
+        dir: Option<PathBuf>,
+        /// Reconcile managed template files against .quaqua/template.lock.
+        #[arg(long)]
+        update: bool,
+        /// Print the decisions without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// OpenCode usage audit.
     Usage {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -492,8 +501,12 @@ fn main() {
             },
         },
         Some(Command::Gate) => quaqua::gate::run(),
-        Some(Command::Init) => match quaqua::init::run() {
-            Ok(()) => 0,
+        Some(Command::Init {
+            dir,
+            update,
+            dry_run,
+        }) => match quaqua::init::run(dir.as_deref(), update, dry_run) {
+            Ok(code) => code,
             Err(e) => {
                 eprintln!("{e}");
                 1
