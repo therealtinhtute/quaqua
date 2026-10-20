@@ -2,6 +2,8 @@
 
 Status: locked, awaiting approval → to-plan
 
+Diagrams: `quaqua-rs-split.tldr` — open in tldraw; pages: Overview (high-level), Engine P2 (v2.1.1), Workflow (high-level), Workflow (detail), SLP vs Quaqua.
+
 ## Goal
 The Rust engine lives in its own checkout `~/Lab/quaqua`. `~/quaqua` holds only the workspace and uses the installed `quaqua` binary. The workspace is the md files, memory, runs, rules, team.toml and the hooks.
 
