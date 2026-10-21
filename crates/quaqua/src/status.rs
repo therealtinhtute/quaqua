@@ -5,8 +5,11 @@
 //! and flags coordination anomalies like `WAITER-LOST` (issue #47).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use crate::worker::cleanup::WorkerTelemetryRow;
+use crate::worker::prompt::cost::Tokens;
 
 use crate::cap::is_task_worker_name;
 use crate::herdr::HerdrOps;
@@ -493,7 +496,19 @@ pub fn render_status<H: HerdrOps>(
 }
 
 /// CLI entrypoint for `quaqua status`.
-pub fn handle_status<H: HerdrOps>(_args: &[String], herdr: &H) -> Result<i32, String> {
+pub fn handle_status<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, String> {
+    if args.iter().any(|a| a == "--metrics" || a.starts_with("--metrics=")) {
+        let metrics_args = parse_metrics_args(args)?;
+        let runs_dir = if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
+            PathBuf::from(dir)
+        } else {
+            crate::workspace::workspace_root().join("runs")
+        };
+        let out = render_metrics(&runs_dir, &metrics_args)?;
+        print!("{out}");
+        return Ok(0);
+    }
+
     let db_path = crate::workspace::workspace_root()
         .join("runs")
         .join("quaqua.db");
@@ -501,6 +516,317 @@ pub fn handle_status<H: HerdrOps>(_args: &[String], herdr: &H) -> Result<i32, St
     let report = render_status(&db_path, &runs_dir, herdr)?;
     print!("{report}");
     Ok(0)
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MetricsArgs {
+    pub metrics: bool,
+    pub since: String,
+    pub owner: Option<String>,
+    pub json: bool,
+}
+
+pub fn parse_metrics_args(args: &[String]) -> Result<MetricsArgs, String> {
+    let mut parsed = MetricsArgs {
+        metrics: false,
+        since: "24h".to_string(),
+        owner: None,
+        json: false,
+    };
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--metrics" {
+            parsed.metrics = true;
+        } else if let Some(val) = arg.strip_prefix("--metrics=") {
+            parsed.metrics = true;
+            if !val.is_empty() {
+                parsed.since = val.to_string();
+            }
+        } else if arg == "--json" {
+            parsed.json = true;
+        } else if arg == "--since" {
+            i += 1;
+            if i < args.len() {
+                parsed.since = args[i].clone();
+            } else {
+                return Err("missing value for --since".to_string());
+            }
+        } else if let Some(val) = arg.strip_prefix("--since=") {
+            parsed.since = val.to_string();
+        } else if arg == "--owner" {
+            i += 1;
+            if i < args.len() {
+                parsed.owner = Some(args[i].clone());
+            } else {
+                return Err("missing value for --owner".to_string());
+            }
+        } else if let Some(val) = arg.strip_prefix("--owner=") {
+            parsed.owner = Some(val.to_string());
+        }
+        i += 1;
+    }
+
+    Ok(parsed)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PipelineTelemetryItem {
+    pub ts: String,
+    #[serde(default = "default_pipeline_rec")]
+    pub rec: String,
+    pub task: String,
+    pub repo: String,
+    pub builder: String,
+    pub reviewer: String,
+    pub review: String,
+    pub rounds: u32,
+    #[serde(default)]
+    pub review_changed_outcome: bool,
+    pub status: String,
+    pub minutes: u64,
+}
+
+fn default_pipeline_rec() -> String {
+    "pipeline".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetricsReport {
+    pub since: String,
+    pub workers: Vec<WorkerTelemetryRow>,
+    pub pipelines: Vec<PipelineTelemetryItem>,
+    pub total: MetricsTotal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetricsTotal {
+    pub workers: usize,
+    pub usd: f64,
+    pub claude_unpriced: usize,
+    pub wall_sec: u64,
+}
+
+pub fn parse_since_cutoff(since: &str, now_ms: u64) -> u64 {
+    let trimmed = since.trim();
+    if let Some(num_str) = trimmed.strip_suffix('h') {
+        if let Ok(hours) = num_str.parse::<u64>() {
+            return now_ms.saturating_sub(hours * 3600 * 1000);
+        }
+    } else if let Some(num_str) = trimmed.strip_suffix('d') {
+        if let Ok(days) = num_str.parse::<u64>() {
+            return now_ms.saturating_sub(days * 86400 * 1000);
+        }
+    } else if let Some(num_str) = trimmed.strip_suffix('m') {
+        if let Ok(mins) = num_str.parse::<u64>() {
+            return now_ms.saturating_sub(mins * 60 * 1000);
+        }
+    } else if let Some(ms) = crate::worker::prompt::cost::parse_iso_timestamp_ms(trimmed) {
+        return ms;
+    }
+    now_ms.saturating_sub(24 * 3600 * 1000)
+}
+
+pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
+    let now_sec = crate::util::now_sec();
+    let now_ms = now_sec * 1000;
+    let cutoff_ms = parse_since_cutoff(&args.since, now_ms);
+
+    let tele_path = runs_dir.join("telemetry.jsonl");
+    let mut workers = Vec::new();
+    let mut pipelines = Vec::new();
+
+    if let Ok(file) = std::fs::File::open(&tele_path) {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+
+            let ts_ms = v
+                .get("ts")
+                .and_then(|t| t.as_str())
+                .and_then(crate::worker::prompt::cost::parse_iso_timestamp_ms)
+                .unwrap_or(0);
+
+            if ts_ms < cutoff_ms {
+                continue;
+            }
+
+            let rec = v.get("rec").and_then(|r| r.as_str());
+            if rec == Some("worker") {
+                if let Ok(row) = serde_json::from_str::<WorkerTelemetryRow>(trimmed) {
+                    if let Some(o) = &args.owner {
+                        if row.owner.as_deref() != Some(o.as_str()) {
+                            continue;
+                        }
+                    }
+                    workers.push(row);
+                }
+            } else {
+                if let Ok(row) = serde_json::from_str::<PipelineTelemetryItem>(trimmed) {
+                    pipelines.push(row);
+                }
+            }
+        }
+    }
+
+    let mut total_usd = 0.0;
+    let mut claude_unpriced = 0usize;
+    let mut total_wall_sec = 0u64;
+
+    for w in &workers {
+        if let Some(usd) = w.usd {
+            total_usd += usd;
+        } else if w.harness.as_deref() == Some("claude") || w.spend_src == "claude-tokens" {
+            claude_unpriced += 1;
+        }
+        if let Some(wall) = w.wall_sec {
+            total_wall_sec += wall;
+        }
+    }
+    let worker_count = workers.len();
+    MetricsReport {
+        since: args.since.clone(),
+        workers,
+        pipelines,
+        total: MetricsTotal {
+            workers: worker_count,
+            usd: (total_usd * 10000.0).round() / 10000.0,
+            claude_unpriced,
+            wall_sec: total_wall_sec,
+        },
+    }
+}
+
+fn format_token_metric(tok: Option<&Tokens>) -> String {
+    let Some(t) = tok else {
+        return "-".to_string();
+    };
+    let in_str = format_compact_number(t.in_tokens);
+    let out_str = format_compact_number(t.out_tokens);
+    let cache_str = format_compact_number(t.cache_read);
+    format!("{in_str}/{out_str}/{cache_str}")
+}
+
+fn format_compact_number(n: u64) -> String {
+    if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        format!("{:.1}M", m)
+    } else if n >= 1_000 {
+        let k = (n as f64 / 1000.0).round() as u64;
+        format!("{k}k")
+    } else {
+        format!("{n}")
+    }
+}
+
+fn format_duration_metric(sec: u64) -> String {
+    if sec >= 3600 {
+        let h = sec / 3600;
+        let m = ((sec % 3600) as f64 / 60.0).round() as u64;
+        if m > 0 {
+            format!("{h}h{m}m")
+        } else {
+            format!("{h}h")
+        }
+    } else if sec >= 60 {
+        let m = (sec as f64 / 60.0).round() as u64;
+        format!("{m}m")
+    } else {
+        format!("{sec}s")
+    }
+}
+
+pub fn render_metrics_text(report: &MetricsReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "=== Metrics (runs/telemetry.jsonl, since {}) ===\n",
+        report.since
+    ));
+    out.push_str("name              kind/harness       owner  exit  wall/budget  $/budget      tokens in/out/cache   pipeline\n");
+
+    for w in &report.workers {
+        let name = &w.name;
+        let kind_harness = format!(
+            "{}/{}",
+            w.kind.as_deref().unwrap_or("-"),
+            w.harness.as_deref().unwrap_or("-")
+        );
+        let owner = w.owner.as_deref().unwrap_or("-");
+        let exit = w
+            .exit
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "-".to_string());
+
+        let wall_str = w
+            .wall_sec
+            .map(format_duration_metric)
+            .unwrap_or_else(|| "-".to_string());
+        let budget_str = w
+            .budget_sec
+            .map(format_duration_metric)
+            .unwrap_or_else(|| "-".to_string());
+        let wall_budget = format!("{wall_str}/{budget_str}");
+
+        let cost_str = match w.usd {
+            Some(c) if c < 0.1 => format!("{c:.3}"),
+            Some(c) => format!("{c:.2}"),
+            None => "-".to_string(),
+        };
+        let cost_budget_str = match w.usd_budget {
+            Some(b) => format!("{b:.2}"),
+            None => "-".to_string(),
+        };
+        let cost_budget = format!("{cost_str}/{cost_budget_str}");
+
+        let tokens_str = format_token_metric(w.tokens.as_ref());
+        let pipeline_str = w.pipeline.as_deref().unwrap_or("-");
+
+        out.push_str(&format!(
+            "{name:<17} {kind_harness:<18} {owner:<6} {exit:<5} {wall_budget:<12} {cost_budget:<13} {tokens_str:<21} {pipeline_str}\n"
+        ));
+    }
+
+    if !report.pipelines.is_empty() {
+        let p_strs: Vec<String> = report
+            .pipelines
+            .iter()
+            .map(|p| format!("{} {} r{} {}m", p.task, p.status, p.rounds, p.minutes))
+            .collect();
+        out.push_str(&format!("pipelines: {}\n", p_strs.join(" · ")));
+    } else {
+        out.push_str("pipelines: none\n");
+    }
+
+    let unpriced_str = if report.total.claude_unpriced > 0 {
+        format!(" (+{} claude unpriced)", report.total.claude_unpriced)
+    } else {
+        String::new()
+    };
+    let total_wall_str = format_duration_metric(report.total.wall_sec);
+    out.push_str(&format!(
+        "total: {} workers · ${:.2}{} · {}\n",
+        report.total.workers, report.total.usd, unpriced_str, total_wall_str
+    ));
+
+    out
+}
+
+pub fn render_metrics(runs_dir: &Path, args: &MetricsArgs) -> Result<String, String> {
+    let report = read_metrics(runs_dir, args);
+    if args.json {
+        serde_json::to_string_pretty(&report)
+            .map(|s| format!("{s}\n"))
+            .map_err(|e| format!("json serialization error: {e}"))
+    } else {
+        Ok(render_metrics_text(&report))
+    }
 }
 
 #[cfg(test)]
@@ -1250,5 +1576,95 @@ mod tests {
         assert!(out.contains("arch-lead"));
         assert!(out.contains("sude-w1"));
         assert!(out.contains("WAIT"));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod metrics {
+    use super::*;
+
+    #[test]
+    fn test_status_metrics_rendering_and_json_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("status-metrics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let runs_dir = tmp.join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+
+        let tele_path = runs_dir.join("telemetry.jsonl");
+
+        // Old legacy row without rec
+        let old_pipeline_row = r#"{"ts":"2026-10-21T10:00:00+07:00","task":"w2","repo":"/Personal/baroiplayer","builder":"sude","reviewer":"quansu","review":"run","rounds":2,"review_changed_outcome":false,"status":"clean","minutes":84}"#;
+
+        // New pipeline row with rec: "pipeline"
+        let new_pipeline_row = r#"{"ts":"2026-10-21T11:00:00+07:00","rec":"pipeline","task":"w6","repo":"/Personal/baroiplayer","builder":"sude","reviewer":"quansu","review":"run","rounds":1,"review_changed_outcome":true,"status":"blocked","minutes":27}"#;
+
+        // Worker rows
+        let worker_row1 = r#"{"ts":"2026-10-21T12:00:00+07:00","rec":"worker","name":"tieude-p74lock","kind":"tieude","harness":"opencode","owner":"cos","pipeline":null,"repo":"~/quaqua","prompts":1,"exit":0,"wall_sec":409,"budget_sec":1500,"usd":0.0458,"usd_budget":1.0,"tokens":{"in":94574,"out":16991,"reasoning":0,"cache_read":3754496,"cache_write":0},"spend_src":"opencode-db","model":"deepseek-v4.1-flash"}"#;
+
+        let worker_row2 = r#"{"ts":"2026-10-21T12:10:00+07:00","rec":"worker","name":"detu-claudediff","kind":"detu","harness":"omp","owner":"cos","pipeline":null,"repo":"~/Personal/baroiplayer","prompts":1,"exit":0,"wall_sec":420,"budget_sec":2400,"usd":0.41,"usd_budget":2.0,"tokens":{"in":17371,"out":952,"reasoning":0,"cache_read":0,"cache_write":0},"spend_src":"omp-session","model":"gemini-3.8-flash"}"#;
+
+        let worker_row3 = r#"{"ts":"2026-10-21T12:20:00+07:00","rec":"worker","name":"truonglao-metrics","kind":"truonglao","harness":"claude","owner":"cos","pipeline":null,"repo":"~/Personal/baroiplayer","prompts":1,"exit":0,"wall_sec":2280,"budget_sec":2400,"usd":null,"usd_budget":3.0,"tokens":{"in":6995,"out":1262,"reasoning":0,"cache_read":1262078,"cache_write":0},"spend_src":"claude-tokens","model":"claude-opus-5-5"}"#;
+
+        std::fs::write(
+            &tele_path,
+            format!("{old_pipeline_row}\n{new_pipeline_row}\n{worker_row1}\n{worker_row2}\n{worker_row3}\n"),
+        ).unwrap();
+
+        // Test text rendering
+        let args = MetricsArgs {
+            metrics: true,
+            since: "2026-10-21T00:00:00Z".to_string(),
+            owner: None,
+            json: false,
+        };
+
+        let rendered = render_metrics(&runs_dir, &args).unwrap();
+        assert!(rendered.contains("=== Metrics (runs/telemetry.jsonl, since 2026-10-21T00:00:00Z) ==="));
+        assert!(rendered.contains("tieude-p74lock"));
+        assert!(rendered.contains("detu-claudediff"));
+        assert!(rendered.contains("truonglao-metrics"));
+        assert!(rendered.contains("0.046/1.00"));
+        assert!(rendered.contains("0.41/2.00"));
+        assert!(rendered.contains("-/3.00"));
+        assert!(rendered.contains("95k/17k/3.8M"));
+        assert!(rendered.contains("pipelines: w2 clean r2 84m · w6 blocked r1 27m"));
+        assert!(rendered.contains("total: 3 workers · $0.46 (+1 claude unpriced)"));
+
+        // Test --json round-trip
+        let json_args = MetricsArgs {
+            metrics: true,
+            since: "2026-10-21T00:00:00Z".to_string(),
+            owner: None,
+            json: true,
+        };
+        let json_str = render_metrics(&runs_dir, &json_args).unwrap();
+        let parsed_report: MetricsReport = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed_report.workers.len(), 3);
+        assert_eq!(parsed_report.pipelines.len(), 2);
+        assert_eq!(parsed_report.total.workers, 3);
+        assert!((parsed_report.total.usd - 0.4558).abs() < 1e-3);
+        assert_eq!(parsed_report.total.claude_unpriced, 1);
+
+        // Test --owner filter
+        let cos_args = MetricsArgs {
+            metrics: true,
+            since: "2026-10-21T00:00:00Z".to_string(),
+            owner: Some("cos".to_string()),
+            json: false,
+        };
+        let cos_rendered = render_metrics(&runs_dir, &cos_args).unwrap();
+        assert!(cos_rendered.contains("tieude-p74lock"));
+
+        let other_args = MetricsArgs {
+            metrics: true,
+            since: "2026-10-21T00:00:00Z".to_string(),
+            owner: Some("other-owner".to_string()),
+            json: false,
+        };
+        let other_rendered = render_metrics(&runs_dir, &other_args).unwrap();
+        assert!(!other_rendered.contains("tieude-p74lock"));
+        assert!(other_rendered.contains("total: 0 workers"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
