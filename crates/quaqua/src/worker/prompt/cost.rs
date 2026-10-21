@@ -199,22 +199,59 @@ fn session_line_cost(v: &serde_json::Value) -> Option<f64> {
     find(v)
 }
 
+/// Tracks the model of the newest record, independent of file or hash order.
+///
+/// A record with a timestamp beats one without; higher timestamps win, and a
+/// tie (or two records without timestamps) goes to the later `seq` in
+/// file-then-line order.
+#[derive(Default)]
+struct NewestModel {
+    best: Option<(Option<u64>, u64, String)>,
+}
+
+impl NewestModel {
+    fn observe(&mut self, ts_ms: Option<u64>, seq: u64, model: &str) {
+        let replace = match &self.best {
+            None => true,
+            Some((best_ts, best_seq, _)) => match (ts_ms, *best_ts) {
+                (Some(ts), Some(best)) => ts > best || (ts == best && seq > *best_seq),
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => seq > *best_seq,
+            },
+        };
+        if replace {
+            self.best = Some((ts_ms, seq, model.to_string()));
+        }
+    }
+
+    fn into_model(self) -> Option<String> {
+        self.best.map(|(_, _, model)| model)
+    }
+}
+
 /// Reads omp spend from session transcripts in `root`.
 pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -> Option<Spend> {
     use std::io::BufRead;
     let dir = root.join(omp_session_dir_name(cwd, home));
-    let entries = std::fs::read_dir(&dir).ok()?;
+    // `read_dir` order is filesystem-dependent, so sort before reading; the
+    // model is then chosen by per-message timestamp, not by the last file read.
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect();
+    files.sort();
     let mut total_cost = 0.0;
     let mut tokens = Tokens::default();
     let mut found_cost = false;
     let mut found_usage = false;
-    let mut last_model: Option<String> = None;
+    let mut newest_model = NewestModel::default();
+    let mut seq = 0u64;
 
-    for entry in entries.flatten() {
-        if entry.path().extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(file) = std::fs::File::open(entry.path()) else {
+    for path in &files {
+        let Ok(file) = std::fs::File::open(path) else {
             continue;
         };
         for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
@@ -224,6 +261,7 @@ pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
+            seq += 1;
 
             if let Some(fence) = since_ms {
                 if let Some(ts_str) = v.get("timestamp").and_then(|t| t.as_str()) {
@@ -266,7 +304,11 @@ pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -
                 .and_then(|m| m.as_str());
             if let Some(m) = model {
                 if !m.is_empty() && m != "<synthetic>" {
-                    last_model = Some(m.to_string());
+                    let ts_ms = v
+                        .get("timestamp")
+                        .and_then(|t| t.as_str())
+                        .and_then(parse_iso_timestamp_ms);
+                    newest_model.observe(ts_ms, seq, m);
                 }
             }
         }
@@ -277,7 +319,7 @@ pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -
             usd: if found_cost { Some(total_cost) } else { None },
             tokens: if found_usage { Some(tokens) } else { None },
             spend_src: "omp-session".to_string(),
-            model: last_model,
+            model: newest_model.into_model(),
         })
     } else {
         None
@@ -337,9 +379,13 @@ pub fn claude_spend_in(
     if candidate_files.is_empty() {
         return None;
     }
+    // `read_dir` order is filesystem-dependent: sort so the no-timestamp
+    // fallback below is deterministic too.
+    candidate_files.sort();
 
-    // Deduplicate by message.id
-    let mut dedup_map: HashMap<String, (Tokens, Option<String>)> = HashMap::new();
+    // Deduplicate by message.id, keeping the last emission of each message.
+    let mut dedup_map: HashMap<String, (Tokens, Option<String>, Option<u64>, u64)> = HashMap::new();
+    let mut seq = 0u64;
 
     for file_path in candidate_files {
         let Ok(file) = std::fs::File::open(&file_path) else {
@@ -390,7 +436,12 @@ pub fn claude_spend_in(
                     Some(m.to_string())
                 }
             });
+            let ts_ms = v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(parse_iso_timestamp_ms);
 
+            seq += 1;
             dedup_map.insert(
                 msg_id.to_string(),
                 (
@@ -402,6 +453,8 @@ pub fn claude_spend_in(
                         cache_write,
                     },
                     model,
+                    ts_ms,
+                    seq,
                 ),
             );
         }
@@ -412,11 +465,11 @@ pub fn claude_spend_in(
     }
 
     let mut total_tokens = Tokens::default();
-    let mut last_model: Option<String> = None;
-    for (tok, model) in dedup_map.values() {
+    let mut newest_model = NewestModel::default();
+    for (tok, model, ts_ms, msg_seq) in dedup_map.values() {
         total_tokens.add(tok);
-        if model.is_some() {
-            last_model = model.clone();
+        if let Some(m) = model {
+            newest_model.observe(*ts_ms, *msg_seq, m);
         }
     }
 
@@ -424,7 +477,7 @@ pub fn claude_spend_in(
         usd: None,
         tokens: Some(total_tokens),
         spend_src: "claude-tokens".to_string(),
-        model: last_model,
+        model: newest_model.into_model(),
     })
 }
 
@@ -1438,6 +1491,103 @@ pub(crate) mod spend {
         let spend_fenced = omp_spend_in(&root, cwd, "/path/to/worktree", Some(fence_ms)).unwrap();
         assert!((spend_fenced.usd.unwrap() - 0.025).abs() < 1e-9);
         assert_eq!(spend_fenced.tokens.unwrap().in_tokens, 200);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_omp_model_newest_by_timestamp_not_file_order() {
+        let tmp = std::env::temp_dir().join(format!("omp-model-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("sessions");
+        let cwd = "/path/to/worktree/.wt/sude-switch";
+        let dir = root.join("-.wt-sude-switch");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // `a.jsonl` sorts first and its first line is the newest message;
+        // `b.jsonl` sorts last and holds the oldest message. Reading the last
+        // line (or the last file) would report `model-old`, not `model-new`.
+        std::fs::write(
+            dir.join("a.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-10-21T12:00:00.000Z","message":{"model":"model-new","usage":{"input":10,"output":1,"cost":{"total":0.01}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-10-21T11:30:00.000Z","message":{"model":"model-mid","usage":{"input":10,"output":1,"cost":{"total":0.01}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-10-21T11:00:00.000Z","message":{"model":"model-old","usage":{"input":10,"output":1,"cost":{"total":0.01}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let spend = omp_spend_in(&root, cwd, "/path/to/worktree", None).unwrap();
+        assert_eq!(spend.model.as_deref(), Some("model-new"));
+
+        // Records without a timestamp fall back to file-then-line order.
+        std::fs::write(
+            dir.join("a.jsonl"),
+            r#"{"message":{"model":"model-first","usage":{"input":1,"output":1,"cost":{"total":0.01}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.jsonl"),
+            r#"{"message":{"model":"model-last","usage":{"input":1,"output":1,"cost":{"total":0.01}}}}"#,
+        )
+        .unwrap();
+
+        let spend = omp_spend_in(&root, cwd, "/path/to/worktree", None).unwrap();
+        assert_eq!(spend.model.as_deref(), Some("model-last"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_claude_model_newest_by_timestamp_not_map_order() {
+        let tmp = std::env::temp_dir().join(format!("claude-model-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let cwd = "/path/to/worktree/truonglao-switch";
+        let slug = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+        let project_dir = tmp.join(&slug);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let session_id = "test-model-session";
+        let session_file = project_dir.join(format!("{session_id}.jsonl"));
+
+        // The newest message comes first; an older message with another model
+        // follows. `HashMap` iteration decided the reported model before.
+        std::fs::write(
+            &session_file,
+            concat!(
+                r#"{"timestamp":"2026-10-21T12:00:00.000Z","message":{"id":"msg-new","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-10-21T11:00:00.000Z","message":{"id":"msg-old","model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let spend = claude_spend_in(&tmp, session_id, cwd, None).unwrap();
+        assert_eq!(spend.model.as_deref(), Some("claude-opus-5-5"));
+
+        // Records without a timestamp fall back to file-then-line order.
+        std::fs::write(
+            &session_file,
+            concat!(
+                r#"{"message":{"id":"msg-1","model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+                "\n",
+                r#"{"message":{"id":"msg-2","model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let spend = claude_spend_in(&tmp, session_id, cwd, None).unwrap();
+        assert_eq!(spend.model.as_deref(), Some("claude-haiku-4-5"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
