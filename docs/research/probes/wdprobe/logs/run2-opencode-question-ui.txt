@@ -1,0 +1,12 @@
+# `herdr pane read wA:p2 --source visible` while status=blocked (run2)
+  ┃  Questions
+  ┃
+  ┃  Pick A or B?
+  ┃
+  ┃  1. A
+  ┃     Option A
+  ┃  2. B
+  ┃     Option B
+  ┃  3. Type your own answer
+  ┃
+  ┃  ↑↓ select  enter submit  esc dismiss

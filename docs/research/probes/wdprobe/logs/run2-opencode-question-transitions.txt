@@ -1,0 +1,6 @@
+t+0.0s status=idle store_ms=None tail=2.1.1
+t+3.0s status=working store_ms=1792569391968 tail=■■■■■⬝⬝⬝ esc interrupt                                                                                                                                               shift+tab agents  ctrl+p commands
+t+5.0s status=blocked store_ms=1792569394385 tail=┃
+t+16.1s status=working store_ms=1792569405758 tail=⬝⬝■■■■■■ esc interrupt                                                                                                                                                     11.2K (6%)  ctrl+p commands
+t+17.1s status=working store_ms=1792569407023 tail=/tmp/opencode/wdprobe-cwd                                                                                                                                                   11.3K (6%)  ctrl+p commands
+t+18.1s status=idle store_ms=1792569407023 tail=/tmp/opencode/wdprobe-cwd                                                                                                                                                   11.3K (6%)  ctrl+p commands

@@ -1,0 +1,5 @@
+t+0.0s status=done store_ms=1792569474234 tail=✦ Gemini 3.8 Flash · high · ──────── 1% · ϟ 7.8k tpm
+t+2.0s status=done store_ms=1792569477550 tail=✦ Gemini 3.8 Flash · high · ──────── 1% · ϟ 7.7k tpm
+t+3.0s status=working store_ms=1792569477550 tail=✦ Gemini 3.8 Flash · high · ──────── 1% · ϟ 7.6k tpm
+t+13.1s status=working store_ms=1792569488091 tail=✦ Gemini 3.8 Flash · high · ──────── 1% · ϟ 14k tpm
+t+17.1s status=done store_ms=1792569492029 tail=✦ Gemini 3.8 Flash · high · ──────── 1% · ϟ 20k tpm

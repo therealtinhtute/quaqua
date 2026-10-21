@@ -1,0 +1,14 @@
+{"id":"wdprobe","result":{"type":"subscription_started"},"_recv":1792568931357}
+{"data":{"agent":"omp","agent_status":"working","pane_id":"w9:p6","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568931459}
+{"data":{"agent":"opencode","agent_status":"working","pane_id":"w9:p7","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568931559}
+{"data":{"agent":"omp","agent_status":"done","pane_id":"w9:p6","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568931961}
+{"data":{"agent":"omp","agent_status":"working","pane_id":"w9:p6","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568935482}
+{"data":{"agent":"omp","agent_status":"done","pane_id":"w9:p6","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568936186}
+{"data":{"agent":"omp","agent_status":"idle","pane_id":"w9:p6","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568943020}
+{"data":{"agent":"claude","agent_status":"done","pane_id":"w9:p5","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568943121}
+{"data":{"agent":"claude","agent_status":"working","pane_id":"w9:p5","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568984130}
+{"data":{"agent":"omp","agent_status":"working","pane_id":"w9:p6","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568984331}
+{"data":{"agent":"omp","agent_status":"done","pane_id":"w9:p6","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568985034}
+{"data":{"agent":"claude","agent_status":"blocked","pane_id":"w9:p5","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792568985638}
+{"data":{"agent":"claude","agent_status":"working","pane_id":"w9:p5","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792569000314}
+{"data":{"agent":"claude","agent_status":"idle","pane_id":"w9:p5","workspace_id":"w9"},"event":"pane.agent_status_changed","_recv":1792569001519}

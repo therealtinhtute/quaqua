@@ -1,0 +1,26 @@
+{
+ "t0": 1792568931354,
+ "dur": 75.0,
+ "herdr": "herdr 0.9.5",
+ "socket": "~/.config/herdr/sessions/quaqua/herdr.sock",
+ "targets": [
+  {
+   "pane": "w9:p7",
+   "name": "wd-oc2",
+   "kind": "opencode",
+   "session": ""
+  },
+  {
+   "pane": "w9:p5",
+   "name": "wd-cc",
+   "kind": "claude",
+   "session": ""
+  },
+  {
+   "pane": "w9:p6",
+   "name": "wd-omp",
+   "kind": "omp",
+   "session": ""
+  }
+ ]
+}
