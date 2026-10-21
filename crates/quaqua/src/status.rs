@@ -697,7 +697,10 @@ pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
             total_usd += usd;
         } else {
             unpriced += 1;
-            if w.harness.as_deref() == Some("claude") || w.spend_src == "claude-tokens" {
+            if w.harness.as_deref().and_then(crate::harness::Harness::parse)
+                == Some(crate::harness::Harness::Claude)
+                || w.spend_src == "claude-tokens"
+            {
                 claude_unpriced += 1;
             }
         }

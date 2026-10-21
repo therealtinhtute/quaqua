@@ -1,6 +1,7 @@
 //! Worker cost tracking and budget resolution via opencode API and sqlite database.
 
 use crate::engine::activity::{ActivityResult, CostResult, ReportFileResult};
+use crate::harness::Harness;
 use crate::state::WorkerMetadata;
 use crate::worker::cleanup::default_runs_dir;
 use serde::{Deserialize, Serialize};
@@ -133,19 +134,19 @@ pub fn resolve_cost_budget(task: &str) -> Option<f64> {
 
 /// True when this worker reported spend through omp session transcripts.
 pub fn is_omp_worker(harness: &str, name: &str) -> bool {
-    harness == "omp"
+    Harness::parse(harness) == Some(Harness::Omp)
         || (harness.is_empty() && (name.starts_with("sude-") || name.starts_with("detu-")))
 }
 
 /// True when this worker reported spend through claude session transcripts.
 pub fn is_claude_worker(harness: &str, name: &str) -> bool {
-    harness == "claude"
+    Harness::parse(harness) == Some(Harness::Claude)
         || (harness.is_empty() && (name.starts_with("ni-") || name.starts_with("truonglao-")))
 }
 
 /// True when this worker reported spend through opencode sqlite database.
 pub fn is_opencode_worker(harness: &str, name: &str) -> bool {
-    harness == "opencode"
+    Harness::parse(harness) == Some(Harness::Opencode)
         || (harness.is_empty() && (name.starts_with("tieude-") || name.starts_with("suhuynh-")))
 }
 
@@ -839,10 +840,10 @@ pub fn session_store_mtime(
     if session_kind == "path" {
         return file_mtime_ms(Path::new(session_value));
     }
-    match harness {
-        "opencode" => opencode_session_mtime(session_value),
-        "claude" => claude_session_mtime(session_value, cwd),
-        "omp" => {
+    match Harness::parse(harness) {
+        Some(Harness::Opencode) => opencode_session_mtime(session_value),
+        Some(Harness::Claude) => claude_session_mtime(session_value, cwd),
+        Some(Harness::Omp) => {
             let home = std::env::var("HOME").ok()?;
             let root = match std::env::var("OMP_SESSIONS_DIR") {
                 Ok(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir),
@@ -850,7 +851,7 @@ pub fn session_store_mtime(
             };
             file_mtime_ms(&root.join(omp_session_dir_name(cwd, &home)).join(session_value))
         }
-        _ => file_mtime_ms(Path::new(session_value)),
+        None => file_mtime_ms(Path::new(session_value)),
     }
 }
 

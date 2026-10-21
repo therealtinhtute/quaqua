@@ -34,3 +34,4 @@ Enforced in W2 with: `cargo test --locked -p quaqua -- --ignored test_w1_owners_
 | P2 | crates/quaqua/src/grid/types.rs | pipe-lead | sude-arch-p2 | Grid layout data types and structures |
 | P3 | crates/quaqua/src/status.rs | pipe-lead | sude-arch-p3 | quaqua status query reading runs/quaqua.db (issue #47) |
 | P4 | crates/quaqua/tests/worker_unit.rs | pipe-lead | sude-arch-p4 | Migration of HerdrOps mocks to MockActivities |
+| H2 | crates/quaqua/src/harness/mod.rs | worker-lead | cos-h2 | Harness registry: names, effort sets, stop keys, fallback idle (harness-hygiene.md H2) |

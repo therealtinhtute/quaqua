@@ -1472,8 +1472,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                         }
 
                         let child_wf = SingleWorkerWorkflow::new();
-                        let is_fallback = child_input.kind.contains("opencode")
-                            || child_input.kind.contains("omp");
+                        let is_fallback = crate::harness::mentions_fallback_idle(&child_input.kind);
                         let config = watchdog_config_from_env(is_reviewer, is_fallback);
                         eprintln!(
                             "waiting for {} (poll {}s, stall {}s, idle {}s, budget {}s, cap {}s)",
@@ -1505,8 +1504,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                             ctx.archive_stale(&child_report_path);
                         }
                         let child_wf = SingleWorkerWorkflow::new();
-                        let is_fallback = child_input.kind.contains("opencode")
-                            || child_input.kind.contains("omp");
+                        let is_fallback = crate::harness::mentions_fallback_idle(&child_input.kind);
                         let config = watchdog_config_from_env(is_reviewer, is_fallback);
                         eprintln!(
                             "waiting for {} (poll {}s, stall {}s, idle {}s, budget {}s, cap {}s)",

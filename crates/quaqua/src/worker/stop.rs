@@ -18,11 +18,7 @@ pub const USAGE: &str = "\
 /// Keys that interrupt a busy worker of this harness, in order.
 /// `None` = no verified sequence: stop refuses rather than guessing.
 pub fn stop_keys(harness: &str) -> Option<&'static [&'static str]> {
-    match harness {
-        "opencode" => Some(&["esc", "esc"]),
-        "omp" => Some(&["esc"]),
-        _ => None,
-    }
+    crate::harness::Harness::parse(harness)?.stop_keys()
 }
 
 /// Harness of a live agent, parsed from `herdr agent get` output
