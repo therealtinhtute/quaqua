@@ -3,9 +3,9 @@
 Source: review of #92, 2026-10-21 (quaqua @ c32174b, pi 1.3.0).
 Status: **draft spec** · design only, nothing built until anh iu approves. [F] = verified in repo/CLI, [A] = assumption the PR must confirm first.
 
-This is `harness-hygiene.md` H3. It needs H4a (harness registry) merged first.
+This is `harness-hygiene.md` H3a. It needs H2 (harness registry) merged first; Codex (H3b) runs in parallel.
 
-Locked decisions (anh iu): `tieude` + `suhuynh` move to `harness = "pi"`, same model `opencode-go/deepseek-v4.1-flash`, effort `max` (`--thinking max`) · `herdr integration install pi` is done · suhuynh stays default reviewer (same model as tieude = accepted risk) · nothing built before approval.
+Locked decisions (anh iu): `tieude` + `suhuynh` move to `harness = "pi"`, same model `opencode-go/deepseek-v4.1-flash`, effort `max` (`--thinking max`) · `herdr integration install pi` is done · pi workers run isolated (`--no-extensions` + herdr extension only) · opencode stays a fallback harness until P-pi4 · suhuynh stays default reviewer (same model as tieude = accepted risk) · nothing built before approval.
 
 ## Facts
 
@@ -20,7 +20,7 @@ Locked decisions (anh iu): `tieude` + `suhuynh` move to `harness = "pi"`, same m
 
 | Site | Today | pi needs |
 |---|---|---|
-| `launch.rs:20`, `config.rs:490` | closed list `opencode, omp, claude` | add `pi` (via H4a registry) |
+| `launch.rs:20`, `config.rs:490` | closed list `opencode, omp, claude` | add `pi` (via H2 registry) |
 | `config.rs:208-219` `effort_allowed` | per-harness set | pi set = pi `--thinking` list |
 | `launch.rs:97-151` `build_launch_cmd` | one arm per harness | new `pi` arm |
 | `worker/stop.rs:21-25` | opencode `esc esc`, omp `esc`, else refuse | pi keys only after a smoke; until then `None` (refuse, fail closed by design) |
@@ -43,7 +43,7 @@ herdr agent start <name> --kind pi --pane <p> -- \
   --session-dir <runs>/.pi-sessions/<name> \
   --no-extensions -e ~/.pi/agent/extensions/herdr-agent-state.ts \
   --no-approve
-review: + --tools read,grep,find,ls,bash   (see H2; not a sandbox)
+review: + --tools read,grep,find,ls,bash   (see H4; not a sandbox)
 ```
 
 - Rules channel: `--append-system-prompt <file>` — same shape as omp (`launch.rs:118-119`), help says it takes "text or file contents" [F]; that pi reads the file (not the literal path) is [A] → P-pi1 smoke.
@@ -59,7 +59,7 @@ Each phase lands on its own; each has one acceptance check.
 | Phase | Change | Acceptance |
 |---|---|---|
 | P-pi0 CLI smoke (no code, ≤30 min pilot) | Plain shell, scratch dir, no herdr: `pi -p --no-extensions --no-approve --model opencode-go/deepseek-v4.1-flash --thinking max --append-system-prompt <file with sentinel> --session-dir <tmp> "print the sentinel"` | output contains the sentinel (file read, not the path); a jsonl under `<tmp>` with `message.usage.cost.total` and `thinkingLevel` = `max` |
-| P-pi1 launch + config | `pi` in the H4a registry: allowlist, effort set, `build_launch_cmd` arm; stop keys `None` | unit test in `tests/worker_unit.rs` next to `test_launch_args_carry_exact_model_and_effort` (:1430) asserting the exact pi args; `quaqua config validate` accepts a pi kind, rejects `effort = "auto"`. Live: `QUAQUA_TEAM_TOML=<scratch toml with a pi kind> quaqua worker spawn` (the gate blocks a direct `herdr agent start`) → `herdr agent wait` sees idle then done, no trust prompt; record which of `esc` / `esc esc` stops a busy turn, then set stop keys in a 1-line follow-up |
+| P-pi1 launch + config | `pi` in the H2 registry: allowlist, effort set, `build_launch_cmd` arm; stop keys `None` | unit test in `tests/worker_unit.rs` next to `test_launch_args_carry_exact_model_and_effort` (:1430) asserting the exact pi args; `quaqua config validate` accepts a pi kind, rejects `effort = "auto"`. Live: `QUAQUA_TEAM_TOML=<scratch toml with a pi kind> quaqua worker spawn` (the gate blocks a direct `herdr agent start`) → `herdr agent wait` sees idle then done, no trust prompt; record which of `esc` / `esc esc` stops a busy turn, then set stop keys in a 1-line follow-up |
 | P-pi2 cost + mtime | pi reader on `--session-dir`; pi branch before `cost.rs:163`; `session_store_mtime` pi arm | fixture jsonl (copied shape of a real line) sums correctly; repro test: `tieude-x` with harness `pi` and a planted opencode db returns the pi cost, fails on old code |
 | P-pi3 switch kinds | `team.toml` tieude + suhuynh → pi; fallbacks unchanged (`tieude → detu`) | one live 1-line task on tieude and one review on suhuynh in a scratch worktree: report lands, watchdog exits 0, `cost=` readable |
 | P-pi4 (optional, later) | drop opencode as a kind harness | only after ≥2 weeks of pi runs and a decision on `usage.rs` (it still shells to `opencode`) |
