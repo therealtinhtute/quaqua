@@ -4,8 +4,99 @@ use crate::engine::activity::{ActivityResult, CostResult, ReportFileResult};
 use crate::state::WorkerMetadata;
 use crate::worker::cleanup::default_runs_dir;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::process::Command;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+/// Token counts for a worker session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Tokens {
+    #[serde(rename = "in")]
+    pub in_tokens: u64,
+    #[serde(rename = "out")]
+    pub out_tokens: u64,
+    #[serde(default)]
+    pub reasoning: u64,
+    #[serde(default)]
+    pub cache_read: u64,
+    #[serde(default)]
+    pub cache_write: u64,
+}
+
+impl Tokens {
+    pub fn add(&mut self, other: &Tokens) {
+        self.in_tokens += other.in_tokens;
+        self.out_tokens += other.out_tokens;
+        self.reasoning += other.reasoning;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+    }
+}
+
+/// Spend results (dollars, tokens, source, model) for a worker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Spend {
+    pub usd: Option<f64>,
+    pub tokens: Option<Tokens>,
+    pub spend_src: String,
+    pub model: Option<String>,
+}
+
+/// Parses an ISO-8601/RFC-3339 timestamp string into epoch milliseconds.
+pub fn parse_iso_timestamp_ms(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (date_part, time_and_tz) = s.split_once('T')?;
+    let mut date_segs = date_part.split('-');
+    let y: i32 = date_segs.next()?.parse().ok()?;
+    let m: u32 = date_segs.next()?.parse().ok()?;
+    let d: u32 = date_segs.next()?.parse().ok()?;
+
+    let (time_part, tz_offset_ms) = if let Some(stripped) = time_and_tz.strip_suffix('Z') {
+        (stripped, 0i64)
+    } else if let Some(idx) = time_and_tz.rfind(['+', '-']) {
+        if idx > 0 && time_and_tz.as_bytes()[idx - 1] != b'T' {
+            let (time_str, tz_str) = time_and_tz.split_at(idx);
+            let sign = if tz_str.starts_with('+') { 1i64 } else { -1i64 };
+            let tz_digits = &tz_str[1..];
+            let (tz_h, tz_m) = if let Some((h_str, m_str)) = tz_digits.split_once(':') {
+                (h_str.parse::<i64>().ok()?, m_str.parse::<i64>().ok()?)
+            } else {
+                (tz_digits.parse::<i64>().ok()?, 0i64)
+            };
+            (time_str, sign * (tz_h * 3600 + tz_m * 60) * 1000)
+        } else {
+            (time_and_tz, 0i64)
+        }
+    } else {
+        (time_and_tz, 0i64)
+    };
+
+    let (time_main, frac) = time_part.split_once('.').unwrap_or((time_part, "0"));
+    let mut time_segs = time_main.split(':');
+    let h: i64 = time_segs.next()?.parse().ok()?;
+    let min: i64 = time_segs.next()?.parse().ok()?;
+    let sec: i64 = time_segs.next()?.parse().ok()?;
+
+    let mut millis = 0i64;
+    let frac = frac.trim();
+    if !frac.is_empty() {
+        let frac_3: String = frac.chars().take(3).collect();
+        if let Ok(v) = frac_3.parse::<i64>() {
+            millis = match frac_3.len() {
+                1 => v * 100,
+                2 => v * 10,
+                _ => v,
+            };
+        }
+    }
+
+    let days = crate::usage::days_from_civil(y, m, d);
+    let total_ms = days * 86_400_000 + (h * 3600 + min * 60 + sec) * 1000 + millis - tz_offset_ms;
+    if total_ms >= 0 {
+        Some(total_ms as u64)
+    } else {
+        None
+    }
+}
 
 pub fn brief_cost_budget(text: &str) -> Option<f64> {
     for line in text.lines() {
@@ -41,16 +132,28 @@ pub fn resolve_cost_budget(task: &str) -> Option<f64> {
 }
 
 /// True when this worker reported spend through omp session transcripts.
-fn is_omp_worker(harness: &str, name: &str) -> bool {
+pub fn is_omp_worker(harness: &str, name: &str) -> bool {
     harness == "omp"
         || (harness.is_empty() && (name.starts_with("sude-") || name.starts_with("detu-")))
+}
+
+/// True when this worker reported spend through claude session transcripts.
+pub fn is_claude_worker(harness: &str, name: &str) -> bool {
+    harness == "claude"
+        || (harness.is_empty() && (name.starts_with("ni-") || name.starts_with("truonglao-")))
+}
+
+/// True when this worker reported spend through opencode sqlite database.
+pub fn is_opencode_worker(harness: &str, name: &str) -> bool {
+    harness == "opencode"
+        || (harness.is_empty() && (name.starts_with("tieude-") || name.starts_with("suhuynh-")))
 }
 
 /// omp's session directory name for a worktree path: `$HOME` is stripped, then
 /// every `/` becomes `-` (the leading dash is kept).
 ///
 /// `/home/me/.wt/sude-x` -> `-.wt-sude-x`, `/tmp/x` -> `-tmp-x`.
-fn omp_session_dir_name(cwd: &str, home: &str) -> String {
+pub fn omp_session_dir_name(cwd: &str, home: &str) -> String {
     let path = Path::new(cwd);
     let rel = if home.is_empty() {
         path
@@ -96,14 +199,16 @@ fn session_line_cost(v: &serde_json::Value) -> Option<f64> {
     find(v)
 }
 
-/// Sums `cost.total` over every `.jsonl` line of omp's session directory that
-/// matches `cwd`. Read-only; one directory, at most a few files.
-fn omp_cost_in(root: &Path, cwd: &str, home: &str) -> Option<f64> {
+/// Reads omp spend from session transcripts in `root`.
+pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -> Option<Spend> {
     use std::io::BufRead;
     let dir = root.join(omp_session_dir_name(cwd, home));
     let entries = std::fs::read_dir(&dir).ok()?;
-    let mut total = 0.0;
+    let mut total_cost = 0.0;
+    let mut tokens = Tokens::default();
     let mut found = false;
+    let mut last_model: Option<String> = None;
+
     for entry in entries.flatten() {
         if entry.path().extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
@@ -112,84 +217,314 @@ fn omp_cost_in(root: &Path, cwd: &str, home: &str) -> Option<f64> {
             continue;
         };
         for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
-            if !line.contains("\"cost\"") {
+            if !line.contains("\"cost\"") && !line.contains("\"usage\"") {
                 continue;
             }
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
+
+            if let Some(fence) = since_ms {
+                if let Some(ts_str) = v.get("timestamp").and_then(|t| t.as_str()) {
+                    if let Some(ts_ms) = parse_iso_timestamp_ms(ts_str) {
+                        if ts_ms < fence {
+                            continue;
+                        }
+                    }
+                }
+            }
+
             if let Some(c) = session_line_cost(&v) {
-                total += c;
+                total_cost += c;
                 found = true;
+            }
+
+            let usage = v.pointer("/message/usage").or_else(|| v.get("usage"));
+            if let Some(u) = usage {
+                let tin = u.get("input").and_then(|x| x.as_u64()).unwrap_or(0);
+                let tout = u.get("output").and_then(|x| x.as_u64()).unwrap_or(0);
+                let trsn = u
+                    .get("reasoningTokens")
+                    .or_else(|| u.get("reasoning"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                let tcr = u.get("cacheRead").and_then(|x| x.as_u64()).unwrap_or(0);
+                let tcw = u.get("cacheWrite").and_then(|x| x.as_u64()).unwrap_or(0);
+
+                tokens.in_tokens += tin;
+                tokens.out_tokens += tout;
+                tokens.reasoning += trsn;
+                tokens.cache_read += tcr;
+                tokens.cache_write += tcw;
+                found = true;
+            }
+
+            let model = v
+                .pointer("/message/model")
+                .or_else(|| v.get("model"))
+                .and_then(|m| m.as_str());
+            if let Some(m) = model {
+                if !m.is_empty() && m != "<synthetic>" {
+                    last_model = Some(m.to_string());
+                }
             }
         }
     }
+
     if found {
-        Some(total)
+        Some(Spend {
+            usd: Some(total_cost),
+            tokens: Some(tokens),
+            spend_src: "omp-session".to_string(),
+            model: last_model,
+        })
     } else {
         None
     }
 }
 
-/// omp spend for a worker worktree, from `~/.omp/agent/sessions/<dir>/*.jsonl`.
-fn read_omp_cost(cwd: &str) -> Option<f64> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let root = match std::env::var("OMP_SESSIONS_DIR") {
-        Ok(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir),
-        _ => {
-            if home.is_empty() {
-                return None;
-            }
-            Path::new(&home).join(".omp/agent/sessions")
-        }
-    };
-    omp_cost_in(&root, cwd, &home)
+/// Sums `cost.total` over every `.jsonl` line of omp's session directory that matches `cwd`.
+pub fn omp_cost_in(root: &Path, cwd: &str, home: &str) -> Option<f64> {
+    omp_spend_in(root, cwd, home, None).and_then(|s| s.usd)
 }
 
-pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) -> Option<f64> {
-    if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
-        if let Ok(content) = std::fs::read_to_string(&cost_file) {
-            if let Ok(val) = content.trim().parse::<f64>() {
-                return Some(val);
+/// Reads claude spend from transcripts under `projects_root`, deduplicated by `message.id`.
+pub fn claude_spend_in(
+    projects_root: &Path,
+    session_id: &str,
+    cwd: &str,
+    since_ms: Option<u64>,
+) -> Option<Spend> {
+    use std::io::BufRead;
+
+    let mut candidate_files = Vec::new();
+    if !cwd.is_empty() {
+        let slug: String = cwd
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let project_dir = projects_root.join(&slug);
+        if !session_id.is_empty() {
+            let direct = project_dir.join(format!("{session_id}.jsonl"));
+            if direct.is_file() {
+                candidate_files.push(direct);
             }
         }
-        return None;
-    }
-
-    if is_omp_worker(harness, name) {
-        return read_omp_cost(cwd);
-    }
-
-    if harness != "opencode" && !name.starts_with("tieude-") {
-        return None;
-    }
-
-    if !session_id.is_empty() {
-        let mut cmd = Command::new("opencode");
-        cmd.args(["api", "GET", &format!("/api/session/{session_id}")]);
-
-        let state_dir = default_runs_dir().join(".opencode-state").join(name);
-        if state_dir.is_dir() {
-            cmd.env("XDG_STATE_HOME", &state_dir);
-        }
-        if let Ok(out) = cmd.output() {
-            if out.status.success() {
-                if let Ok(json_str) = std::str::from_utf8(&out.stdout) {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                        if let Some(c) = v
-                            .get("data")
-                            .and_then(|d| d.get("cost"))
-                            .and_then(|c| c.as_f64())
-                        {
-                            return Some(c);
-                        }
+        if candidate_files.is_empty() && project_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&project_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                        candidate_files.push(p);
                     }
                 }
             }
         }
     }
 
+    if candidate_files.is_empty() && !session_id.is_empty() {
+        if let Ok(entries) = std::fs::read_dir(projects_root) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join(format!("{session_id}.jsonl"));
+                if candidate.is_file() {
+                    candidate_files.push(candidate);
+                }
+            }
+        }
+    }
+
+    if candidate_files.is_empty() {
+        return None;
+    }
+
+    // Deduplicate by message.id
+    let mut dedup_map: HashMap<String, (Tokens, Option<String>)> = HashMap::new();
+
+    for file_path in candidate_files {
+        let Ok(file) = std::fs::File::open(&file_path) else {
+            continue;
+        };
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            if !line.contains("\"usage\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+
+            if let Some(fence) = since_ms {
+                if let Some(ts_str) = v.get("timestamp").and_then(|t| t.as_str()) {
+                    if let Some(ts_ms) = parse_iso_timestamp_ms(ts_str) {
+                        if ts_ms < fence {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            let Some(msg) = v.get("message") else { continue };
+            let Some(msg_id) = msg.get("id").and_then(|id| id.as_str()) else { continue };
+            let Some(u) = msg.get("usage") else { continue };
+
+            let in_tok = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+            let out_tok = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+            let cache_read = u
+                .get("cache_read_input_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+            let cache_write = u
+                .get("cache_creation_input_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+            let reasoning = u
+                .get("output_tokens_details")
+                .and_then(|d| d.get("thinking_tokens"))
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+
+            let model = msg.get("model").and_then(|m| m.as_str()).and_then(|m| {
+                if m.is_empty() || m == "<synthetic>" {
+                    None
+                } else {
+                    Some(m.to_string())
+                }
+            });
+
+            dedup_map.insert(
+                msg_id.to_string(),
+                (
+                    Tokens {
+                        in_tokens: in_tok,
+                        out_tokens: out_tok,
+                        reasoning,
+                        cache_read,
+                        cache_write,
+                    },
+                    model,
+                ),
+            );
+        }
+    }
+
+    if dedup_map.is_empty() {
+        return None;
+    }
+
+    let mut total_tokens = Tokens::default();
+    let mut last_model: Option<String> = None;
+    for (tok, model) in dedup_map.values() {
+        total_tokens.add(tok);
+        if model.is_some() {
+            last_model = model.clone();
+        }
+    }
+
+    Some(Spend {
+        usd: None,
+        tokens: Some(total_tokens),
+        spend_src: "claude-tokens".to_string(),
+        model: last_model,
+    })
+}
+
+/// Reads opencode spend from an sqlite database file, summing over every session in `cwd`.
+pub fn opencode_spend_in(
+    db_path: &Path,
+    session_id: &str,
+    cwd: &str,
+    since_ms: Option<u64>,
+) -> Option<Spend> {
+    if !db_path.is_file() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+
+    let (query, param): (&str, &str) = if !cwd.is_empty() {
+        (
+            "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
+             tokens_cache_write, model, time_created \
+             FROM session_v2 WHERE directory = ?1 ORDER BY time_created ASC;",
+            cwd,
+        )
+    } else if !session_id.is_empty() {
+        (
+            "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
+             tokens_cache_write, model, time_created \
+             FROM session_v2 WHERE id = ?1 ORDER BY time_created ASC;",
+            session_id,
+        )
+    } else {
+        return None;
+    };
+
+    let mut stmt = conn.prepare(query).ok()?;
+    let mut rows = stmt.query(rusqlite::params![param]).ok()?;
+
+    let mut total_cost = 0.0;
+    let mut tokens = Tokens::default();
+    let mut last_model: Option<String> = None;
+    let mut found = false;
+
+    while let Ok(Some(row)) = rows.next() {
+        let time_created: i64 = row.get(7).unwrap_or(0);
+        if let Some(fence) = since_ms {
+            if time_created > 0 && (time_created as u64) < fence {
+                continue;
+            }
+        }
+
+        let cost: f64 = row.get(0).unwrap_or(0.0);
+        let tin: i64 = row.get(1).unwrap_or(0);
+        let tout: i64 = row.get(2).unwrap_or(0);
+        let trsn: i64 = row.get(3).unwrap_or(0);
+        let tcr: i64 = row.get(4).unwrap_or(0);
+        let tcw: i64 = row.get(5).unwrap_or(0);
+        let raw_model: Option<String> = row.get(6).ok();
+
+        total_cost += cost;
+        tokens.in_tokens += tin.max(0) as u64;
+        tokens.out_tokens += tout.max(0) as u64;
+        tokens.reasoning += trsn.max(0) as u64;
+        tokens.cache_read += tcr.max(0) as u64;
+        tokens.cache_write += tcw.max(0) as u64;
+
+        if let Some(m_str) = raw_model {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&m_str) {
+                if let Some(id_str) = v.get("id").and_then(|id| id.as_str()) {
+                    last_model = Some(id_str.to_string());
+                } else {
+                    last_model = Some(m_str);
+                }
+            } else if !m_str.is_empty() {
+                last_model = Some(m_str);
+            }
+        }
+        found = true;
+    }
+
+    if found {
+        Some(Spend {
+            usd: Some(total_cost),
+            tokens: Some(tokens),
+            spend_src: "opencode-db".to_string(),
+            model: last_model,
+        })
+    } else {
+        None
+    }
+}
+
+fn opencode_db_candidates(name: &str) -> Vec<PathBuf> {
     let mut db_candidates = Vec::new();
+    if let Ok(env_db) = std::env::var("QUAQUA_COST_DB_PATH") {
+        if !env_db.trim().is_empty() {
+            db_candidates.push(PathBuf::from(env_db));
+        }
+    }
     let state_db = default_runs_dir()
         .join(".opencode-state")
         .join(name)
@@ -199,32 +534,116 @@ pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) 
         db_candidates.push(state_db);
     }
     if let Ok(home) = std::env::var("HOME") {
-        let home_db = std::path::PathBuf::from(home).join(".local/share/opencode/opencode.db");
+        let home_db = PathBuf::from(home).join(".local/share/opencode/opencode.db");
         if home_db.is_file() {
             db_candidates.push(home_db);
         }
     }
+    db_candidates
+}
 
-    for db_path in db_candidates {
-        let uri = format!("file:{}?mode=ro", db_path.display());
-        let query = if !cwd.is_empty() {
-            format!("SELECT cost FROM session_v2 WHERE directory = '{cwd}' ORDER BY time_updated DESC LIMIT 1;")
-        } else if !session_id.is_empty() {
-            format!("SELECT cost FROM session_v2 WHERE id = '{session_id}' LIMIT 1;")
-        } else {
-            continue;
-        };
-        if let Ok(out) = Command::new("sqlite3").arg(&uri).arg(&query).output() {
-            if out.status.success() {
-                let text = String::from_utf8_lossy(&out.stdout);
-                if let Ok(c) = text.trim().parse::<f64>() {
-                    return Some(c);
-                }
+/// Reads spend for a worker across opencode, omp, or claude.
+pub fn read_worker_spend(
+    name: &str,
+    session_id: &str,
+    cwd: &str,
+    harness: &str,
+    since_ms: Option<u64>,
+) -> Spend {
+    if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
+        if let Ok(content) = std::fs::read_to_string(&cost_file) {
+            if let Ok(val) = content.trim().parse::<f64>() {
+                return Spend {
+                    usd: Some(val),
+                    tokens: None,
+                    spend_src: "cost-file".to_string(),
+                    model: None,
+                };
             }
         }
+        return Spend {
+            usd: None,
+            tokens: None,
+            spend_src: "cost-file-invalid".to_string(),
+            model: None,
+        };
     }
 
-    None
+    if is_omp_worker(harness, name) {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let root = match std::env::var("OMP_SESSIONS_DIR") {
+            Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+            _ => {
+                if home.is_empty() {
+                    PathBuf::new()
+                } else {
+                    Path::new(&home).join(".omp/agent/sessions")
+                }
+            }
+        };
+        if let Some(spend) = omp_spend_in(&root, cwd, &home, since_ms) {
+            return spend;
+        }
+        return Spend {
+            usd: None,
+            tokens: None,
+            spend_src: "omp-session-not-found".to_string(),
+            model: None,
+        };
+    }
+
+    if is_claude_worker(harness, name) {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let root = match std::env::var("CLAUDE_PROJECTS_DIR") {
+            Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+            _ => {
+                if home.is_empty() {
+                    PathBuf::new()
+                } else {
+                    Path::new(&home).join(".claude/projects")
+                }
+            }
+        };
+        if let Some(spend) = claude_spend_in(&root, session_id, cwd, since_ms) {
+            return spend;
+        }
+        return Spend {
+            usd: None,
+            tokens: None,
+            spend_src: "claude-tokens-not-found".to_string(),
+            model: None,
+        };
+    }
+
+    if is_opencode_worker(harness, name) {
+        let candidates = opencode_db_candidates(name);
+        for db_path in candidates {
+            if let Some(spend) = opencode_spend_in(&db_path, session_id, cwd, since_ms) {
+                return spend;
+            }
+        }
+        return Spend {
+            usd: None,
+            tokens: None,
+            spend_src: "opencode-db-not-found".to_string(),
+            model: None,
+        };
+    }
+
+    Spend {
+        usd: None,
+        tokens: None,
+        spend_src: if harness.is_empty() {
+            "unknown-harness".to_string()
+        } else {
+            format!("unsupported-harness:{harness}")
+        },
+        model: None,
+    }
+}
+
+pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) -> Option<f64> {
+    read_worker_spend(name, session_id, cwd, harness, None).usd
 }
 
 /// Milliseconds since the epoch from a file's mtime.
@@ -874,5 +1293,172 @@ mod tests {
         assert!((c - 0.05).abs() < 1e-9, "expected 0.05, got {c}");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod spend {
+    use super::*;
+
+    #[test]
+    fn test_opencode_sum_multiple_sessions() {
+        let tmp = std::env::temp_dir().join(format!("opencode-spend-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = tmp.join("opencode.db");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                directory TEXT NOT NULL,
+                cost REAL DEFAULT 0 NOT NULL,
+                tokens_input INTEGER DEFAULT 0 NOT NULL,
+                tokens_output INTEGER DEFAULT 0 NOT NULL,
+                tokens_reasoning INTEGER DEFAULT 0 NOT NULL,
+                tokens_cache_read INTEGER DEFAULT 0 NOT NULL,
+                tokens_cache_write INTEGER DEFAULT 0 NOT NULL,
+                model TEXT,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+
+        let cwd = "/path/to/worktree/tieude-p74lock";
+        // Session 1: older session
+        conn.execute(
+            "INSERT INTO session_v2 (id, directory, cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, model, time_created, time_updated)
+             VALUES ('ses-1', ?1, 0.05, 1000, 200, 50, 5000, 100, '{\"id\":\"deepseek-v4.1-flash\"}', 1000, 1500);",
+            rusqlite::params![cwd],
+        ).unwrap();
+
+        // Session 2: newer session in same directory (e.g. after respawn)
+        conn.execute(
+            "INSERT INTO session_v2 (id, directory, cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, model, time_created, time_updated)
+             VALUES ('ses-2', ?1, 0.03, 800, 150, 30, 4000, 50, '{\"id\":\"deepseek-v4.1-flash\"}', 2000, 2500);",
+            rusqlite::params![cwd],
+        ).unwrap();
+
+        // 1. Without fence: SUM over the dir returns 0.08, not 0.03 or 0.05 (fails on old LIMIT 1)
+        let spend = opencode_spend_in(&db_path, "", cwd, None).unwrap();
+        assert!((spend.usd.unwrap() - 0.08).abs() < 1e-9);
+        let tok = spend.tokens.unwrap();
+        assert_eq!(tok.in_tokens, 1800);
+        assert_eq!(tok.out_tokens, 350);
+        assert_eq!(tok.reasoning, 80);
+        assert_eq!(tok.cache_read, 9000);
+        assert_eq!(tok.cache_write, 150);
+        assert_eq!(spend.spend_src, "opencode-db");
+        assert_eq!(spend.model.as_deref(), Some("deepseek-v4.1-flash"));
+
+        // 2. Lifecycle fence: since_ms = 1500 ignores session 1 (time_created=1000)
+        let spend_fenced = opencode_spend_in(&db_path, "", cwd, Some(1500)).unwrap();
+        assert!((spend_fenced.usd.unwrap() - 0.03).abs() < 1e-9);
+        assert_eq!(spend_fenced.tokens.unwrap().in_tokens, 800);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_omp_tokens_and_dollars() {
+        let tmp = std::env::temp_dir().join(format!("omp-spend-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("sessions");
+        let cwd = "/path/to/worktree/.wt/sude-test";
+        let dir = root.join("-.wt-sude-test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join("session-1.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-10-21T10:00:00.000Z","message":{"model":"gemini-3.8-flash","usage":{"input":100,"output":20,"reasoningTokens":5,"cacheRead":50,"cacheWrite":10,"cost":{"total":0.015}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-10-21T10:05:00.000Z","message":{"model":"gemini-3.8-flash","usage":{"input":200,"output":40,"reasoningTokens":10,"cacheRead":100,"cacheWrite":20,"cost":{"total":0.025}}}}"#,
+                "\n",
+            ),
+        ).unwrap();
+
+        // Without fence
+        let spend = omp_spend_in(&root, cwd, "/path/to/worktree", None).unwrap();
+        assert!((spend.usd.unwrap() - 0.04).abs() < 1e-9);
+        let tok = spend.tokens.unwrap();
+        assert_eq!(tok.in_tokens, 300);
+        assert_eq!(tok.out_tokens, 60);
+        assert_eq!(tok.reasoning, 15);
+        assert_eq!(tok.cache_read, 150);
+        assert_eq!(tok.cache_write, 30);
+        assert_eq!(spend.spend_src, "omp-session");
+        assert_eq!(spend.model.as_deref(), Some("gemini-3.8-flash"));
+
+        // With fence: fence at 10:02 ignores the first line
+        let fence_ms = parse_iso_timestamp_ms("2026-10-21T10:02:00.000Z").unwrap();
+        let spend_fenced = omp_spend_in(&root, cwd, "/path/to/worktree", Some(fence_ms)).unwrap();
+        assert!((spend_fenced.usd.unwrap() - 0.025).abs() < 1e-9);
+        assert_eq!(spend_fenced.tokens.unwrap().in_tokens, 200);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_claude_dedup_message_ids() {
+        let tmp = std::env::temp_dir().join(format!("claude-spend-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let cwd = "/path/to/worktree/truonglao-test";
+        let slug = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+        let project_dir = tmp.join(&slug);
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let session_id = "test-session-123";
+        let session_file = project_dir.join(format!("{session_id}.jsonl"));
+
+        // Line 1: msg-1 initial emission
+        // Line 2: msg-1 repeated emission (same message.id, identical or updated tokens)
+        // Line 3: msg-2 distinct message.id
+        std::fs::write(
+            &session_file,
+            concat!(
+                r#"{"timestamp":"2026-10-21T12:00:00.000Z","message":{"id":"msg-1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":50,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens_details":{"thinking_tokens":5}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-10-21T12:00:01.000Z","message":{"id":"msg-1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":50,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens_details":{"thinking_tokens":5}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-10-21T12:01:00.000Z","message":{"id":"msg-2","model":"claude-opus-5-5","usage":{"input_tokens":20,"output_tokens":80,"cache_read_input_tokens":200,"cache_creation_input_tokens":40,"output_tokens_details":{"thinking_tokens":10}}}}"#,
+                "\n",
+            ),
+        ).unwrap();
+
+        let spend = claude_spend_in(&tmp, session_id, cwd, None).unwrap();
+        assert_eq!(spend.usd, None, "claude records tokens only, usd must be None");
+        assert_eq!(spend.spend_src, "claude-tokens");
+        assert_eq!(spend.model.as_deref(), Some("claude-opus-5-5"));
+
+        let tok = spend.tokens.unwrap();
+        // msg-1 is deduped: (10 + 20) = 30, NOT 40
+        assert_eq!(tok.in_tokens, 30);
+        // output: (50 + 80) = 130, NOT 180
+        assert_eq!(tok.out_tokens, 130);
+        // reasoning: (5 + 10) = 15, NOT 20
+        assert_eq!(tok.reasoning, 15);
+        // cache_read: (100 + 200) = 300, NOT 400
+        assert_eq!(tok.cache_read, 300);
+        // cache_write: (20 + 40) = 60, NOT 80
+        assert_eq!(tok.cache_write, 60);
+
+        // Lifecycle fence: fence at 12:00:30 ignores msg-1
+        let fence_ms = parse_iso_timestamp_ms("2026-10-21T12:00:30.000Z").unwrap();
+        let spend_fenced = claude_spend_in(&tmp, session_id, cwd, Some(fence_ms)).unwrap();
+        assert_eq!(spend_fenced.tokens.unwrap().in_tokens, 20);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_parse_iso_timestamp_ms() {
+        let utc = parse_iso_timestamp_ms("2026-10-21T13:40:00Z").unwrap();
+        let vn = parse_iso_timestamp_ms("2026-10-21T20:40:00+07:00").unwrap();
+        assert_eq!(utc, vn, "UTC and +07:00 representations must yield identical epoch ms");
+
+        let frac = parse_iso_timestamp_ms("2026-10-21T13:40:00.500Z").unwrap();
+        assert_eq!(frac, utc + 500);
     }
 }
