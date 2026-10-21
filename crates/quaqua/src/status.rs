@@ -567,6 +567,9 @@ pub fn parse_metrics_args(args: &[String]) -> Result<MetricsArgs, String> {
         }
         i += 1;
     }
+    let now_sec = crate::util::now_sec();
+    let now_ms = now_sec * 1000;
+    parse_since_cutoff(&parsed.since, now_ms)?;
 
     Ok(parsed)
 }
@@ -611,30 +614,35 @@ pub struct MetricsTotal {
     pub wall_sec: u64,
 }
 
-pub fn parse_since_cutoff(since: &str, now_ms: u64) -> u64 {
+pub fn parse_since_cutoff(since: &str, now_ms: u64) -> Result<u64, String> {
     let trimmed = since.trim();
     if let Some(num_str) = trimmed.strip_suffix('h') {
         if let Ok(hours) = num_str.parse::<u64>() {
-            return now_ms.saturating_sub(hours * 3600 * 1000);
+            let delta = hours.saturating_mul(3600).saturating_mul(1000);
+            return Ok(now_ms.saturating_sub(delta));
         }
     } else if let Some(num_str) = trimmed.strip_suffix('d') {
         if let Ok(days) = num_str.parse::<u64>() {
-            return now_ms.saturating_sub(days * 86400 * 1000);
+            let delta = days.saturating_mul(86400).saturating_mul(1000);
+            return Ok(now_ms.saturating_sub(delta));
         }
     } else if let Some(num_str) = trimmed.strip_suffix('m') {
         if let Ok(mins) = num_str.parse::<u64>() {
-            return now_ms.saturating_sub(mins * 60 * 1000);
+            let delta = mins.saturating_mul(60).saturating_mul(1000);
+            return Ok(now_ms.saturating_sub(delta));
         }
     } else if let Some(ms) = crate::worker::prompt::cost::parse_iso_timestamp_ms(trimmed) {
-        return ms;
+        return Ok(ms);
     }
-    now_ms.saturating_sub(24 * 3600 * 1000)
+    Err(format!(
+        "invalid --since value '{since}', expected <N>h, <N>d, <N>m, or ISO timestamp"
+    ))
 }
 
 pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
     let now_sec = crate::util::now_sec();
     let now_ms = now_sec * 1000;
-    let cutoff_ms = parse_since_cutoff(&args.since, now_ms);
+    let cutoff_ms = parse_since_cutoff(&args.since, now_ms).unwrap_or(0);
 
     let tele_path = runs_dir.join("telemetry.jsonl");
     let mut workers = Vec::new();
@@ -757,7 +765,18 @@ pub fn render_metrics_text(report: &MetricsReport) -> String {
         "=== Metrics (runs/telemetry.jsonl, since {}) ===\n",
         report.since
     ));
-    out.push_str("name              kind/harness       owner  exit  wall/budget  $/budget      tokens in/out/cache   pipeline\n");
+    let name_width = report
+        .workers
+        .iter()
+        .map(|w| w.name.len())
+        .max()
+        .unwrap_or(4)
+        .max(17);
+
+    out.push_str(&format!(
+        "{:<name_width$} kind/harness       owner  exit  wall/budget  $/budget      tokens in/out/cache   pipeline\n",
+        "name"
+    ));
 
     for w in &report.workers {
         let name = &w.name;
@@ -797,7 +816,7 @@ pub fn render_metrics_text(report: &MetricsReport) -> String {
         let pipeline_str = w.pipeline.as_deref().unwrap_or("-");
 
         out.push_str(&format!(
-            "{name:<17} {kind_harness:<18} {owner:<6} {exit:<5} {wall_budget:<12} {cost_budget:<13} {tokens_str:<21} {pipeline_str}\n"
+            "{name:<name_width$} {kind_harness:<18} {owner:<6} {exit:<5} {wall_budget:<12} {cost_budget:<13} {tokens_str:<21} {pipeline_str}\n"
         ));
     }
 
@@ -1704,7 +1723,7 @@ pub(crate) mod metrics {
             owner: Some("cos".to_string()),
             pipeline: None,
             repo: Some("~/quaqua".to_string()),
-            prompts: 1,
+            prompts: Some(1),
             exit: Some(0),
             wall_sec: Some(300),
             budget_sec: Some(1500),
@@ -1763,9 +1782,54 @@ pub(crate) mod metrics {
         // 3. Test --since cutoff
         let now_sec = crate::util::now_sec();
         let now_ms = now_sec * 1000;
-        let c_24h = parse_since_cutoff("24h", now_ms);
-        let c_7d = parse_since_cutoff("7d", now_ms);
+        let c_24h = parse_since_cutoff("24h", now_ms).unwrap();
+        let c_7d = parse_since_cutoff("7d", now_ms).unwrap();
         assert!(c_24h > c_7d);
+
+        // Nit 10: large days value saturates without overflow
+        let c_overflow = parse_since_cutoff("999999999999d", now_ms).unwrap();
+        assert_eq!(c_overflow, 0);
+
+        // Nit 11: invalid --since value is rejected with Err
+        assert!(parse_metrics_args(&["--metrics".to_string(), "--since".to_string(), "1w".to_string()]).is_err());
+        assert!(parse_metrics_args(&["--metrics".to_string(), "--since=invalid".to_string()]).is_err());
+
+        // Nit 14: long names expand name_width
+        let long_worker = WorkerTelemetryRow {
+            ts: "2026-10-21T12:00:00+07:00".to_string(),
+            rec: "worker".to_string(),
+            name: "suhuynh-metricsrev".to_string(),
+            kind: Some("suhuynh".to_string()),
+            harness: Some("omp".to_string()),
+            owner: Some("cos".to_string()),
+            pipeline: None,
+            repo: Some("~/quaqua".to_string()),
+            prompts: Some(1),
+            exit: Some(0),
+            wall_sec: Some(300),
+            budget_sec: Some(1500),
+            usd: Some(1.23),
+            usd_budget: Some(2.0),
+            tokens: None,
+            spend_src: "omp-session".to_string(),
+            model: None,
+        };
+        let long_report = MetricsReport {
+            since: "24h".to_string(),
+            workers: vec![long_worker],
+            pipelines: vec![],
+            total: MetricsTotal {
+                workers: 1,
+                usd: 1.23,
+                unpriced: 0,
+                claude_unpriced: 0,
+                wall_sec: 300,
+            },
+        };
+        let rendered_long = render_metrics_text(&long_report);
+        // 18 chars for suhuynh-metricsrev means header "name" is padded to 18 chars
+        assert!(rendered_long.contains("name               kind/harness"));
+        assert!(rendered_long.contains("suhuynh-metricsrev suhuynh/omp"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

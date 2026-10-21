@@ -20,7 +20,8 @@ pub struct WorkerTelemetryRow {
     pub owner: Option<String>,
     pub pipeline: Option<String>,
     pub repo: Option<String>,
-    pub prompts: u32,
+    #[serde(default)]
+    pub prompts: Option<u32>,
     pub exit: Option<i32>,
     pub wall_sec: Option<u64>,
     pub budget_sec: Option<u64>,
@@ -32,15 +33,28 @@ pub struct WorkerTelemetryRow {
 }
 
 pub fn format_repo_path(repo: &Path) -> String {
-    let s = repo.to_string_lossy();
     if let Ok(home) = std::env::var("HOME") {
         if !home.is_empty() {
-            if let Some(rest) = s.strip_prefix(&home) {
-                return format!("~{rest}");
+            let home_path = Path::new(&home);
+            if let Ok(rel) = repo.strip_prefix(home_path) {
+                if rel.as_os_str().is_empty() {
+                    return "~".to_string();
+                } else {
+                    return format!("~/{}", rel.display());
+                }
+            }
+            if let Ok(canon_home) = std::fs::canonicalize(home_path) {
+                if let Ok(rel) = repo.strip_prefix(&canon_home) {
+                    if rel.as_os_str().is_empty() {
+                        return "~".to_string();
+                    } else {
+                        return format!("~/{}", rel.display());
+                    }
+                }
             }
         }
     }
-    s.into_owned()
+    repo.to_string_lossy().into_owned()
 }
 
 /// Appends one worker telemetry row to `runs/telemetry.jsonl`.
@@ -163,9 +177,6 @@ pub fn append_worker_telemetry(
             }
         }
 
-        if prompts == 0 {
-            prompts = 1;
-        }
 
         if kind.is_none() {
             let prefix = name.split('-').next().unwrap_or("");
@@ -203,7 +214,7 @@ pub fn append_worker_telemetry(
             owner: owner.map(|o| o.to_string()),
             pipeline,
             repo: Some(repo_str),
-            prompts,
+            prompts: if prompts == 0 { None } else { Some(prompts) },
             exit: last_exit,
             wall_sec,
             budget_sec,
@@ -607,6 +618,7 @@ pub(crate) mod metrics {
         assert_eq!(tok.in_tokens, 94574);
         assert_eq!(tok.out_tokens, 16991);
         assert_eq!(tok.cache_read, 3754496);
+        assert_eq!(row.prompts, None);
         assert_eq!(row.repo.as_deref(), Some("~/repo"));
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -654,6 +666,7 @@ pub(crate) mod metrics {
         assert_eq!(row.usd, None);
         assert_eq!(row.tokens, None);
         assert!(!row.spend_src.is_empty());
+        assert_eq!(row.prompts, None);
 
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::remove_var("QUAQUA_RUNS_DIR");
@@ -839,7 +852,7 @@ pub(crate) mod metrics {
         assert_eq!(lines.len(), 1);
 
         let row: WorkerTelemetryRow = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(row.prompts, 1);
+        assert_eq!(row.prompts, Some(1));
         assert_eq!(row.exit, Some(0));
         assert!(row.wall_sec.unwrap() >= 10);
         assert_eq!(row.kind.as_deref(), Some("tieude"));
@@ -915,5 +928,23 @@ pub(crate) mod metrics {
 
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::remove_var("QUAQUA_RUNS_DIR");
+    }
+
+    #[test]
+    fn test_format_repo_path_boundary() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", "/mock/root/user");
+
+        assert_eq!(format_repo_path(Path::new("/mock/root/user/quaqua")), "~/quaqua");
+        assert_eq!(format_repo_path(Path::new("/mock/root/user")), "~");
+        // Must not strip as prefix when path boundary does not match:
+        assert_eq!(format_repo_path(Path::new("/mock/root/user2/quaqua")), "/mock/root/user2/quaqua");
+
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 }
