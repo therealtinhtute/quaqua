@@ -135,6 +135,13 @@ impl WorkerMetadata {
         atomic_write(&Self::pipeline_path(runs_dir, name), format!("{task}\n"))
     }
 
+    pub fn load_pipeline(runs_dir: &Path, name: &str) -> Option<String> {
+        fs::read_to_string(Self::pipeline_path(runs_dir, name))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     pub fn load_elapsed(runs_dir: &Path, name: &str) -> u64 {
         fs::read_to_string(Self::elapsed_path(runs_dir, name))
             .ok()
