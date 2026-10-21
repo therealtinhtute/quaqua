@@ -152,17 +152,11 @@ your paths and don't clean the tree: a dirty bare `git status` from other lanes 
 `git add -A`, `git checkout -- .`, `git reset --hard` and `git clean -fd` destroy others'
 uncommitted work.
 
-Write the handback to the brief's report path (`/tmp/<proj>-<task>.md`), with these six fields
-in this order:
-
-```
-Outcome         COMPLETE | REOPEN_REQUEST | DEPENDENCY_REQUEST | BLOCKED
-Snapshot        SHA + branch + worktree path (omit if nothing was written)
-Scope           files changed / read, concrete paths
-Verification    commands run + REAL output, and what you deliberately skipped
-Unknown / risk  assumptions you rely on, decisions that need the Human
-Ownership       scope released, or still held and why
-```
+Write the report to the brief's report path (`runs/<name>.md`) in the one format defined in
+`rules/_all/brief.md` `## Report format`: the six fields `Outcome:`, `Snapshot:`, `Scope:`,
+`Verification:`, `Unknown / risk:`, `Ownership:`, then `## Blockers` and `## Lessons`
+(`Verdict:` instead for a pipeline reviewer). The brief may name extra sections; the format
+itself is not restated here.
 
 Reply with the report path and a 5-line summary whose first line is the Outcome. Partial work
 is reported as the blocking outcome plus what's done. **Claiming done when it isn't is worse
