@@ -1,0 +1,1 @@
+t+0.0s status=idle store_ms=None tail=✦ unknown · high · ──────── 0%

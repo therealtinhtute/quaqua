@@ -22,16 +22,26 @@ herdr workspace close w9
 ```
 
 Run 1 window 14:48:51–14:50:09 (75 s, 74 samples); question probe 14:51; a second
-claude window 14:52. `herdr` was called as the CLI binary; no socket writes besides
-`events.subscribe`.
+claude window 14:52. **Run 2** (this follow-up, workspace `wA`) repeats the question
+path on an idle session with `google-antigravity/gemini-3.8-flash` for omp — the run-1
+omp pane used omp's default `opencode-zen/claude-3-5-haiku`, which the upstream rejects
+with HTTP 400 "Model is unavailable", so run-1 omp question evidence is invalid.
+Run-2 logs: `logs/run2-{opencode-question,omp-question,omp-permission,omp-badmodel}.*`.
+`herdr` was called as the CLI binary; no socket writes besides `events.subscribe`.
 
 ## 1) Does `agent_status=blocked` appear while a question/permission UI is on screen?
 
 | harness | UI actually triggered | observed status sequence | verdict |
 |---|---|---|---|
 | claude | Yes: `AskUserQuestion` UI (`Option A / Option B / Type something / Enter to select · ↑/↓ to navigate · Esc to cancel`) | `working → blocked` at t+53.9 s, held **blocked for the full 28 s window** while the prompt was rejected with `agent_blocked`; Esc → `done` | **yes** |
-| opencode | Yes: question tool rendered (`# Questions / Pick A or B? / You picked B.`) | live sequence **not captured**: the prompt was queued behind the 40 s sleep turn, so `working` never dropped before the window ended. Plugin contract maps `question.asked|permission.asked → blocked` (evtprobe 2026-10-17, plugin v13) | **partial** |
-| omp | No question UI: the ask prompt ran 48 s and ended `working → done`; pane logged an HTTP 400 (`~/.omp/logs/http-400-requests/…`) | never `blocked` in 74 samples | **no evidence** — do not rely on it |
+| opencode | Yes: question tool on an **idle** session (`# Questions / Pick A or B? / 1. A / 2. B / 3. Type your own answer`; `logs/run2-opencode-question-ui.txt`) | `idle → working` t+3.0 s → **blocked** t+5.0 s, held ≥10 s (events: `blocked` 1792569394519, `working` 1792569405953, `idle` 1792569407159); `logs/run2-opencode-question-transitions.txt` | **yes** |
+| omp (run 2, `google-antigravity/gemini-3.8-flash`) | Yes: ask UI (`Ask / Pick A or B? / A / B / Other (type your own)`; `logs/run2-omp-question-ui.txt`) | `idle → working` t+4.0 s → **blocked** t+12.1 s, still blocked at the end of the 22 s window (≥8 s); `logs/run2-omp-question-transitions.txt` | **yes** |
+| omp (run 1, default `opencode-zen/claude-3-5-haiku`) | invalid evidence: no question UI, `working → done` after 48 s, HTTP 400 "Model is unavailable" in the pane | never `blocked` | **invalid** — model was rejected upstream |
+
+Run 2 also probed an omp permission path: asking omp to write **outside** the workspace
+wrote `/tmp/opencode/wdprobe-outside.txt` with no approval UI (`working` 3–15 s → `done`,
+`logs/run2-omp-permission-transitions.txt`), so this config has no permission prompt to
+observe. omp's ask question is the interactive case.
 
 Also observed: `blocked` is not question-specific. A fresh claude trust prompt during
 `agent start` was `blocked` too, and `herdr agent prompt` refused it with
@@ -83,6 +93,17 @@ worker advancing?”.
 No primitive exposes “last real activity” or “stalled”; the only real-activity timestamps
 available are the harness session stores and the worktree.
 
+## 3b) Can an API error be told apart from success by status?
+
+| case | status sequence | pane evidence | verdict |
+|---|---|---|---|
+| omp, upstream HTTP 400 "Model is unavailable" (run 1) | `working → done` (48 s), same as a successful turn | 400 request log path in the pane | **no** — indistinguishable by status |
+| omp, model not configured (`opencode-zen/claude-3-5-haiku`, run 2) | stays `idle`; no turn starts | `✦ unknown · high · 0%`, "Use /login, set an API key …" (`logs/run2-omp-badmodel.jsonl`) | **no** — shows as idle, not error |
+
+`done`/`idle` alone cannot separate an upstream error from a finished turn. The watchdog
+still needs the pane text (or the harness session store / a non-zero exit) to classify a
+failed model call; this is independent of the run-file guard.
+
 ## Recommendation
 
 1. **Wait (issue #47 P1): yes, drop the 30 s poll.** Use `events.wait` /
@@ -97,13 +118,16 @@ available are the harness session stores and the worktree.
    All three are glyph-free and track model/tool traffic, but a silent tool call leaves
    them flat for ≥40 s (measured), so keep the filtered pane body / worktree diff as the
    liveness fallback. Do **not** use raw output revision as progress.
-3. **Questions: use `blocked` where proven, keep the text matcher as fallback.**
-   claude verified (question UI and trust/permission UI both `blocked`); opencode is
-   plugin-contract (partial live observation); omp showed none (ask prompt failed with an
-   HTTP 400). Until omp is proven, keep `question_seen()` for omp panes, or classify
-   `blocked` + pane text. `herdr agent prompt` rejecting with `agent_blocked` is a cheap
-   pre-check.
+3. **Questions: `blocked` replaces the string matcher for all three harnesses.**
+   claude verified (question and trust/permission UI); opencode verified on an idle
+   session (`blocked` 10 s, question UI); omp verified on the roster model
+   (`google-antigravity/gemini-3.8-flash`, `blocked` ≥8 s, ask UI). Run-1's omp "no
+   blocked" result was an invalid model and is retracted. Keep `question_seen()` only as a
+   cheap belt-and-braces for provider errors or a harness upgrade that stops reporting
+   `blocked`; the run-2 evidence no longer requires it for omp. `herdr agent prompt`
+   rejecting with `agent_blocked` remains a cheap pre-check.
 
-Residual risks: single 75 s window; opencode question transition not caught live; omp
-question path unproven (HTTP 400); no long silent call measured on claude; idle TUI
-revision measured only on claude.
+Residual risks: run-1 omp evidence invalid (default model rejected with HTTP 400) and
+superseded by run 2; run-2 opencode question cleared itself after ~11 s without input;
+omp's outside-workspace write was not gated, so no omp permission UI was observed; no
+long silent call measured on claude; idle-TUI revision measured only on claude.

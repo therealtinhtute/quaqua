@@ -1,0 +1,4 @@
+t+0.0s status=idle store_ms=None tail=✦ Gemini 3.8 Flash · high · ──────── 1%
+t+4.0s status=working store_ms=None tail=✦ Gemini 3.8 Flash · high · ──────── 1%
+t+12.1s status=blocked store_ms=1792569438754 tail=✦ Gemini 3.8 Flash · high · ──────── 1%
+t+20.1s status=blocked store_ms=1792569446058 tail=✦ Gemini 3.8 Flash · high · ──────── 1% · ϟ 11k tpm

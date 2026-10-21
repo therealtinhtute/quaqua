@@ -1,0 +1,11 @@
+# `herdr pane read wA:p3 --source visible` while status=blocked (run2, model google-antigravity/gemini-3.8-flash)
+  󱊷 Asking user choice between A and B
+╭─ Ask ────────────────────────────────────────────────╮
+│ Pick A or B?                                          │
+├───────────────────────────────────────────────────────┤
+│   A                                                  │
+│    B                                                  │
+│    Other (type your own)                              │
+├───────────────────────────────────────────────────────┤
+│ 󰌑 select · n note · ↑/↓ move · 󱊷 cancel · Alt+H hide     │
+╰───────────────────────────────────────────────────────╯
