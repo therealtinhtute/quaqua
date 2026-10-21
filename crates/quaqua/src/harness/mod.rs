@@ -10,10 +10,11 @@ pub enum Harness {
     Claude,
     Opencode,
     Omp,
+    Pi,
 }
 
 impl Harness {
-    pub const ALL: [Harness; 3] = [Harness::Opencode, Harness::Omp, Harness::Claude];
+    pub const ALL: [Harness; 4] = [Harness::Opencode, Harness::Omp, Harness::Claude, Harness::Pi];
 
     /// The harness named exactly `s` (team.toml `harness`, herdr `agent`).
     pub fn parse(s: &str) -> Option<Self> {
@@ -25,6 +26,7 @@ impl Harness {
             Harness::Claude => "claude",
             Harness::Opencode => "opencode",
             Harness::Omp => "omp",
+            Harness::Pi => "pi",
         }
     }
 
@@ -33,6 +35,7 @@ impl Harness {
     /// from config as `provider/model#variant`, and the variant vocabulary is the
     /// `ReasoningEffort` set). omp's is `omp --help` `--thinking`. claude's is
     /// `claude --help` `--effort <level> (low, medium, high, xhigh, max)`.
+    /// pi's is `pi --help` `--thinking` (pi 1.3.0).
     pub fn effort_allowed(self, effort: &str) -> bool {
         let allowed: &[&str] = match self {
             Harness::Opencode => &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
@@ -40,6 +43,7 @@ impl Harness {
                 "off", "minimal", "low", "medium", "high", "xhigh", "max", "auto",
             ],
             Harness::Claude => &["low", "medium", "high", "xhigh", "max"],
+            Harness::Pi => &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
         };
         allowed.contains(&effort)
     }
@@ -50,12 +54,15 @@ impl Harness {
         match self {
             Harness::Opencode => Some(&["esc", "esc"]),
             Harness::Omp => Some(&["esc"]),
-            Harness::Claude => None,
+            // pi: no interrupt sequence verified on a live pane yet (H3a).
+            Harness::Claude | Harness::Pi => None,
         }
     }
 
     /// True when herdr's hook-based idle signal is not trusted for this harness,
-    /// so the watchdog uses the longer fallback idle limit.
+    /// so the watchdog uses the longer fallback idle limit. pi reports
+    /// working/blocked/idle through herdr's pi integration
+    /// (`~/.pi/agent/extensions/herdr-agent-state.ts`, loaded with `-e`).
     pub fn fallback_idle(self) -> bool {
         matches!(self, Harness::Opencode | Harness::Omp)
     }
@@ -91,6 +98,10 @@ mod tests {
         assert!(Harness::Omp.effort_allowed("off"));
         assert!(Harness::Claude.effort_allowed("xhigh"));
         assert!(!Harness::Claude.effort_allowed("minimal"));
+        assert!(Harness::Pi.effort_allowed("max"));
+        assert!(Harness::Pi.effort_allowed("off"));
+        assert!(!Harness::Pi.effort_allowed("auto"));
+        assert!(!Harness::Pi.effort_allowed("none"));
     }
 
     #[test]
@@ -98,6 +109,8 @@ mod tests {
         assert!(Harness::Opencode.fallback_idle());
         assert!(Harness::Omp.fallback_idle());
         assert!(!Harness::Claude.fallback_idle());
+        assert!(!Harness::Pi.fallback_idle());
+        assert!(Harness::Pi.stop_keys().is_none());
         assert!(mentions_fallback_idle("opencode"));
         assert!(mentions_fallback_idle("x-omp-y"));
         assert!(!mentions_fallback_idle("tieude"));

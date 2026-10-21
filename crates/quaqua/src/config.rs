@@ -687,6 +687,17 @@ workers_tab = "workers"
     }
 
     #[test]
+    fn pi_kind_validates_by_pi_thinking_set() {
+        let mut c = base();
+        let k = c.kinds.get_mut("tieude").unwrap();
+        k.harness = "pi".to_string();
+        assert!(validate(&c).is_ok());
+        c.kinds.get_mut("tieude").unwrap().effort = Some("auto".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("harness 'pi' does not take effort 'auto'"), "{err}");
+    }
+
+    #[test]
     fn cap_over_is_rejected() {
         let mut c = base();
         c.limits.max_workers_per_orchestrator = 9;

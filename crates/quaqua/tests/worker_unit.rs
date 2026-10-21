@@ -1533,6 +1533,44 @@ fn test_launch_args_carry_exact_model_and_effort() {
 }
 
 #[test]
+fn test_launch_args_pi_exact_and_isolated() {
+    let pi = resolve_launch(
+        &kind("pi", "opencode-go/deepseek-v4.1-flash", Some("max")),
+        "tieude",
+    )
+    .unwrap();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let ext = format!("{home}/.pi/agent/extensions/herdr-agent-state.ts");
+    let build = build_launch_cmd(&pi, "tieude-x", "/r/x.rules.md", "/runs", "/repo/.wt/x", false)
+        .unwrap();
+    assert!(build.split_envs.is_empty(), "pi takes no pane env");
+    assert_eq!(
+        build.agent_args,
+        vec![
+            "--",
+            "--model",
+            "opencode-go/deepseek-v4.1-flash",
+            "--thinking",
+            "max",
+            "--append-system-prompt",
+            "/r/x.rules.md",
+            "--session-dir",
+            "/runs/.pi-sessions/tieude-x",
+            "--no-extensions",
+            "-e",
+            ext.as_str(),
+            "--no-approve",
+        ]
+    );
+    // review: tool allowlist without edit/write
+    let review = build_launch_cmd(&pi, "suhuynh-x", "/r/x.rules.md", "/runs", "/repo/.wt/x", true)
+        .unwrap();
+    let tail = &review.agent_args[review.agent_args.len() - 2..];
+    assert_eq!(tail, ["--tools", "read,grep,find,ls,bash"]);
+    assert!(resolve_launch(&kind("pi", "m", Some("auto")), "tieude").is_err());
+}
+
+#[test]
 fn test_launch_fails_closed_without_model_or_effort() {
     let e = resolve_launch(&kind("opencode", "m", None), "tieude")
         .unwrap_err()
