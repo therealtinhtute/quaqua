@@ -3,7 +3,7 @@
 Source: brainstorm 2026-10-21 (pstack @ 190d287 vs quaqua main d24be71).
 Status: **draft spec** (chưa giao worker) · spec only, nothing implemented. [F] = verified in repo/CLI, [A] = assumption the PR must confirm first.
 
-Scope: only ideas ported from [pstack](https://github.com/cursor/plugins/tree/main/pstack). Non-pstack work (drift, read-only reviewers, Codex, `harness/`) lives in `harness-hygiene.md`.
+Scope: only ideas ported from [pstack](https://github.com/cursor/plugins/tree/main/pstack). Non-pstack work (drift, read-only reviewers, pi, `harness/`, Codex) lives in `harness-hygiene.md` + `pi-harness.md`.
 
 Locked decisions: port ideas, not the pstack plugin · Playbook header + Orchestrator/Worker split, exit 6 · port all 11 playbooks before eval · verdict = journal event, no TSV · brief gains Scope + Acceptance · no orch.ts/store.ts, no standing-orders file, no swarm.
 
@@ -22,19 +22,22 @@ Order: P1 → P2 → P3 → P4 → P5. Dependency: `harness-hygiene.md` H1 (one 
 ## P1 — Playbook contract
 
 Goal: the CoS picks a playbook, the worker follows its steps, the engine checks it.
-Scope: `worker/prompt/mod.rs` (`brief_headers_ok`, :41), `worker/spawn.rs:318-355` (rules concat), `watchdog.rs`, new `templates/workspace/playbooks/`
+Scope: `worker/prompt/mod.rs` (`brief_headers_ok`, :41; submit path), `worker/prompt/watchdog.rs` (`validate_report_content`, :57-75) and its callers (`workflow.rs:467`, `mod.rs:956`, `cost.rs:483,488,511`), new `templates/workspace/playbooks/`
 Design:
 - Brief header `Playbook: <name>`, optional. `--check-brief` rejects unknown names.
-- Playbook file has `## Orchestrator` (CoS/Lead) and `## Worker`. Spawn appends only `## Worker` to `runs/<name>.rules.md`.
-- `playbooks/` is a separate dir because spawn's concat isn't recursive [F]. Read it explicitly, never via `rules/_all`.
-- Report must contain `## Playbook` with `<step>: done` or `<step>: skip: <reason>`. Brief has a Playbook but the report lacks the section → exit 6.
-Acceptance: tests for unknown name rejected, Worker-only injection, missing section → 6, `skip:` without reason → 6
-Verify: `cargo test -p quaqua prompt watchdog spawn`
+- Playbook file has `## Orchestrator` (CoS/Lead) and `## Worker`; Worker steps are a numbered list, the number is the step id.
+- Injection point is **`worker prompt`, not spawn**: spawn writes `runs/<name>.rules.md` before any brief exists (`spawn.rs:321-354`; `SpawnOpts` has no brief, `spawn.rs:43-49`) and each harness reads that file once at launch (`launch.rs:105,118-119,145-146`) [F]. `worker prompt` appends the `## Worker` section to the brief it submits. Never via `rules/_all` (`playbooks/` stays outside it; spawn's concat isn't recursive [F]).
+- `worker prompt` persists the playbook name in `runs/.<name>.playbook` (like `.budget`), so `--resume` validates without the brief.
+- Builder report (not reviewer: `expect_verdict = false`) must contain `## Playbook` with one line per step id: `<n>: done` or `<n>: skip: <reason>`. Brief has a Playbook and the section is missing, a step id is missing, or `skip:` has no reason → exit 6 (resumable, like today's Lessons check).
+- `validate_report_content` gains the expected step ids (`None` = no playbook = today's behavior); all callers pass it.
+Acceptance: tests for unknown name rejected, Worker-only text in the submitted prompt (no Orchestrator text), missing section → 6, missing step → 6, `skip:` without reason → 6, `--resume` keeps the check, report without Playbook brief unchanged
+Verify: `cargo test --locked -p quaqua prompt watchdog`
 Forbidden: auto-classifying the playbook in the engine
 
 ## P2 — Port 11 playbooks
 
-Goal: bug-fix, feature, refactoring, perf-issue, investigation, prototype, hillclimb, runtime-forensics, trace-forensics, visual-parity, eval.
+Goal: bug-fix, feature, refactoring, perf-issue, investigation, prototype, hillclimb, runtime-forensics, trace-forensics, visual-parity, eval (11 of pstack's 23 files in `skills/poteto-mode/playbooks/`) [F].
+pstack playbooks have no Orchestrator/Worker split: one `### Title`, a lead paragraph, numbered steps that mix lead and subagent work (`bug-fix.md`: "You own this task… Delegate investigation and the fix to subagents") [F]. Each port is an authored split, not a copy.
 Rules for each port:
 - drop Cursor, Task-tool, `/loop` and mono-harness skill references
 - arena → N workers of different kinds + judge; architect → taskforce `dual-lens`; interrogate → reviewer on a different model
