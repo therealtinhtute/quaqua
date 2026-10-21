@@ -277,6 +277,21 @@ pub fn log_blockers(source: &Path, pfile: &Path) {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PipelineTelemetryRow<'a> {
+    pub ts: &'a str,
+    pub rec: &'a str,
+    pub task: &'a str,
+    pub repo: &'a str,
+    pub builder: &'a str,
+    pub reviewer: &'a str,
+    pub review: &'a str,
+    pub rounds: u32,
+    pub review_changed_outcome: bool,
+    pub status: &'a str,
+    pub minutes: u64,
+}
+
 pub fn append_telemetry(
     runs_dir: &Path,
     ts: &str,
@@ -291,17 +306,29 @@ pub fn append_telemetry(
     minutes: u64,
 ) {
     let tele_path = runs_dir.join("telemetry.jsonl");
-    let line = format!(
-        "{{\"ts\":\"{}\",\"task\":\"{}\",\"repo\":\"{}\",\"builder\":\"{}\",\"reviewer\":\"{}\",\"review\":\"{}\",\"rounds\":{},\"review_changed_outcome\":{},\"status\":\"{}\",\"minutes\":{}}}\n",
-        ts, task, repo, builder, reviewer, review, rounds, changed, status, minutes
-    );
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(tele_path)
-    {
-        use std::io::Write;
-        let _ = f.write_all(line.as_bytes());
+    let row = PipelineTelemetryRow {
+        ts,
+        rec: "pipeline",
+        task,
+        repo,
+        builder,
+        reviewer,
+        review,
+        rounds,
+        review_changed_outcome: changed,
+        status,
+        minutes,
+    };
+    if let Ok(mut json) = serde_json::to_string(&row) {
+        json.push('\n');
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(tele_path)
+        {
+            use std::io::Write;
+            let _ = f.write_all(json.as_bytes());
+        }
     }
 }
 

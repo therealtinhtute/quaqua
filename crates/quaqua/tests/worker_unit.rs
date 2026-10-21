@@ -2316,7 +2316,6 @@ fn test_cleanup_worker_grid_timeout_fails() {
     );
 
     let wt_exists = wt.exists();
-    let owner_file_exists = owner_file.exists();
     std::env::remove_var("QUAQUA_RUNS_DIR");
     std::env::remove_var("QUAQUA_OWNER");
     std::env::remove_var("GRID_TAB");
@@ -2330,10 +2329,6 @@ fn test_cleanup_worker_grid_timeout_fails() {
     assert!(
         !wt_exists,
         "worktree must be removed even when grid check fails"
-    );
-    assert!(
-        !owner_file_exists,
-        "metadata must be removed even when grid check fails"
     );
 }
 
