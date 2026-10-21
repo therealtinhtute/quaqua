@@ -196,6 +196,22 @@ expect_accept tieude-spawnguard tieude "17 chars"
 expect_accept tieude-abcdefghijklm tieude "20 chars (boundary)"
 expect_accept sude-leadname sude "leadname suffix is not -lead"
 
+# ── regression: a git that cannot name its hooks dir must not make spawn write
+# into the caller's cwd. The stub git exits 0 with no output for
+# `rev-parse --absolute-git-dir`; an empty answer used to become the relative
+# path "quaqua-hooks", which the hook install then created under whatever cwd
+# ran the test — `quaqua-hooks/` was left untracked at the repo root after
+# `bash tests/run.sh`.
+mkdir -p "$T/clean-cwd"
+( cd "$T/clean-cwd" && CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
+    HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" \
+    QUAQUA_OWNER=cos QUAQUA_TEST=1 GRID_SKIP=1 \
+    "$QUAQUA_BIN" worker spawn tieude-nohooks tieude "$T/repo" >/dev/null 2>&1 ) \
+  || fail "clean-cwd: spawn failed"
+[[ -z $(find "$T/clean-cwd" -mindepth 1 -print -quit) ]] \
+  || fail "spawn wrote into the caller's cwd: $(find "$T/clean-cwd")"
+echo "ok: unresolvable hooks dir -> nothing written under the caller's cwd"
+
 # ── tieude: opencode with deepseek-v4.1-flash at effort max in the env ──
 # (team.toml) — the interactive TUI has no --model, so model+effort travel as
 # `provider/model#variant` in OPENCODE_CONFIG_CONTENT; no omp/gemini
@@ -240,17 +256,8 @@ grep -qF -- '--kind opencode' "$T/calls" || fail "fallback: fallback opencode no
   || fail "fallback: expected exactly 2 starts: $(cat "$T/calls")"
 grep -qF 'WARN: fallback: detu→tieude (agent_not_ready)' "$T/err" \
   || fail "fallback: no WARN with reason: $(cat "$T/err")"
-grep -qF '"fallback":{"from":"detu","to":"tieude","reason":"agent_not_ready"}' \
-  "$T/home/quaqua/runs/detu-fb.srt.json" \
-  || fail "fallback: not recorded in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
-grep -qF '"running_kind":"tieude"' "$T/home/quaqua/runs/detu-fb.srt.json" \
-  || fail "fallback: running_kind tieude not recorded in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
-grep -qF '"harness":"opencode"' "$T/home/quaqua/runs/detu-fb.srt.json" \
-  || fail "fallback: harness opencode not recorded in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
-grep -qF '"kind":"detu"' "$T/home/quaqua/runs/detu-fb.srt.json" \
-  || fail "fallback: original kind detu not preserved in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
 grep -q "worker=detu-fb" "$T/out" || fail "fallback: no success line"
-echo "ok: fallback -> omp failed, opencode (tieude) started, WARN + srt fallback recorded"
+echo "ok: fallback -> omp failed, opencode (tieude) started, WARN recorded"
 
 # one hop max: tieude (opencode) falls back to detu (omp); when both attempts
 # fail -> hard error after exactly two attempts, never a third hop
@@ -441,10 +448,10 @@ spawn "suhuynh-revread" "suhuynh"
 unset spawn_args
 [[ $rc -eq 0 ]] || fail "--review suhuynh: exit $rc, want 0: $(cat "$T/err")"
 grep -qF -- '--kind opencode' "$T/calls" || fail "--review suhuynh: not an opencode start: $(cat "$T/calls")"
-grep -qF '"review":true' "$T/home/quaqua/runs/suhuynh-revread.srt.json" \
-  || fail "--review suhuynh: srt.json missing review: true"
+[[ -e "$T/home/quaqua/runs/suhuynh-revread.review" ]] \
+  || fail "--review suhuynh: review marker missing"
 grep -q "worker=suhuynh-revread" "$T/out" || fail "--review suhuynh: no success line"
-echo "ok: --review suhuynh -> opencode start, review: true recorded in srt.json"
+echo "ok: --review suhuynh -> opencode start, review marker recorded"
 
 # the review Bash allows are review-only: a plain claude spawn keeps ambient settings
 spawn ni-plain ni
@@ -525,13 +532,14 @@ grep -q "worktree add -b quaqua/tieude-basefix .* quaqua/tieude-m12bt\$" "$T/cal
   || fail "--base: worktree add missing start point: $(cat "$T/calls")"
 echo "ok: --base -> rev-parse --verify, worktree add starts at quaqua/tieude-m12bt"
 
-# no flag: worktree add keeps taking repo HEAD (no start point, no rev-parse)
+# no flag: worktree add keeps taking repo HEAD (no start point, no ref verification)
 spawn tieude-nobase tieude
 [[ $rc -eq 0 ]] || fail "no --base: exit $rc, want 0: $(cat "$T/err")"
-! grep -q "rev-parse" "$T/calls" || fail "no --base: rev-parse ran: $(cat "$T/calls")"
+! grep -q "rev-parse --verify" "$T/calls" \
+  || fail "no --base: a base ref was verified: $(cat "$T/calls")"
 grep -q "worktree add -b quaqua/tieude-nobase .*/tieude-nobase\$" "$T/calls" \
   || fail "no --base: worktree add has a start point: $(cat "$T/calls")"
-echo "ok: no --base -> worktree add <wt> only (HEAD), no rev-parse"
+echo "ok: no --base -> worktree add <wt> only (HEAD), no ref verification"
 
 # ── same-name retry: a branch kept by a cleanup is reused, not re-created ────
 # `quaqua worker cleanup` removes the worker's worktree but keeps
@@ -669,6 +677,63 @@ CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
   "${QUAQUA_BIN:-quaqua}" worker spawn sude-rw1 sude "$T/rgrepo" >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 0 ]] || fail "rw1 spawn: exit $rc: $(cat "$T/err")"
 [[ -d $T/.wt/sude-rw1 ]] || fail "rw1: no worktree created"
+
+# ── push guard: spawn installs ONLY pre-push, into git's effective hooks dir ─
+# core.hooksPath stays unset, so no pre-commit and no config redirect; the
+# guard lands in <common-git-dir>/hooks, which every linked worktree runs.
+[[ -x "$T/rgrepo/.git/hooks/pre-push" ]] || fail "push guard: not installed"
+[[ ! -e "$T/rgrepo/.git/hooks/pre-commit" ]] \
+  || fail "push guard: spawn installed the opt-in pre-commit"
+[[ -z "$(git -C "$T/rgrepo" config --get core.hooksPath)" ]] \
+  || fail "push guard: spawn redirected core.hooksPath"
+grep -q 'QUAQUA_OWNER' "$T/rgrepo/.git/hooks/pre-push" \
+  || fail "push guard: body lacks the owner check"
+
+# a push to a URL bypasses the per-remote pushurl block, so the hook decides
+git init -q --bare "$T/remote.git"
+rc=0
+QUAQUA_OWNER=tieude-push git -C "$T/.wt/sude-rw1" push "$T/remote.git" HEAD:refs/heads/worker \
+  >"$T/push-guard.out" 2>&1 || rc=$?
+[[ $rc -ne 0 ]] || fail "push guard: worker push was allowed"
+grep -q 'pre-push: refused' "$T/push-guard.out" \
+  || fail "push guard: no refusal: $(cat "$T/push-guard.out")"
+rc=0
+env -u QUAQUA_OWNER git -C "$T/.wt/sude-rw1" push "$T/remote.git" HEAD:refs/heads/principal \
+  >"$T/push-guard.out" 2>&1 || rc=$?
+[[ $rc -eq 0 ]] || fail "push guard: principal push blocked: $(cat "$T/push-guard.out")"
+echo "ok: spawn -> pre-push guard only in the default hooks dir; worker push refused, principal allowed"
+
+# an existing foreign pre-push is never overwritten
+fh="$T/rgforeignhook"; mkdir -p "$fh"
+git -C "$fh" init -q
+git -C "$fh" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
+printf '#!/usr/bin/env bash\necho theirs\n' > "$fh/.git/hooks/pre-push"
+chmod +x "$fh/.git/hooks/pre-push"; cp "$fh/.git/hooks/pre-push" "$T/foreign.hook"
+rc=0
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-foreignhook sude "$fh" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 0 ]] || fail "foreign hook spawn: exit $rc: $(cat "$T/err")"
+cmp -s "$fh/.git/hooks/pre-push" "$T/foreign.hook" \
+  || fail "spawn overwrote an existing pre-push"
+grep -q 'not the quaqua push guard' "$T/err" \
+  || fail "foreign hook: no warning: $(cat "$T/err")"
+echo "ok: existing foreign pre-push -> left untouched, warned"
+
+# a foreign core.hooksPath is never redirected, and nothing is written there
+hp="$T/rgforeignhp"; mkdir -p "$hp"
+git -C "$hp" init -q
+git -C "$hp" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
+git -C "$hp" config core.hooksPath "$T/their-hooks"
+rc=0
+CALLS="$T/calls" HOME="$T/home" PATH="$T/bin2:$PATH" QUAQUA_TEST=1 GRID_SKIP=1 \
+  "${QUAQUA_BIN:-quaqua}" worker spawn sude-foreignhp sude "$hp" >"$T/out" 2>"$T/err" || rc=$?
+[[ $rc -eq 0 ]] || fail "foreign hooksPath spawn: exit $rc: $(cat "$T/err")"
+[[ "$(git -C "$hp" config --get core.hooksPath)" == "$T/their-hooks" ]] \
+  || fail "spawn redirected a foreign core.hooksPath"
+[[ ! -e "$T/their-hooks" ]] || fail "spawn wrote into a foreign hooks dir"
+grep -q 'core.hooksPath is already set' "$T/err" \
+  || fail "foreign hooksPath: no warning: $(cat "$T/err")"
+echo "ok: foreign core.hooksPath -> left untouched, guard not installed"
 
 # a second spawn reuses the registered worktree instead of failing on '-b'
 rm -f "$T/failed-sude-rw1"

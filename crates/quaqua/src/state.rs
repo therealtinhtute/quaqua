@@ -35,8 +35,16 @@ impl WorkerMetadata {
         runs_dir.join(format!("{name}.pipeline"))
     }
 
-    pub fn srt_path(runs_dir: &Path, name: &str) -> PathBuf {
-        runs_dir.join(format!("{name}.srt.json"))
+    pub fn review_path(runs_dir: &Path, name: &str) -> PathBuf {
+        runs_dir.join(format!("{name}.review"))
+    }
+
+    pub fn has_review(runs_dir: &Path, name: &str) -> bool {
+        Self::review_path(runs_dir, name).is_file()
+    }
+
+    pub fn mark_review(runs_dir: &Path, name: &str) -> io::Result<()> {
+        atomic_write(&Self::review_path(runs_dir, name), "")
     }
 
     /// Residual helper for `src/status.rs:307` (out of scope for this task).
@@ -127,9 +135,6 @@ impl WorkerMetadata {
         atomic_write(&Self::pipeline_path(runs_dir, name), format!("{task}\n"))
     }
 
-    pub fn save_srt(runs_dir: &Path, name: &str, srt_json: &str) -> io::Result<()> {
-        atomic_write(&Self::srt_path(runs_dir, name), srt_json)
-    }
     pub fn load_elapsed(runs_dir: &Path, name: &str) -> u64 {
         fs::read_to_string(Self::elapsed_path(runs_dir, name))
             .ok()
@@ -175,12 +180,12 @@ impl WorkerMetadata {
 
     /// Clean up all metadata and transient state files for a worker.
     /// Ensures `.cost80`, `.cost100`, `.owner`, `.grid`, `.pipeline`,
-    /// `.srt.json`, `.provider_retry`, etc. are all deleted.
+    /// `.provider_retry`, etc. are all deleted.
     pub fn cleanup_worker_files(runs_dir: &Path, name: &str) {
         let _ = fs::remove_file(Self::owner_path(runs_dir, name));
         let _ = fs::remove_file(Self::grid_path(runs_dir, name));
         let _ = fs::remove_file(Self::pipeline_path(runs_dir, name));
-        let _ = fs::remove_file(Self::srt_path(runs_dir, name));
+        let _ = fs::remove_file(Self::review_path(runs_dir, name));
         let _ = fs::remove_file(Self::provider_retry_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost80_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost100_path(runs_dir, name));

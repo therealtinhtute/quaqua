@@ -269,7 +269,7 @@ grep -q "error: no $T/home/quaqua/runs/sude-never.md" "$T/err" \
 echo "ok: sude-never -> exit 2 after cap, no path printed"
 
 # ── R3: report-shape gate (rules/_all/brief.md) ─────────────────────────────
-# The class comes from the spawn metadata runs/<name>.srt.json, never from the
+# The class comes from the spawn marker runs/<name>.review, never from the
 # brief text: this very suite's brief is a builder brief and would still say
 # nothing about which tail is required.
 
@@ -290,9 +290,8 @@ Current design: x" FAKE_WRITE=1 \
   || fail "builder with Lessons: stdout not the runs path"
 echo "ok: builder report with '## Lessons' -> exit 0"
 
-# reviewer (srt.json review:true) without 'Verdict:' -> exit 6
-printf '{"name":"suhuynh-rv1","kind":"suhuynh","review":true}\n' \
-  > "$T/home/quaqua/runs/suhuynh-rv1.srt.json"
+# reviewer (runs/<name>.review present) without 'Verdict:' -> exit 6
+: > "$T/home/quaqua/runs/suhuynh-rv1.review"
 prompt suhuynh-rv1 "Goal: review it
 Hard constraints: read-only
 Current design: diff" FAKE_WRITE=1 \
@@ -300,8 +299,7 @@ Current design: diff" FAKE_WRITE=1 \
 malformed "reviewer missing Verdict" suhuynh-rv1 "'Verdict:' line"
 
 # reviewer with 'Verdict:' -> exit 0 (indented and trailing-space forms count)
-printf '{"name":"suhuynh-rv2","kind":"suhuynh","review":true}\n' \
-  > "$T/home/quaqua/runs/suhuynh-rv2.srt.json"
+: > "$T/home/quaqua/runs/suhuynh-rv2.review"
 prompt suhuynh-rv2 "Goal: review it
 Hard constraints: read-only
 Current design: diff" FAKE_WRITE=1 \
@@ -310,15 +308,6 @@ Current design: diff" FAKE_WRITE=1 \
 [[ "$(cat "$T/out")" == "$T/home/quaqua/runs/suhuynh-rv2.md" ]] \
   || fail "reviewer with Verdict: stdout not the runs path"
 echo "ok: reviewer report with 'Verdict:' -> exit 0"
-
-# metadata that says review:false is a builder report
-printf '{"name":"sude-nof","kind":"sude","review":false}\n' \
-  > "$T/home/quaqua/runs/sude-nof.srt.json"
-prompt sude-nof "Goal: build it
-Hard constraints: none
-Current design: x" FAKE_WRITE=1 \
-  FAKE_CONTENT=$'work done\nVerdict: clean'
-malformed "review:false is a builder" sude-nof "'## Lessons' section"
 
 # --resume re-validates: the malformed file still fails, then a rewritten
 # report (temp+rename) is accepted without a fresh prompt

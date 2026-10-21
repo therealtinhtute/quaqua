@@ -301,24 +301,6 @@ impl SystemActivities {
                 }
 
                 if harness_str.is_empty() {
-                    let runs_dir = crate::worker::cleanup::default_runs_dir();
-                    let srt_path = runs_dir.join(format!("{name}.srt.json"));
-                    let srt_content = std::fs::read_to_string(&srt_path).or_else(|_| {
-                        std::fs::read_to_string(
-                            self.repo_dir.join("runs").join(format!("{name}.srt.json")),
-                        )
-                    });
-                    if let Ok(c) = srt_content {
-                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&c) {
-                            if let Some(h) = j
-                                .get("running_harness")
-                                .and_then(|s| s.as_str())
-                                .or_else(|| j.get("harness").and_then(|s| s.as_str()))
-                            {
-                                harness_str = h.to_string();
-                            }
-                        }
-                    }
                     if harness_str.is_empty() {
                         if name.starts_with("tieude-") {
                             harness_str = "opencode".to_string();

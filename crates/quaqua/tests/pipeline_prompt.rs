@@ -566,17 +566,16 @@ fn pipeline_resume_at_phase_review_with_delivered_report_avoids_exit_6() {
     )
     .unwrap();
 
-    // Already-delivered reviewer report with findings, but NO srt.json exists (post-cleanup)
+    // Already-delivered reviewer report with findings (post-cleanup)
     let revname = format!("suhuynh-{task}r1");
     fs::write(
         f.runs.join(format!("{revname}.md")),
         "findings\nVerdict: 2 findings\n",
     )
     .unwrap();
-    assert!(!f.runs.join(format!("{revname}.srt.json")).exists());
 
     // Fake prompt-worker.sh: if wait_file is called on the reviewer (--resume),
-    // simulate watchdog exit 6 on missing srt.json post-cleanup.
+    // simulate watchdog exit 6 on a malformed report post-cleanup.
     let psh = f.scripts.join("prompt-worker.sh");
     let script = "#!/usr/bin/env bash\n\
 if [ \"$1\" = \"--resume\" ]; then\n\
