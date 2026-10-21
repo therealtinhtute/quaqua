@@ -2,6 +2,7 @@
 
 pub mod cost;
 pub mod observer;
+pub mod readonly;
 pub mod watchdog;
 pub mod workflow;
 
@@ -956,6 +957,13 @@ pub fn prompt_worker<G: GitOps>(
             if let Err(missing) = validate_report_content(&report_content, expect_verdict) {
                 eprintln!(
                     "WATCHDOG malformed-report | name={name} missing={missing} report={}",
+                    out.display()
+                );
+                return Err((6, String::new()));
+            }
+            if let Err(why) = readonly::check(&runs_dir, name) {
+                eprintln!(
+                    "WATCHDOG malformed-report | name={name} missing=read-only worktree ({why}) report={}",
                     out.display()
                 );
                 return Err((6, String::new()));

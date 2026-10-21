@@ -316,6 +316,15 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     }
 
     prepare_worktree(git, &repo, &wt, &opts.name, opts.base.as_deref())?;
+    if opts.review {
+        if let Err(e) = crate::worker::prompt::readonly::record(&runs_dir, &opts.name, &wt) {
+            eprintln!("warning: read-only baseline not recorded ({e}); this review will be void");
+        }
+    } else {
+        let _ = std::fs::remove_file(crate::worker::prompt::readonly::baseline_path(
+            &runs_dir, &opts.name,
+        ));
+    }
     crate::init::ensure_worker_push_guard(&repo).map_err(|e| (1, format!("{e}\n")))?;
 
     // Worker rules dump

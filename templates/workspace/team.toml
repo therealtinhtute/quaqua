@@ -43,7 +43,7 @@ harness = "pi"                    # H3a: was opencode (still a supported fallbac
 model = "opencode-go/deepseek-v4.1-flash"
 effort = "max"                    # pi --thinking max
 fallback = "detu"                 # one hop, only if agent start fails
-can_review = false                # true for ni, sude, suhuynh, truonglao (read-only launch flags per harness)
+can_review = false                # true for ni, suhuynh, truonglao (reviewers: a worktree change voids the verdict)
 [kinds.detu]
 harness = "omp"
 model = "google-antigravity/gemini-3.8-flash"
