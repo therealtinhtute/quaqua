@@ -9,8 +9,7 @@ pub use crate::util::now_sec;
 pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
 pub use observer::{is_provider_timeout, observe, Observation};
 pub use watchdog::{
-    fallback_header_line, is_lessons_heading, nap, prepend_header, run_watchdog,
-    validate_report_content, WatchdogParams,
+    is_lessons_heading, nap, prepend_header, run_watchdog, validate_report_content, WatchdogParams,
 };
 
 use std::cmp::Reverse;
@@ -549,7 +548,6 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let _ = std::fs::create_dir_all(&runs_dir);
 
     let out = runs_dir.join(format!("{name}.md"));
-    let srt = WorkerMetadata::srt_path(&runs_dir, name);
     let submit_log = WorkerMetadata::submit_log_path(&runs_dir, name);
     let cost_budget: Option<f64> = resolve_cost_budget(task.unwrap_or(""));
 
@@ -592,18 +590,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         .and_then(|s| s.parse().ok())
         .unwrap_or(15);
 
-    let mut expect_verdict = false;
-    let mut fallback_line: Option<String> = None;
-    if srt.is_file() {
-        if let Ok(c) = std::fs::read_to_string(&srt) {
-            if let Ok(j) = serde_json::from_str::<serde_json::Value>(&c) {
-                if j.get("review").and_then(|b| b.as_bool()) == Some(true) {
-                    expect_verdict = true;
-                }
-            }
-            fallback_line = fallback_header_line(&c);
-        }
-    }
+    let expect_verdict = WorkerMetadata::has_review(&runs_dir, name);
 
     let config = WatchdogConfig {
         poll_sec,
@@ -662,22 +649,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         }
     }
 
-    let fallback_kind = if srt.is_file() {
-        if let Ok(c) = std::fs::read_to_string(&srt) {
-            serde_json::from_str::<serde_json::Value>(&c)
-                .ok()
-                .and_then(|j| {
-                    j.get("kind")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| name.split('-').next().unwrap_or("tieude").to_string())
-        } else {
-            name.split('-').next().unwrap_or("tieude").to_string()
-        }
-    } else {
-        name.split('-').next().unwrap_or("tieude").to_string()
-    };
+    let fallback_kind = name.split('-').next().unwrap_or("tieude").to_string();
 
     let fallback_repo = {
         let (_ok, get_info) = herdr.agent_get(name).unwrap_or((false, String::new()));
@@ -1039,15 +1011,6 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
                     out.display()
                 );
                 return Err((6, String::new()));
-            }
-
-            if let Some(line) = fallback_line {
-                if let Some(stamped) = prepend_header(&report_content, &line) {
-                    let tmp = runs_dir.join(format!(".{name}.tmp"));
-                    if std::fs::write(&tmp, stamped).is_ok() {
-                        let _ = std::fs::rename(&tmp, &out);
-                    }
-                }
             }
 
             let read_marker = runs_dir.join(format!(".{name}.read"));

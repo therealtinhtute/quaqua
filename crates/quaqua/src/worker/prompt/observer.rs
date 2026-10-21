@@ -4,7 +4,6 @@ use crate::git::GitOps;
 use crate::hash::md5_hex;
 use crate::herdr::HerdrOps;
 use crate::util::is_pid_alive;
-use crate::worker::cleanup::default_runs_dir;
 use serde_json::Value;
 use std::path::Path;
 
@@ -30,9 +29,9 @@ pub fn question_seen(pane_text: &str) -> bool {
         if trimmed.is_empty() {
             continue;
         }
-        let is_decorative = trimmed.chars().all(|c| {
-            "─│|═━┈┉┄┅┌┐└┘├┤┬┴┼╭╮╯╰ 0123456789%·".contains(c)
-        });
+        let is_decorative = trimmed
+            .chars()
+            .all(|c| "─│|═━┈┉┄┅┌┐└┘├┤┬┴┼╭╮╯╰ 0123456789%·".contains(c));
         if is_decorative
             || trimmed.contains('👾')
             || trimmed.contains('✦')
@@ -63,7 +62,11 @@ pub fn question_seen(pane_text: &str) -> bool {
         }
         // [y/N] or y/n bounded by non-alphabetic
         if let Some(idx) = l.find("y/n") {
-            let before = if idx == 0 { ' ' } else { l.chars().nth(idx - 1).unwrap_or(' ') };
+            let before = if idx == 0 {
+                ' '
+            } else {
+                l.chars().nth(idx - 1).unwrap_or(' ')
+            };
             let after = l.chars().nth(idx + 3).unwrap_or(' ');
             if !before.is_alphabetic() && !after.is_alphabetic() {
                 return true;
@@ -173,13 +176,36 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
     let (_ok, get_info) = herdr.agent_get(name).unwrap_or((false, String::new()));
     if let Ok(json) = serde_json::from_str::<Value>(&get_info) {
         if let Some(agent) = json.get("result").and_then(|r| r.get("agent")) {
-            status = agent.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
-            cwd = agent.get("cwd").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            watcher_pane = agent.get("pane_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            hook_active = agent.get("screen_detection_skipped").and_then(|b| b.as_bool()).unwrap_or(false);
-            harness = agent.get("agent").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            status = agent
+                .get("agent_status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            cwd = agent
+                .get("cwd")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            watcher_pane = agent
+                .get("pane_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            hook_active = agent
+                .get("screen_detection_skipped")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            harness = agent
+                .get("agent")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
             if let Some(session) = agent.get("agent_session") {
-                session_id = session.get("value").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                session_id = session
+                    .get("value")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
             }
         } else if let Some(err) = json.get("error") {
             if err.get("code").and_then(|c| c.as_str()) == Some("agent_not_found") {
@@ -191,13 +217,6 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
         status = "gone".to_string();
     }
     if harness.is_empty() {
-        if let Ok(c) = std::fs::read_to_string(default_runs_dir().join(format!("{name}.srt.json"))) {
-            if let Ok(j) = serde_json::from_str::<Value>(&c) {
-                if let Some(h) = j.get("running_harness").and_then(|s| s.as_str()).or_else(|| j.get("harness").and_then(|s| s.as_str())) {
-                    harness = h.to_string();
-                }
-            }
-        }
         if harness.is_empty() {
             if name.starts_with("tieude-") {
                 harness = "opencode".to_string();
@@ -211,9 +230,7 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
         .agent_read(name, "recent-unwrapped", 80)
         .unwrap_or_default();
     if pane_text.trim().is_empty() || pane_text.contains("{\"error\"") {
-        pane_text = herdr
-            .agent_read(name, "visible", 80)
-            .unwrap_or_default();
+        pane_text = herdr.agent_read(name, "visible", 80).unwrap_or_default();
     }
     if pane_text.contains("{\"error\"") {
         pane_text.clear();
@@ -228,7 +245,11 @@ pub fn observe<G: GitOps, H: HerdrOps>(herdr: &H, git: &G, name: &str) -> Option
     for line in pane_text.lines() {
         let t = line.trim();
         let is_sep = t.chars().all(|c| "─│| ".contains(c));
-        if is_sep || t.contains('👾') || t.contains('✦') || t.chars().any(|c| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)) {
+        if is_sep
+            || t.contains('👾')
+            || t.contains('✦')
+            || t.chars().any(|c| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c))
+        {
             continue;
         }
         let mut collapsed = String::new();

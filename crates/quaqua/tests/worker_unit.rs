@@ -7,10 +7,7 @@ use quaqua::herdr::HerdrOps;
 use quaqua::launch::{build_launch_cmd, resolve_launch, Launch};
 use quaqua::lead::spawn::{update_index_content, update_project_index_owner};
 use quaqua::worker::cleanup::{resolve_default_runs_dir, resolve_home_quaqua_runs};
-use quaqua::worker::prompt::{
-    brief_budget_sec, brief_headers_ok, fallback_header_line, prepend_header,
-    validate_env_budget_val,
-};
+use quaqua::worker::prompt::{brief_budget_sec, brief_headers_ok, validate_env_budget_val};
 use quaqua::worker::spawn::{fallback_kind, parse_spawn_args, start_failure_reason};
 use quaqua::workspace::resolve_workspace_root;
 use std::path::{Path, PathBuf};
@@ -1615,35 +1612,6 @@ fn test_launch_fails_closed_without_model_or_effort() {
 }
 
 #[test]
-fn test_fallback_header_line_and_stamping() {
-    let srt = r#"{"name":"x","kind":"sude","fallback":{"from":"sude","to":"detu","reason":"agent_not_ready"}}"#;
-    assert_eq!(
-        fallback_header_line(srt).as_deref(),
-        Some("fallback: sude→detu (agent_not_ready)")
-    );
-    // no fallback in the metadata -> no header
-    assert_eq!(
-        fallback_header_line(r#"{"name":"x","kind":"tieude"}"#),
-        None
-    );
-    // malformed / incomplete -> no header (never a panic)
-    assert_eq!(fallback_header_line("not json"), None);
-    assert_eq!(
-        fallback_header_line(r#"{"fallback":{"from":"sude"}}"#),
-        None
-    );
-
-    let report = "# sude-x — report\n\n## Lessons\n- none\n";
-    let stamped = prepend_header(report, "fallback: sude→detu (agent_not_ready)").unwrap();
-    assert!(stamped.starts_with("fallback: sude→detu (agent_not_ready)\n# sude-x"));
-    // idempotent: already present -> None (no rewrite)
-    assert_eq!(
-        prepend_header(&stamped, "fallback: sude→detu (agent_not_ready)"),
-        None
-    );
-}
-
-#[test]
 fn test_start_failure_reason_reads_herdr_error_code() {
     fn out(stdout: &str) -> Output {
         Output {
@@ -1858,7 +1826,7 @@ fn test_spawn_worker_fallback_scenarios() {
     std::env::set_var("QUAQUA_TEST", "1");
     std::env::set_var("GRID_SKIP", "1");
 
-    // Scenario 1: Primary start fails (omp), falls back to detu (opencode), srt.json recorded
+    // Scenario 1: Primary start fails (omp), falls back to detu (opencode)
     {
         let cfg = test_cfg_with_fallback();
         let git = SpawnTestGit;
@@ -1906,27 +1874,6 @@ fn test_spawn_worker_fallback_scenarios() {
         assert_eq!(
             starts[1],
             ("sude-fbtest".to_string(), "opencode".to_string())
-        );
-
-        let srt_path = runs_dir.join("sude-fbtest.srt.json");
-        assert!(srt_path.is_file(), "srt.json must be written");
-        let srt_content = std::fs::read_to_string(&srt_path).unwrap();
-        assert!(
-            srt_content
-                .contains(r#""fallback":{"from":"sude","to":"detu","reason":"agent_not_ready"}"#),
-            "{srt_content}"
-        );
-        assert!(
-            srt_content.contains(r#""running_kind":"detu""#),
-            "srt.json must record running_kind after fallback: {srt_content}"
-        );
-        assert!(
-            srt_content.contains(r#""harness":"opencode""#),
-            "srt.json must record running harness after fallback: {srt_content}"
-        );
-        assert!(
-            srt_content.contains(r#""kind":"sude""#),
-            "srt.json must preserve original kind field: {srt_content}"
         );
     }
 
@@ -2681,7 +2628,6 @@ fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
         runs_dir.join(format!("{worker_name}.owner")),
         runs_dir.join(format!("{worker_name}.grid")),
         runs_dir.join(format!("{worker_name}.pipeline")),
-        runs_dir.join(format!("{worker_name}.srt.json")),
         runs_dir.join(format!(".{worker_name}.provider_retry")),
         runs_dir.join(format!(".{worker_name}.cost80")),
         runs_dir.join(format!(".{worker_name}.cost100")),

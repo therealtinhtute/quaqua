@@ -9,8 +9,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::herdr::{Herdr, HerdrOps};
-
 pub const USAGE: &str = "# Usage: quaqua auditor run [--dry-run] [--out <path>] [--model <model>] [--harness <harness>] [--repo <path>]";
 
 pub const PROMPT_TEMPLATE: &str = r#"You are the Auditor for the quaqua repo. READ-ONLY: inspect and report only.
@@ -52,9 +50,6 @@ Audit five things:
      before acceptance; no handling line = still open. A Challenge already
      copied into a pipeline file's `## Challenge (from <file>)` section is
      covered by that file's flag — do not report it twice.
-5. Live workers. Flag any live task worker in herdr not started through the
-   sandbox wrapper (missing runs/<name>.srt.json); a `herdr agent list`
-   failure is itself a finding — never report 'none' for it.
    Deterministic pre-check — the script already ran the cheap greps; list
    each finding below under `## Pipeline`, `## Workers` or (doc-rot)
    `## Stale docs` unless repo evidence
@@ -134,7 +129,10 @@ pub fn handle_auditor(args: &[String]) -> Result<i32, (i32, String)> {
                     println!("{USAGE}");
                     return Ok(0);
                 } else {
-                    return Err((1, format!("error: unknown auditor option '{arg}'\n{USAGE}\n")));
+                    return Err((
+                        1,
+                        format!("error: unknown auditor option '{arg}'\n{USAGE}\n"),
+                    ));
                 }
             }
             run_auditor(opts)
@@ -143,7 +141,10 @@ pub fn handle_auditor(args: &[String]) -> Result<i32, (i32, String)> {
             println!("{USAGE}");
             Ok(0)
         }
-        unknown => Err((1, format!("error: unknown auditor command '{unknown}'\n{USAGE}\n"))),
+        unknown => Err((
+            1,
+            format!("error: unknown auditor command '{unknown}'\n{USAGE}\n"),
+        )),
     }
 }
 
@@ -152,7 +153,8 @@ pub fn run_auditor(opts: AuditorRunOptions) -> Result<i32, (i32, String)> {
 
     let out = resolve_out_path(&root, opts.out.as_deref());
     if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| (1, format!("error creating report dir: {e}\n")))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| (1, format!("error creating report dir: {e}\n")))?;
     }
 
     let flags = run_deterministic_prechecks(&root);
@@ -185,7 +187,10 @@ pub fn run_auditor(opts: AuditorRunOptions) -> Result<i32, (i32, String)> {
         report.push_str("## Unhandled\n- none\n\n## Pipeline\n");
         let pipeline_flags: Vec<&str> = flags
             .iter()
-            .filter(|f| f.starts_with("- runs/pipeline-") || (f.starts_with("- runs/") && f.contains("'## Challenge'")))
+            .filter(|f| {
+                f.starts_with("- runs/pipeline-")
+                    || (f.starts_with("- runs/") && f.contains("'## Challenge'"))
+            })
             .map(|s| s.as_str())
             .collect();
         if pipeline_flags.is_empty() {
@@ -220,7 +225,8 @@ pub fn run_auditor(opts: AuditorRunOptions) -> Result<i32, (i32, String)> {
             report.push_str(&format!("Verdict: {} findings\n", flags.len()));
         }
 
-        std::fs::write(&out, &report).map_err(|e| (1, format!("error writing dry-run report: {e}\n")))?;
+        std::fs::write(&out, &report)
+            .map_err(|e| (1, format!("error writing dry-run report: {e}\n")))?;
         println!("{}", out.display());
         return Ok(0);
     }
@@ -228,8 +234,14 @@ pub fn run_auditor(opts: AuditorRunOptions) -> Result<i32, (i32, String)> {
     let harness = resolve_harness(opts.harness.as_deref());
     let (model, mut cmd) = match harness.as_str() {
         "opencode" => {
-            let m = opts.model.clone()
-                .or_else(|| std::env::var("AUDITOR_MODEL").ok().filter(|s| !s.is_empty()))
+            let m = opts
+                .model
+                .clone()
+                .or_else(|| {
+                    std::env::var("AUDITOR_MODEL")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
                 .unwrap_or_else(|| "opencode-go/deepseek-v4.1-flash#low".to_string());
             let mut c = Command::new("opencode");
             c.current_dir(&root);
@@ -237,8 +249,14 @@ pub fn run_auditor(opts: AuditorRunOptions) -> Result<i32, (i32, String)> {
             (m, c)
         }
         _ => {
-            let m = opts.model.clone()
-                .or_else(|| std::env::var("AUDITOR_MODEL").ok().filter(|s| !s.is_empty()))
+            let m = opts
+                .model
+                .clone()
+                .or_else(|| {
+                    std::env::var("AUDITOR_MODEL")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
                 .unwrap_or_else(|| "claude-opus-5-5".to_string());
             let mut c = Command::new("claude");
             c.current_dir(&root);
@@ -269,11 +287,7 @@ pub fn run_auditor(opts: AuditorRunOptions) -> Result<i32, (i32, String)> {
             output.stdout,
             output.stderr,
         ),
-        Err(e) => (
-            1,
-            Vec::new(),
-            e.to_string().into_bytes(),
-        ),
+        Err(e) => (1, Vec::new(), e.to_string().into_bytes()),
     };
 
     if rc != 0 {
@@ -340,7 +354,8 @@ fn resolve_out_path(root: &Path, explicit: Option<&Path>) -> PathBuf {
             return PathBuf::from(out);
         }
     }
-    root.join("reports").join(format!("audit-{}.md", current_date_hour()))
+    root.join("reports")
+        .join(format!("audit-{}.md", current_date_hour()))
 }
 
 fn resolve_harness(explicit: Option<&str>) -> String {
@@ -506,16 +521,6 @@ fn git_verify_commit(repo: &Path, sha: &str) -> bool {
     matches!(res, Ok(output) if output.status.success())
 }
 
-fn is_task_worker(name: &str) -> bool {
-    if name.ends_with("-lead") {
-        return false;
-    }
-    const PREFIXES: &[&str] = &[
-        "tieude-", "detu-", "sude-", "ni-", "suhuynh-", "truonglao-",
-    ];
-    PREFIXES.iter().any(|prefix| name.starts_with(prefix))
-}
-
 pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
     let mut flags: Vec<String> = Vec::new();
 
@@ -541,7 +546,11 @@ pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
                 Err(_) => continue,
             };
 
-            let sline = match content.lines().filter(|l| l.starts_with("- status: ")).last() {
+            let sline = match content
+                .lines()
+                .filter(|l| l.starts_with("- status: "))
+                .last()
+            {
                 Some(l) => l,
                 None => continue,
             };
@@ -596,7 +605,10 @@ pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
                     };
 
                     if !prepo.is_dir() {
-                        flags.push(format!("- runs/{base}.md: status clean but recorded repo '{}' is missing", prepo.display()));
+                        flags.push(format!(
+                            "- runs/{base}.md: status clean but recorded repo '{}' is missing",
+                            prepo.display()
+                        ));
                     } else if sha.is_empty()
                         || sha == "none"
                         || sha == "?"
@@ -611,7 +623,8 @@ pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
                         .filter(|l| {
                             if let Some(idx) = l.find("review round ") {
                                 let after = &l[idx + "review round ".len()..];
-                                let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
+                                let digits =
+                                    after.chars().take_while(|c| c.is_ascii_digit()).count();
                                 digits > 0 && after[digits..].starts_with(':')
                             } else {
                                 false
@@ -644,7 +657,9 @@ pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
                         let has_verdict = if !revfile.is_empty() {
                             let rev_path = root.join("runs").join(&revfile);
                             if let Ok(rev_content) = std::fs::read_to_string(&rev_path) {
-                                rev_content.lines().any(|l| l.trim_start().starts_with("Verdict:"))
+                                rev_content
+                                    .lines()
+                                    .any(|l| l.trim_start().starts_with("Verdict:"))
                             } else {
                                 false
                             }
@@ -729,68 +744,7 @@ pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
         }
     }
 
-    // ── 3. live-worker sandbox pre-checks ─────────────────────────────────────
-    let herdr_res = Herdr::new().run(&["agent", "list"]);
-    match herdr_res {
-        Ok(output) => {
-            let herdr_rc = output.status.code().unwrap_or(1);
-            if herdr_rc != 0 {
-                let err_str = String::from_utf8_lossy(&output.stderr);
-                let first_line = err_str.lines().next().unwrap_or("").trim();
-                let herdr_msg = if first_line.len() > 200 {
-                    &first_line[..200]
-                } else {
-                    first_line
-                };
-                let msg_part = if herdr_msg.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {herdr_msg}")
-                };
-                flags.push(format!("- herdr agent list failed (exit {herdr_rc}{msg_part}) — live-worker sandbox audit skipped"));
-            } else {
-                match serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                    Ok(json) => {
-                        if let Some(agents) = json
-                            .get("result")
-                            .and_then(|r| r.get("agents"))
-                            .and_then(|a| a.as_array())
-                        {
-                            for agent in agents {
-                                let name = agent.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                                if is_task_worker(name) {
-                                    let srt = root.join("runs").join(format!("{name}.srt.json"));
-                                    if !srt.is_file() {
-                                        flags.push(format!("- live worker '{name}': not started through sandbox wrapper (missing runs/{name}.srt.json)"));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        flags.push("- herdr agent list returned no JSON — live-worker sandbox audit skipped".to_string());
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            let err_msg = e.to_string();
-            let first_line = err_msg.lines().next().unwrap_or("").trim();
-            let herdr_msg = if first_line.len() > 200 {
-                &first_line[..200]
-            } else {
-                first_line
-            };
-            let msg_part = if herdr_msg.is_empty() {
-                String::new()
-            } else {
-                format!(": {herdr_msg}")
-            };
-            flags.push(format!("- herdr agent list failed (exit 1{msg_part}) — live-worker sandbox audit skipped"));
-        }
-    }
-
-    // ── 4. doc-rot pre-checks ─────────────────────────────────────────────────
+    // ── 3. doc-rot pre-checks ─────────────────────────────────────────────────
     let mut doc_files: Vec<PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root) {
         for e in entries.flatten() {
@@ -837,7 +791,11 @@ pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
             let n = bytes.iter().filter(|&&b| b == b'\n').count();
             if n > 100 {
                 let rel = f.strip_prefix(root).unwrap_or(&f);
-                flags.push(format!("- {}: {} lines (>100) — doc-rot risk, trim or split", rel.display(), n));
+                flags.push(format!(
+                    "- {}: {} lines (>100) — doc-rot risk, trim or split",
+                    rel.display(),
+                    n
+                ));
             }
         }
     }
@@ -900,15 +858,5 @@ mod tests {
         assert!(PROMPT_TEMPLATE.contains("[audit]"));
         assert!(PROMPT_TEMPLATE.contains("## Lessons"));
         assert!(PROMPT_TEMPLATE.contains("runs/"));
-    }
-
-    #[test]
-    fn test_is_task_worker() {
-        assert!(is_task_worker("tieude-foo"));
-        assert!(is_task_worker("sude-bar"));
-        assert!(is_task_worker("suhuynh-baz"));
-        assert!(!is_task_worker("mono-desk-lead"));
-        assert!(!is_task_worker("sude-lead"));
-        assert!(!is_task_worker("custom-worker"));
     }
 }

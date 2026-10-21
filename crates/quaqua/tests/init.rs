@@ -568,6 +568,15 @@ fn init_wires_embedded_hook_and_migrates_legacy() {
     assert_eq!(path_mode(&hook) & 0o111, 0o111, "hook is not executable");
     assert!(read(&hook).contains("portable-paths.md"));
 
+    let push_hook = ws.join(".git/quaqua-hooks/pre-push");
+    assert!(push_hook.is_file(), "pre-push hook was not created");
+    assert_eq!(
+        path_mode(&push_hook) & 0o111,
+        0o111,
+        "pre-push hook is not executable"
+    );
+    assert!(read(&push_hook).contains("QUAQUA_OWNER"));
+
     let hooks_path = Command::new(&git)
         .arg("-C")
         .arg(&ws)
@@ -734,6 +743,15 @@ fn init_git_hooks_wires_an_existing_repo_only() {
     assert_eq!(path_mode(&hook) & 0o111, 0o111, "hook is not executable");
     assert!(read(&hook).contains("portable-paths.md"));
 
+    let push_hook = repo.join(".git/quaqua-hooks/pre-push");
+    assert!(push_hook.is_file(), "pre-push hook was not created");
+    assert_eq!(
+        path_mode(&push_hook) & 0o111,
+        0o111,
+        "pre-push hook is not executable"
+    );
+    assert!(read(&push_hook).contains("QUAQUA_OWNER"));
+
     let hooks_path = Command::new(&git)
         .arg("-C")
         .arg(&repo)
@@ -888,4 +906,55 @@ fn find_git() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// A worker pane carries `QUAQUA_OWNER`; the pre-push hook must reject that and
+/// pass a plain shell. Runs the installed hook directly — no remote needed.
+#[test]
+fn pre_push_hook_rejects_workers_only() {
+    let Some(git) = find_git() else {
+        return;
+    };
+    let sb = Sandbox::new("prepush");
+    let repo = sb.target("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(Command::new(&git)
+        .args(["init", "-q"])
+        .arg(&repo)
+        .status()
+        .unwrap()
+        .success());
+    let bin = sb.target("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&git, bin.join("git")).unwrap();
+    let out = sb
+        .cmd()
+        .env("PATH", &bin)
+        .args(["init", "--git-hooks", repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+
+    let hook = repo.join(".git/quaqua-hooks/pre-push");
+    let run = |owner: Option<&str>| {
+        let mut cmd = Command::new(&hook);
+        cmd.current_dir(&repo)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match owner {
+            Some(v) => {
+                cmd.env("QUAQUA_OWNER", v);
+            }
+            None => {
+                cmd.env_remove("QUAQUA_OWNER");
+            }
+        }
+        cmd.status().unwrap()
+    };
+    assert!(
+        !run(Some("tieude-hardwork")).success(),
+        "worker push must fail"
+    );
+    assert!(run(None).success(), "principal push must pass");
 }

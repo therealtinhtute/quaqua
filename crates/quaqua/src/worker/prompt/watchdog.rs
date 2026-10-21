@@ -8,7 +8,6 @@ use crate::worker::prompt::cost::CostTracker;
 use crate::worker::prompt::observer::{
     is_provider_timeout, lead_waiting, observe, question_seen, report_ready, Observation,
 };
-use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
@@ -18,23 +17,6 @@ pub fn nap(sec: u64) {
     } else {
         std::thread::sleep(std::time::Duration::from_secs(sec));
     }
-}
-
-/// The `fallback: <from>→<to> (<reason>)` header line a fallback spawn recorded
-/// in the run metadata (`runs/<name>.srt.json`), if any.
-pub fn fallback_header_line(srt_json: &str) -> Option<String> {
-    let j = serde_json::from_str::<Value>(srt_json).ok()?;
-    let fb = j.get("fallback")?;
-    let from = fb.get("from").and_then(|s| s.as_str()).unwrap_or("");
-    let to = fb.get("to").and_then(|s| s.as_str()).unwrap_or("");
-    let reason = fb
-        .get("reason")
-        .and_then(|s| s.as_str())
-        .unwrap_or("start-failed");
-    if from.is_empty() || to.is_empty() {
-        return None;
-    }
-    Some(format!("fallback: {from}→{to} ({reason})"))
 }
 
 /// Prepend a header line to a report unless it is already present. Returns
@@ -190,7 +172,6 @@ pub fn run_watchdog<G: GitOps, H: HerdrOps>(
     herdr: &H,
 ) -> Result<(), (i32, String)> {
     let out = runs_dir.join(format!("{name}.md"));
-    let srt = WorkerMetadata::srt_path(runs_dir, name);
     let mut cost_tracker = CostTracker::new(runs_dir, name, params.cost_budget);
 
     let mut autoext_total: u64 = 0;
@@ -528,20 +509,7 @@ pub fn run_watchdog<G: GitOps, H: HerdrOps>(
     }
 
     // Validate report shape
-    let mut expect_verdict = false;
-    let mut fallback_line: Option<String> = None;
-    if srt.is_file() {
-        if let Ok(c) = std::fs::read_to_string(&srt) {
-            if let Ok(j) = serde_json::from_str::<Value>(&c) {
-                if j.get("review").and_then(|b| b.as_bool()) == Some(true) {
-                    expect_verdict = true;
-                }
-            }
-            // A fallback spawn recorded from/to/reason in the run metadata;
-            // stamp it as the report header line once the report lands.
-            fallback_line = fallback_header_line(&c);
-        }
-    }
+    let expect_verdict = WorkerMetadata::has_review(runs_dir, name);
 
     let report_content = std::fs::read_to_string(&out).unwrap_or_default();
     if let Err(missing) = validate_report_content(&report_content, expect_verdict) {
@@ -551,14 +519,6 @@ pub fn run_watchdog<G: GitOps, H: HerdrOps>(
     // spawn must never create runs/<name>.md (its existence is the completion
     // signal), so the `fallback:` header is stamped here, after the report is
     // validated. Idempotent; atomic tmp+rename.
-    if let Some(line) = fallback_line {
-        if let Some(stamped) = prepend_header(&report_content, &line) {
-            let tmp = runs_dir.join(format!(".{name}.tmp"));
-            if std::fs::write(&tmp, stamped).is_ok() {
-                let _ = std::fs::rename(&tmp, &out);
-            }
-        }
-    }
 
     let now = now_sec();
     save_elapsed(now);

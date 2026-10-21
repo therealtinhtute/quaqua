@@ -240,17 +240,8 @@ grep -qF -- '--kind opencode' "$T/calls" || fail "fallback: fallback opencode no
   || fail "fallback: expected exactly 2 starts: $(cat "$T/calls")"
 grep -qF 'WARN: fallback: detu→tieude (agent_not_ready)' "$T/err" \
   || fail "fallback: no WARN with reason: $(cat "$T/err")"
-grep -qF '"fallback":{"from":"detu","to":"tieude","reason":"agent_not_ready"}' \
-  "$T/home/quaqua/runs/detu-fb.srt.json" \
-  || fail "fallback: not recorded in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
-grep -qF '"running_kind":"tieude"' "$T/home/quaqua/runs/detu-fb.srt.json" \
-  || fail "fallback: running_kind tieude not recorded in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
-grep -qF '"harness":"opencode"' "$T/home/quaqua/runs/detu-fb.srt.json" \
-  || fail "fallback: harness opencode not recorded in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
-grep -qF '"kind":"detu"' "$T/home/quaqua/runs/detu-fb.srt.json" \
-  || fail "fallback: original kind detu not preserved in srt.json: $(cat "$T/home/quaqua/runs/detu-fb.srt.json")"
 grep -q "worker=detu-fb" "$T/out" || fail "fallback: no success line"
-echo "ok: fallback -> omp failed, opencode (tieude) started, WARN + srt fallback recorded"
+echo "ok: fallback -> omp failed, opencode (tieude) started, WARN recorded"
 
 # one hop max: tieude (opencode) falls back to detu (omp); when both attempts
 # fail -> hard error after exactly two attempts, never a third hop
@@ -441,10 +432,10 @@ spawn "suhuynh-revread" "suhuynh"
 unset spawn_args
 [[ $rc -eq 0 ]] || fail "--review suhuynh: exit $rc, want 0: $(cat "$T/err")"
 grep -qF -- '--kind opencode' "$T/calls" || fail "--review suhuynh: not an opencode start: $(cat "$T/calls")"
-grep -qF '"review":true' "$T/home/quaqua/runs/suhuynh-revread.srt.json" \
-  || fail "--review suhuynh: srt.json missing review: true"
+[[ -e "$T/home/quaqua/runs/suhuynh-revread.review" ]] \
+  || fail "--review suhuynh: review marker missing"
 grep -q "worker=suhuynh-revread" "$T/out" || fail "--review suhuynh: no success line"
-echo "ok: --review suhuynh -> opencode start, review: true recorded in srt.json"
+echo "ok: --review suhuynh -> opencode start, review marker recorded"
 
 # the review Bash allows are review-only: a plain claude spawn keeps ambient settings
 spawn ni-plain ni
@@ -525,13 +516,14 @@ grep -q "worktree add -b quaqua/tieude-basefix .* quaqua/tieude-m12bt\$" "$T/cal
   || fail "--base: worktree add missing start point: $(cat "$T/calls")"
 echo "ok: --base -> rev-parse --verify, worktree add starts at quaqua/tieude-m12bt"
 
-# no flag: worktree add keeps taking repo HEAD (no start point, no rev-parse)
+# no flag: worktree add keeps taking repo HEAD (no start point, no ref verification)
 spawn tieude-nobase tieude
 [[ $rc -eq 0 ]] || fail "no --base: exit $rc, want 0: $(cat "$T/err")"
-! grep -q "rev-parse" "$T/calls" || fail "no --base: rev-parse ran: $(cat "$T/calls")"
+! grep -q "rev-parse --verify" "$T/calls" \
+  || fail "no --base: a base ref was verified: $(cat "$T/calls")"
 grep -q "worktree add -b quaqua/tieude-nobase .*/tieude-nobase\$" "$T/calls" \
   || fail "no --base: worktree add has a start point: $(cat "$T/calls")"
-echo "ok: no --base -> worktree add <wt> only (HEAD), no rev-parse"
+echo "ok: no --base -> worktree add <wt> only (HEAD), no ref verification"
 
 # ── same-name retry: a branch kept by a cleanup is reused, not re-created ────
 # `quaqua worker cleanup` removes the worker's worktree but keeps

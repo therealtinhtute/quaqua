@@ -4,16 +4,32 @@ use crate::cap::count_owner_slots;
 use crate::config::{Config, Kind};
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
+pub use crate::launch::{
+    build_launch_cmd, claude_trust_dialog_up, resolve_launch, Launch, LaunchCmd,
+};
 use crate::state::WorkerMetadata;
-use serde_json::Value;
 use crate::worker::cleanup::run_grid_hook;
-use std::path::PathBuf;
-pub use crate::launch::{build_launch_cmd, claude_trust_dialog_up, resolve_launch, Launch, LaunchCmd};
 pub use crate::worker::worktree::{
     apply_push_block, canonicalize_repo_path, prepare_worktree, remove_worktree, resolve_paths,
     resolve_worktree_path, setup_worktree, validate_base_ref,
 };
-use std::process::{Command, Output};
+use serde_json::Value;
+use std::path::PathBuf;
+use std::process::Output;
+
+/// Credential env vars a worker must never inherit from the spawning shell.
+/// Provider API keys are deliberately absent: the harness needs its own auth
+/// to run. `SSH_AUTH_SOCK` stays too (read-only ssh fetches); pushes are
+/// stopped by the pre-push hook instead.
+const CREDENTIAL_ENV_VARS: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GITHUB_PAT",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+];
 
 pub const USAGE: &str = "\
 # Usage: quaqua worker spawn [--base <ref>] [--review] [--approve-kind <kind>] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
@@ -111,31 +127,9 @@ fn is_valid_name(name: &str, kind: &str) -> bool {
     if rest.is_empty() {
         return false;
     }
-    rest.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    rest.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
-
-fn get_iso_now() -> String {
-    if let Ok(out) = Command::new("date").arg("-Iseconds").output() {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() {
-                return s;
-            }
-        }
-    }
-    if let Ok(out) = Command::new("date").arg("+%Y-%m-%dT%H:%M:%S%z").output() {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() {
-                return s;
-            }
-        }
-    }
-    "2026-10-16T09:00:00+0000".to_string()
-}
-
-
-
 /// A short, stable slug for why an agent start failed: herdr's `error.code`
 /// when the output carries one (`agent_not_ready`, auth/quota codes), else
 /// `start-failed`.
@@ -147,7 +141,11 @@ pub fn start_failure_reason(out: &Output) -> String {
         stdout.into_owned()
     };
     if let Ok(j) = serde_json::from_str::<Value>(&text) {
-        if let Some(code) = j.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_str()) {
+        if let Some(code) = j
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str())
+        {
             if !code.is_empty() {
                 return code.to_string();
             }
@@ -177,7 +175,6 @@ pub fn fallback_kind<'a>(
         }
     }
 }
-
 
 /// Default workers-tab label for a spawn. A project Lead's workers belong to its
 /// project tab — owner `<slug>-lead` → `<slug>-workers`, the exact tab the Lead's
@@ -245,6 +242,21 @@ fn resolve_owner<H: HerdrOps>(herdr: &H) -> String {
     }
 }
 
+/// Pane env for a worker: the launch env plus blank copies of every credential
+/// name, so the herdr daemon's inherited value cannot reach the agent (`pane
+/// split` has no `--unset-env`; an empty value carries no secret).
+fn worker_split_envs<'a>(cmd: &'a LaunchCmd) -> Vec<(&'a str, &'a str)> {
+    let mut envs: Vec<(&'a str, &'a str)> = cmd
+        .split_envs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    for name in CREDENTIAL_ENV_VARS {
+        envs.push((*name, ""));
+    }
+    envs
+}
+
 pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     opts: SpawnOptions,
     cfg: &Config,
@@ -304,6 +316,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     }
 
     prepare_worktree(git, &repo, &wt, &opts.name, opts.base.as_deref())?;
+    crate::init::ensure_git_hooks(&repo).map_err(|e| (1, format!("{e}\n")))?;
 
     // Worker rules dump
     let rules_dir = crate::workspace::workspace_root().join("rules");
@@ -351,23 +364,24 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let rf_str = rf.to_string_lossy().to_string();
     let runs_str = runs_dir.to_string_lossy().to_string();
     let wt_str = wt.to_string_lossy().to_string();
-    let iso_now = get_iso_now();
 
     // Attempt list: the configured kind, and — only if its agent fails to start —
     // one hop to its fallback kind. The worker name never changes.
     let mut attempts: Vec<Launch> = vec![primary_launch];
-    let mut fallback_record: Option<(String, String, String)> = None; // (from, to, reason)
 
     let mut pane_id = String::new();
     let mut idx = 0;
     while idx < attempts.len() {
         let launch = attempts[idx].clone();
-        let cmd = build_launch_cmd(&launch, &opts.name, &rf_str, &runs_str, &wt_str, opts.review)?;
-        let split_envs: Vec<(&str, &str)> = cmd
-            .split_envs
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
+        let cmd = build_launch_cmd(
+            &launch,
+            &opts.name,
+            &rf_str,
+            &runs_str,
+            &wt_str,
+            opts.review,
+        )?;
+        let split_envs = worker_split_envs(&cmd);
 
         let split_out = herdr
             .pane_split(&wt_str, &owner, &split_envs)
@@ -377,10 +391,19 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         }
         let pane = serde_json::from_str::<Value>(&String::from_utf8_lossy(&split_out.stdout))
             .ok()
-            .and_then(|j| j.get("result").and_then(|r| r.get("pane")).and_then(|p| p.get("pane_id")).and_then(|p| p.as_str()).map(String::from))
+            .and_then(|j| {
+                j.get("result")
+                    .and_then(|r| r.get("pane"))
+                    .and_then(|p| p.get("pane_id"))
+                    .and_then(|p| p.as_str())
+                    .map(String::from)
+            })
             .unwrap_or_default();
         if pane.is_empty() {
-            return Err((1, "error: herdr pane split returned no pane_id\n".to_string()));
+            return Err((
+                1,
+                "error: herdr pane split returned no pane_id\n".to_string(),
+            ));
         }
 
         // Report initial metadata tokens. `grid_tab` carries GRID_TAB (the workers
@@ -489,7 +512,6 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
                 crate::config::check_spawn_policy(fb, fb_kind, &opts.approve_kinds)?;
                 let fb_launch = resolve_launch(fb_kind, fb)?;
                 eprintln!("WARN: fallback: {}→{fb} ({reason})", opts.kind);
-                fallback_record = Some((opts.kind.clone(), fb.to_string(), reason.clone()));
                 attempts.push(fb_launch);
                 idx += 1;
                 continue;
@@ -502,28 +524,17 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         return Err((1, String::new()));
     }
 
-    let (running_kind, running_harness) = match &fallback_record {
-        Some((_, to, _)) => {
-            let to_kind = cfg.kinds.get(to.as_str());
-            let h = to_kind.map(|k| k.harness.as_str()).unwrap_or("");
-            (to.as_str(), h)
-        }
-        None => (opts.kind.as_str(), kind_info.harness.as_str()),
-    };
+    if opts.review {
+        let _ = WorkerMetadata::mark_review(&runs_dir, &opts.name);
+    }
 
-    let srt_json = match &fallback_record {
-        Some((from, to, reason)) => format!(
-            "{{\"name\":\"{}\",\"kind\":\"{}\",\"running_kind\":\"{}\",\"harness\":\"{}\",\"running_harness\":\"{}\",\"created\":\"{}\",\"sandbox\":true,\"owner\":\"{}\",\"review\":{},\"fallback\":{{\"from\":\"{}\",\"to\":\"{}\",\"reason\":\"{}\"}}}}\n",
-            opts.name, opts.kind, running_kind, running_harness, running_harness, iso_now, owner, opts.review, from, to, reason
-        ),
-        None => format!(
-            "{{\"name\":\"{}\",\"kind\":\"{}\",\"running_kind\":\"{}\",\"harness\":\"{}\",\"running_harness\":\"{}\",\"created\":\"{}\",\"sandbox\":true,\"owner\":\"{}\",\"review\":{}}}\n",
-            opts.name, opts.kind, running_kind, running_harness, running_harness, iso_now, owner, opts.review
-        ),
-    };
-    let _ = WorkerMetadata::save_srt(&runs_dir, &opts.name, &srt_json);
-
-    println!("worker={} kind={} pane={} worktree={}", opts.name, opts.kind, pane_id, wt.display());
+    println!(
+        "worker={} kind={} pane={} worktree={}",
+        opts.name,
+        opts.kind,
+        pane_id,
+        wt.display()
+    );
     if let Err((code, msg)) = run_grid_hook(&grid_tab, Some(&owner)) {
         return Err((
             code,
@@ -535,4 +546,32 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod credential_env_tests {
+    use super::*;
+
+    #[test]
+    fn worker_pane_env_blanks_credentials() {
+        let cmd = LaunchCmd {
+            split_envs: vec![("OPENCODE_CONFIG_CONTENT".to_string(), "{}".to_string())],
+            agent_args: Vec::new(),
+        };
+        let envs = worker_split_envs(&cmd);
+        for secret in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+        ] {
+            assert!(
+                envs.iter().any(|(k, v)| *k == secret && v.is_empty()),
+                "{secret} must be blanked in the worker pane env"
+            );
+        }
+        assert!(envs
+            .iter()
+            .any(|(k, v)| *k == "OPENCODE_CONFIG_CONTENT" && !v.is_empty()));
+    }
 }
