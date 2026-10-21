@@ -3,7 +3,7 @@
 Cấu hình đổi **không cần sửa code**: mọi giá trị nằm trong `team.toml`, đọc lại mỗi lần spawn.
 
 ## Đọc ở đâu, khi nào
-- Thứ tự resolve (`config.rs:load_team_config`): `$QUAQUA_TEAM_TOML` → `./team.toml` (cwd) → `workspace_root()/team.toml` → bản **nhúng trong binary** (`include_str!`).
+- Thứ tự resolve (`config.rs:load_team_config`): `$QUAQUA_TEAM_TOML` → `./team.toml` (cwd) → `workspace_root()/team.toml` → bản **nhúng trong binary** (`include_str!` của `templates/workspace/team.toml` trong engine checkout).
 - **Hệ quả:** sửa `team.toml` có tác dụng ngay cho spawn kế tiếp (worker, pipeline, lead — không rebuild). NHƯNG nếu không tìm thấy file lúc chạy, binary rơi về bản nhúng lúc build — muốn đổi giá trị nhúng phải rebuild.
 - `[projects.<slug>]` merge đè lên default theo project (`config::resolve`).
 
