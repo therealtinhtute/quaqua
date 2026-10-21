@@ -958,8 +958,8 @@ fn test_team_toml_harness_routing() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates/workspace/team.toml");
     let cfg = config::load(&team_path).expect("valid team.toml");
 
-    // tieude is opencode at effort max
-    assert_eq!(cfg.kinds["tieude"].harness, "opencode");
+    // tieude is pi at effort max (H3a)
+    assert_eq!(cfg.kinds["tieude"].harness, "pi");
     assert_eq!(cfg.kinds["tieude"].model, "opencode-go/deepseek-v4.1-flash");
     assert_eq!(cfg.kinds["tieude"].effort.as_deref(), Some("max"));
     assert!(!cfg.kinds["tieude"].can_review);
@@ -995,8 +995,8 @@ fn test_team_toml_harness_routing() {
     assert_eq!(cfg.kinds["ni"].model, "opus-5.5");
     assert!(cfg.kinds["ni"].can_review);
 
-    // suhuynh is opencode with can_review=true (Claude out, anh iu 2026-10-17)
-    assert_eq!(cfg.kinds["suhuynh"].harness, "opencode");
+    // suhuynh is pi with can_review=true (H3a)
+    assert_eq!(cfg.kinds["suhuynh"].harness, "pi");
     assert_eq!(
         cfg.kinds["suhuynh"].model,
         "opencode-go/deepseek-v4.1-flash"
@@ -1004,14 +1004,14 @@ fn test_team_toml_harness_routing() {
     assert_eq!(cfg.kinds["suhuynh"].effort.as_deref(), Some("max"));
     assert!(cfg.kinds["suhuynh"].can_review);
 
-    // truonglao is claude with can_review=true; every kind is opencode/omp/claude
+    // truonglao is claude with can_review=true; every kind is pi/omp/claude
     assert_eq!(cfg.kinds["truonglao"].harness, "claude");
     assert!(cfg.kinds["truonglao"].can_review);
     assert_eq!(cfg.kinds.len(), 6, "only the six surviving kinds");
     assert!(cfg
         .kinds
         .values()
-        .all(|k| ["opencode", "omp", "claude"].contains(&k.harness.as_str())));
+        .all(|k| ["pi", "omp", "claude"].contains(&k.harness.as_str())));
 
     // strategy.lead_kind defaults to tieude
     assert_eq!(cfg.strategy.lead_kind.as_deref(), Some("tieude"));
@@ -1023,10 +1023,10 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates/workspace/team.toml");
     let cfg = config::load(&team_path).expect("valid team.toml");
 
-    // 1. Default lead launch uses strategy.lead_kind ("tieude" on opencode)
+    // 1. Default lead launch uses strategy.lead_kind ("tieude" on pi)
     let (kind, launch) = quaqua::lead::spawn::resolve_lead_launch(&cfg, None).expect("lead launch");
     assert_eq!(kind, "tieude");
-    assert_eq!(launch.harness, "opencode");
+    assert_eq!(launch.harness, "pi");
     assert_eq!(launch.model, "opencode-go/deepseek-v4.1-flash");
     assert_eq!(launch.effort, "max");
 
@@ -1039,10 +1039,8 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
         false,
     )
     .unwrap();
-    assert_eq!(cmd.split_envs.len(), 2);
-    assert_eq!(cmd.split_envs[0].0, "OPENCODE_CONFIG_CONTENT");
-    assert!(cmd.split_envs[0].1.contains("\"variant\":\"max\""));
-    assert_eq!(cmd.agent_args, vec!["--", "--standalone", "--auto"]);
+    assert!(cmd.split_envs.is_empty());
+    assert!(cmd.agent_args.join(" ").contains("--thinking max --append-system-prompt /runs/test.rules.md"));
 
     // 2. LEAD_KIND env override switches lead to detu (omp)
     let (kind_detu, launch_detu) =
@@ -1111,7 +1109,7 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     let (kind_fallback, launch_fallback) =
         quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("nonexistent_kind")).expect("fallback");
     assert_eq!(kind_fallback, "tieude");
-    assert_eq!(launch_fallback.harness, "opencode");
+    assert_eq!(launch_fallback.harness, "pi");
 
     // 5. Missing lead_kind in Strategy defaults to tieude
     let mut cfg_no_lead = cfg.clone();
@@ -1119,7 +1117,7 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     let (kind_default, launch_default) =
         quaqua::lead::spawn::resolve_lead_launch(&cfg_no_lead, None).expect("default");
     assert_eq!(kind_default, "tieude");
-    assert_eq!(launch_default.harness, "opencode");
+    assert_eq!(launch_default.harness, "pi");
 }
 
 #[test]
@@ -1530,6 +1528,44 @@ fn test_launch_args_carry_exact_model_and_effort() {
     assert!(joined.contains("--effort high"), "{joined}");
     // review keeps its read-only boundary
     assert!(joined.contains("--permission-mode dontAsk"), "{joined}");
+}
+
+#[test]
+fn test_launch_args_pi_exact_and_isolated() {
+    let pi = resolve_launch(
+        &kind("pi", "opencode-go/deepseek-v4.1-flash", Some("max")),
+        "tieude",
+    )
+    .unwrap();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let ext = format!("{home}/.pi/agent/extensions/herdr-agent-state.ts");
+    let build = build_launch_cmd(&pi, "tieude-x", "/r/x.rules.md", "/runs", "/repo/.wt/x", false)
+        .unwrap();
+    assert!(build.split_envs.is_empty(), "pi takes no pane env");
+    assert_eq!(
+        build.agent_args,
+        vec![
+            "--",
+            "--model",
+            "opencode-go/deepseek-v4.1-flash",
+            "--thinking",
+            "max",
+            "--append-system-prompt",
+            "/r/x.rules.md",
+            "--session-dir",
+            "/runs/.pi-sessions/tieude-x",
+            "--no-extensions",
+            "-e",
+            ext.as_str(),
+            "--no-approve",
+        ]
+    );
+    // review: tool allowlist without edit/write
+    let review = build_launch_cmd(&pi, "suhuynh-x", "/r/x.rules.md", "/runs", "/repo/.wt/x", true)
+        .unwrap();
+    let tail = &review.agent_args[review.agent_args.len() - 2..];
+    assert_eq!(tail, ["--tools", "read,grep,find,ls,bash"]);
+    assert!(resolve_launch(&kind("pi", "m", Some("auto")), "tieude").is_err());
 }
 
 #[test]

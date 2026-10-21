@@ -138,6 +138,17 @@ pub fn is_omp_worker(harness: &str, name: &str) -> bool {
         || (harness.is_empty() && (name.starts_with("sude-") || name.starts_with("detu-")))
 }
 
+/// True when this worker reports spend through pi session transcripts. No name
+/// fallback: pi kinds share prefixes with opencode ones (`tieude-`, `suhuynh-`).
+pub fn is_pi_worker(harness: &str) -> bool {
+    Harness::parse(harness) == Some(Harness::Pi)
+}
+
+/// pi's per-worker session directory, set at launch by `--session-dir`.
+pub fn pi_session_dir(runs_dir: &Path, name: &str) -> PathBuf {
+    runs_dir.join(".pi-sessions").join(name)
+}
+
 /// True when this worker reported spend through claude session transcripts.
 pub fn is_claude_worker(harness: &str, name: &str) -> bool {
     Harness::parse(harness) == Some(Harness::Claude)
@@ -233,11 +244,16 @@ impl NewestModel {
 
 /// Reads omp spend from session transcripts in `root`.
 pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -> Option<Spend> {
+    session_dir_spend(&root.join(omp_session_dir_name(cwd, home)), since_ms, "omp-session")
+}
+
+/// Sums spend over every `.jsonl` transcript in `dir` (omp and pi share the
+/// line shape: `message.usage.cost.total`).
+fn session_dir_spend(dir: &Path, since_ms: Option<u64>, spend_src: &str) -> Option<Spend> {
     use std::io::BufRead;
-    let dir = root.join(omp_session_dir_name(cwd, home));
     // `read_dir` order is filesystem-dependent, so sort before reading; the
     // model is then chosen by per-message timestamp, not by the last file read.
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
         .map(|entry| entry.path())
@@ -319,7 +335,7 @@ pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -
         Some(Spend {
             usd: if found_cost { Some(total_cost) } else { None },
             tokens: if found_usage { Some(tokens) } else { None },
-            spend_src: "omp-session".to_string(),
+            spend_src: spend_src.to_string(),
             model: newest_model.into_model(),
         })
     } else {
@@ -636,6 +652,19 @@ pub fn read_worker_spend(
         };
     }
 
+    if is_pi_worker(harness) {
+        let dir = pi_session_dir(&default_runs_dir(), name);
+        if let Some(spend) = session_dir_spend(&dir, since_ms, "pi-session") {
+            return spend;
+        }
+        return Spend {
+            usd: None,
+            tokens: None,
+            spend_src: "pi-session-not-found".to_string(),
+            model: None,
+        };
+    }
+
     if is_omp_worker(harness, name) {
         let home = std::env::var("HOME").unwrap_or_default();
         let root = match std::env::var("OMP_SESSIONS_DIR") {
@@ -801,6 +830,19 @@ fn opencode_session_mtime(session_id: &str) -> Option<u64> {
     None
 }
 
+/// pi's transcript for a session id: `<runs>/.pi-sessions/<name>/<ts>_<id>.jsonl`.
+fn pi_session_mtime(session_id: &str) -> Option<u64> {
+    let suffix = format!("_{session_id}.jsonl");
+    let root = default_runs_dir().join(".pi-sessions");
+    std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter_map(|worker| std::fs::read_dir(worker.path()).ok())
+        .flat_map(|files| files.flatten())
+        .filter(|f| f.file_name().to_string_lossy().ends_with(&suffix))
+        .find_map(|f| file_mtime_ms(&f.path()))
+}
+
 /// claude's per-project session transcript: `~/.claude/projects/<slug>/<id>.jsonl`.
 fn claude_session_mtime(session_id: &str, cwd: &str) -> Option<u64> {
     let home = std::env::var("HOME").ok()?;
@@ -851,6 +893,7 @@ pub fn session_store_mtime(
             };
             file_mtime_ms(&root.join(omp_session_dir_name(cwd, &home)).join(session_value))
         }
+        Some(Harness::Pi) => pi_session_mtime(session_value),
         None => file_mtime_ms(Path::new(session_value)),
     }
 }
@@ -1331,6 +1374,49 @@ mod tests {
             "-home-mel-x"
         );
         assert_eq!(omp_session_dir_name("/tmp/x", ""), "-tmp-x");
+    }
+
+
+    #[test]
+    fn test_pi_worker_reads_pi_session_dir_not_opencode_db() {
+        // A `tieude-` name on harness pi must read `<runs>/.pi-sessions/<name>`,
+        // never an opencode db that happens to hold the same worktree.
+        let tmp = std::env::temp_dir().join(format!("pi-cost-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let runs = tmp.join("runs");
+        let dir = runs.join(".pi-sessions").join("tieude-x");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("2026-10-21T15-48-51-226Z_01a1.jsonl"),
+            concat!(
+                r#"{"type":"thinking_level_change","thinkingLevel":"max"}"#,
+                "\n",
+                r#"{"type":"message","timestamp":"2026-10-21T15:48:56.022Z","message":{"role":"assistant","model":"deepseek-v4.1-flash","usage":{"input":33287,"output":120,"cacheRead":0,"cacheWrite":0,"cost":{"input":0.0020883,"output":0.0000846,"cacheRead":0,"cacheWrite":0,"total":0.0021729}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let cwd = "/wt/tieude-x";
+        let db = tmp.join("opencode.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT, directory TEXT, cost REAL, tokens_input INT, \
+             tokens_output INT, tokens_reasoning INT, tokens_cache_read INT, tokens_cache_write INT, \
+             model TEXT, time_created INT, time_updated INT);
+             INSERT INTO session_v2 VALUES ('s1','/wt/tieude-x',9.0,1,1,0,0,0,'stale',1,1);",
+        )
+        .unwrap();
+        drop(conn);
+        std::env::set_var("QUAQUA_RUNS_DIR", &runs);
+        std::env::set_var("QUAQUA_COST_DB_PATH", &db);
+        let spend = read_worker_spend("tieude-x", "s1", cwd, "pi", None);
+        std::env::remove_var("QUAQUA_RUNS_DIR");
+        std::env::remove_var("QUAQUA_COST_DB_PATH");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(spend.spend_src, "pi-session");
+        let usd = spend.usd.expect("pi cost");
+        assert!((usd - 0.0021729).abs() < 1e-9, "got {usd}");
+        assert_eq!(spend.model.as_deref(), Some("deepseek-v4.1-flash"));
     }
 
     #[test]

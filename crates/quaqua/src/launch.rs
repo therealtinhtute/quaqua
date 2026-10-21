@@ -83,7 +83,7 @@ pub struct LaunchCmd {
 /// --auto/--continue/--session/--prompt), so its model+effort travel as the
 /// config `model` object `{"providerID": "...", "model": "...", "variant": "..."}`
 /// in OPENCODE_CONFIG_CONTENT in the pane env.
-/// omp takes `--model`/`--thinking`, claude takes `--model`/`--effort`.
+/// omp and pi take `--model`/`--thinking`, claude takes `--model`/`--effort`.
 pub fn build_launch_cmd(
     launch: &Launch,
     name: &str,
@@ -119,6 +119,31 @@ pub fn build_launch_cmd(
             "--append-system-prompt".to_string(),
             rules_file.to_string(),
         ],
+        "pi" => {
+            // Isolated: only herdr's state extension loads, so personal
+            // subagent/memory extensions cannot spawn outside the grid.
+            let home = std::env::var("HOME").unwrap_or_default();
+            let mut args = vec![
+                "--".to_string(),
+                "--model".to_string(),
+                launch.model.clone(),
+                "--thinking".to_string(),
+                launch.effort.clone(),
+                "--append-system-prompt".to_string(),
+                rules_file.to_string(),
+                "--session-dir".to_string(),
+                format!("{runs_dir}/.pi-sessions/{name}"),
+                "--no-extensions".to_string(),
+                "-e".to_string(),
+                format!("{home}/.pi/agent/extensions/herdr-agent-state.ts"),
+                "--no-approve".to_string(),
+            ];
+            if review {
+                args.push("--tools".to_string());
+                args.push("read,grep,find,ls,bash".to_string());
+            }
+            args
+        }
         "claude" => {
             let claude_model = if launch.model.starts_with("claude-") {
                 launch.model.clone()
