@@ -199,23 +199,10 @@ pub struct Kind {
     pub spawn: String,
 }
 
-/// The effort values a harness accepts. opencode effort is a model *variant*
-/// (`opencode --help` lists no `--model`; the interactive TUI reads the model
-/// from config as `provider/model#variant`, and the variant vocabulary is the
-/// `ReasoningEffort` set). omp's is `omp --help` `--thinking`. claude's is
-/// `claude --help` `--effort <level> (low, medium, high, xhigh, max)`.
+/// The effort values a harness accepts (`crate::harness::Harness::effort_allowed`);
+/// false for an unknown harness.
 pub fn effort_allowed(harness: &str, effort: &str) -> bool {
-    match harness {
-        "opencode" => {
-            ["none", "minimal", "low", "medium", "high", "xhigh", "max"].contains(&effort)
-        }
-        "omp" => [
-            "off", "minimal", "low", "medium", "high", "xhigh", "max", "auto",
-        ]
-        .contains(&effort),
-        "claude" => ["low", "medium", "high", "xhigh", "max"].contains(&effort),
-        _ => false,
-    }
+    crate::harness::Harness::parse(harness).is_some_and(|h| h.effort_allowed(effort))
 }
 
 /// The variant vocabulary allowed for known opencode models.
@@ -231,7 +218,7 @@ pub fn opencode_model_variants(model: &str) -> Option<&'static [&'static str]> {
 /// Check if an effort/variant value is allowed for a specific harness and model.
 /// opencode models can restrict variant vocabulary (e.g. deepseek-v4.1-flash takes low, high, max).
 pub fn model_effort_allowed(harness: &str, model: &str, effort: &str) -> bool {
-    if harness != "opencode" {
+    if crate::harness::Harness::parse(harness) != Some(crate::harness::Harness::Opencode) {
         return true;
     }
     match opencode_model_variants(model) {
@@ -487,7 +474,7 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
                 kind.spawn
             ));
         }
-        if !["opencode", "omp", "claude"].contains(&kind.harness.as_str()) {
+        if crate::harness::Harness::parse(&kind.harness).is_none() {
             return Err(format!(
                 "kind '{name}': unsupported harness '{}'",
                 kind.harness
@@ -506,7 +493,9 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
                 kind.harness
             ));
         }
-        if kind.harness == "opencode" {
+        if crate::harness::Harness::parse(&kind.harness)
+            == Some(crate::harness::Harness::Opencode)
+        {
             match opencode_model_variants(&kind.model) {
                 Some(allowed) => {
                     if !allowed.contains(&effort) {

@@ -129,7 +129,7 @@ impl SingleWorkerState {
     pub fn new(input: SingleWorkerInput) -> Self {
         let report_path = PathBuf::from(format!("runs/{}.md", input.name));
         let expect_verdict = input.brief.contains("Pipeline phase: REVIEW");
-        let is_fallback_idle = input.kind.contains("opencode") || input.kind.contains("omp");
+        let is_fallback_idle = crate::harness::mentions_fallback_idle(&input.kind);
 
         let mut config = WatchdogConfig::default();
         config.expect_verdict = expect_verdict;
@@ -204,8 +204,8 @@ impl SingleWorkerState {
             && self
                 .harness
                 .as_deref()
-                .map(|h| h == "opencode" || h == "omp")
-                .unwrap_or(false)
+                .and_then(crate::harness::Harness::parse)
+                .is_some_and(|h| h.fallback_idle())
             || self.config.is_fallback_idle;
         if is_fallback_idle {
             self.config.idle_fallback_sec

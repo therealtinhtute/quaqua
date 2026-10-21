@@ -17,12 +17,12 @@ pub struct Launch {
 /// model or effort, or the harness cannot take that effort value. No defaults:
 /// team.toml is the only source (the old `unwrap_or("medium"/"high")` are gone).
 pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, String)> {
-    if !["opencode", "omp", "claude"].contains(&kind.harness.as_str()) {
+    let Some(harness) = crate::harness::Harness::parse(&kind.harness) else {
         return Err((
             1,
             format!("error: unsupported harness '{}' for kind '{kind_name}'\n", kind.harness),
         ));
-    }
+    };
     if kind.model.trim().is_empty() {
         return Err((1, format!("error: kind '{kind_name}' has no model in team.toml\n")));
     }
@@ -30,7 +30,7 @@ pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, Stri
         Some(e) if !e.trim().is_empty() => e,
         _ => return Err((1, format!("error: kind '{kind_name}' has no effort in team.toml\n"))),
     };
-    if !crate::config::effort_allowed(&kind.harness, effort) {
+    if !harness.effort_allowed(effort) {
         return Err((
             1,
             format!(
@@ -39,7 +39,7 @@ pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, Stri
             ),
         ));
     }
-    if kind.harness == "opencode" {
+    if harness == crate::harness::Harness::Opencode {
         match crate::config::opencode_model_variants(&kind.model) {
             Some(allowed) => {
                 if !allowed.contains(&effort) {
