@@ -164,14 +164,15 @@ struct ConfigArgs {
     project: Option<String>,
 }
 
-fn team_file(explicit: &Option<PathBuf>) -> Result<PathBuf, String> {
-    if let Some(p) = explicit {
-        return Ok(p.clone());
+/// Grid config source: the explicit `--team-file`, else the same resolution
+/// every other command uses (`config::load_team_config`). `None` when no file
+/// resolves (or it cannot be parsed), so the grid falls back to its built-in
+/// labels and statuses.
+fn grid_config(explicit: &Option<PathBuf>) -> Option<config::Config> {
+    match explicit {
+        Some(p) => config::load(p).ok(),
+        None => config::load_team_config().ok(),
     }
-    if let Ok(p) = std::env::var("QUAQUA_TEAM_TOML") {
-        return Ok(PathBuf::from(p));
-    }
-    Ok(PathBuf::from("team.toml"))
 }
 
 /// `config get|validate` config source: the explicit `--file`, else the same
@@ -348,10 +349,7 @@ fn do_grid_plan(file_opt: Option<PathBuf>, path_opt: Option<PathBuf>) -> Result<
     let val: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("invalid snapshot JSON: {e}"))?;
     let snap = quaqua::grid::parse_snapshot_value(&val)?;
-    let def_statuses = team_file(&None)
-        .ok()
-        .and_then(|p| config::load(&p).ok())
-        .map(|c| c.grid.deferred_statuses);
+    let def_statuses = grid_config(&None).map(|c| c.grid.deferred_statuses);
     let def_slices: Option<Vec<&str>> = def_statuses
         .as_ref()
         .map(|v| v.iter().map(|s| s.as_str()).collect());
@@ -370,16 +368,10 @@ fn do_grid_reconcile(
     dry_run: bool,
     team_opt: Option<PathBuf>,
 ) -> Result<(), String> {
-    let (default_workers_tab, def_statuses) = if let Ok(tf) = team_file(&team_opt) {
-        let cfg = config::load(&tf).ok();
-        (
-            cfg.as_ref()
-                .map(|c| c.grid.workers_tab.clone())
-                .unwrap_or_else(|| "workers".to_string()),
-            cfg.map(|c| c.grid.deferred_statuses),
-        )
-    } else {
-        ("workers".to_string(), None)
+    let cfg = grid_config(&team_opt);
+    let (default_workers_tab, def_statuses) = match cfg {
+        Some(c) => (c.grid.workers_tab, Some(c.grid.deferred_statuses)),
+        None => ("workers".to_string(), None),
     };
 
     if check && repair {

@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 2;
 /// AGENTS.md `## Rules`: "Max 4 task workers per orchestrator".
@@ -307,25 +307,39 @@ pub fn load(path: &Path) -> Result<Config, String> {
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
-/// Load team config from environment, relative path, home directory, or embedded fallback.
-pub fn load_team_config() -> Result<Config, (i32, String)> {
+/// The team.toml every reader resolves, in the one order: `$QUAQUA_TEAM_TOML`,
+/// else `./team.toml`, else `<workspace_root>/team.toml`. `None` means the
+/// embedded default. A `$QUAQUA_TEAM_TOML` path is returned even when it does
+/// not exist, so an explicit override fails loudly instead of silently falling
+/// back to another file.
+pub fn team_config_path() -> Option<PathBuf> {
     if let Ok(path_str) = std::env::var("QUAQUA_TEAM_TOML") {
-        return load(Path::new(&path_str)).map_err(|e| (1, format!("error: {e}\n")));
+        return Some(PathBuf::from(path_str));
     }
     if Path::new("team.toml").is_file() {
-        return load(Path::new("team.toml")).map_err(|e| (1, format!("error: {e}\n")));
+        return Some(PathBuf::from("team.toml"));
     }
     let home_team = crate::workspace::workspace_root().join("team.toml");
     if home_team.is_file() {
-        return load(&home_team).map_err(|e| (1, format!("error: {e}\n")));
+        return Some(home_team);
     }
-    const DEFAULT_TOML: &str = include_str!("../../../templates/workspace/team.toml");
-    toml::from_str(DEFAULT_TOML).map_err(|e| {
-        (
-            1,
-            format!("error: failed to parse default team.toml: {e}\n"),
-        )
-    })
+    None
+}
+
+/// Load team config from environment, relative path, workspace root, or embedded fallback.
+pub fn load_team_config() -> Result<Config, (i32, String)> {
+    match team_config_path() {
+        Some(path) => load(&path).map_err(|e| (1, format!("error: {e}\n"))),
+        None => {
+            const DEFAULT_TOML: &str = include_str!("../../../templates/workspace/team.toml");
+            toml::from_str(DEFAULT_TOML).map_err(|e| {
+                (
+                    1,
+                    format!("error: failed to parse default team.toml: {e}\n"),
+                )
+            })
+        }
+    }
 }
 
 /// Apply a project override over the defaults. Unknown project is a hard error.
