@@ -70,6 +70,9 @@ pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, Stri
     })
 }
 
+/// omp tools a reviewer keeps: no `edit`/`write`/`notebook`/`python`.
+pub const OMP_REVIEW_TOOLS: &str = "read,bash,grep,glob";
+
 /// One attempt's `herdr` invocation: the pane-split envs and the args after
 /// `herdr agent start <name> --kind <harness> --pane <p> --timeout <ms>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,16 +112,24 @@ pub fn build_launch_cmd(
             split_envs.push(("XDG_STATE_HOME".to_string(), state_dir));
             vec!["--".to_string(), "--standalone".to_string(), "--auto".to_string()]
         }
-        "omp" => vec![
-            "--".to_string(),
-            "--model".to_string(),
-            launch.model.clone(),
-            "--thinking".to_string(),
-            launch.effort.clone(),
-            "--auto-approve".to_string(),
-            "--append-system-prompt".to_string(),
-            rules_file.to_string(),
-        ],
+        "omp" => {
+            let mut args = vec![
+                "--".to_string(),
+                "--model".to_string(),
+                launch.model.clone(),
+                "--thinking".to_string(),
+                launch.effort.clone(),
+                "--auto-approve".to_string(),
+            ];
+            // Review: read tools + bash only, no edit/write (`omp --help`).
+            // Detection (`worker::prompt::readonly`) is the guarantee.
+            if review {
+                args.push(format!("--tools={OMP_REVIEW_TOOLS}"));
+            }
+            args.push("--append-system-prompt".to_string());
+            args.push(rules_file.to_string());
+            args
+        }
         "pi" => {
             // Isolated: only herdr's state extension loads, so personal
             // subagent/memory extensions cannot spawn outside the grid.

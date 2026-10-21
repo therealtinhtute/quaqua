@@ -1569,6 +1569,44 @@ fn test_launch_args_pi_exact_and_isolated() {
 }
 
 #[test]
+fn test_launch_review_args_per_harness() {
+    let cmd = |harness: &str, model: &str, effort: &str, review: bool| {
+        let l = resolve_launch(&kind(harness, model, Some(effort)), "k").unwrap();
+        build_launch_cmd(&l, "rev", "/r/x.rules.md", "/w/runs", "/repo/.wt/rev", review).unwrap()
+    };
+
+    // omp: review drops edit/write, keeps read tools + bash.
+    let omp = cmd("omp", "google-antigravity/gemini-3.8-flash", "high", true);
+    assert_eq!(
+        omp.agent_args,
+        vec![
+            "--", "--model", "google-antigravity/gemini-3.8-flash", "--thinking", "high",
+            "--auto-approve", "--tools=read,bash,grep,glob", "--append-system-prompt",
+            "/r/x.rules.md",
+        ]
+    );
+    let omp_build = cmd("omp", "google-antigravity/gemini-3.8-flash", "high", false);
+    assert!(!omp_build.agent_args.iter().any(|a| a.starts_with("--tools")));
+
+    // claude: today's settings, unchanged.
+    let cl = cmd("claude", "opus-5.5", "high", true);
+    assert_eq!(
+        cl.agent_args,
+        vec![
+            "--", "--model", "claude-opus-5-5", "--effort", "high",
+            "--permission-mode", "dontAsk", "--add-dir", "/w/runs", "--settings",
+            r#"{"permissions":{"allow":["Edit(//w/runs/**)","Bash(cargo test:*)","Bash(mv *runs/.*.tmp *runs/*.md)"],"deny":["Edit(//repo/.wt/rev/**)"]}}"#,
+            "--append-system-prompt-file", "/r/x.rules.md",
+        ]
+    );
+
+    // opencode: no confirmed edit-deny config key yet — review launch equals
+    // build launch; detection (`worker::prompt::readonly`) is the guard.
+    let oc = cmd("opencode", "opencode-go/deepseek-v4.1-flash", "max", true);
+    assert_eq!(oc, cmd("opencode", "opencode-go/deepseek-v4.1-flash", "max", false));
+}
+
+#[test]
 fn test_launch_fails_closed_without_model_or_effort() {
     let e = resolve_launch(&kind("opencode", "m", None), "tieude")
         .unwrap_err()

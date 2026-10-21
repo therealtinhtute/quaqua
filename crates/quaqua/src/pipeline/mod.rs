@@ -1556,6 +1556,20 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 .finish(&mut state, "blocked", child_out.exit, Some(&b))
                                 .map(|_| ());
                         }
+                        if is_reviewer {
+                            if let Err(why) = crate::worker::prompt::readonly::check(
+                                &ctx.runs_dir,
+                                &child_input.name,
+                            ) {
+                                eprintln!(
+                                    "WATCHDOG malformed-report | name={} missing=read-only worktree ({why}) report={}",
+                                    child_input.name,
+                                    child_report_path.display()
+                                );
+                                let b = format!("review verdict void: {why}");
+                                return ctx.finish(&mut state, "blocked", 6, Some(&b)).map(|_| ());
+                            }
+                        }
 
                         let _ = std::fs::write(
                             ctx.runs_dir.join(format!(".{}.read", child_input.name)),
@@ -4103,6 +4117,9 @@ REPEOF
             exit 0
             ;;
           suhuynh-*r1)
+            if [ -f "$QUAQUA_RUNS_DIR/stub_review_dirty" ]; then
+              echo edit > "$(dirname "$QUAQUA_RUNS_DIR")/.wt/$NAME/sneaky.txt"
+            fi
             if [ -f "$QUAQUA_RUNS_DIR/stub_review_r1" ]; then
               cp "$QUAQUA_RUNS_DIR/stub_review_r1" "$QUAQUA_RUNS_DIR/$NAME.md"
               echo '{"result":{"agent":{"agent_status":"working","state_change_seq":1}}}'
@@ -4333,6 +4350,78 @@ esac
             review_starts, 2,
             "journal must record 2 child_started attempts for review child"
         );
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_h4_review_that_changes_its_worktree_is_void() {
+        if !in_isolated_driver_process(
+            "pipeline::tests::test_h4_review_that_changes_its_worktree_is_void",
+        ) {
+            return;
+        }
+        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let task = "h4-ro";
+        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
+            setup_test_pipeline_workspace(task);
+        let _guard_team = TestEnvVarGuard::set("QUAQUA_TEAM_TOML", team_file.to_str().unwrap());
+        let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_bin.to_str().unwrap());
+        let _guard_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _guard_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+        let _guard_owner = TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+        let _guard_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let git = Git::new();
+        let herdr = Herdr {
+            bin: stub_bin.to_string_lossy().to_string(),
+        };
+        let brief_file = repo_dir.join("brief.md");
+
+        std::fs::write(
+            runs_dir.join(format!("sude-{task}.md")),
+            "# Plan\nImplementation steps.\n## Lessons\nnone\n",
+        )
+        .unwrap();
+        let args = vec![
+            task.to_string(),
+            repo_dir.to_string_lossy().to_string(),
+            "--brief".to_string(),
+            brief_file.to_string_lossy().to_string(),
+            "--review".to_string(),
+            "always".to_string(),
+        ];
+        assert_eq!(handle_pipeline(&args, &git, &herdr), Err((5, String::new())));
+
+        let wt_dir = base_dir.join(".wt").join(format!("sude-{task}"));
+        let _ = std::process::Command::new("git")
+            .args(&["commit", "--allow-empty", "-m", "build commit"])
+            .current_dir(&wt_dir)
+            .output();
+        std::fs::write(
+            runs_dir.join(format!("sude-{task}.md")),
+            "# Build\nImplemented.\n## Lessons\nnone\n",
+        )
+        .unwrap();
+        // The reviewer writes into its worktree, then reports a clean verdict.
+        std::fs::write(
+            runs_dir.join("stub_review_r1"),
+            "# Review\nVerdict: clean\n## Lessons\nnone\n",
+        )
+        .unwrap();
+        std::fs::write(runs_dir.join("stub_review_dirty"), "").unwrap();
+        let resume_args = vec![
+            "--resume".to_string(),
+            task.to_string(),
+            repo_dir.to_string_lossy().to_string(),
+        ];
+        assert_eq!(
+            handle_pipeline(&resume_args, &git, &herdr),
+            Err((6, String::new())),
+            "a review that changed its worktree must be void"
+        );
+        let pfile = std::fs::read_to_string(runs_dir.join(format!("pipeline-{task}.md"))).unwrap();
+        assert!(!pfile.contains("- status: clean"), "{pfile}");
 
         let _ = std::fs::remove_dir_all(&base_dir);
     }
