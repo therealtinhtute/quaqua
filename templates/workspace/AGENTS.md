@@ -41,7 +41,7 @@ Authority, not persona; brief shape: `rules/_all/brief.md`.
 - Plan gate only for tasks touching >2 files or shared code paths (`grid/`, `pipeline/`, `worker/`, `merge/`); a mechanical task (≤2 files, tests green) skips the plan file — the brief's Goal + Evidence is the contract.
 - Review: one round by default; a second round only for a correctness, scope or data-loss defect — never for style or nits.
 - Worker half-done, stalled or killed → resume the same session (`quaqua worker prompt --resume`); a fresh spawn only when the goal changed or its worktree is unrecoverable — 2026-10-17, spawneff re-done cost $0.14 + 3h33m.
-- Every brief carries `Cost budget: $<x>` beside `Time budget`. CoS records the worker's real cost (`session_v2.cost`) at acceptance (`rules/_all/worker-timebox.md`).
+- Every brief carries `Cost budget: $<x>` beside `Time budget`. CoS records the worker's real cost via `quaqua status --metrics` at acceptance (`rules/_all/worker-timebox.md`).
 - Kill criteria: same error ≥3 iterations → kill the worker, then start a fresh one with a sharper brief (a looping session is not resumed; an interrupted one is — see above).
 
 ## Workers
