@@ -3,41 +3,39 @@
 //! Evaluates worker watchdog rules deterministically:
 //! - Exit 0: Success (report ready with stable mtime, non-empty content, and valid `## Lessons` or `Verdict:`)
 //! - Exit 2: Hard timeout / cap exceeded
-//! - Exit 3: Stall (no pane or diff progress for 600 s) / idle (120 s, 300 s fallback) / agent gone (60 s)
+//! - Exit 3: Stall (no worktree diff and no harness session write for 600 s) /
+//!   idle (120 s, 300 s fallback) / agent gone (60 s) / prompt never landed
 //! - Exit 4: Time budget exceeded (after one +25% grace and bounded auto-extensions up to +50% total)
 //! - Exit 5: Blocked on question / permission
 //! - Exit 6: Malformed report (stable, non-empty report missing `## Lessons` or `Verdict:`)
 //!
 //! Signals and contracts:
-//! - Auto-extension keys exclusively to `GitRequest::DiffHash { path }` -> `GitResult::DiffHash { hash, stat }`
-//! - Progress fingerprint `fp` combines cleaned pane body hash (dropping spinners/separators and collapsing digit runs) + diff hash
-//! - Grace keys to progress fingerprint `fp` advancement within 2 polls of budget deadline
-//! - Agent status, harness, and hook activity arrive via `HerdrRequest::AgentInfo { name }` -> `HerdrResult::AgentInfo`
-//! - Scoped events arrive via `HerdrEventRequest::PollEventsFor { agent }` -> `HerdrEventResult::ScopedEvents` (filtering `pane.exited`)
-//! - Report readiness requires two consecutive matching `ReportFileRequest::CheckMtime` samples + non-empty content
+//! - One blocking `herdr agent wait` per wake; `timeout_ms == 0` is a plain `agent get`.
+//! - Progress is glyph-free: `GitRequest::DiffHash` plus the harness session-store
+//!   mtime (`SessionRequest::Mtime`). A harness with neither source gets the time
+//!   budget only; the stall check is skipped.
+//! - Report readiness is one `report_ready` check per wake (double-stat), then a read.
+//! - Auto-extension keys exclusively to `GitRequest::DiffHash`.
 //!
 //! Determinism contract: No `std::fs`, `std::process`, or `std::net` is used.
-//! All external observation and time progression occur through scheduled activities, timers,
+//! All external observation and time progression occur through scheduled activities
 //! and virtual time arithmetic.
 
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::time::Duration;
 
 use crate::engine::activity::{
-    ActivityRequest, ActivityResult, GitRequest, GitResult, HerdrEventRequest, HerdrEventResult,
-    HerdrRequest, HerdrResult, ReportFileRequest, ReportFileResult,
+    ActivityRequest, ActivityResult, GitRequest, GitResult, HerdrRequest, HerdrResult,
+    ReportFileRequest, ReportFileResult, SessionRequest, SessionResult,
 };
 use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
 use crate::engine::workflow::{StepDecision, Workflow, WorkflowContext, WorkflowEvent};
-use crate::worker::prompt::observer::question_seen;
 use crate::worker::prompt::watchdog::validate_report_content;
 
 /// Pure configuration parameters for watchdog execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WatchdogConfig {
+    /// Heartbeat: the longest the watchdog sleeps without re-observing.
     pub poll_sec: u64,
     pub stall_sec: u64,
     pub idle_sec: u64,
@@ -54,7 +52,7 @@ pub struct WatchdogConfig {
 impl Default for WatchdogConfig {
     fn default() -> Self {
         Self {
-            poll_sec: 30,
+            poll_sec: 60,
             stall_sec: 600,
             idle_sec: 120,
             idle_fallback_sec: 300,
@@ -75,38 +73,56 @@ pub struct SingleWorkerState {
     pub report_path: PathBuf,
     pub config: WatchdogConfig,
     pub start_ms: u64,
+    #[serde(default)]
     pub prev_elapsed_ms: u64,
     #[serde(default, alias = "budget_deadline_ms")]
     pub allowance_deadline_ms: u64,
+    #[serde(default)]
     pub cap_deadline_ms: u64,
+    #[serde(default)]
     pub last_progress_ms: u64,
+    #[serde(default)]
     pub first_progress_seen: bool,
-    pub last_progress_fp: String,
+    #[serde(default)]
     pub current_diff_hash: String,
+    #[serde(default)]
     pub last_autoext_diff_hash: String,
-    pub latest_pane_text: String,
+    #[serde(default)]
     pub agent_status: String,
+    #[serde(default)]
     pub harness: Option<String>,
+    #[serde(default)]
     pub hook_active: bool,
+    #[serde(default)]
     pub idle_since_ms: u64,
+    #[serde(default)]
     pub gone_since_ms: u64,
     #[serde(default, alias = "grace_used")]
     pub overrun_granted: bool,
     #[serde(default, alias = "autoext_total_ms")]
     pub extension_total_ms: u64,
+    #[serde(default)]
     pub poll_count: u64,
+    #[serde(default)]
     pub nudged: bool,
+    #[serde(default)]
     pub initialized: bool,
+    #[serde(default)]
     pub report_mtime_ms: u64,
-    pub report_mtime_stable: bool,
     #[serde(default)]
-    pub prompt_landed: bool,
+    pub report_ready: bool,
     #[serde(default)]
-    pub prompt_recovered: bool,
+    pub session_mtime_ms: u64,
     #[serde(default)]
-    pub recover_at_ms: u64,
+    pub session_key: String,
     #[serde(default)]
-    pub recover_deadline_ms: u64,
+    pub session_seen: bool,
+    #[serde(default)]
+    pub wait_err: String,
+    #[serde(default)]
+    pub lead_waiting: bool,
+    #[serde(default)]
+    pub errors: u64,
 }
 
 impl SingleWorkerState {
@@ -129,10 +145,8 @@ impl SingleWorkerState {
             cap_deadline_ms: 0,
             last_progress_ms: 0,
             first_progress_seen: false,
-            last_progress_fp: String::new(),
             current_diff_hash: String::new(),
             last_autoext_diff_hash: String::new(),
-            latest_pane_text: String::new(),
             agent_status: "working".to_string(),
             harness: None,
             hook_active: true,
@@ -144,11 +158,13 @@ impl SingleWorkerState {
             nudged: false,
             initialized: false,
             report_mtime_ms: 0,
-            report_mtime_stable: false,
-            prompt_landed: false,
-            prompt_recovered: false,
-            recover_at_ms: 0,
-            recover_deadline_ms: 0,
+            report_ready: false,
+            session_mtime_ms: 0,
+            session_key: String::new(),
+            session_seen: false,
+            wait_err: String::new(),
+            lead_waiting: false,
+            errors: 0,
         }
     }
 
@@ -179,10 +195,27 @@ impl SingleWorkerState {
             self.first_progress_seen = true;
         }
         self.initialized = false;
-        self.prompt_landed = true;
-        self.initialized = false;
         self.start_ms = 0;
         self
+    }
+
+    fn idle_limit_ms(&self) -> u64 {
+        let is_fallback_idle = (!self.hook_active)
+            && self
+                .harness
+                .as_deref()
+                .map(|h| h == "opencode" || h == "omp")
+                .unwrap_or(false)
+            || self.config.is_fallback_idle;
+        if is_fallback_idle {
+            self.config.idle_fallback_sec
+        } else {
+            self.config.idle_sec
+        }
+    }
+
+    fn has_progress_source(&self) -> bool {
+        self.session_seen || !self.current_diff_hash.is_empty()
     }
 }
 
@@ -195,6 +228,7 @@ impl SingleWorkerWorkflow {
         Self
     }
 }
+
 fn complete_step(
     state: &mut SingleWorkerState,
     now_ms: u64,
@@ -212,44 +246,23 @@ fn complete_step(
     )
 }
 
-/// Cleans pane text body by dropping spinners/separators and collapsing digit sequences to 'N'.
-fn clean_pane_body(pane_text: &str) -> String {
-    let mut body_lines = Vec::new();
-    for line in pane_text.lines() {
-        let t = line.trim();
-        let is_sep = t.chars().all(|c| "─│| ".contains(c));
-        if is_sep
-            || t.contains('👾')
-            || t.contains('✦')
-            || t.chars().any(|c| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c))
-        {
-            continue;
-        }
-        let mut collapsed = String::new();
-        let mut in_digits = false;
-        for c in line.chars() {
-            if c.is_ascii_digit() {
-                if !in_digits {
-                    collapsed.push('N');
-                    in_digits = true;
-                }
-            } else {
-                in_digits = false;
-                collapsed.push(c);
-            }
-        }
-        body_lines.push(collapsed);
-    }
-    body_lines.join("\n")
-}
-
-/// Computes the composite progress fingerprint: clean pane body hash + diff hash.
-fn compute_fingerprint(pane_text: &str, diff_hash: &str) -> String {
-    let cleaned = clean_pane_body(pane_text);
-    let mut hasher = DefaultHasher::new();
-    cleaned.hash(&mut hasher);
-    let body_hash = format!("{:016x}", hasher.finish());
-    format!("{body_hash}|{diff_hash}")
+/// One blocking wait, clamped to the next deadline. `until` empty means the
+/// herdr default set (`idle`, `done`, `blocked`).
+fn schedule_wake(
+    state: &SingleWorkerState,
+    ctx: &mut WorkflowContext,
+    index: u64,
+    until: Vec<String>,
+    timeout_ms: u64,
+) {
+    ctx.schedule_activity(
+        format!("wake_{index}"),
+        ActivityRequest::Herdr(HerdrRequest::AgentWait {
+            name: state.input.name.clone(),
+            until,
+            timeout_ms,
+        }),
+    );
 }
 
 impl Workflow for SingleWorkerWorkflow {
@@ -278,49 +291,7 @@ impl Workflow for SingleWorkerWorkflow {
                 .max(1);
             state.allowance_deadline_ms = state.start_ms + rem_budget * 1000;
             state.cap_deadline_ms = state.start_ms + rem_cap * 1000;
-
-            // Subscribe once on the first step for scoped events (pane.exited)
-            ctx.schedule_activity(
-                "sub_events_0",
-                ActivityRequest::HerdrEvents(HerdrEventRequest::Subscribe {
-                    agent: state.input.name.clone(),
-                    event_types: vec!["pane.exited".to_string()],
-                }),
-            );
-
-            // Schedule initial tick observations and poll timer
-            ctx.schedule_activity(
-                format!("act_agent_info_{}", state.poll_count),
-                ActivityRequest::Herdr(HerdrRequest::AgentInfo {
-                    name: state.input.name.clone(),
-                }),
-            );
-            ctx.schedule_activity(
-                format!("check_report_{}", state.poll_count),
-                ActivityRequest::ReportFile(ReportFileRequest::CheckMtime {
-                    path: state.report_path.to_string_lossy().to_string(),
-                }),
-            );
-            ctx.schedule_activity(
-                format!("get_diff_hash_{}", state.poll_count),
-                ActivityRequest::Git(GitRequest::DiffHash {
-                    path: state.input.repo.clone(),
-                }),
-            );
-            ctx.schedule_activity(
-                format!("read_agent_{}", state.poll_count),
-                ActivityRequest::Herdr(HerdrRequest::ReadAgent {
-                    name: state.input.name.clone(),
-                    lines: 80,
-                }),
-            );
-            ctx.schedule_activity(
-                format!("poll_events_{}", state.poll_count),
-                ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
-                    agent: state.input.name.clone(),
-                }),
-            );
-            ctx.schedule_timer("poll_timer", Duration::from_secs(state.config.poll_sec));
+            schedule_wake(state, ctx, 0, Vec::new(), 0);
             return StepDecision::Continue;
         }
 
@@ -328,386 +299,372 @@ impl Workflow for SingleWorkerWorkflow {
             None => StepDecision::Continue,
 
             Some(WorkflowEvent::ActivityCompleted { id, result }) => {
-                if id.starts_with("act_agent_info_") {
-                    if let ActivityResult::Herdr(HerdrResult::AgentInfo {
+                if let Some(index) = parse_index(&id, "wake_") {
+                    let now = ctx.now_ms();
+                    let (
                         status,
+                        session_kind,
+                        session_value,
                         harness,
                         hook_active,
-                        ..
-                    }) = result
-                    {
-                        state.agent_status = status.clone();
-                        state.harness = harness;
-                        state.hook_active = hook_active;
-                        let is_gone = status == "gone" || status == "not_found";
-                        if is_gone {
-                            if state.gone_since_ms == 0 {
-                                state.gone_since_ms = ctx.now_ms();
+                        lead_waiting,
+                        err,
+                    ) = match result {
+                        ActivityResult::Herdr(HerdrResult::AgentWait {
+                            status,
+                            session_kind,
+                            session_value,
+                            harness,
+                            hook_active,
+                            lead_waiting,
+                            err,
+                            ..
+                        }) => (
+                            status,
+                            session_kind,
+                            session_value,
+                            harness,
+                            hook_active,
+                            lead_waiting,
+                            err,
+                        ),
+                        _ => {
+                            return StepDecision::Fail {
+                                code: 1,
+                                reason: format!("wake {index}: unexpected activity result"),
                             }
-                        } else {
-                            state.gone_since_ms = 0;
                         }
-
-                        if status == "idle" || status == "done" {
-                            if state.idle_since_ms == 0 {
-                                state.idle_since_ms = ctx.now_ms();
-                            }
-                        } else {
-                            state.idle_since_ms = 0;
-                        }
-
-                        if status == "blocked" {
-                            return complete_step(state, ctx.now_ms(), 5);
-                        }
-                    }
-                    StepDecision::Continue
-                } else if id.starts_with("check_report_") {
-                    let mtime_opt = match result {
-                        ActivityResult::ReportFile(ReportFileResult::MtimeMs(mtime)) => Some(mtime),
-                        ActivityResult::ReportFile(ReportFileResult::Exists(exists)) => {
-                            Some(if exists { 1 } else { 0 })
-                        }
-                        _ => None,
                     };
-                    if let Some(mtime) = mtime_opt {
-                        if mtime == 0 {
-                            state.report_mtime_ms = 0;
-                            state.report_mtime_stable = false;
-                        } else if state.report_mtime_ms == mtime {
-                            // Two consecutive matching mtime samples -> stable
-                            state.report_mtime_stable = true;
-                            state.prompt_landed = true;
-                            state.prompt_recovered = false;
-                            ctx.schedule_activity(
-                                format!("read_report_{}", state.poll_count),
-                                ActivityRequest::ReportFile(ReportFileRequest::Read {
-                                    path: state.report_path.to_string_lossy().to_string(),
-                                }),
-                            );
-                        } else {
-                            // First sample or modified mtime
-                            state.report_mtime_ms = mtime;
-                            state.report_mtime_stable = false;
-                            state.prompt_landed = true;
-                            state.prompt_recovered = false;
-                        }
-                    }
-                    StepDecision::Continue
-                } else if id.starts_with("read_report_") {
-                    if let ActivityResult::ReportFile(ReportFileResult::Content(content)) = result {
-                        // Exit 6 only on a stable, non-empty, malformed report; empty continues polling
-                        if !content.trim().is_empty() && state.report_mtime_stable {
-                            let valid =
-                                validate_report_content(&content, state.config.expect_verdict);
-                            let exit = if valid.is_ok() { 0 } else { 6 };
-                            return complete_step(state, ctx.now_ms(), exit);
-                        }
-                    }
-                    StepDecision::Continue
-                } else if id.starts_with("get_diff_hash_") {
-                    if let ActivityResult::Git(GitResult::DiffHash { hash, stat: _ }) = result {
-                        state.current_diff_hash = hash.clone();
-                        if state.last_autoext_diff_hash.is_empty() && !hash.is_empty() {
-                            state.last_autoext_diff_hash = hash;
-                        }
 
-                        // Recompute progress fingerprint with updated diff hash
-                        let fp =
-                            compute_fingerprint(&state.latest_pane_text, &state.current_diff_hash);
-                        if state.poll_count == 0 {
-                            state.last_progress_fp = fp;
-                        } else if fp != state.last_progress_fp {
-                            state.last_progress_fp = fp;
-                            state.last_progress_ms = ctx.now_ms();
-                            if state.agent_status != "idle" && state.agent_status != "done" {
-                                state.idle_since_ms = 0;
-                            }
-                        }
-                    }
-                    StepDecision::Continue
-                } else if id.starts_with("read_agent_") {
-                    if let ActivityResult::Herdr(HerdrResult::AgentOutput { content }) = result {
-                        state.latest_pane_text = content.clone();
+                    state.agent_status = status;
+                    state.session_key = format!("{session_kind}:{session_value}");
+                    state.harness = if harness.is_empty() {
+                        None
+                    } else {
+                        Some(harness)
+                    };
+                    state.hook_active = hook_active;
+                    state.lead_waiting = lead_waiting;
+                    state.wait_err = err.clone();
 
-                        // Legacy watchdog: unknown status with empty pane indicates agent gone
-                        if content.trim().is_empty() && state.agent_status == "unknown" {
-                            state.agent_status = "gone".to_string();
-                        }
-
-                        // Interactive question / permission prompt pending
-                        if question_seen(&content) {
-                            return complete_step(state, ctx.now_ms(), 5);
-                        }
-
-                        // Recompute progress fingerprint with updated pane text
-                        let fp =
-                            compute_fingerprint(&state.latest_pane_text, &state.current_diff_hash);
-                        if state.poll_count == 0 {
-                            state.last_progress_fp = fp;
-                        } else if fp != state.last_progress_fp {
-                            state.last_progress_fp = fp;
-                            state.last_progress_ms = ctx.now_ms();
-                            if state.agent_status != "idle" && state.agent_status != "done" {
-                                state.idle_since_ms = 0;
-                            }
-                        }
-
-                        let now = ctx.now_ms();
-                        let is_waiting = {
-                            let runs_dir = state
-                                .report_path
-                                .parent()
-                                .unwrap_or_else(|| std::path::Path::new("."));
-                            crate::worker::prompt::observer::lead_waiting(
-                                runs_dir,
-                                &state.input.name,
-                                "",
-                            )
-                        };
-                        let stall_baseline = if state.last_progress_ms > 0 {
-                            state.last_progress_ms
-                        } else {
-                            state.start_ms
-                        };
-                        if !is_waiting
-                            && state.poll_count > 0
-                            && now.saturating_sub(stall_baseline) >= state.config.stall_sec * 1000
-                        {
-                            return complete_step(state, now, 3);
-                        }
-                    }
-                    StepDecision::Continue
-                } else if id.starts_with("poll_events_") {
-                    if let ActivityResult::HerdrEvents(HerdrEventResult::ScopedEvents {
-                        agent,
-                        events,
-                    }) = result
-                    {
-                        // Apply scoped events only for this agent; check for pane.exited
-                        if agent == state.input.name {
-                            for ev in events {
-                                if ev.contains("pane.exited") {
-                                    state.agent_status = "gone".to_string();
-                                }
-                            }
-                        }
-                    }
-                    StepDecision::Continue
-                } else {
-                    StepDecision::Continue
-                }
-            }
-
-            Some(WorkflowEvent::TimerFired { id }) => {
-                if id == "poll_timer" {
-                    state.poll_count += 1;
-                    let now = ctx.now_ms();
-
-                    // 1. Hard cap check (exit 2)
-                    if now >= state.cap_deadline_ms {
-                        return complete_step(state, now, 2);
-                    }
-
-                    // 2. Agent gone check (exit 3) - includes NotFound or unknown with empty pane
-                    let is_gone = state.agent_status == "gone"
-                        || state.agent_status == "not_found"
-                        || (state.agent_status == "unknown"
-                            && state.latest_pane_text.trim().is_empty());
-                    if is_gone {
+                    if err == "agent_not_running" || err == "agent_not_found" {
                         if state.gone_since_ms == 0 {
                             state.gone_since_ms = now;
                         }
-                        if now.saturating_sub(state.gone_since_ms) >= state.config.gone_sec * 1000 {
+                        if now >= state.cap_deadline_ms {
+                            return complete_step(state, now, 2);
+                        }
+                        let gone_end = state.gone_since_ms + state.config.gone_sec * 1000;
+                        if now >= gone_end {
                             return complete_step(state, now, 3);
                         }
-                    } else {
+                        let t = wait_interval(state, now, gone_end);
+                        schedule_wake(state, ctx, index + 1, Vec::new(), t);
+                        return StepDecision::Continue;
+                    }
+
+                    if !err.is_empty() {
+                        // Socket/io error: back off and re-observe; never hot-loop.
+                        state.errors += 1;
                         state.gone_since_ms = 0;
-                    }
-
-                    // 3. Blocked / question check (exit 5)
-                    if state.agent_status == "blocked" || question_seen(&state.latest_pane_text) {
-                        return complete_step(state, now, 5);
-                    }
-
-                    // 4. Budget deadline check (exit 4, with grace and autoext) - checked BEFORE idle and stall
-                    if now >= state.allowance_deadline_ms {
-                        // Grace (+25% once) keys to progress fingerprint advancement within 2 polls
-                        if !state.overrun_granted
-                            && state.last_progress_ms > 0
-                            && now.saturating_sub(state.last_progress_ms)
-                                <= state.config.poll_sec * 2 * 1000
-                        {
-                            let mut grace_ms = (state.input.time_budget_sec / 4).max(1) * 1000;
-                            if state.allowance_deadline_ms + grace_ms > state.cap_deadline_ms {
-                                grace_ms = state
-                                    .cap_deadline_ms
-                                    .saturating_sub(state.allowance_deadline_ms);
-                            }
-                            if grace_ms > 0 {
-                                state.allowance_deadline_ms += grace_ms;
-                                state.overrun_granted = true;
-                            }
+                        if now >= state.cap_deadline_ms {
+                            return complete_step(state, now, 2);
                         }
-
-                        // Auto-extension (+25% steps up to +50% total) keys strictly to diff hash changes
-                        let max_autoext_ms = (state.input.time_budget_sec / 2) * 1000;
-                        if state.extension_total_ms < max_autoext_ms
-                            && !state.current_diff_hash.is_empty()
-                            && state.current_diff_hash != state.last_autoext_diff_hash
-                        {
-                            let rem = max_autoext_ms.saturating_sub(state.extension_total_ms);
-                            let mut ext_ms =
-                                ((state.input.time_budget_sec / 4).max(1) * 1000).min(rem);
-                            if state.allowance_deadline_ms + ext_ms > state.cap_deadline_ms {
-                                ext_ms = state
-                                    .cap_deadline_ms
-                                    .saturating_sub(state.allowance_deadline_ms);
-                            }
-                            if ext_ms > 0 {
-                                state.allowance_deadline_ms += ext_ms;
-                                state.extension_total_ms += ext_ms;
-                                state.last_autoext_diff_hash = state.current_diff_hash.clone();
-                            }
-                        }
-
-                        if now >= state.allowance_deadline_ms {
-                            return complete_step(state, now, 4);
-                        }
+                        let backoff = (30_000u64).min(state.config.poll_sec * 1000);
+                        let t = wait_interval(state, now, now + backoff);
+                        schedule_wake(state, ctx, index + 1, Vec::new(), t);
+                        return StepDecision::Continue;
                     }
 
-                    let is_waiting = {
-                        let runs_dir = state
-                            .report_path
-                            .parent()
-                            .unwrap_or_else(|| std::path::Path::new("."));
-                        crate::worker::prompt::observer::lead_waiting(
-                            runs_dir,
-                            &state.input.name,
-                            "",
-                        )
-                    };
-
-                    if state.report_mtime_ms > 0 {
-                        state.prompt_landed = true;
-                        state.prompt_recovered = false;
-                    }
-
-                    if !state.prompt_landed && state.config.land_sec > 0 {
-                        if state.agent_status == "working"
-                            || state.agent_status == "blocked"
-                            || is_waiting
-                            || state.report_mtime_ms > 0
-                        {
-                            state.prompt_landed = true;
-                            state.prompt_recovered = false;
-                        } else if state.agent_status == "idle" || state.agent_status == "done" {
-                            if state.prompt_recovered {
-                                if now >= state.recover_deadline_ms && state.report_mtime_ms == 0 {
-                                    return complete_step(state, now, 3);
-                                }
-                            } else if now >= state.start_ms + state.config.land_sec * 1000 {
-                                state.prompt_recovered = true;
-                                state.recover_at_ms = now;
-                                state.recover_deadline_ms = now + state.config.land_sec * 1000;
-                            }
-                        }
-                    }
-
-                    // 5. Agent idle check (exit 3) - 120s standard, 300s fallback for opencode/omp without hook
-                    if is_waiting {
-                        state.idle_since_ms = 0;
-                    } else if state.agent_status == "idle" || state.agent_status == "done" {
-                        if state.idle_since_ms == 0 {
-                            state.idle_since_ms = now;
-                        }
-                        let is_fallback_idle = (!state.hook_active)
-                            && state
-                                .harness
-                                .as_deref()
-                                .map(|h| h == "opencode" || h == "omp")
-                                .unwrap_or(false);
-                        let effective_idle_sec =
-                            if is_fallback_idle || state.config.is_fallback_idle {
-                                state.config.idle_fallback_sec
-                            } else {
-                                state.config.idle_sec
-                            };
-                        if now.saturating_sub(state.idle_since_ms) >= effective_idle_sec * 1000 {
-                            return complete_step(state, now, 3);
-                        }
-                    } else {
-                        state.idle_since_ms = 0;
-                    }
-
-                    // 7. Nudge check (non-terminal)
-                    let nudge_thresh_ms =
-                        (state.input.time_budget_sec * state.config.nudge_pct / 100) * 1000;
-                    let nudge_at_ms =
-                        state.start_ms + nudge_thresh_ms.saturating_sub(state.prev_elapsed_ms);
-                    if !state.nudged && now >= nudge_at_ms {
-                        state.nudged = true;
-                        let nudge_msg = format!(
-                            "Time check: you are past {}% of this task's time budget. Wrap up now: finish the current step, commit your work, and write {} (via a temp file + rename) with what is done plus a Blockers section for the rest. Reply only the path.",
-                            state.config.nudge_pct,
-                            state.report_path.display()
-                        );
-                        ctx.schedule_activity(
-                            format!("nudge_prompt_{}", state.poll_count),
-                            ActivityRequest::Herdr(HerdrRequest::Prompt {
-                                name: state.input.name.clone(),
-                                task: nudge_msg,
-                            }),
-                        );
-                    }
-
-                    // 8. Schedule next tick observations and poll timer
+                    state.errors = 0;
+                    state.gone_since_ms = 0;
+                    state.poll_count = index;
                     ctx.schedule_activity(
-                        format!("act_agent_info_{}", state.poll_count),
-                        ActivityRequest::Herdr(HerdrRequest::AgentInfo {
-                            name: state.input.name.clone(),
-                        }),
-                    );
-                    ctx.schedule_activity(
-                        format!("check_report_{}", state.poll_count),
+                        format!("obs_{index}_report"),
                         ActivityRequest::ReportFile(ReportFileRequest::CheckMtime {
                             path: state.report_path.to_string_lossy().to_string(),
                         }),
                     );
                     ctx.schedule_activity(
-                        format!("get_diff_hash_{}", state.poll_count),
+                        format!("obs_{index}_diff"),
                         ActivityRequest::Git(GitRequest::DiffHash {
                             path: state.input.repo.clone(),
                         }),
                     );
                     ctx.schedule_activity(
-                        format!("read_agent_{}", state.poll_count),
-                        ActivityRequest::Herdr(HerdrRequest::ReadAgent {
-                            name: state.input.name.clone(),
-                            lines: 80,
+                        format!("obs_{index}_session"),
+                        ActivityRequest::Session(SessionRequest::Mtime {
+                            harness: state.harness.clone().unwrap_or_default(),
+                            session_kind: state
+                                .session_key
+                                .split_once(':')
+                                .map(|(k, _)| k.to_string())
+                                .unwrap_or_default(),
+                            session_value: state
+                                .session_key
+                                .split_once(':')
+                                .map(|(_, v)| v.to_string())
+                                .unwrap_or_default(),
+                            cwd: String::new(),
                         }),
                     );
-                    ctx.schedule_activity(
-                        format!("poll_events_{}", state.poll_count),
-                        ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
-                            agent: state.input.name.clone(),
-                        }),
-                    );
-                    ctx.schedule_timer("poll_timer", Duration::from_secs(state.config.poll_sec));
-                    StepDecision::Continue
-                } else {
-                    StepDecision::Fail {
-                        code: 1,
-                        reason: format!("unexpected timer fired: {id}"),
-                    }
+                    return StepDecision::Continue;
                 }
+
+                if let Some(index) = parse_index(&id, "obs_") {
+                    let now = ctx.now_ms();
+                    if id.ends_with("_report") {
+                        if let ActivityResult::ReportFile(ReportFileResult::MtimeMs(mtime)) = result
+                        {
+                            state.report_mtime_ms = mtime;
+                            state.report_ready = mtime > 0;
+                        }
+                        return StepDecision::Continue;
+                    }
+                    if id.ends_with("_diff") {
+                        if let ActivityResult::Git(GitResult::DiffHash { hash, .. }) = result {
+                            if !state.first_progress_seen {
+                                state.first_progress_seen = true;
+                                state.current_diff_hash = hash.clone();
+                                if state.last_autoext_diff_hash.is_empty() && !hash.is_empty() {
+                                    state.last_autoext_diff_hash = hash;
+                                }
+                            } else if hash != state.current_diff_hash {
+                                state.current_diff_hash = hash;
+                                state.last_progress_ms = now;
+                            }
+                        }
+                        return StepDecision::Continue;
+                    }
+                    if id.ends_with("_session") {
+                        if let ActivityResult::Session(SessionResult::Mtime(mtime)) = result {
+                            match mtime {
+                                Some(ms) => {
+                                    if !state.session_seen {
+                                        state.session_seen = true;
+                                        state.session_mtime_ms = ms;
+                                    } else if ms > state.session_mtime_ms {
+                                        state.session_mtime_ms = ms;
+                                        state.last_progress_ms = now;
+                                    }
+                                }
+                                None => state.session_seen = false,
+                            }
+                        }
+                        return evaluate(state, ctx, index, now);
+                    }
+                    return StepDecision::Continue;
+                }
+
+                if let Some(index) = parse_index(&id, "read_report_") {
+                    if let ActivityResult::ReportFile(ReportFileResult::Content(content)) = result {
+                        if content.trim().is_empty() {
+                            state.report_ready = false;
+                            let t = wait_interval(state, ctx.now_ms(), ctx.now_ms() + state.config.poll_sec * 1000);
+                            schedule_wake(state, ctx, index + 1, default_until(state), t);
+                            return StepDecision::Continue;
+                        }
+                        let valid = validate_report_content(&content, state.config.expect_verdict);
+                        let exit = if valid.is_ok() { 0 } else { 6 };
+                        return complete_step(state, ctx.now_ms(), exit);
+                    }
+                    return StepDecision::Continue;
+                }
+
+                StepDecision::Continue
             }
 
-            _ => StepDecision::Fail {
+            Some(WorkflowEvent::TimerFired { id }) => {
+                if let Some(index) = parse_index(&id, "backoff_") {
+                    schedule_wake(state, ctx, index + 1, Vec::new(), 0);
+                }
+                StepDecision::Continue
+            }
+
+            Some(unexpected) => StepDecision::Fail {
                 code: 1,
-                reason: format!("unexpected workflow event: {event:?}"),
+                reason: format!("unexpected workflow event: {unexpected:?}"),
             },
         }
     }
+}
+
+fn parse_index(id: &str, prefix: &str) -> Option<u64> {
+    id.strip_prefix(prefix)?
+        .split('_')
+        .next()?
+        .parse::<u64>()
+        .ok()
+}
+
+fn default_until(state: &SingleWorkerState) -> Vec<String> {
+    if state.agent_status == "idle" || state.agent_status == "done" {
+        // The current state already matches the default set; flip so the wait
+        // returns only when the agent starts working again (U1a spin).
+        vec!["working".to_string(), "blocked".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn wait_interval(state: &SingleWorkerState, now: u64, next_deadline: u64) -> u64 {
+    let heartbeat = now + state.config.poll_sec * 1000;
+    next_deadline
+        .min(heartbeat)
+        .saturating_sub(now)
+        .max(1000)
+}
+
+fn nudge_deadline_ms(state: &SingleWorkerState) -> u64 {
+    let nudge_thresh_ms = (state.input.time_budget_sec * state.config.nudge_pct / 100) * 1000;
+    state
+        .start_ms
+        .saturating_add(nudge_thresh_ms)
+        .saturating_sub(state.prev_elapsed_ms)
+}
+
+/// Evaluate one wake after its report/diff/session observations completed.
+fn evaluate(
+    state: &mut SingleWorkerState,
+    ctx: &mut WorkflowContext,
+    index: u64,
+    now: u64,
+) -> StepDecision<SingleWorkerOutput> {
+    // 1. Report first: one ready check per wake, then read.
+    if state.report_ready {
+        ctx.schedule_activity(
+            format!("read_report_{index}"),
+            ActivityRequest::ReportFile(ReportFileRequest::Read {
+                path: state.report_path.to_string_lossy().to_string(),
+            }),
+        );
+        return StepDecision::Continue;
+    }
+
+    // 2. Hard cap.
+    if now >= state.cap_deadline_ms {
+        return complete_step(state, now, 2);
+    }
+
+    // 3. Blocked on a question/permission.
+    if state.agent_status == "blocked" {
+        return complete_step(state, now, 5);
+    }
+
+    // 4. Budget, with one grace and bounded diff auto-extensions.
+    if now >= state.allowance_deadline_ms {
+        if !state.overrun_granted
+            && state.last_progress_ms > 0
+            && now.saturating_sub(state.last_progress_ms)
+                <= state.config.poll_sec * 2 * 1000
+        {
+            let mut grace_ms = (state.input.time_budget_sec / 4).max(1) * 1000;
+            if state.allowance_deadline_ms + grace_ms > state.cap_deadline_ms {
+                grace_ms = state
+                    .cap_deadline_ms
+                    .saturating_sub(state.allowance_deadline_ms);
+            }
+            if grace_ms > 0 {
+                state.allowance_deadline_ms += grace_ms;
+                state.overrun_granted = true;
+            }
+        }
+
+        let max_autoext_ms = (state.input.time_budget_sec / 2) * 1000;
+        if state.extension_total_ms < max_autoext_ms
+            && !state.current_diff_hash.is_empty()
+            && state.current_diff_hash != state.last_autoext_diff_hash
+        {
+            let rem = max_autoext_ms.saturating_sub(state.extension_total_ms);
+            let mut ext_ms = ((state.input.time_budget_sec / 4).max(1) * 1000).min(rem);
+            if state.allowance_deadline_ms + ext_ms > state.cap_deadline_ms {
+                ext_ms = state
+                    .cap_deadline_ms
+                    .saturating_sub(state.allowance_deadline_ms);
+            }
+            if ext_ms > 0 {
+                state.allowance_deadline_ms += ext_ms;
+                state.extension_total_ms += ext_ms;
+                state.last_autoext_diff_hash = state.current_diff_hash.clone();
+            }
+        }
+
+        if now >= state.allowance_deadline_ms {
+            return complete_step(state, now, 4);
+        }
+    }
+
+    // 5. Idle without a report.
+    if state.agent_status == "idle" || state.agent_status == "done" {
+        if state.lead_waiting {
+            state.idle_since_ms = 0;
+        } else {
+            if state.idle_since_ms == 0 {
+                state.idle_since_ms = now;
+            }
+            if now.saturating_sub(state.idle_since_ms) >= state.idle_limit_ms() * 1000 {
+                return complete_step(state, now, 3);
+            }
+        }
+    } else {
+        state.idle_since_ms = 0;
+    }
+
+    // 6. Stall: only when a progress source exists and the agent is working.
+    if state.agent_status == "working" && !state.lead_waiting && state.has_progress_source() {
+        let baseline = if state.last_progress_ms > 0 {
+            state.last_progress_ms
+        } else {
+            state.start_ms
+        };
+        if now.saturating_sub(baseline) >= state.config.stall_sec * 1000 {
+            return complete_step(state, now, 3);
+        }
+    }
+
+    // 7. Nudge once at nudge_pct.
+    let nudge_at_ms = nudge_deadline_ms(state);
+    if !state.nudged && now >= nudge_at_ms {
+        state.nudged = true;
+        let nudge_msg = format!(
+            "Time check: you are past {}% of this task's time budget. Wrap up now: finish the current step, commit your work, and write {} (via a temp file + rename) with what is done plus a Blockers section for the rest. Reply only the path.",
+            state.config.nudge_pct,
+            state.report_path.display()
+        );
+        ctx.schedule_activity(
+            format!("nudge_{index}"),
+            ActivityRequest::Herdr(HerdrRequest::Prompt {
+                name: state.input.name.clone(),
+                task: nudge_msg,
+            }),
+        );
+    }
+
+    // 8. Next wake, clamped to the earliest deadline.
+    let mut deadline = now + state.config.poll_sec * 1000;
+    deadline = deadline.min(state.cap_deadline_ms);
+    deadline = deadline.min(state.allowance_deadline_ms);
+    if !state.nudged {
+        deadline = deadline.min(nudge_at_ms);
+    }
+    if state.agent_status == "idle" || state.agent_status == "done" {
+        if !state.lead_waiting {
+            deadline = deadline.min(
+                state.idle_since_ms + state.idle_limit_ms() * 1000,
+            );
+        }
+    } else if state.agent_status == "working" && !state.lead_waiting && state.has_progress_source()
+    {
+        let baseline = if state.last_progress_ms > 0 {
+            state.last_progress_ms
+        } else {
+            state.start_ms
+        };
+        deadline = deadline.min(baseline + state.config.stall_sec * 1000);
+    }
+    let timeout_ms = deadline.saturating_sub(now).max(1000);
+    schedule_wake(state, ctx, index + 1, default_until(state), timeout_ms);
+    StepDecision::Continue
 }
 
 // ----------------------------------------------------------------------------
@@ -732,1358 +689,357 @@ mod tests {
         )
     }
 
-    fn mock_poll(
-        activities: &mut MockActivities,
-        agent: &str,
-        poll: u64,
-        mtime: u64,
-        status: &str,
-        pane_text: &str,
-        diff_hash: &str,
-        harness: Option<&str>,
+    #[derive(Clone)]
+    struct Poll {
+        status: &'static str,
+        err: &'static str,
+        diff: &'static str,
+        report_mtime: u64,
+        session_mtime: Option<u64>,
+        report: Option<&'static str>,
         hook_active: bool,
-        scoped_events: Vec<String>,
-    ) {
-        if poll == 0 {
-            activities.register(
-                "sub_events_0",
-                ActivityResult::HerdrEvents(HerdrEventResult::Subscribed {
-                    agent: agent.to_string(),
-                }),
-            );
+    }
+
+    impl Default for Poll {
+        fn default() -> Self {
+            Self {
+                status: "working",
+                err: "",
+                diff: "dh0",
+                report_mtime: 0,
+                session_mtime: Some(1000),
+                report: None,
+                hook_active: true,
+            }
         }
+    }
+
+    fn register_poll(activities: &mut MockActivities, name: &str, poll: u64, p: Poll) {
         activities.register(
-            format!("act_agent_info_{poll}"),
-            ActivityResult::Herdr(HerdrResult::AgentInfo {
-                name: agent.to_string(),
-                status: status.to_string(),
-                harness: harness.map(|s| s.to_string()),
-                hook_active,
+            format!("wake_{poll}"),
+            ActivityResult::Herdr(HerdrResult::AgentWait {
+                name: name.to_string(),
+                status: p.status.to_string(),
+                seq: poll + 1,
+                session_kind: "id".to_string(),
+                session_value: "sid".to_string(),
+                harness: "omp".to_string(),
+                cwd: "/repo".to_string(),
+                err: p.err.to_string(),
+                lead_waiting: false,
+                hook_active: p.hook_active,
             }),
         );
         activities.register(
-            format!("check_report_{poll}"),
-            ActivityResult::ReportFile(ReportFileResult::MtimeMs(mtime)),
+            format!("obs_{poll}_report"),
+            ActivityResult::ReportFile(ReportFileResult::MtimeMs(p.report_mtime)),
         );
         activities.register(
-            format!("get_diff_hash_{poll}"),
+            format!("obs_{poll}_diff"),
             ActivityResult::Git(GitResult::DiffHash {
-                hash: diff_hash.to_string(),
-                stat: if diff_hash.is_empty() {
-                    "clean".to_string()
-                } else {
-                    "modified".to_string()
-                },
+                hash: p.diff.to_string(),
+                stat: String::new(),
             }),
         );
         activities.register(
-            format!("read_agent_{poll}"),
-            ActivityResult::Herdr(HerdrResult::AgentOutput {
-                content: pane_text.to_string(),
-            }),
+            format!("obs_{poll}_session"),
+            ActivityResult::Session(SessionResult::Mtime(p.session_mtime)),
         );
         activities.register(
-            format!("poll_events_{poll}"),
-            ActivityResult::HerdrEvents(HerdrEventResult::ScopedEvents {
-                agent: agent.to_string(),
-                events: scoped_events,
-            }),
-        );
-        activities.register(
-            format!("nudge_prompt_{poll}"),
+            format!("nudge_{poll}"),
             ActivityResult::Herdr(HerdrResult::Prompted {
-                name: agent.to_string(),
+                name: name.to_string(),
             }),
         );
-    }
-
-    fn mock_poll_standard(
-        activities: &mut MockActivities,
-        agent: &str,
-        poll: u64,
-        mtime: u64,
-        pane_text: &str,
-        diff_hash: &str,
-    ) {
-        mock_poll(
-            activities,
-            agent,
-            poll,
-            mtime,
-            "working",
-            pane_text,
-            diff_hash,
-            Some("omp"),
-            true,
-            vec![],
-        );
-    }
-
-    // ------------------------------------------------------------------------
-    // Acceptance Test Cases
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_single_worker_workflow_exit_0_success() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-ok", 1800);
-        let report_path = PathBuf::from("runs/worker-ok.md");
-        let initial_state = SingleWorkerState::new(input);
-
-        // Poll 0: mtime 0
-        mock_poll_standard(&mut activities, "worker-ok", 0, 0, "building", "dh0");
-        // Poll 1: mtime 1000 (sample 1)
-        mock_poll_standard(&mut activities, "worker-ok", 1, 1000, "building", "dh0");
-        // Poll 2: mtime 1000 (sample 2 -> stable!)
-        mock_poll_standard(&mut activities, "worker-ok", 2, 1000, "done", "dh0");
-        activities.register(
-            "read_report_2",
-            ActivityResult::ReportFile(ReportFileResult::Content(
-                "# Report\nDone!\n\n## Lessons\n- none\n".to_string(),
-            )),
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-exit-0",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete successfully");
-
-        assert_eq!(out.exit, 0);
-        assert_eq!(out.report_path, report_path);
-    }
-
-    #[test]
-    fn test_single_worker_workflow_exit_2_hard_cap() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-cap", 10_000);
-        let report_path = PathBuf::from("runs/worker-cap.md");
-        let mut config = WatchdogConfig::default();
-        config.poll_sec = 30;
-        config.hard_cap_sec = 90;
-        config.stall_sec = 600;
-
-        let initial_state = SingleWorkerState::new(input).with_config(config);
-
-        // Diff moves on each poll so stall does not trigger
-        mock_poll_standard(&mut activities, "worker-cap", 0, 0, "step 0", "dh0");
-        mock_poll_standard(&mut activities, "worker-cap", 1, 0, "step 1", "dh1");
-        mock_poll_standard(&mut activities, "worker-cap", 2, 0, "step 2", "dh2");
-        mock_poll_standard(&mut activities, "worker-cap", 3, 0, "step 3", "dh3");
-
-        let out = run_to_completion(
-            &workflow,
-            "test-exit-2",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete");
-
-        assert_eq!(out.exit, 2);
-        assert_eq!(out.report_path, report_path);
-    }
-
-    #[test]
-    fn test_stall_fires_when_neither_pane_nor_diff_moves() {
-        // Acceptance test: stall (exit 3) still fires when neither pane nor diff moves
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-stall", 1800);
-        let report_path = PathBuf::from("runs/worker-stall.md");
-        let mut config = WatchdogConfig::default();
-        config.poll_sec = 30;
-        config.stall_sec = 60; // Stalls after 60s of static pane + static diff
-
-        let initial_state = SingleWorkerState::new(input).with_config(config);
-
-        // Same pane and same diff on all polls
-        mock_poll_standard(
-            &mut activities,
-            "worker-stall",
-            0,
-            0,
-            "frozen output",
-            "static_dh",
-        );
-        mock_poll_standard(
-            &mut activities,
-            "worker-stall",
-            1,
-            0,
-            "frozen output",
-            "static_dh",
-        );
-        mock_poll_standard(
-            &mut activities,
-            "worker-stall",
-            2,
-            0,
-            "frozen output",
-            "static_dh",
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-stall-both-static",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete");
-
-        assert_eq!(out.exit, 3);
-        assert_eq!(out.report_path, report_path);
-    }
-
-    #[test]
-    fn test_single_worker_workflow_exit_3_stall() {
-        // Legacy test alias
-        test_stall_fires_when_neither_pane_nor_diff_moves();
-    }
-
-    #[test]
-    fn test_idle_fallback_300s_for_opencode_omp_without_hook_and_120s_otherwise() {
-        // Acceptance test: idle fallback 300 s for opencode/omp without hook and 120 s otherwise
-
-        // Case A: opencode without hook -> 300s fallback (does not exit at 120s, exits at 300s)
-        {
-            let workflow = SingleWorkerWorkflow::new();
-            let mut clock = VirtualClock::new(100_000);
-            let mut activities = MockActivities::new();
-            let mut journal = InMemoryJournal::new();
-
-            let input = sample_input("worker-fb", 1800);
-            let initial_state = SingleWorkerState::new(input);
-
-            mock_poll(
-                &mut activities,
-                "worker-fb",
-                0,
-                0,
-                "working",
-                "running",
-                "dh0",
-                Some("opencode"),
-                false,
-                vec![],
-            );
-            // Becomes idle at poll 1 (t=30s)
-            for p in 1..=11 {
-                mock_poll(
-                    &mut activities,
-                    "worker-fb",
-                    p,
-                    0,
-                    "idle",
-                    "idle",
-                    "dh0",
-                    Some("opencode"),
-                    false, // !hook_active
-                    vec![],
-                );
-            }
-
-            let out = run_to_completion(
-                &workflow,
-                "test-idle-fb-300",
-                initial_state,
-                &mut clock,
-                &mut activities,
-                &mut journal,
-            )
-            .expect("workflow should complete with exit 3 after 300s fallback");
-
-            assert_eq!(out.exit, 3);
-            // 300s idle from t=30s is t=330s (100_000 + 330_000 = 430_000)
-            assert_eq!(clock.now_ms(), 430_000);
-        }
-
-        // Case B: claude with hook_active=true -> 120s standard idle
-        {
-            let workflow = SingleWorkerWorkflow::new();
-            let mut clock = VirtualClock::new(100_000);
-            let mut activities = MockActivities::new();
-            let mut journal = InMemoryJournal::new();
-
-            let input = sample_input("worker-standard-idle", 1800);
-            let initial_state = SingleWorkerState::new(input);
-
-            mock_poll(
-                &mut activities,
-                "worker-standard-idle",
-                0,
-                0,
-                "working",
-                "running",
-                "dh0",
-                Some("claude"),
-                true,
-                vec![],
-            );
-            // Becomes idle at poll 1 (t=30s)
-            for p in 1..=5 {
-                mock_poll(
-                    &mut activities,
-                    "worker-standard-idle",
-                    p,
-                    0,
-                    "idle",
-                    "idle",
-                    "dh0",
-                    Some("claude"),
-                    true,
-                    vec![],
-                );
-            }
-
-            let out = run_to_completion(
-                &workflow,
-                "test-idle-standard-120",
-                initial_state,
-                &mut clock,
-                &mut activities,
-                &mut journal,
-            )
-            .expect("workflow should complete with exit 3 after 120s");
-
-            assert_eq!(out.exit, 3);
-            // 120s idle from t=30s is t=150s (100_000 + 150_000 = 250_000)
-            assert_eq!(clock.now_ms(), 250_000);
-        }
-    }
-
-    #[test]
-    fn test_single_worker_workflow_exit_3_idle() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-idle", 1800);
-        let report_path = PathBuf::from("runs/worker-idle.md");
-        let initial_state = SingleWorkerState::new(input);
-
-        mock_poll(
-            &mut activities,
-            "worker-idle",
-            0,
-            0,
-            "working",
-            "running",
-            "dh0",
-            Some("claude"),
-            true,
-            vec![],
-        );
-        for p in 1..=5 {
-            mock_poll(
-                &mut activities,
-                "worker-idle",
-                p,
-                0,
-                "idle",
-                "idle",
-                "dh0",
-                Some("claude"),
-                true,
-                vec![],
-            );
-        }
-
-        let out = run_to_completion(
-            &workflow,
-            "test-exit-3-idle",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete");
-
-        assert_eq!(out.exit, 3);
-        assert_eq!(out.report_path, report_path);
-    }
-
-    #[test]
-    fn test_gone_via_agent_info_not_found() {
-        // Acceptance test: gone via AgentInfo NotFound / gone status
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-gone", 1800);
-        let report_path = PathBuf::from("runs/worker-gone.md");
-        let initial_state = SingleWorkerState::new(input);
-
-        mock_poll_standard(&mut activities, "worker-gone", 0, 0, "working", "dh0");
-        // Status reports "not_found" (legacy gone clock trigger)
-        mock_poll(
-            &mut activities,
-            "worker-gone",
-            1,
-            0,
-            "not_found",
-            "",
-            "dh0",
-            None,
-            false,
-            vec![],
-        );
-        mock_poll(
-            &mut activities,
-            "worker-gone",
-            2,
-            0,
-            "not_found",
-            "",
-            "dh0",
-            None,
-            false,
-            vec![],
-        );
-        mock_poll(
-            &mut activities,
-            "worker-gone",
-            3,
-            0,
-            "not_found",
-            "",
-            "dh0",
-            None,
-            false,
-            vec![],
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-gone-not-found",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 3");
-
-        assert_eq!(out.exit, 3);
-        assert_eq!(out.report_path, report_path);
-    }
-
-    #[test]
-    fn test_single_worker_workflow_exit_3_agent_gone() {
-        test_gone_via_agent_info_not_found();
-    }
-
-    #[test]
-    fn test_single_worker_workflow_exit_4_budget_exceeded() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-budget", 60);
-        let report_path = PathBuf::from("runs/worker-budget.md");
-        let initial_state = SingleWorkerState::new(input);
-
-        mock_poll_standard(&mut activities, "worker-budget", 0, 0, "no progress", "dh0");
-        mock_poll_standard(&mut activities, "worker-budget", 1, 0, "no progress", "dh0");
-        mock_poll_standard(&mut activities, "worker-budget", 2, 0, "no progress", "dh0");
-
-        let out = run_to_completion(
-            &workflow,
-            "test-exit-4",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 4");
-
-        assert_eq!(out.exit, 4);
-        assert_eq!(out.report_path, report_path);
-        assert_eq!(clock.now_ms(), 100_000 + 60_000);
-    }
-
-    #[test]
-    fn test_single_worker_workflow_exit_5_blocked_status() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-blocked", 1800);
-        let report_path = PathBuf::from("runs/worker-blocked.md");
-        let initial_state = SingleWorkerState::new(input);
-
-        mock_poll(
-            &mut activities,
-            "worker-blocked",
-            0,
-            0,
-            "blocked",
-            "waiting on permission",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-exit-5-st",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 5");
-
-        assert_eq!(out.exit, 5);
-        assert_eq!(out.report_path, report_path);
-    }
-
-    #[test]
-    fn test_single_worker_workflow_exit_5_question_detected() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-q", 1800);
-        let report_path = PathBuf::from("runs/worker-q.md");
-        let initial_state = SingleWorkerState::new(input);
-
-        mock_poll_standard(
-            &mut activities,
-            "worker-q",
-            0,
-            0,
-            "Do you want to proceed? [y/N]",
-            "dh0",
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-exit-5-q",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 5");
-
-        assert_eq!(out.exit, 5);
-        assert_eq!(out.report_path, report_path);
-    }
-
-    #[test]
-    fn test_stable_mtime_ready_vs_malformed_exit_6() {
-        // Acceptance test: stable-mtime Ready vs malformed exit 6
-
-        // Case A: malformed report exits 6 ONLY after stable mtime and non-empty content
-        {
-            let workflow = SingleWorkerWorkflow::new();
-            let mut clock = VirtualClock::new(100_000);
-            let mut activities = MockActivities::new();
-            let mut journal = InMemoryJournal::new();
-
-            let input = sample_input("worker-bad", 1800);
-            let report_path = PathBuf::from("runs/worker-bad.md");
-            let initial_state = SingleWorkerState::new(input);
-
-            // Poll 0: sample 1 of mtime 1000 (not yet stable)
-            mock_poll_standard(&mut activities, "worker-bad", 0, 1000, "working", "dh0");
-            // Poll 1: sample 2 of mtime 1000 (now stable!)
-            mock_poll_standard(&mut activities, "worker-bad", 1, 1000, "working", "dh0");
+        if let Some(report) = p.report {
             activities.register(
-                "read_report_1",
-                ActivityResult::ReportFile(ReportFileResult::Content(
-                    "# Bad Report\nMissing lessons\n".to_string(),
-                )),
+                format!("read_report_{poll}"),
+                ActivityResult::ReportFile(ReportFileResult::Content(report.to_string())),
             );
-
-            let out = run_to_completion(
-                &workflow,
-                "test-bad-report",
-                initial_state,
-                &mut clock,
-                &mut activities,
-                &mut journal,
-            )
-            .expect("workflow should complete with exit 6 on stable malformed report");
-
-            assert_eq!(out.exit, 6);
-            assert_eq!(out.report_path, report_path);
-        }
-
-        // Case B: empty content does NOT exit 6; waits for non-empty report
-        {
-            let workflow = SingleWorkerWorkflow::new();
-            let mut clock = VirtualClock::new(100_000);
-            let mut activities = MockActivities::new();
-            let mut journal = InMemoryJournal::new();
-
-            let input = sample_input("worker-empty-wait", 1800);
-            let initial_state = SingleWorkerState::new(input);
-
-            mock_poll_standard(
-                &mut activities,
-                "worker-empty-wait",
-                0,
-                1000,
-                "writing",
-                "dh0",
-            );
-            mock_poll_standard(
-                &mut activities,
-                "worker-empty-wait",
-                1,
-                1000,
-                "writing",
-                "dh0",
-            );
-            // Stable mtime, but content is empty!
-            activities.register(
-                "read_report_1",
-                ActivityResult::ReportFile(ReportFileResult::Content("   \n".to_string())),
-            );
-
-            // Poll 2: still stable, now content arrives!
-            mock_poll_standard(&mut activities, "worker-empty-wait", 2, 1000, "done", "dh0");
-            activities.register(
-                "read_report_2",
-                ActivityResult::ReportFile(ReportFileResult::Content(
-                    "# Done\n\n## Lessons\n- none\n".to_string(),
-                )),
-            );
-
-            let out = run_to_completion(
-                &workflow,
-                "test-empty-content-wait",
-                initial_state,
-                &mut clock,
-                &mut activities,
-                &mut journal,
-            )
-            .expect("workflow should wait for non-empty content and exit 0");
-
-            assert_eq!(out.exit, 0);
         }
     }
 
-    #[test]
-    fn test_single_worker_workflow_exit_6_malformed_report() {
-        test_stable_mtime_ready_vs_malformed_exit_6();
-    }
-
-    #[test]
-    fn test_autoext_fires_on_diff_hash_change_and_not_on_pane_churn_alone() {
-        // Acceptance test: autoext fires on diff-hash change and NOT on pane churn alone
-
-        // Case A: pane churn alone does NOT autoextend -> exits 4
-        {
-            let workflow = SingleWorkerWorkflow::new();
-            let mut clock = VirtualClock::new(100_000);
-            let mut activities = MockActivities::new();
-            let mut journal = InMemoryJournal::new();
-
-            // Budget 40s (poll 20s). Grace +10s (50s).
-            let input = sample_input("worker-churn-no-ext", 40);
-            let mut config = WatchdogConfig::default();
-            config.poll_sec = 20;
-            config.hard_cap_sec = 200;
-            config.stall_sec = 600;
-
-            let initial_state = SingleWorkerState::new(input).with_config(config);
-
-            // Pane text churns on every poll, but diff hash is static
-            mock_poll_standard(
-                &mut activities,
-                "worker-churn-no-ext",
-                0,
-                0,
-                "spin |",
-                "dh_static",
-            );
-            mock_poll_standard(
-                &mut activities,
-                "worker-churn-no-ext",
-                1,
-                0,
-                "spin /",
-                "dh_static",
-            );
-            mock_poll_standard(
-                &mut activities,
-                "worker-churn-no-ext",
-                2,
-                0,
-                "spin -",
-                "dh_static",
-            );
-            mock_poll_standard(
-                &mut activities,
-                "worker-churn-no-ext",
-                3,
-                0,
-                "spin \\",
-                "dh_static",
-            );
-
-            let out = run_to_completion(
-                &workflow,
-                "test-churn-fails",
-                initial_state,
-                &mut clock,
-                &mut activities,
-                &mut journal,
-            )
-            .expect("workflow should complete with exit 4 without autoext");
-
-            assert_eq!(out.exit, 4);
-        }
-
-        // Case B: diff hash changes -> auto-extends up to +50%
-        {
-            let workflow = SingleWorkerWorkflow::new();
-            let mut clock = VirtualClock::new(100_000);
-            let mut activities = MockActivities::new();
-            let mut journal = InMemoryJournal::new();
-
-            let input = sample_input("worker-diff-ext", 40);
-            let mut config = WatchdogConfig::default();
-            config.poll_sec = 20;
-            config.hard_cap_sec = 200;
-            config.stall_sec = 600;
-
-            let initial_state = SingleWorkerState::new(input).with_config(config);
-
-            mock_poll_standard(&mut activities, "worker-diff-ext", 0, 0, "step 0", "dh1");
-            mock_poll_standard(&mut activities, "worker-diff-ext", 1, 0, "step 1", "dh2");
-            // Poll 2 (t=40s): budget reached -> grace (+10s -> 50s) + autoext on dh3 (+10s -> 60s)
-            mock_poll_standard(&mut activities, "worker-diff-ext", 2, 0, "step 2", "dh3");
-            // Poll 3 (t=60s): autoext on dh4 (+10s -> 70s, max +50% reached)
-            mock_poll_standard(&mut activities, "worker-diff-ext", 3, 0, "step 3", "dh4");
-            // Poll 4 (t=80s): past 70s max -> exits 4
-            mock_poll_standard(&mut activities, "worker-diff-ext", 4, 0, "step 4", "dh5");
-
-            let out = run_to_completion(
-                &workflow,
-                "test-diff-autoext",
-                initial_state,
-                &mut clock,
-                &mut activities,
-                &mut journal,
-            )
-            .expect("workflow should complete with exit 4 after reaching max autoext");
-
-            assert_eq!(out.exit, 4);
+    fn config(heartbeat: u64, budget_cap: u64) -> WatchdogConfig {
+        WatchdogConfig {
+            poll_sec: heartbeat,
+            hard_cap_sec: budget_cap,
+            stall_sec: 600,
+            nudge_pct: 100,
+            ..WatchdogConfig::default()
         }
     }
 
-    #[test]
-    fn test_single_worker_workflow_autoext_bounded() {
-        test_autoext_fires_on_diff_hash_change_and_not_on_pane_churn_alone();
-    }
-
-    #[test]
-    fn test_grace_after_a_diff_move() {
-        // Acceptance test: grace after a diff move
+    fn run(
+        name: &str,
+        budget: u64,
+        cfg: WatchdogConfig,
+        polls: Vec<Poll>,
+    ) -> (SingleWorkerOutput, u64, Vec<crate::engine::journal::EventRecord>) {
         let workflow = SingleWorkerWorkflow::new();
         let mut clock = VirtualClock::new(100_000);
         let mut activities = MockActivities::new();
         let mut journal = InMemoryJournal::new();
-
-        // 80s budget with 20s poll
-        let input = sample_input("worker-grace-diff", 80);
-        let mut config = WatchdogConfig::default();
-        config.poll_sec = 20;
-        config.hard_cap_sec = 200;
-        config.stall_sec = 600;
-
-        let initial_state = SingleWorkerState::new(input).with_config(config);
-
-        // Diff moves at poll 3 (t=60s), which is within 2 polls of 80s budget!
-        mock_poll_standard(&mut activities, "worker-grace-diff", 0, 0, "same", "dh0");
-        mock_poll_standard(&mut activities, "worker-grace-diff", 1, 0, "same", "dh0");
-        mock_poll_standard(&mut activities, "worker-grace-diff", 2, 0, "same", "dh0");
-        mock_poll_standard(
-            &mut activities,
-            "worker-grace-diff",
-            3,
-            0,
-            "same",
-            "dh1_moved",
-        );
-
-        // Poll 4 (t=80s): reaches budget, grace (+20s = 80/4) extends deadline to 100s!
-        // Report lands in grace window: sample 1 at poll 4, sample 2 at poll 5
-        mock_poll_standard(
-            &mut activities,
-            "worker-grace-diff",
-            4,
-            1000,
-            "same",
-            "dh1_moved",
-        );
-        mock_poll_standard(
-            &mut activities,
-            "worker-grace-diff",
-            5,
-            1000,
-            "same",
-            "dh1_moved",
-        );
-        activities.register(
-            "read_report_5",
-            ActivityResult::ReportFile(ReportFileResult::Content(
-                "# Report\nLanded in grace\n\n## Lessons\n- none\n".to_string(),
-            )),
-        );
-
+        for (i, p) in polls.iter().cloned().enumerate() {
+            register_poll(&mut activities, name, i as u64, p);
+        }
+        let state = SingleWorkerState::new(sample_input(name, budget)).with_config(cfg);
         let out = run_to_completion(
             &workflow,
-            "test-grace-diff-run",
-            initial_state,
+            &format!("test-{name}"),
+            state,
             &mut clock,
             &mut activities,
             &mut journal,
         )
-        .expect("workflow should complete with exit 0 during grace");
-
-        assert_eq!(out.exit, 0);
+        .expect("workflow completes");
+        let now = clock.now_ms();
+        (out, now, journal.all_events(&format!("test-{name}")).to_vec())
     }
 
     #[test]
-    fn test_single_worker_workflow_grace_extension() {
-        test_grace_after_a_diff_move();
-    }
-
-    #[test]
-    fn test_single_worker_workflow_autoext_cap_clamped() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        // 80s budget, 90s hard cap
-        let input = sample_input("worker-clamped", 80);
-        let report_path = PathBuf::from("runs/worker-clamped.md");
-        let mut config = WatchdogConfig::default();
-        config.poll_sec = 20;
-        config.hard_cap_sec = 90;
-        config.stall_sec = 600;
-
-        let initial_state = SingleWorkerState::new(input).with_config(config);
-
-        mock_poll_standard(&mut activities, "worker-clamped", 0, 0, "diff 0", "dh0");
-        mock_poll_standard(&mut activities, "worker-clamped", 1, 0, "diff 1", "dh1");
-        mock_poll_standard(&mut activities, "worker-clamped", 2, 0, "diff 2", "dh2");
-        mock_poll_standard(&mut activities, "worker-clamped", 3, 0, "diff 3", "dh3");
-        // Poll 4 (t=80s): budget reached, grace clamped to 10s (deadline 90s)
-        mock_poll_standard(&mut activities, "worker-clamped", 4, 0, "diff 4", "dh4");
-        // Poll 5 (t=100s): now >= 90s hard cap -> exit 2!
-        mock_poll_standard(&mut activities, "worker-clamped", 5, 0, "diff 5", "dh5");
-
-        let out = run_to_completion(
-            &workflow,
-            "test-clamped",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 2 when hard cap reached");
-
-        assert_eq!(out.exit, 2);
-        assert_eq!(out.report_path, report_path);
-    }
-
-    #[test]
-    fn test_single_worker_workflow_determinism_two_runs() {
-        let run = || {
-            let workflow = SingleWorkerWorkflow::new();
-            let mut clock = VirtualClock::new(100_000);
-            let mut activities = MockActivities::new();
-            let mut journal = InMemoryJournal::new();
-
-            let input = sample_input("worker-det", 1800);
-            let initial_state = SingleWorkerState::new(input);
-
-            mock_poll_standard(&mut activities, "worker-det", 0, 0, "step 1", "dh0");
-            mock_poll_standard(&mut activities, "worker-det", 1, 1000, "step 2", "dh1");
-            mock_poll_standard(&mut activities, "worker-det", 2, 1000, "step 3", "dh1");
-            activities.register(
-                "read_report_2",
-                ActivityResult::ReportFile(ReportFileResult::Content(
-                    "# Report\nDeterministic!\n\n## Lessons\n- none\n".to_string(),
-                )),
-            );
-
-            let out = run_to_completion(
-                &workflow,
-                "det-run",
-                initial_state,
-                &mut clock,
-                &mut activities,
-                &mut journal,
-            )
-            .expect("workflow should complete");
-
-            (out, journal.all_events("det-run").to_vec())
-        };
-
-        let (out1, events1) = run();
-        let (out2, events2) = run();
-
-        assert_eq!(out1, out2);
-        assert_eq!(events1, events2);
-    }
-
-    #[test]
-    fn test_budget_precedence_over_idle_and_stall() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-precedence", 60);
-        let mut config = WatchdogConfig::default();
-        config.poll_sec = 30;
-        config.idle_sec = 30;
-        config.stall_sec = 600;
-
-        let initial_state = SingleWorkerState::new(input).with_config(config);
-
-        mock_poll_standard(&mut activities, "worker-precedence", 0, 0, "idle", "dh0");
-        // Poll 1 (t=30s): becomes idle
-        mock_poll(
-            &mut activities,
-            "worker-precedence",
-            1,
-            0,
-            "idle",
-            "idle",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-        // Poll 2 (t=60s): budget reached while idle -> exit 4 takes precedence over exit 3
-        mock_poll(
-            &mut activities,
-            "worker-precedence",
-            2,
-            0,
-            "idle",
-            "idle",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-precedence",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 4");
-
-        assert_eq!(out.exit, 4);
-    }
-
-    #[test]
-    fn test_nudge_prompt_activity_scheduled_at_80_percent() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-nudge", 100);
-        let mut config = WatchdogConfig::default();
-        config.poll_sec = 20;
-        config.nudge_pct = 80;
-        config.stall_sec = 600;
-
-        let initial_state = SingleWorkerState::new(input).with_config(config);
-
-        mock_poll_standard(&mut activities, "worker-nudge", 0, 0, "step 0", "dh0");
-        mock_poll_standard(&mut activities, "worker-nudge", 1, 0, "step 1", "dh1");
-        mock_poll_standard(&mut activities, "worker-nudge", 2, 0, "step 2", "dh2");
-        mock_poll_standard(&mut activities, "worker-nudge", 3, 0, "step 3", "dh3");
-        // Poll 4 (t=80s): nudge threshold reached!
-        mock_poll_standard(&mut activities, "worker-nudge", 4, 1000, "step 4", "dh4");
-        // Poll 5 (t=100s): stable mtime
-        mock_poll_standard(&mut activities, "worker-nudge", 5, 1000, "step 5", "dh4");
-        activities.register(
-            "read_report_5",
-            ActivityResult::ReportFile(ReportFileResult::Content(
-                "# Report\nLanded after nudge!\n\n## Lessons\n- none\n".to_string(),
-            )),
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-nudge",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete");
-
-        assert_eq!(out.exit, 0);
-
-        let events = journal.all_events("test-nudge");
-        assert!(
-            events
-                .iter()
-                .any(|e| e.payload_json.contains("Time check: you are past 80%")),
-            "nudge prompt was not recorded in journal"
-        );
-    }
-
-    #[test]
-    fn test_builder_brief_mentioning_verdict_does_not_require_verdict() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = SingleWorkerInput::new(
-            "builder-mentions-verdict",
-            "sude",
-            "quaqua",
-            "Goal: build something. Note that the reviewer will check for Verdict: clean.",
+    fn exit_0_on_first_wake_with_a_ready_report() {
+        let (out, now, _) = run(
+            "worker-ok",
             1800,
-            None,
+            config(30, 200),
+            vec![Poll {
+                report_mtime: 1000,
+                report: Some("# Report\nDone!\n\n## Lessons\n- none\n"),
+                ..Poll::default()
+            }],
         );
-        let initial_state = SingleWorkerState::new(input);
-
-        mock_poll_standard(
-            &mut activities,
-            "builder-mentions-verdict",
-            0,
-            1000,
-            "working",
-            "dh0",
-        );
-        mock_poll_standard(
-            &mut activities,
-            "builder-mentions-verdict",
-            1,
-            1000,
-            "working",
-            "dh0",
-        );
-        activities.register(
-            "read_report_1",
-            ActivityResult::ReportFile(ReportFileResult::Content(
-                "# Builder Report\nSuccess!\n\n## Lessons\n- none\n".to_string(),
-            )),
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-builder-verdict",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 0 for builder report");
-
         assert_eq!(out.exit, 0);
+        assert_eq!(now, 100_000, "one wake, no second poll");
     }
 
     #[test]
-    fn test_scoped_events_pane_exited_starts_gone() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-pane-exited", 1800);
-        let initial_state = SingleWorkerState::new(input);
-
-        mock_poll_standard(
-            &mut activities,
-            "worker-pane-exited",
-            0,
-            0,
-            "working",
-            "dh0",
+    fn exit_6_on_stable_malformed_report() {
+        let (out, _, _) = run(
+            "worker-bad",
+            1800,
+            config(30, 200),
+            vec![Poll {
+                report_mtime: 1000,
+                report: Some("# Bad Report\nMissing lessons\n"),
+                ..Poll::default()
+            }],
         );
-        // Poll 1: scoped event pane.exited arrives
-        mock_poll(
-            &mut activities,
-            "worker-pane-exited",
-            1,
-            0,
-            "working",
-            "crashed",
-            "dh0",
-            Some("omp"),
-            true,
-            vec!["pane.exited".to_string()],
-        );
-        // Gone for 60s
-        mock_poll(
-            &mut activities,
-            "worker-pane-exited",
-            2,
-            0,
-            "gone",
-            "",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-        mock_poll(
-            &mut activities,
-            "worker-pane-exited",
-            3,
-            0,
-            "gone",
-            "",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-scoped-exited",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 3 after pane.exited");
-
-        assert_eq!(out.exit, 3);
-    }
-    #[test]
-    fn test_fast_finish_report_valid_before_second_poll_exits_0() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-fast-0", 1800);
-        let report_path = PathBuf::from("runs/worker-fast-0.md");
-        let mut config = WatchdogConfig::default();
-        config.poll_sec = 30;
-        config.land_sec = 15;
-        let initial_state = SingleWorkerState::new(input).with_config(config);
-
-        // Poll 0 (t=0): report already on disk with mtime 1000, agent done
-        mock_poll(
-            &mut activities,
-            "worker-fast-0",
-            0,
-            1000,
-            "done",
-            "done",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-        // Poll 1 (t=30s): matching mtime 1000 -> stable before second timer poll (poll 2)!
-        mock_poll(
-            &mut activities,
-            "worker-fast-0",
-            1,
-            1000,
-            "done",
-            "done",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-        activities.register(
-            "read_report_1",
-            ActivityResult::ReportFile(ReportFileResult::Content(
-                "# Report\nFast done!\n\n## Lessons\n- none\n".to_string(),
-            )),
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-fast-exit-0",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 0");
-
-        assert_eq!(out.exit, 0);
-        assert_eq!(out.report_path, report_path);
-        // Completed at poll 1 (t=30s), before poll 2!
-        assert_eq!(clock.now_ms(), 100_000 + 30_000);
-    }
-
-    #[test]
-    fn test_fast_finish_landing_timer_expiry_with_valid_report_exits_0() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-fast-land", 1800);
-        let report_path = PathBuf::from("runs/worker-fast-land.md");
-        let mut config = WatchdogConfig::default();
-        config.poll_sec = 30;
-        config.land_sec = 15;
-        let initial_state = SingleWorkerState::new(input).with_config(config);
-
-        // Poll 0 (t=0): report not yet on disk (mtime 0), agent done
-        mock_poll(
-            &mut activities,
-            "worker-fast-land",
-            0,
-            0,
-            "done",
-            "done",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-        // Poll 1 (t=30s): report appears on disk (mtime 1000, sample 1), agent done
-        mock_poll(
-            &mut activities,
-            "worker-fast-land",
-            1,
-            1000,
-            "done",
-            "done",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-        // Poll 2 (t=60s): recover_deadline_ms (45s) is expired!
-        // But report is on disk (mtime 1000, sample 2 -> stable!)
-        mock_poll(
-            &mut activities,
-            "worker-fast-land",
-            2,
-            1000,
-            "done",
-            "done",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-        activities.register(
-            "read_report_2",
-            ActivityResult::ReportFile(ReportFileResult::Content(
-                "# Report\nFast done after poll 0!\n\n## Lessons\n- none\n".to_string(),
-            )),
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-fast-land-exit-0",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 0");
-
-        assert_eq!(out.exit, 0);
-        assert_eq!(out.report_path, report_path);
-    }
-
-    #[test]
-    fn test_fast_finish_malformed_report_exits_6() {
-        let workflow = SingleWorkerWorkflow::new();
-        let mut clock = VirtualClock::new(100_000);
-        let mut activities = MockActivities::new();
-        let mut journal = InMemoryJournal::new();
-
-        let input = sample_input("worker-fast-bad", 1800);
-        let report_path = PathBuf::from("runs/worker-fast-bad.md");
-        let mut config = WatchdogConfig::default();
-        config.poll_sec = 30;
-        config.land_sec = 15;
-        let initial_state = SingleWorkerState::new(input).with_config(config);
-
-        // Poll 0 (t=0): report already on disk (mtime 1000), agent done
-        mock_poll(
-            &mut activities,
-            "worker-fast-bad",
-            0,
-            1000,
-            "done",
-            "done",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-        // Poll 1 (t=30s): matching mtime 1000 -> stable!
-        mock_poll(
-            &mut activities,
-            "worker-fast-bad",
-            1,
-            1000,
-            "done",
-            "done",
-            "dh0",
-            Some("omp"),
-            true,
-            vec![],
-        );
-        // Malformed content: missing `## Lessons`
-        activities.register(
-            "read_report_1",
-            ActivityResult::ReportFile(ReportFileResult::Content(
-                "# Report\nFast done but malformed!\n".to_string(),
-            )),
-        );
-
-        let out = run_to_completion(
-            &workflow,
-            "test-fast-exit-6",
-            initial_state,
-            &mut clock,
-            &mut activities,
-            &mut journal,
-        )
-        .expect("workflow should complete with exit 6");
-
         assert_eq!(out.exit, 6);
-        assert_eq!(out.report_path, report_path);
+    }
+
+    #[test]
+    fn exit_2_at_the_hard_cap_with_a_moving_diff() {
+        let polls = (0..4)
+            .map(|i| Poll {
+                diff: ["dh0", "dh1", "dh2", "dh3"][i],
+                session_mtime: None,
+                ..Poll::default()
+            })
+            .collect();
+        let (out, now, _) = run("worker-cap", 10_000, config(30, 90), polls);
+        assert_eq!(out.exit, 2);
+        assert_eq!(now, 100_000 + 90_000);
+    }
+
+    #[test]
+    fn exit_3_stall_when_neither_diff_nor_session_moves() {
+        let polls = (0..3)
+            .map(|_| Poll {
+                session_mtime: Some(1000),
+                ..Poll::default()
+            })
+            .collect();
+        let mut cfg = config(30, 1800);
+        cfg.stall_sec = 60;
+        let (out, now, _) = run("worker-stall", 1800, cfg, polls);
+        assert_eq!(out.exit, 3);
+        assert_eq!(now, 100_000 + 60_000);
+    }
+
+    #[test]
+    fn stall_is_skipped_when_the_harness_has_no_progress_source() {
+        let polls = (0..5)
+            .map(|_| Poll {
+                diff: "",
+                session_mtime: None,
+                ..Poll::default()
+            })
+            .collect();
+        let mut cfg = config(30, 1800);
+        cfg.stall_sec = 60;
+        let (out, _, _) = run("worker-blind", 100, cfg, polls);
+        // No source: never a stall, the budget alone ends it.
+        assert_eq!(out.exit, 4);
+    }
+
+    #[test]
+    fn exit_3_idle_after_idle_sec() {
+        let polls = (0..3)
+            .map(|_| Poll {
+                status: "idle",
+                ..Poll::default()
+            })
+            .collect();
+        let mut cfg = config(30, 1800);
+        cfg.idle_sec = 60;
+        let (out, now, _) = run("worker-idle", 1800, cfg, polls);
+        assert_eq!(out.exit, 3);
+        assert_eq!(now, 100_000 + 60_000);
+    }
+
+    #[test]
+    fn idle_fallback_uses_300s_for_opencode_without_a_hook() {
+        let polls = (0..11)
+            .map(|_| Poll {
+                status: "idle",
+                hook_active: false,
+                ..Poll::default()
+            })
+            .collect();
+        let mut cfg = config(30, 1800);
+        cfg.idle_sec = 60;
+        cfg.idle_fallback_sec = 300;
+        let (out, now, _) = run("worker-fb", 1800, cfg, polls);
+        assert_eq!(out.exit, 3);
+        assert_eq!(now, 100_000 + 300_000);
+    }
+
+    #[test]
+    fn exit_3_agent_gone_after_gone_sec() {
+        let polls = (0..3)
+            .map(|_| Poll {
+                status: "gone",
+                err: "agent_not_found",
+                ..Poll::default()
+            })
+            .collect();
+        let (out, now, _) = run("worker-gone", 1800, config(30, 1800), polls);
+        assert_eq!(out.exit, 3);
+        assert_eq!(now, 100_000 + 60_000);
+    }
+
+    #[test]
+    fn exit_4_at_the_budget_without_progress() {
+        let polls = (0..4)
+            .map(|_| Poll {
+                session_mtime: Some(1000),
+                ..Poll::default()
+            })
+            .collect();
+        let mut cfg = config(30, 1800);
+        cfg.stall_sec = 9999;
+        let (out, now, _) = run("worker-budget", 60, cfg, polls);
+        assert_eq!(out.exit, 4);
+        assert_eq!(now, 100_000 + 60_000);
+    }
+
+    #[test]
+    fn exit_5_on_blocked_status() {
+        let (out, _, _) = run(
+            "worker-blocked",
+            1800,
+            config(30, 1800),
+            vec![Poll {
+                status: "blocked",
+                ..Poll::default()
+            }],
+        );
+        assert_eq!(out.exit, 5);
+    }
+
+    #[test]
+    fn grace_extends_a_progressing_budget() {
+        let polls = vec![
+            Poll::default(),
+            Poll::default(),
+            Poll {
+                diff: "dh1",
+                ..Poll::default()
+            },
+            Poll {
+                diff: "dh1",
+                report_mtime: 1000,
+                report: Some("# Report\nLanded in grace\n\n## Lessons\n- none\n"),
+                ..Poll::default()
+            },
+        ];
+        let (out, now, _) = run("worker-grace", 40, config(20, 200), polls);
+        assert_eq!(out.exit, 0);
+        assert_eq!(now, 100_000 + 60_000);
+    }
+
+    #[test]
+    fn autoext_is_bounded_by_half_the_budget() {
+        let polls = (0..5)
+            .map(|i| Poll {
+                diff: ["dh0", "dh1", "dh2", "dh3", "dh4"][i],
+                ..Poll::default()
+            })
+            .collect();
+        let (out, _, _) = run("worker-ext", 40, config(20, 200), polls);
+        assert_eq!(out.exit, 4);
+    }
+
+    #[test]
+    fn nudge_is_sent_once_at_the_threshold() {
+        let polls = vec![
+            Poll::default(),
+            Poll::default(),
+            Poll::default(),
+            Poll::default(),
+            Poll::default(),
+            Poll {
+                report_mtime: 1000,
+                report: Some("# Report\nNudged\n\n## Lessons\n- none\n"),
+                ..Poll::default()
+            },
+        ];
+        let mut cfg = config(20, 400);
+        cfg.nudge_pct = 80;
+        let (out, _, events) = run("worker-nudge", 100, cfg, polls);
+        assert_eq!(out.exit, 0);
+        assert!(events
+            .iter()
+            .any(|e| e.payload_json.contains("Time check: you are past 80%")));
+    }
+
+    #[test]
+    fn a_socket_error_backs_off_without_observations() {
+        let polls = vec![
+            Poll::default(),
+            Poll {
+                err: "socket is closed",
+                ..Poll::default()
+            },
+            Poll {
+                report_mtime: 1000,
+                report: Some("# Report\nRecovered\n\n## Lessons\n- none\n"),
+                ..Poll::default()
+            },
+        ];
+        let (out, _, _) = run("worker-err", 1800, config(20, 1800), polls);
+        assert_eq!(out.exit, 0);
+    }
+
+    #[test]
+    fn deterministic_two_runs_produce_identical_events() {
+        let polls = vec![
+            Poll::default(),
+            Poll {
+                diff: "dh1",
+                ..Poll::default()
+            },
+            Poll {
+                diff: "dh1",
+                report_mtime: 1000,
+                report: Some("# Report\nDeterministic\n\n## Lessons\n- none\n"),
+                ..Poll::default()
+            },
+        ];
+        let (out1, now1, events1) = run("worker-det", 1800, config(20, 1800), polls.clone());
+        let (out2, now2, events2) = run("worker-det", 1800, config(20, 1800), polls);
+        assert_eq!(out1, out2);
+        assert_eq!(now1, now2);
+        assert_eq!(events1, events2);
     }
 }

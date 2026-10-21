@@ -110,7 +110,7 @@ fn test_pipeline_reviewer_prefix_matching_n2() {
 /// NOTE on W2 rewire: The current W0 testkit `HerdrRequest` enum does not have variants
 /// for pane split, agent list, metadata reporting, or waiting. Consequently, this adapter
 /// provisionally maps those operations onto available `HerdrRequest` variants (e.g. `Spawn`,
-/// `ReadAgent`, `Prompt`) and custom activity IDs (`"herdr.pane_split"`, `"herdr.agent_list"`,
+/// `AgentWait`, `Prompt`) and custom activity IDs (`"herdr.pane_split"`, `"herdr.agent_list"`,
 /// etc.) as a temporary bridge until W2 updates the activity contract.
 struct MockActivitiesHerdr {
     pub activities: Mutex<MockActivities>,
@@ -261,10 +261,7 @@ impl HerdrOps for MockActivitiesHerdr {
     }
 
     fn agent_list(&self) -> std::io::Result<String> {
-        let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
-            name: String::new(),
-            lines: 0,
-        });
+        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: String::new(), until: Vec::new(), timeout_ms: 0 });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.agent_list", &req) {
             Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(content),
@@ -277,10 +274,7 @@ impl HerdrOps for MockActivitiesHerdr {
     }
 
     fn agent_get(&self, name: &str) -> std::io::Result<(bool, String)> {
-        let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
-            name: name.to_string(),
-            lines: 0,
-        });
+        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: name.to_string(), until: Vec::new(), timeout_ms: 0 });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.agent_get", &req) {
             Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => {
@@ -301,11 +295,8 @@ impl HerdrOps for MockActivitiesHerdr {
         }
     }
 
-    fn agent_read(&self, name: &str, _source: &str, lines: u32) -> std::io::Result<String> {
-        let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
-            name: name.to_string(),
-            lines: lines as usize,
-        });
+    fn agent_read(&self, name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: name.to_string(), until: Vec::new(), timeout_ms: 0 });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.agent_read", &req) {
             Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(content),
@@ -425,20 +416,14 @@ impl HerdrOps for MockActivitiesHerdr {
     }
 
     fn pane_wait_output(&self, pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
-        let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
-            name: pane.to_string(),
-            lines: 0,
-        });
+        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: pane.to_string(), until: Vec::new(), timeout_ms: 0 });
         let mut acts = self.activities.lock().unwrap();
         let _ = acts.execute("herdr.pane_wait_output", &req);
         false
     }
 
-    fn pane_read(&self, pane: &str, _source: &str, lines: u32) -> std::io::Result<String> {
-        let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
-            name: pane.to_string(),
-            lines: lines as usize,
-        });
+    fn pane_read(&self, pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
+        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: pane.to_string(), until: Vec::new(), timeout_ms: 0 });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.pane_read", &req) {
             Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(content),

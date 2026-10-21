@@ -3,15 +3,13 @@
 //! Provides [`SystemActivities`], executing typed side-effecting operations
 //! over existing [`Herdr`] and [`Git`] adapters, filesystem reports, and cost checks.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use crate::engine::activity::{
     Activity, ActivityError, ActivityRequest, ActivityResult, CostRequest, CostResult, GitRequest,
-    GitResult, GridRequest, GridResult, HerdrEventRequest, HerdrEventResult, HerdrRequest,
-    HerdrResult, ReportFileRequest, ReportFileResult,
+    GitResult, GridRequest, HerdrRequest, HerdrResult, ReportFileRequest,
+    ReportFileResult, SessionRequest, SessionResult,
 };
 use crate::git::{Git, GitOps};
 use crate::herdr::{Herdr, HerdrOps};
@@ -22,7 +20,6 @@ pub struct SystemActivities {
     pub herdr: Herdr,
     pub git: Git,
     pub repo_dir: PathBuf,
-    event_clients: Arc<Mutex<HashMap<String, crate::herdr_events::HerdrEvents>>>,
 }
 
 impl std::fmt::Debug for SystemActivities {
@@ -33,6 +30,113 @@ impl std::fmt::Debug for SystemActivities {
             .field("repo_dir", &self.repo_dir)
             .finish()
     }
+}
+
+/// Parsed subset of a herdr `agent get` / `agent wait` payload.
+struct AgentSnapshot {
+    status: String,
+    seq: u64,
+    session_kind: String,
+    session_value: String,
+    harness: String,
+    cwd: String,
+    err: String,
+    hook_active: bool,
+}
+
+fn parse_agent_text(name: &str, text: &str) -> AgentSnapshot {
+    let mut snap = AgentSnapshot {
+        status: "unknown".to_string(),
+        seq: 0,
+        session_kind: String::new(),
+        session_value: String::new(),
+        harness: String::new(),
+        cwd: String::new(),
+        err: String::new(),
+        hook_active: false,
+    };
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(err) = json.get("error") {
+            snap.err = err
+                .get("code")
+                .and_then(|c| c.as_str())
+                .unwrap_or("herdr_error")
+                .to_string();
+        }
+        let agent = json
+            .pointer("/result/agent")
+            .or_else(|| json.get("result").filter(|r| r.is_object()));
+        if let Some(a) = agent {
+            if let Some(status) = a
+                .get("agent_status")
+                .or_else(|| a.get("status"))
+                .and_then(|v| v.as_str())
+            {
+                snap.status = status.to_string();
+            }
+            snap.seq = a
+                .get("state_change_seq")
+                .or_else(|| a.get("seq"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            snap.harness = a
+                .get("agent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            snap.cwd = a
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            snap.hook_active = a
+                .get("screen_detection_skipped")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if let Some(session) = a.get("agent_session") {
+                snap.session_kind = session
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                snap.session_value = session
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+            }
+        }
+    } else if text.contains("agent_not_found") {
+        snap.err = "agent_not_found".to_string();
+    }
+    if snap.err == "agent_not_found" || snap.err == "agent_not_running" {
+        snap.status = "gone".to_string();
+    }
+    if snap.status == "unknown" && snap.err.is_empty() && !text.trim().is_empty() {
+        // Keep name in the diagnostic path without scraping pane text.
+        let _ = name;
+    }
+    snap
+}
+
+fn parse_agent_output(name: &str, out: &std::process::Output) -> AgentSnapshot {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let text = if stdout.trim().is_empty() {
+        stderr.as_ref()
+    } else {
+        stdout.as_ref()
+    };
+    let mut snap = parse_agent_text(name, text);
+    if !out.status.success() && snap.err.is_empty() {
+        let msg = text.trim();
+        snap.err = if msg.is_empty() {
+            format!("herdr agent wait failed (status {:?})", out.status.code())
+        } else {
+            msg.to_string()
+        };
+    }
+    snap
 }
 
 impl SystemActivities {
@@ -48,7 +152,6 @@ impl SystemActivities {
             herdr: Herdr::new(),
             git: Git::new(),
             repo_dir: repo_dir.into(),
-            event_clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -58,7 +161,6 @@ impl SystemActivities {
             herdr,
             git,
             repo_dir: repo_dir.into(),
-            event_clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     fn run_with_etxtbusy_retry<F, T>(f: F) -> std::io::Result<T>
@@ -79,6 +181,7 @@ impl SystemActivities {
 
     fn execute_herdr(&self, req: &HerdrRequest) -> Result<ActivityResult, ActivityError> {
         match req {
+            HerdrRequest::Unknown => Ok(ActivityResult::Unknown),
             HerdrRequest::Prompt { name, task } => {
                 let out =
                     Self::run_with_etxtbusy_retry(|| self.herdr.agent_prompt_nowait(name, task))
@@ -125,31 +228,6 @@ impl SystemActivities {
                 Ok(ActivityResult::Herdr(HerdrResult::KeysSent {
                     name: name.clone(),
                 }))
-            }
-            HerdrRequest::ReadAgent { name, lines } => {
-                let lines_str = lines.to_string();
-                let out = Self::run_with_etxtbusy_retry(|| {
-                    self.herdr.run(&[
-                        "agent", "read", name, "--source", "visible", "--lines", &lines_str,
-                    ])
-                })
-                .map_err(|e| {
-                    ActivityError::ExecutionFailed(format!("herdr agent read io error: {e}"))
-                })?;
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let err = if stderr.trim().is_empty() {
-                        stdout
-                    } else {
-                        stderr
-                    };
-                    return Err(ActivityError::ExecutionFailed(format!(
-                        "herdr agent read failed: {err}"
-                    )));
-                }
-                let content = String::from_utf8_lossy(&out.stdout).to_string();
-                Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content }))
             }
             HerdrRequest::Stop { name } => {
                 let (ok, output) = Self::run_with_etxtbusy_retry(|| self.herdr.agent_get(name))
@@ -264,63 +342,56 @@ impl SystemActivities {
                     name: name.clone(),
                 }))
             }
-            HerdrRequest::AgentInfo { name } => {
-                let (_ok, output) = Self::run_with_etxtbusy_retry(|| self.herdr.agent_get(name))
-                    .map_err(|e| {
-                        ActivityError::ExecutionFailed(format!("herdr agent get io error: {e}"))
-                    })?;
+            HerdrRequest::AgentWait {
+                name,
+                until,
+                timeout_ms,
+            } => {
+                let until_refs: Vec<&str> = until.iter().map(String::as_str).collect();
+                let out = Self::run_with_etxtbusy_retry(|| {
+                    self.herdr.agent_wait(name, &until_refs, *timeout_ms)
+                })
+                .map_err(|e| {
+                    ActivityError::ExecutionFailed(format!("herdr agent wait io error: {e}"))
+                })?;
 
-                let mut status = "unknown".to_string();
-                let mut hook_active = false;
-                let mut harness_str = String::new();
-
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&output) {
-                    if let Some(agent) = json.get("result").and_then(|r| r.get("agent")) {
-                        status = agent
-                            .get("agent_status")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        hook_active = agent
-                            .get("screen_detection_skipped")
-                            .and_then(|b| b.as_bool())
-                            .unwrap_or(false);
-                        harness_str = agent
-                            .get("agent")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                    } else if let Some(err) = json.get("error") {
-                        if err.get("code").and_then(|c| c.as_str()) == Some("agent_not_found") {
-                            status = "gone".to_string();
-                        }
+                let mut snap = parse_agent_output(name, &out);
+                // An unrecognised wait payload (older herdr, stub) is not a
+                // state: read the current one with `agent get`.
+                if snap.status == "unknown" && snap.err.is_empty() && *timeout_ms > 0 {
+                    if let Ok((_ok, text)) = self.herdr.agent_get(name) {
+                        let mut got = parse_agent_text(name, &text);
+                        got.err = String::new();
+                        snap = got;
                     }
                 }
-                if status == "unknown" && output.contains("agent_not_found") {
-                    status = "gone".to_string();
-                }
-
-                if harness_str.is_empty() {
-                    if harness_str.is_empty() {
-                        if name.starts_with("tieude-") {
-                            harness_str = "opencode".to_string();
-                        } else if name.starts_with("sude-") || name.starts_with("detu-") {
-                            harness_str = "omp".to_string();
-                        }
+                // A wait timeout is an observation, not a failure: read the
+                // current state once so idle/stall arithmetic stays accurate.
+                if snap.err == "timeout" && *timeout_ms > 0 {
+                    if let Ok((_ok, text)) = self.herdr.agent_get(name) {
+                        let mut got = parse_agent_text(name, &text);
+                        got.err = String::new();
+                        snap = got;
+                    } else {
+                        snap.err = String::new();
                     }
                 }
-
-                let harness = if harness_str.is_empty() {
-                    None
-                } else {
-                    Some(harness_str)
-                };
-
-                Ok(ActivityResult::Herdr(HerdrResult::AgentInfo {
+                let lead_waiting = crate::worker::prompt::observer::lead_waiting(
+                    &crate::worker::cleanup::default_runs_dir(),
+                    name,
+                    "",
+                );
+                Ok(ActivityResult::Herdr(HerdrResult::AgentWait {
                     name: name.clone(),
-                    status,
-                    harness,
-                    hook_active,
+                    status: snap.status,
+                    seq: snap.seq,
+                    session_kind: snap.session_kind,
+                    session_value: snap.session_value,
+                    harness: snap.harness,
+                    cwd: snap.cwd,
+                    err: snap.err,
+                    lead_waiting,
+                    hook_active: snap.hook_active,
                 }))
             }
         }
@@ -536,95 +607,21 @@ impl SystemActivities {
         }
     }
 
-    fn execute_herdr_events(
-        &self,
-        req: &HerdrEventRequest,
-    ) -> Result<ActivityResult, ActivityError> {
+    fn execute_session(&self, req: &SessionRequest) -> Result<ActivityResult, ActivityError> {
         match req {
-            HerdrEventRequest::Subscribe { agent, event_types } => {
-                let mut map = self.event_clients.lock().map_err(|_| {
-                    ActivityError::ExecutionFailed("event_clients mutex poisoned".to_string())
-                })?;
-                let client = crate::herdr_events::HerdrEvents::new();
-                client.subscribe(agent, event_types)?;
-                map.insert(agent.clone(), client);
-                Ok(ActivityResult::HerdrEvents(HerdrEventResult::Subscribed {
-                    agent: agent.clone(),
-                }))
-            }
-            HerdrEventRequest::Unsubscribe { agent } => {
-                let mut map = self.event_clients.lock().map_err(|_| {
-                    ActivityError::ExecutionFailed("event_clients mutex poisoned".to_string())
-                })?;
-                if let Some(client) = map.remove(agent) {
-                    let _ = client.unsubscribe(agent);
-                }
-                Ok(ActivityResult::HerdrEvents(
-                    HerdrEventResult::Unsubscribed {
-                        agent: agent.clone(),
-                    },
-                ))
-            }
-            HerdrEventRequest::PollEventsFor { agent } => {
-                let map = self.event_clients.lock().map_err(|_| {
-                    ActivityError::ExecutionFailed("event_clients mutex poisoned".to_string())
-                })?;
-                let client = match map.get(agent) {
-                    Some(c) => c,
-                    None => {
-                        // Subscriptions are process-local and not durable across process restarts / resumes.
-                        // Return empty events rather than a fatal error so a resumed runner can continue polling.
-                        return Ok(ActivityResult::HerdrEvents(
-                            HerdrEventResult::ScopedEvents {
-                                agent: agent.clone(),
-                                events: Vec::new(),
-                            },
-                        ));
-                    }
-                };
-                let events = client.poll_events()?;
-                Ok(ActivityResult::HerdrEvents(
-                    HerdrEventResult::ScopedEvents {
-                        agent: agent.clone(),
-                        events,
-                    },
-                ))
-            }
-            HerdrEventRequest::PollEvents => {
-                let mut map = self.event_clients.lock().map_err(|_| {
-                    ActivityError::ExecutionFailed("event_clients mutex poisoned".to_string())
-                })?;
-                if map.is_empty() {
-                    return Ok(ActivityResult::HerdrEvents(HerdrEventResult::Events(
-                        Vec::new(),
-                    )));
-                }
-                let mut all_events = Vec::new();
-                let mut dead_agents = Vec::new();
-                let mut first_err = None;
-                for (agent, client) in map.iter() {
-                    match client.poll_events() {
-                        Ok(mut evs) => all_events.append(&mut evs),
-                        Err(e) => {
-                            dead_agents.push(agent.clone());
-                            if first_err.is_none() {
-                                first_err = Some(e);
-                            }
-                        }
-                    }
-                }
-                for dead in dead_agents {
-                    map.remove(&dead);
-                }
-                if all_events.is_empty() {
-                    if let Some(err) = first_err {
-                        return Err(err);
-                    }
-                }
-                Ok(ActivityResult::HerdrEvents(HerdrEventResult::Events(
-                    all_events,
-                )))
-            }
+            SessionRequest::Mtime {
+                harness,
+                session_kind,
+                session_value,
+                cwd,
+            } => Ok(ActivityResult::Session(SessionResult::Mtime(
+                crate::worker::prompt::cost::session_store_mtime(
+                    harness,
+                    session_kind,
+                    session_value,
+                    cwd,
+                ),
+            ))),
         }
     }
 
@@ -746,11 +743,12 @@ impl Activity for SystemActivities {
     fn execute(&self, req: &ActivityRequest) -> Result<ActivityResult, ActivityError> {
         match req {
             ActivityRequest::Herdr(r) => self.execute_herdr(r),
-            ActivityRequest::HerdrEvents(r) => self.execute_herdr_events(r),
             ActivityRequest::Git(r) => self.execute_git(r),
             ActivityRequest::Grid(r) => self.execute_grid(r),
             ActivityRequest::ReportFile(r) => self.execute_report_file(r),
             ActivityRequest::Cost(r) => self.execute_cost(r),
+            ActivityRequest::Session(r) => self.execute_session(r),
+            ActivityRequest::Unknown => Ok(ActivityResult::Unknown),
         }
     }
 }
@@ -758,6 +756,7 @@ impl Activity for SystemActivities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::activity::GridResult;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
@@ -991,20 +990,60 @@ esac
     }
 
     #[test]
-    fn test_herdr_read_agent_via_stub() {
+    fn test_herdr_agent_wait_via_stub() {
         with_herdr_stub(|activities, _log_file| {
-            let req = ActivityRequest::Herdr(HerdrRequest::ReadAgent {
-                name: "e3-stub-agent".to_string(),
-                lines: 50,
+            let req = ActivityRequest::Herdr(HerdrRequest::AgentWait {
+                name: "e3-info-agent".to_string(),
+                until: Vec::new(),
+                timeout_ms: 0,
             });
-            let res = activities.execute(&req).expect("read agent must succeed");
+            let res = activities.execute(&req).expect("agent wait must succeed");
+            assert_eq!(
+                res,
+                ActivityResult::Herdr(HerdrResult::AgentWait {
+                    name: "e3-info-agent".to_string(),
+                    status: "working".to_string(),
+                    seq: 0,
+                    session_kind: String::new(),
+                    session_value: String::new(),
+                    harness: "omp".to_string(),
+                    cwd: String::new(),
+                    err: String::new(),
+                    lead_waiting: false,
+                    hook_active: true,
+                })
+            );
+
+            let gone = ActivityRequest::Herdr(HerdrRequest::AgentWait {
+                name: "live-agent-nonexistent".to_string(),
+                until: Vec::new(),
+                timeout_ms: 0,
+            });
+            let res = activities.execute(&gone).expect("gone is an observation");
             match res {
-                ActivityResult::Herdr(HerdrResult::AgentOutput { content }) => {
-                    assert!(content.contains("stub output line 1"));
+                ActivityResult::Herdr(HerdrResult::AgentWait { status, err, .. }) => {
+                    assert_eq!(status, "gone");
+                    assert_eq!(err, "agent_not_found");
                 }
                 other => panic!("unexpected result: {other:?}"),
             }
         });
+    }
+
+    #[test]
+    fn test_session_mtime_missing_store_is_none() {
+        let activities = SystemActivities::new();
+        let req = ActivityRequest::Session(SessionRequest::Mtime {
+            harness: "opencode".to_string(),
+            session_kind: "id".to_string(),
+            session_value: "ses_does_not_exist".to_string(),
+            cwd: "/tmp".to_string(),
+        });
+        // No readable store for this id: the watchdog treats it as budget-only.
+        assert_eq!(
+            activities.execute(&req).expect("session mtime"),
+            ActivityResult::Session(SessionResult::Mtime(None))
+        );
     }
 
     #[test]
@@ -1450,60 +1489,6 @@ esac
     }
 
     #[test]
-    fn test_herdr_agent_info_via_stub() {
-        with_herdr_stub(|activities, _log_file| {
-            // 1. Stub agent with full agent_info
-            let req = ActivityRequest::Herdr(HerdrRequest::AgentInfo {
-                name: "e3-info-agent".to_string(),
-            });
-            let res = activities.execute(&req).expect("agent info must succeed");
-            assert_eq!(
-                res,
-                ActivityResult::Herdr(HerdrResult::AgentInfo {
-                    name: "e3-info-agent".to_string(),
-                    status: "working".to_string(),
-                    harness: Some("omp".to_string()),
-                    hook_active: true,
-                })
-            );
-
-            // 2. Nonexistent agent -> gone, hook_active false, harness None
-            let req_gone = ActivityRequest::Herdr(HerdrRequest::AgentInfo {
-                name: "live-agent-nonexistent".to_string(),
-            });
-            let res_gone = activities
-                .execute(&req_gone)
-                .expect("agent info gone must succeed");
-            assert_eq!(
-                res_gone,
-                ActivityResult::Herdr(HerdrResult::AgentInfo {
-                    name: "live-agent-nonexistent".to_string(),
-                    status: "gone".to_string(),
-                    harness: None,
-                    hook_active: false,
-                })
-            );
-
-            // 3. Agent with tieude- prefix fallback -> opencode
-            let req_prefix = ActivityRequest::Herdr(HerdrRequest::AgentInfo {
-                name: "tieude-stub-agent".to_string(),
-            });
-            let res_prefix = activities
-                .execute(&req_prefix)
-                .expect("agent info prefix fallback");
-            assert_eq!(
-                res_prefix,
-                ActivityResult::Herdr(HerdrResult::AgentInfo {
-                    name: "tieude-stub-agent".to_string(),
-                    status: "idle".to_string(),
-                    harness: Some("opencode".to_string()),
-                    hook_active: false,
-                })
-            );
-        });
-    }
-
-    #[test]
     fn test_cost_check_budget() {
         let activities = SystemActivities::new();
 
@@ -1772,249 +1757,6 @@ spawn = "auto"
     }
 
     #[test]
-    fn test_herdr_events_live_lifecycle() {
-        use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::net::UnixListener;
-        use std::thread;
-        let _lock = HERDR_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let pid = std::process::id();
-        let sock_path = std::env::temp_dir().join(format!("quaqua-act-events-{}.sock", pid));
-        let _ = fs::remove_file(&sock_path);
-        let listener = UnixListener::bind(&sock_path).expect("bind test unix socket");
-
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept connection");
-            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
-            let mut line = String::new();
-            reader.read_line(&mut line).expect("read subscribe request");
-
-            let req_val: serde_json::Value =
-                serde_json::from_str(&line).expect("valid json request");
-            assert_eq!(req_val["method"], "events.subscribe");
-            let req_id = req_val["id"].as_str().unwrap().to_string();
-
-            let resp = serde_json::json!({
-                "id": req_id,
-                "result": { "type": "subscription_started" }
-            });
-            let event1 = serde_json::json!({
-                "event": "pane.agent_status_changed",
-                "data": { "agent": "sude-ev", "agent_status": "working" }
-            });
-            let event2 = serde_json::json!({
-                "event": "pane.exited",
-                "data": { "agent": "sude-ev", "exit_code": 0 }
-            });
-            stream
-                .write_all(format!("{}\n{}\n{}\n", resp, event1, event2).as_bytes())
-                .expect("write response and events");
-            stream.flush().expect("flush response and events");
-        });
-
-        let _guard_sock = EnvVarGuard::set("HERDR_SOCKET_PATH", &sock_path);
-        let activities = SystemActivities::new();
-
-        // 1. Subscribe
-        let sub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Subscribe {
-            agent: "sude-ev".to_string(),
-            event_types: vec!["pane.agent_status_changed".to_string()],
-        });
-        let sub_res = activities.execute(&sub_req).expect("subscribe succeeds");
-        assert_eq!(
-            sub_res,
-            ActivityResult::HerdrEvents(HerdrEventResult::Subscribed {
-                agent: "sude-ev".to_string()
-            })
-        );
-
-        // Wait for background server thread to deliver events
-        let _ = handle.join();
-
-        // 2. PollEventsFor (scoped)
-        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
-            agent: "sude-ev".to_string(),
-        });
-        let poll_res = activities.execute(&poll_req).expect("poll events succeeds");
-        if let ActivityResult::HerdrEvents(HerdrEventResult::ScopedEvents { agent, events }) =
-            poll_res
-        {
-            assert_eq!(agent, "sude-ev");
-            assert_eq!(events.len(), 2);
-        } else {
-            panic!("expected ScopedEvents, got {poll_res:?}");
-        }
-
-        // 3. PollEventsFor unknown agent returns empty ScopedEvents (R2: not fatal, allows resumed runners to poll)
-        let unk_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor {
-            agent: "nonexistent-agent".to_string(),
-        });
-        let unk_res = activities
-            .execute(&unk_req)
-            .expect("unsubscribed poll returns empty events");
-        assert_eq!(
-            unk_res,
-            ActivityResult::HerdrEvents(HerdrEventResult::ScopedEvents {
-                agent: "nonexistent-agent".to_string(),
-                events: vec![],
-            })
-        );
-        // 4. Unsubscribe
-        let unsub_req = ActivityRequest::HerdrEvents(HerdrEventRequest::Unsubscribe {
-            agent: "sude-ev".to_string(),
-        });
-        let unsub_res = activities
-            .execute(&unsub_req)
-            .expect("unsubscribe succeeds");
-        assert_eq!(
-            unsub_res,
-            ActivityResult::HerdrEvents(HerdrEventResult::Unsubscribed {
-                agent: "sude-ev".to_string()
-            })
-        );
-
-        // 5. Unscoped PollEvents on empty returns Events(vec![])
-        let empty_poll = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
-        let empty_res = activities
-            .execute(&empty_poll)
-            .expect("empty poll succeeds");
-        assert_eq!(
-            empty_res,
-            ActivityResult::HerdrEvents(HerdrEventResult::Events(vec![]))
-        );
-
-        let _ = fs::remove_file(&sock_path);
-    }
-
-    #[test]
-    fn test_herdr_events_unscoped_poll_with_multiple_subscriptions() {
-        use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::net::UnixListener;
-        use std::thread;
-
-        let _lock = HERDR_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let pid = std::process::id();
-        let sock_path = std::env::temp_dir().join(format!("quaqua-act-events-multi-{}.sock", pid));
-        let _ = fs::remove_file(&sock_path);
-        let listener = UnixListener::bind(&sock_path).expect("bind test unix socket");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (tx_done, rx_done) = std::sync::mpsc::channel();
-        let handle = thread::spawn(move || {
-            // Client 1 (agent-1): healthy
-            let (mut stream1, _) = listener.accept().expect("accept connection 1");
-            let mut reader1 = BufReader::new(stream1.try_clone().expect("clone stream 1"));
-            let mut line1 = String::new();
-            reader1.read_line(&mut line1).expect("read sub 1");
-            let req_val1: serde_json::Value = serde_json::from_str(&line1).unwrap();
-            let req_id1 = req_val1["id"].as_str().unwrap();
-            let resp1 =
-                serde_json::json!({ "id": req_id1, "result": { "type": "subscription_started" } });
-            let ev1 = serde_json::json!({ "event": "pane.agent_status_changed", "data": { "agent": "agent-1", "agent_status": "working" } });
-            stream1
-                .write_all(format!("{}\n{}\n", resp1, ev1).as_bytes())
-                .unwrap();
-            stream1.flush().unwrap();
-
-            // Client 2 (agent-2): delivers an event, then closes connection (EOF) to simulate dead client
-            let (mut stream2, _) = listener.accept().expect("accept connection 2");
-            let mut reader2 = BufReader::new(stream2.try_clone().expect("clone stream 2"));
-            let mut line2 = String::new();
-            reader2.read_line(&mut line2).expect("read sub 2");
-            let req_val2: serde_json::Value = serde_json::from_str(&line2).unwrap();
-            let req_id2 = req_val2["id"].as_str().unwrap();
-            let resp2 =
-                serde_json::json!({ "id": req_id2, "result": { "type": "subscription_started" } });
-            let ev2 = serde_json::json!({ "event": "pane.exited", "data": { "agent": "agent-2", "exit_code": 0 } });
-            stream2
-                .write_all(format!("{}\n{}\n", resp2, ev2).as_bytes())
-                .unwrap();
-            stream2.flush().unwrap();
-
-            // Explicitly shutdown client 2 to generate EOF on subsequent reads
-            let _ = stream2.shutdown(std::net::Shutdown::Both);
-
-            // Wait for signal before sending second event from Client 1
-            let _ = rx.recv();
-            let ev1_second = serde_json::json!({ "event": "pane.agent_status_changed", "data": { "agent": "agent-1", "agent_status": "idle" } });
-            stream1
-                .write_all(format!("{}\n", ev1_second).as_bytes())
-                .unwrap();
-            stream1.flush().unwrap();
-
-            // Keep stream1 open until all polls complete
-            let _ = rx_done.recv();
-        });
-
-        let _guard_sock = EnvVarGuard::set("HERDR_SOCKET_PATH", &sock_path);
-        let activities = SystemActivities::new();
-
-        activities
-            .execute(&ActivityRequest::HerdrEvents(
-                HerdrEventRequest::Subscribe {
-                    agent: "agent-1".to_string(),
-                    event_types: vec!["pane.agent_status_changed".to_string()],
-                },
-            ))
-            .expect("subscribe agent-1");
-
-        activities
-            .execute(&ActivityRequest::HerdrEvents(
-                HerdrEventRequest::Subscribe {
-                    agent: "agent-2".to_string(),
-                    event_types: vec!["pane.exited".to_string()],
-                },
-            ))
-            .expect("subscribe agent-2");
-
-        // 1. Initial poll aggregates events from both subscribed clients
-        let poll_res = activities
-            .execute(&ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents))
-            .expect("poll all events");
-        if let ActivityResult::HerdrEvents(HerdrEventResult::Events(events)) = poll_res {
-            assert_eq!(events.len(), 2);
-            let combined = events.join("\n");
-            assert!(combined.contains("agent-1"));
-            assert!(combined.contains("agent-2"));
-        } else {
-            panic!("expected Events, got {poll_res:?}");
-        }
-
-        // Signal thread to send event 2 on client 1 while client 2 is dead
-        let _ = tx.send(());
-        // Small yield so the event buffer is flushed to the socket
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        // 2. Second poll: agent-2 hits EOF (dead client) and is dropped from map;
-        // agent-1's second event is returned successfully despite agent-2's EOF (R3)
-        let poll_res2 = activities
-            .execute(&ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents))
-            .expect("second poll with dead client mix");
-        if let ActivityResult::HerdrEvents(HerdrEventResult::Events(events)) = poll_res2 {
-            assert_eq!(events.len(), 1);
-            assert!(events[0].contains("agent-1"));
-        } else {
-            panic!("expected 1 Event, got {poll_res2:?}");
-        }
-
-        // 3. Third poll: agent-2 was dropped from the map, so polling healthy agent-1 yields empty events without error
-        let poll_res3 = activities
-            .execute(&ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents))
-            .expect("third poll after dead client dropped");
-        if let ActivityResult::HerdrEvents(HerdrEventResult::Events(events)) = poll_res3 {
-            assert_eq!(events.len(), 0);
-        } else {
-            panic!("expected empty Events, got {poll_res3:?}");
-        }
-        let _ = tx_done.send(());
-        let _ = handle.join();
-        let _ = fs::remove_file(&sock_path);
-    }
-
-    #[test]
     fn test_grid_reconcile_and_plan_via_stub() {
         with_herdr_stub(|activities, _log| {
             // Plan
@@ -2153,13 +1895,12 @@ spawn = "auto"
 
         let activities = SystemActivities::new();
 
-        // PollEvents returns empty vector rather than deferred error
-        let poll_req = ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents);
-        let poll_res = activities.execute(&poll_req).expect("poll events live");
-        assert_eq!(
-            poll_res,
-            ActivityResult::HerdrEvents(HerdrEventResult::Events(vec![]))
-        );
+        // A deserialize-only tombstone executes as a no-op, never a deferral
+        let legacy_req: ActivityRequest =
+            serde_json::from_str(r#"{"HerdrEvents":{"PollEvents":null}}"#).expect("legacy request");
+        assert_eq!(legacy_req, ActivityRequest::Unknown);
+        let legacy_res = activities.execute(&legacy_req).expect("legacy arm live");
+        assert_eq!(legacy_res, ActivityResult::Unknown);
 
         // QuerySpend returns Spend(0.0) rather than deferred error
         let cost_req = ActivityRequest::Cost(CostRequest::QuerySpend {

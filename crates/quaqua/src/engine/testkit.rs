@@ -213,6 +213,20 @@ impl Journal for InMemoryJournal {
     }
 }
 
+/// A blocking `AgentWait` advances the virtual clock by its timeout, which is
+/// what the real herdr call does.
+fn advance_for_wait(clock: &mut VirtualClock, activity: &ActivityRequest) {
+    if let ActivityRequest::Herdr(crate::engine::activity::HerdrRequest::AgentWait {
+        timeout_ms,
+        ..
+    }) = activity
+    {
+        if *timeout_ms > 0 {
+            clock.advance(Duration::from_millis(*timeout_ms));
+        }
+    }
+}
+
 /// Drives a workflow to completion deterministically using virtual components.
 pub fn run_to_completion<W: Workflow>(
     workflow: &W,
@@ -275,6 +289,7 @@ pub fn run_to_completion<W: Workflow>(
                         ),
                     )?;
 
+                    advance_for_wait(clock, &activity);
                     let result = activities.execute(&id, &activity)?;
                     seq += 1;
                     journal.append_event(
@@ -376,6 +391,7 @@ pub fn run_to_completion<W: Workflow>(
                     ),
                 )?;
 
+                advance_for_wait(clock, &activity);
                 let result = activities.execute(&id, &activity)?;
                 seq += 1;
                 journal.append_event(
