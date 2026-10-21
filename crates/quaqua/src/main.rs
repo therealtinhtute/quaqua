@@ -80,6 +80,10 @@ enum Command {
         /// Print the decisions without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Install only the portable-paths pre-commit into an existing git repo
+        /// (no workspace sync).
+        #[arg(long, value_name = "REPO", conflicts_with_all = ["dir", "update", "dry_run"])]
+        git_hooks: Option<PathBuf>,
     },
     /// OpenCode usage audit.
     Usage {
@@ -210,7 +214,10 @@ fn do_get(key: &str, args: &ConfigArgs) -> Result<String, String> {
 
 fn handle_worker(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, String)> {
     if args.is_empty() {
-        return Err((1, "error: worker subcommand required (spawn, prompt, cleanup, stop)\n".to_string()));
+        return Err((
+            1,
+            "error: worker subcommand required (spawn, prompt, cleanup, stop)\n".to_string(),
+        ));
     }
     match args[0].as_str() {
         "spawn" => {
@@ -242,7 +249,10 @@ fn handle_worker(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, 
                             return Err((1, format!("{PROMPT_USAGE}\n")));
                         }
                         let val = &p_args[i + 1];
-                        if !val.chars().all(|c| c.is_ascii_digit()) || val.starts_with('0') || val.is_empty() {
+                        if !val.chars().all(|c| c.is_ascii_digit())
+                            || val.starts_with('0')
+                            || val.is_empty()
+                        {
                             return Err((1, format!("{PROMPT_USAGE}\n")));
                         }
                         extend = val.parse::<u64>().ok();
@@ -257,7 +267,11 @@ fn handle_worker(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, 
                         i += 1;
                     }
                 }
-                if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+                if name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                {
                     return Err((1, format!("{PROMPT_USAGE}\n")));
                 }
                 prompt_worker(name, None, true, extend, git, herdr)?;
@@ -270,7 +284,11 @@ fn handle_worker(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, 
             }
             let name = &p_args[0];
             let task = &p_args[1];
-            if task.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            if task.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
                 return Err((1, format!("{PROMPT_USAGE}\n")));
             }
             if !quaqua::worker::prompt::brief_headers_ok(task) {
@@ -296,9 +314,7 @@ fn handle_worker(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, 
             stop_worker(&name, herdr)?;
             Ok(())
         }
-        other => {
-            Err((1, format!("error: unknown worker subcommand '{other}'\n")))
-        }
+        other => Err((1, format!("error: unknown worker subcommand '{other}'\n"))),
     }
 }
 
@@ -317,9 +333,8 @@ fn handle_cap(args: &[String], herdr: &Herdr) -> Result<(), (i32, String)> {
 fn do_grid_plan(file_opt: Option<PathBuf>, path_opt: Option<PathBuf>) -> Result<(), String> {
     let target = file_opt.or(path_opt);
     let content = match target {
-        Some(path) => {
-            std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?
-        }
+        Some(path) => std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?,
         None => {
             use std::io::Read;
             let mut buf = String::new();
@@ -358,7 +373,9 @@ fn do_grid_reconcile(
     let (default_workers_tab, def_statuses) = if let Ok(tf) = team_file(&team_opt) {
         let cfg = config::load(&tf).ok();
         (
-            cfg.as_ref().map(|c| c.grid.workers_tab.clone()).unwrap_or_else(|| "workers".to_string()),
+            cfg.as_ref()
+                .map(|c| c.grid.workers_tab.clone())
+                .unwrap_or_else(|| "workers".to_string()),
             cfg.map(|c| c.grid.deferred_statuses),
         )
     } else {
@@ -385,7 +402,12 @@ fn do_grid_reconcile(
     let def_slices: Option<Vec<&str>> = def_statuses
         .as_ref()
         .map(|v| v.iter().map(|s| s.as_str()).collect());
-    quaqua::grid::run_reconcile(&mut driver, &opts, &default_workers_tab, def_slices.as_deref())
+    quaqua::grid::run_reconcile(
+        &mut driver,
+        &opts,
+        &default_workers_tab,
+        def_slices.as_deref(),
+    )
 }
 fn main() {
     let cli = Cli::parse();
@@ -442,15 +464,17 @@ fn main() {
                 rc
             }
         },
-        Some(Command::Taskforce { args }) => match quaqua::taskforce::handle_taskforce(&args, &git, &herdr) {
-            Ok(()) => 0,
-            Err((rc, err)) => {
-                if !err.is_empty() {
-                    eprint!("{err}");
+        Some(Command::Taskforce { args }) => {
+            match quaqua::taskforce::handle_taskforce(&args, &git, &herdr) {
+                Ok(()) => 0,
+                Err((rc, err)) => {
+                    if !err.is_empty() {
+                        eprint!("{err}");
+                    }
+                    rc
                 }
-                rc
             }
-        },
+        }
         Some(Command::Merge { args }) => match quaqua::merge::handle_merge(&args, &git) {
             Ok(()) => 0,
             Err((rc, err)) => {
@@ -460,15 +484,17 @@ fn main() {
                 rc
             }
         },
-        Some(Command::Pipeline { args }) => match quaqua::pipeline::handle_pipeline(&args, &git, &herdr) {
-            Ok(()) => 0,
-            Err((rc, err)) => {
-                if !err.is_empty() {
-                    eprint!("{err}");
+        Some(Command::Pipeline { args }) => {
+            match quaqua::pipeline::handle_pipeline(&args, &git, &herdr) {
+                Ok(()) => 0,
+                Err((rc, err)) => {
+                    if !err.is_empty() {
+                        eprint!("{err}");
+                    }
+                    rc
                 }
-                rc
             }
-        },
+        }
         Some(Command::Grid { cmd }) => match cmd {
             GridCmd::Plan { file, path } => match do_grid_plan(file, path) {
                 Ok(()) => 0,
@@ -505,12 +531,22 @@ fn main() {
             dir,
             update,
             dry_run,
-        }) => match quaqua::init::run(dir.as_deref(), update, dry_run) {
-            Ok(code) => code,
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
+            git_hooks,
+        }) => match git_hooks {
+            Some(repo) => match quaqua::init::run_git_hooks(&repo) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            },
+            None => match quaqua::init::run(dir.as_deref(), update, dry_run) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            },
         },
         Some(Command::Usage { args }) => match quaqua::usage::handle_usage(&args) {
             Ok(code) => code,
@@ -528,7 +564,8 @@ fn main() {
                 code
             }
         },
-        Some(Command::Status { args }) => match quaqua::status::handle_status(&args, &Herdr::new()) {
+        Some(Command::Status { args }) => match quaqua::status::handle_status(&args, &Herdr::new())
+        {
             Ok(code) => code,
             Err(e) => {
                 if !e.is_empty() {

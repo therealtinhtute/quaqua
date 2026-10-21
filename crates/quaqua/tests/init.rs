@@ -83,7 +83,11 @@ impl Sandbox {
         };
         sb.tpl_write("workspace/AGENTS.md", "# agents v1\n", 0o644);
         sb.tpl_write("workspace/rules/_all/core.md", "rule v1\n", 0o644);
-        sb.tpl_write("workspace/scripts/hooks/herdr-gate.sh", "#!/bin/sh\n", 0o755);
+        sb.tpl_write(
+            "workspace/scripts/hooks/herdr-gate.sh",
+            "#!/bin/sh\n",
+            0o755,
+        );
         sb.tpl_write("seed/memory-rules.md", "# rules v1\n", 0o644);
         sb.tpl_write("seed/projects-INDEX.md", "| slug |\n", 0o644);
         sb.tpl_write("seed/projects-_template.md", "# p\n", 0o644);
@@ -157,7 +161,10 @@ fn init_writes_missing_files_with_modes_and_a_lock() {
     assert_eq!(read(&ws.join("projects/_template.md")), "# p\n");
 
     // the exec bit survives the embed
-    assert_eq!(path_mode(&ws.join("scripts/hooks/herdr-gate.sh")) & 0o111, 0o111);
+    assert_eq!(
+        path_mode(&ws.join("scripts/hooks/herdr-gate.sh")) & 0o111,
+        0o111
+    );
     assert_eq!(path_mode(&ws.join("AGENTS.md")) & 0o111, 0);
 
     let lock = sb.lock(&ws);
@@ -265,7 +272,11 @@ fn update_writes_a_missing_managed_file() {
     let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(read(&ws.join("rules/_all/core.md")), "rule v1\n");
-    assert!(stdout(&out).contains("write rules/_all/core.md"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("write rules/_all/core.md"),
+        "{}",
+        stdout(&out)
+    );
 
     let _ = std::fs::remove_dir_all(&sb.root);
 }
@@ -280,7 +291,11 @@ fn update_records_an_already_current_file() {
     let before = read(&ws.join("AGENTS.md"));
     let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    assert!(stdout(&out).contains("record AGENTS.md"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("record AGENTS.md"),
+        "{}",
+        stdout(&out)
+    );
     assert_eq!(read(&ws.join("AGENTS.md")), before);
 
     let lock = sb.lock(&ws);
@@ -299,7 +314,11 @@ fn update_overwrites_an_untouched_file() {
     sb.tpl_write("workspace/AGENTS.md", "# agents v2\n", 0o644);
     let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    assert!(stdout(&out).contains("overwrite AGENTS.md"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("overwrite AGENTS.md"),
+        "{}",
+        stdout(&out)
+    );
     assert_eq!(read(&ws.join("AGENTS.md")), "# agents v2\n");
     assert_eq!(
         sb.lock(&ws)["files"]["AGENTS.md"]["md5"],
@@ -320,7 +339,12 @@ fn update_keeps_a_locally_changed_file_and_pends_the_new_one() {
 
     sb.tpl_write("workspace/AGENTS.md", "# agents v2\n", 0o644);
     let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
-    assert_eq!(out.status.code(), Some(3), "expected exit 3: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "expected exit 3: {}",
+        stderr(&out)
+    );
 
     assert_eq!(read(&ws.join("AGENTS.md")), "# mine\n", "local edit lost");
     assert_eq!(
@@ -355,7 +379,12 @@ fn update_treats_a_preexisting_divergent_file_as_a_conflict() {
     std::fs::write(ws.join("AGENTS.md"), "# foreign\n").unwrap();
 
     let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
-    assert_eq!(out.status.code(), Some(3), "expected exit 3: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "expected exit 3: {}",
+        stderr(&out)
+    );
     assert_eq!(read(&ws.join("AGENTS.md")), "# foreign\n");
     assert_eq!(read(&ws.join(".quaqua/pending/AGENTS.md")), "# agents v1\n");
 
@@ -377,11 +406,7 @@ fn update_accepts_a_pending_copy_on_the_next_run() {
         Some(3),
     );
 
-    std::fs::copy(
-        ws.join(".quaqua/pending/AGENTS.md"),
-        ws.join("AGENTS.md"),
-    )
-    .unwrap();
+    std::fs::copy(ws.join(".quaqua/pending/AGENTS.md"), ws.join("AGENTS.md")).unwrap();
     let out = sb.run(&["init", ws.to_str().unwrap(), "--update"]);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(read(&ws.join("AGENTS.md")), "# agents v2\n");
@@ -436,7 +461,12 @@ fn dry_run_writes_nothing() {
     std::fs::write(ws.join("AGENTS.md"), "# foreign\n").unwrap();
 
     let out = sb.run(&["init", ws.to_str().unwrap(), "--update", "--dry-run"]);
-    assert_eq!(out.status.code(), Some(3), "expected exit 3: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "expected exit 3: {}",
+        stderr(&out)
+    );
     let text = stdout(&out);
     assert!(text.contains("conflict AGENTS.md"), "{text}");
     assert!(text.contains("write rules/_all/core.md"), "{text}");
@@ -654,6 +684,193 @@ fn init_resolves_herdr_through_herdr_bin_path_only() {
     assert!(
         calls.contains("pane report-metadata w1:p1"),
         "the HERDR_BIN_PATH binary did not tag the CoS pane: {calls}",
+    );
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+/// `init --git-hooks <repo>` installs the same embedded pre-commit into an
+/// existing repo and does nothing else: no workspace dirs, no template lock,
+/// no working-tree writes, and a re-run is a no-op.
+#[test]
+fn init_git_hooks_wires_an_existing_repo_only() {
+    let Some(git) = find_git() else {
+        return; // no git on PATH: nothing to assert
+    };
+    let sb = Sandbox::new("githooks");
+    let repo = sb.target("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let ok = Command::new(&git)
+        .args(["init", "-q"])
+        .arg(&repo)
+        .status()
+        .expect("git init");
+    assert!(ok.success(), "git init failed");
+    std::fs::write(repo.join("README.md"), "engine\n").unwrap();
+    assert!(Command::new(&git)
+        .arg("-C")
+        .arg(&repo)
+        .args(["add", "README.md"])
+        .status()
+        .unwrap()
+        .success());
+
+    let bin = sb.target("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&git, bin.join("git")).unwrap();
+    let run = |args: &[&str]| {
+        sb.cmd()
+            .env("PATH", &bin)
+            .args(args)
+            .output()
+            .expect("spawn")
+    };
+
+    let out = run(&["init", "--git-hooks", repo.to_str().unwrap()]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+
+    let hook = repo.join(".git/quaqua-hooks/pre-commit");
+    assert!(hook.is_file(), "hook was not created");
+    assert_eq!(path_mode(&hook) & 0o111, 0o111, "hook is not executable");
+    assert!(read(&hook).contains("portable-paths.md"));
+
+    let hooks_path = Command::new(&git)
+        .arg("-C")
+        .arg(&repo)
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&hooks_path.stdout).trim(),
+        repo.join(".git/quaqua-hooks").to_string_lossy().trim()
+    );
+
+    // hook-only: no workspace skeleton, no lock, no CoS tag side effects
+    for rel in [
+        "AGENTS.md",
+        "memory",
+        "projects",
+        "runs",
+        "reports",
+        ".quaqua",
+    ] {
+        assert!(!repo.join(rel).exists(), "workspace file written: {rel}");
+    }
+    let status = Command::new(&git)
+        .arg("-C")
+        .arg(&repo)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout).trim(),
+        "A  README.md",
+        "the working tree/index was touched",
+    );
+
+    // idempotent: a second run rewrites neither the hook nor the config
+    let config_before = read(&repo.join(".git/config"));
+    let hook_before = read(&hook);
+    let out = run(&["init", "--git-hooks", repo.to_str().unwrap()]);
+    assert!(out.status.success(), "re-run failed: {}", stderr(&out));
+    assert_eq!(
+        read(&repo.join(".git/config")),
+        config_before,
+        "config rewritten"
+    );
+    assert_eq!(read(&hook), hook_before, "hook rewritten");
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+#[test]
+fn init_git_hooks_refuses_a_foreign_hooks_path() {
+    let Some(git) = find_git() else {
+        return;
+    };
+    let sb = Sandbox::new("githooks-foreign");
+    let repo = sb.target("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(Command::new(&git)
+        .args(["init", "-q"])
+        .arg(&repo)
+        .status()
+        .expect("git init")
+        .success());
+    assert!(Command::new(&git)
+        .arg("-C")
+        .arg(&repo)
+        .args(["config", "core.hooksPath", "/their/hooks"])
+        .status()
+        .unwrap()
+        .success());
+
+    let bin = sb.target("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&git, bin.join("git")).unwrap();
+    let out = sb
+        .cmd()
+        .env("PATH", &bin)
+        .args(["init", "--git-hooks", repo.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+
+    assert!(
+        !out.status.success(),
+        "a foreign core.hooksPath was accepted"
+    );
+    assert!(
+        stderr(&out).contains("already sets core.hooksPath='/their/hooks'"),
+        "unclear refusal: {}",
+        stderr(&out),
+    );
+    let hooks_path = Command::new(&git)
+        .arg("-C")
+        .arg(&repo)
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&hooks_path.stdout).trim(),
+        "/their/hooks",
+        "the foreign value was overwritten",
+    );
+    assert!(
+        !repo.join(".git/quaqua-hooks").exists(),
+        "a refused repo was still given a quaqua hook dir",
+    );
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+#[test]
+fn init_git_hooks_rejects_a_non_git_directory() {
+    let Some(git) = find_git() else {
+        return;
+    };
+    let sb = Sandbox::new("githooks-nonrepo");
+    let plain = sb.target("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+
+    let bin = sb.target("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&git, bin.join("git")).unwrap();
+    let out = sb
+        .cmd()
+        .env("PATH", &bin)
+        .args(["init", "--git-hooks", plain.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+
+    assert!(!out.status.success(), "a non-repo target was accepted");
+    assert!(
+        stderr(&out).contains("is not a git repository"),
+        "unclear error: {}",
+        stderr(&out),
+    );
+    assert!(
+        std::fs::read_dir(&plain).unwrap().next().is_none(),
+        "a non-repo target was written to",
     );
 
     let _ = std::fs::remove_dir_all(&sb.root);

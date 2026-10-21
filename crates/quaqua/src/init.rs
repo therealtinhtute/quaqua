@@ -3,7 +3,7 @@
 //! managed template files, the seed files, `.quaqua/template.lock`, git hooks
 //! on a repo target, and the CoS pane tag.
 //!
-//! `quaqua init [<dir>] [--update] [--dry-run]`:
+//! `quaqua init [<dir>] [--update] [--dry-run] [--git-hooks <repo>]`:
 //! - `<dir>` defaults to [`workspace_root`](crate::workspace::workspace_root).
 //!   Nothing but the target is read from disk — the template is embedded
 //!   (`build.rs` → `$OUT_DIR/template_table.rs`), so no checkout is needed.
@@ -13,6 +13,8 @@
 //!   changed locally (or no lock entry) → never overwrite — save the new template
 //!   to `.quaqua/pending/<path>` and exit 3.
 //! - `--dry-run` prints the decisions and writes nothing.
+//! - `--git-hooks <repo>` installs only the embedded portable-paths pre-commit
+//!   into an existing git repo (no workspace sync, working tree untouched).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -151,8 +153,12 @@ impl Lock {
         }
         let body = std::fs::read_to_string(&path)
             .map_err(|e| format!("init: cannot read {}: {e}", path.display()))?;
-        serde_json::from_str(&body)
-            .map_err(|e| format!("init: corrupt {}: {e} (delete it to re-baseline)", path.display()))
+        serde_json::from_str(&body).map_err(|e| {
+            format!(
+                "init: corrupt {}: {e} (delete it to re-baseline)",
+                path.display()
+            )
+        })
     }
 
     fn save(&self, root: &Path) -> Result<(), String> {
@@ -218,14 +224,26 @@ fn run_init(root: &Path, entries: &[Entry], lock: &mut Lock, dry_run: bool) -> R
                 }
                 write_file(&dst, e.bytes, e.mode)?;
                 println!("created {rel}");
-                lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+                lock.files.insert(
+                    rel,
+                    LockEntry {
+                        md5: want,
+                        mode: e.mode,
+                    },
+                );
             }
             Some(have) if have == want => {
                 // already current — record it, restore the template mode
                 if !dry_run {
                     apply_mode(&dst, e.mode)?;
                 }
-                lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+                lock.files.insert(
+                    rel,
+                    LockEntry {
+                        md5: want,
+                        mode: e.mode,
+                    },
+                );
             }
             // Existing and different: left byte-for-byte alone *and* left out of
             // the lock, so the first `--update` sees "no lock entry, W != T" and
@@ -274,10 +292,22 @@ fn run_update(
                     }
                     write_file(&dst, e.bytes, e.mode)?;
                     println!("created {rel} (seed)");
-                    lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+                    lock.files.insert(
+                        rel,
+                        LockEntry {
+                            md5: want,
+                            mode: e.mode,
+                        },
+                    );
                 }
                 Some(h) if h == want => {
-                    lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+                    lock.files.insert(
+                        rel,
+                        LockEntry {
+                            md5: want,
+                            mode: e.mode,
+                        },
+                    );
                 }
                 Some(_) => println!("keep {rel} (seed, never updated)"),
             }
@@ -295,7 +325,13 @@ fn run_update(
                 }
                 write_file(&dst, e.bytes, e.mode)?;
                 println!("write {rel}");
-                lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+                lock.files.insert(
+                    rel,
+                    LockEntry {
+                        md5: want,
+                        mode: e.mode,
+                    },
+                );
             }
             // row 2: W == T -> record only
             Some(have) if have == want => {
@@ -303,7 +339,13 @@ fn run_update(
                     apply_mode(&dst, e.mode)?;
                 }
                 println!("record {rel}");
-                lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+                lock.files.insert(
+                    rel,
+                    LockEntry {
+                        md5: want,
+                        mode: e.mode,
+                    },
+                );
             }
             // row 3: W == L, T != L (untouched locally) -> overwrite with T
             Some(have) if Some(&have) == locked.as_ref() => {
@@ -313,7 +355,13 @@ fn run_update(
                 }
                 write_file(&dst, e.bytes, e.mode)?;
                 println!("overwrite {rel}");
-                lock.files.insert(rel, LockEntry { md5: want, mode: e.mode });
+                lock.files.insert(
+                    rel,
+                    LockEntry {
+                        md5: want,
+                        mode: e.mode,
+                    },
+                );
             }
             // row 4: changed locally, or no lock entry and W != T -> never
             // overwrite: pending copy + diff, keep L
@@ -408,8 +456,8 @@ fn load_fixture(dir: &Path) -> Result<Vec<Entry>, String> {
 }
 
 fn load_dir(base: &Path, dir: &Path, kind: Kind, out: &mut Vec<Entry>) -> Result<(), String> {
-    let rd = std::fs::read_dir(dir)
-        .map_err(|e| format!("init: cannot read {}: {e}", dir.display()))?;
+    let rd =
+        std::fs::read_dir(dir).map_err(|e| format!("init: cannot read {}: {e}", dir.display()))?;
     for ent in rd {
         let path = ent
             .map_err(|e| format!("init: cannot read {}: {e}", dir.display()))?
@@ -465,7 +513,10 @@ fn resolve_target(target: Option<&Path>, dry_run: bool) -> Result<PathBuf, Strin
         _ => workspace_root(),
     };
     if raw.is_file() {
-        return Err(format!("init: {} is a file, not a directory", raw.display()));
+        return Err(format!(
+            "init: {} is a file, not a directory",
+            raw.display()
+        ));
     }
     if !dry_run {
         std::fs::create_dir_all(&raw)
@@ -487,7 +538,8 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("init: cannot create {}: {e}", parent.display()))?;
     }
-    std::fs::write(path, bytes).map_err(|e| format!("init: cannot write {}: {e}", path.display()))?;
+    std::fs::write(path, bytes)
+        .map_err(|e| format!("init: cannot write {}: {e}", path.display()))?;
     apply_mode(path, mode)
 }
 
@@ -526,7 +578,7 @@ fn print_diff(local: &Path, pending: &Path) {
         .status();
 }
 
-/// Wire `core.hooksPath` -> `<root>/.git/quaqua-hooks` on a real git repo, generating
+/// Wire `core.hooksPath` -> `<git-dir>/quaqua-hooks` on a real git repo, generating
 /// the embedded `pre-commit` hook if missing or refreshing it if changed.
 /// An existing different value (local or global) is left in place with a warning.
 /// If `core.hooksPath` is legacy `<root>/scripts/hooks`, it is migrated to the new dir.
@@ -536,77 +588,65 @@ fn wire_hooks(root: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let hooks_dir = if root.join(".git").is_file() {
-        git_output(root, &["rev-parse", "--git-dir"])
-            .map(PathBuf::from)
-            .map(|p| if p.is_absolute() { p } else { root.join(p) })
-            .map(|p| p.join("quaqua-hooks"))
-            .unwrap_or_else(|| root.join(".git/quaqua-hooks"))
-    } else {
-        root.join(".git/quaqua-hooks")
-    };
+    let hooks_dir = quaqua_hooks_dir(root);
 
-    std::fs::create_dir_all(&hooks_dir).map_err(|e| {
-        format!("init-workspace: cannot create {}: {e}", hooks_dir.display())
-    })?;
+    std::fs::create_dir_all(&hooks_dir)
+        .map_err(|e| format!("init-workspace: cannot create {}: {e}", hooks_dir.display()))?;
 
     let hook_file = hooks_dir.join("pre-commit");
     if !hook_file.exists() {
-        std::fs::write(&hook_file, PRE_COMMIT_TEMPLATE).map_err(|e| {
-            format!("init-workspace: cannot write {}: {e}", hook_file.display())
-        })?;
+        std::fs::write(&hook_file, PRE_COMMIT_TEMPLATE)
+            .map_err(|e| format!("init-workspace: cannot write {}: {e}", hook_file.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook_file, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
-                format!("init-workspace: failed to chmod {}: {e}", hook_file.display())
-            })?;
+            std::fs::set_permissions(&hook_file, std::fs::Permissions::from_mode(0o755)).map_err(
+                |e| {
+                    format!(
+                        "init-workspace: failed to chmod {}: {e}",
+                        hook_file.display()
+                    )
+                },
+            )?;
         }
     } else {
         let existing = std::fs::read_to_string(&hook_file).unwrap_or_default();
         if existing != PRE_COMMIT_TEMPLATE {
             std::fs::write(&hook_file, PRE_COMMIT_TEMPLATE).map_err(|e| {
-                format!("init-workspace: cannot refresh {}: {e}", hook_file.display())
+                format!(
+                    "init-workspace: cannot refresh {}: {e}",
+                    hook_file.display()
+                )
             })?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&hook_file, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
-                    format!("init-workspace: failed to chmod {}: {e}", hook_file.display())
-                })?;
+                std::fs::set_permissions(&hook_file, std::fs::Permissions::from_mode(0o755))
+                    .map_err(|e| {
+                        format!(
+                            "init-workspace: failed to chmod {}: {e}",
+                            hook_file.display()
+                        )
+                    })?;
             }
             println!("hooks: refreshed {}", hook_file.display());
         } else {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&hook_file, std::fs::Permissions::from_mode(0o755));
+                let _ =
+                    std::fs::set_permissions(&hook_file, std::fs::Permissions::from_mode(0o755));
             }
         }
     }
 
     let want_str = hooks_dir.to_string_lossy().to_string();
-    let legacy = root.join("scripts/hooks");
-    let legacy_str = legacy.to_string_lossy().to_string();
 
     match git_output(root, &["config", "--get", "core.hooksPath"]) {
-        Some(have)
-            if have == want_str
-                || have == format!("{want_str}/")
-                || have == ".git/quaqua-hooks"
-                || have == ".git/quaqua-hooks/"
-                || Path::new(&have) == hooks_dir
-                || root.join(&have) == hooks_dir =>
-        {
+        Some(have) if hooks_path_is_ours(&have, root, &hooks_dir) => {
             // already ours — silent, like the rest of this command
         }
-        Some(have)
-            if have == legacy_str
-                || have == "scripts/hooks"
-                || have == format!("{legacy_str}/")
-                || Path::new(&have) == legacy
-                || root.join(&have) == legacy =>
-        {
+        Some(have) if hooks_path_is_legacy(&have, root) => {
             if !git_ok(root, &["config", "core.hooksPath", &want_str]) {
                 return Err(format!(
                     "init-workspace: failed to set core.hooksPath to {want_str}"
@@ -630,6 +670,79 @@ fn wire_hooks(root: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `quaqua init --git-hooks <repo>`: install the embedded portable-paths
+/// pre-commit into an existing git repo and stop there — no workspace dirs, no
+/// template sync, no lock, no CoS tag. The repo's working tree is untouched;
+/// only `<git-dir>/quaqua-hooks/pre-commit` and `core.hooksPath` change.
+///
+/// A repo whose `core.hooksPath` points somewhere else is refused untouched;
+/// re-running against a repo we already own is a no-op.
+pub fn run_git_hooks(repo: &Path) -> Result<i32, String> {
+    let repo = std::fs::canonicalize(repo)
+        .map_err(|e| format!("init --git-hooks: cannot resolve {}: {e}", repo.display()))?;
+    if !repo.is_dir() {
+        return Err(format!(
+            "init --git-hooks: {} is not a directory",
+            repo.display()
+        ));
+    }
+    if !git_ok(&repo, &["rev-parse", "--git-dir"]) {
+        return Err(format!(
+            "init --git-hooks: {} is not a git repository",
+            repo.display()
+        ));
+    }
+
+    let hooks_dir = quaqua_hooks_dir(&repo);
+    if let Some(have) = git_output(&repo, &["config", "--get", "core.hooksPath"]) {
+        if !have.is_empty() && !hooks_path_is_ours(&have, &repo, &hooks_dir) {
+            return Err(format!(
+                "init --git-hooks: {} already sets core.hooksPath='{have}' — refusing to \
+                 overwrite it; unset it to install the quaqua hook instead",
+                repo.display()
+            ));
+        }
+    }
+
+    wire_hooks(&repo)?;
+    println!("git hooks: {} -> {}", repo.display(), hooks_dir.display());
+    Ok(0)
+}
+
+/// The directory quaqua owns for git hooks: `<absolute git dir>/quaqua-hooks`.
+/// Works for a normal checkout, a linked worktree, and a path inside a repo.
+fn quaqua_hooks_dir(root: &Path) -> PathBuf {
+    git_output(root, &["rev-parse", "--absolute-git-dir"])
+        .map(PathBuf::from)
+        .map(|p| p.join("quaqua-hooks"))
+        .unwrap_or_else(|| root.join(".git/quaqua-hooks"))
+}
+
+/// True when a `core.hooksPath` value already points at `hooks_dir` — the
+/// absolute path quaqua writes, the legacy relative form, or an equivalent
+/// spelling of either.
+fn hooks_path_is_ours(have: &str, root: &Path, hooks_dir: &Path) -> bool {
+    let want = hooks_dir.to_string_lossy();
+    have == want.as_ref()
+        || have == format!("{want}/")
+        || have == ".git/quaqua-hooks"
+        || have == ".git/quaqua-hooks/"
+        || Path::new(have) == hooks_dir
+        || root.join(have) == hooks_dir
+}
+
+/// True when a `core.hooksPath` value is the legacy `<root>/scripts/hooks`
+/// location that `quaqua init` migrates to the quaqua-owned directory.
+fn hooks_path_is_legacy(have: &str, root: &Path) -> bool {
+    let legacy = root.join("scripts/hooks");
+    let legacy_str = legacy.to_string_lossy();
+    have == legacy_str.as_ref()
+        || have == "scripts/hooks"
+        || have == format!("{legacy_str}/")
+        || Path::new(have) == legacy
+        || root.join(have) == legacy
 }
 
 fn git_ok(root: &Path, args: &[&str]) -> bool {
