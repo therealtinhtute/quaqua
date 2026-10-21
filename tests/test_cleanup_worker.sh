@@ -18,7 +18,7 @@ bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
 export QUAQUA_BIN="$bin"
 
 # ── sandbox: temp worker repo + fake herdr ──────────────────────────────────
-mkdir -p "$T/quaqua" "$T/bin"
+mkdir -p "$T/quaqua" "$T/bin" "$T/home" "$T/runs"
 
 cat > "$T/bin/herdr" <<'EOF'
 #!/usr/bin/env bash
@@ -92,7 +92,7 @@ worktree() {  # worktree <repo> <name>; cleanup keeps the branch, so reuse it
 run_cleanup() {  # run_cleanup <name> [VAR=val...]
   local name=$1; shift
   : > "$T/events"
-  env PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" EVENTS="$T/events" "$@" \
+  env PATH="$T/bin:$PATH" HOME="$T/home" QUAQUA_RUNS_DIR="$T/runs" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" EVENTS="$T/events" "$@" \
     "${QUAQUA_BIN:-quaqua}" worker cleanup "$name" "$T/quaqua"
 }
 
