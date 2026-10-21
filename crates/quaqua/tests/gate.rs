@@ -3,9 +3,42 @@
 //! classifier (`git push` / gh writes → ask, force+main → deny), and tests
 //! that drive the built binary through the stdin hook-JSON contract.
 
-use quaqua::gate::{check, check_ctx, Verdict};
+use quaqua::gate::{check, check_ctx, check_with_pr, PrFacts, PrLookup, Verdict};
+use std::cell::RefCell;
 use std::io::Write;
 use std::process::{Command, Stdio};
+
+/// A PR lookup stub: never touches the network, records the selector the gate
+/// asked for.
+struct StubPr {
+    result: Result<PrFacts, String>,
+    seen: RefCell<Vec<Option<String>>>,
+}
+
+impl StubPr {
+    fn ok(body: &str, comments: &[&str]) -> Self {
+        StubPr {
+            result: Ok(PrFacts {
+                body: body.to_string(),
+                comments: comments.iter().map(|c| c.to_string()).collect(),
+            }),
+            seen: RefCell::new(Vec::new()),
+        }
+    }
+    fn fail(reason: &str) -> Self {
+        StubPr {
+            result: Err(reason.to_string()),
+            seen: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl PrLookup for StubPr {
+    fn view(&self, selector: Option<&str>, _cwd: Option<&str>) -> Result<PrFacts, String> {
+        self.seen.borrow_mut().push(selector.map(String::from));
+        self.result.clone()
+    }
+}
 
 fn assert_cases(cases: &[&str], want: Verdict, group: &str) {
     for c in cases {
@@ -360,6 +393,133 @@ fn outward_decisions_compose_over_compounds() {
 }
 
 #[test]
+fn gh_pr_merge_asks_when_the_pr_says_wip_or_cancelled_or_has_unchecked_items() {
+    let cases = [
+        ("WIP: half done", &[][..], "WIP"),
+        ("ready", &["cancelled mid-run"][..], "cancelled mid-run"),
+        ("- [x] done\n- [ ] still open", &[][..], "unchecked"),
+    ];
+    for (body, comments, needle) in cases {
+        let stub = StubPr::ok(body, comments);
+        match check_with_pr("gh pr merge 42 --squash", None, &stub) {
+            Verdict::Ask(reason) => {
+                assert!(
+                    reason.contains(needle),
+                    "reason {reason:?} lacks {needle:?}"
+                );
+                assert!(reason.contains("42"), "reason must name the PR: {reason:?}");
+            }
+            other => panic!("want ask, got {other:?} for {body}"),
+        }
+        assert_eq!(stub.seen.borrow().as_slice(), &[Some("42".to_string())]);
+    }
+}
+
+#[test]
+fn gh_pr_merge_lookup_failure_asks_never_allows() {
+    let stub = StubPr::fail("gh: not logged in");
+    match check_with_pr("gh pr merge 42", None, &stub) {
+        Verdict::Ask(reason) => {
+            assert!(reason.contains("could not verify"), "{reason}");
+            assert!(reason.contains("not logged in"), "{reason}");
+        }
+        other => panic!("want ask on a failed lookup, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_clean_pr_still_asks_and_merging_to_main_still_denies_without_a_lookup() {
+    let clean = StubPr::ok("all good", &[]);
+    let verdict = check_with_pr("gh pr merge --auto 42", None, &clean);
+    assert!(matches!(verdict, Verdict::Ask(_)), "{verdict:?}");
+    assert_eq!(clean.seen.borrow().as_slice(), &[Some("42".to_string())]);
+
+    // main is denied before any lookup; the stub must not be consulted.
+    let main = StubPr::fail("must not be called");
+    assert!(matches!(
+        check_with_pr("gh pr merge main --squash", None, &main),
+        Verdict::Deny(_)
+    ));
+    assert!(main.seen.borrow().is_empty());
+}
+
+#[test]
+fn removed_worker_scripts_are_denied_with_the_replacement_hint() {
+    let cases = [
+        (
+            "scripts/worker/prompt-worker.sh sude-x",
+            "quaqua worker prompt",
+        ),
+        ("./scripts/worker/spawn-worker.sh x", "quaqua worker spawn"),
+        (
+            "bash scripts/worker/cleanup-worker.sh sude-x ~/repo",
+            "quaqua worker cleanup",
+        ),
+        (
+            "sudo ~/quaqua/scripts/worker/grid-workers.sh --tab x",
+            "quaqua grid reconcile",
+        ),
+        ("env FOO=1 scripts/worker/worker-cap.sh cos", "quaqua cap"),
+    ];
+    for (cmd, hint) in cases {
+        match check(cmd) {
+            Verdict::Deny(reason) => {
+                assert!(reason.contains(hint), "reason {reason:?} lacks {hint:?}");
+                assert!(reason.contains("removed"), "{reason}");
+            }
+            other => panic!("want deny, got {other:?}: {cmd:?}"),
+        }
+    }
+    // The path as argument text is not a call.
+    assert_eq!(
+        check("grep -rn \"scripts/worker/prompt-worker.sh\" docs/"),
+        Verdict::Allow
+    );
+    assert_eq!(check("echo scripts/worker/spawn-worker.sh"), Verdict::Allow);
+}
+
+#[test]
+fn gate_binary_asks_with_the_wip_reason_through_a_stub_gh() {
+    let dir = std::env::temp_dir().join(format!("quaqua-gate-gh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let gh = dir.join("gh");
+    std::fs::write(
+        &gh,
+        "#!/bin/sh\nprintf '%s\\n' '{\"body\":\"WIP: do not merge\",\"comments\":[]}'\n",
+    )
+    .expect("write gh");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let bin = env!("CARGO_BIN_EXE_quaqua");
+    let mut child = Command::new(bin)
+        .arg("gate")
+        .env("QUAQUA_GH_BIN", &gh)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn quaqua");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(br#"{"tool_name":"Bash","tool_input":{"command":"gh pr merge 42 --squash"}}"#)
+        .expect("write");
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(out.status.code(), Some(0));
+    let decision: serde_json::Value = serde_json::from_slice(&out.stdout).expect("decision JSON");
+    assert_eq!(decision["hookSpecificOutput"]["permissionDecision"], "ask");
+    let reason = decision["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason");
+    assert!(reason.contains("WIP"), "{reason}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn bare_push_resolves_the_checked_out_branch() {
     let dir = std::env::temp_dir().join(format!("quaqua-gate-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -447,12 +607,18 @@ fn binary_emits_pretooluse_json_for_outward_actions() {
         r#"{"tool_name":"Bash","tool_input":{"command":"gh pr create --title x"},"cwd":"/tmp"}"#,
     );
     assert_eq!(code, Some(0), "ask must exit 0");
-    assert_eq!(decision(&stdout)["hookSpecificOutput"]["permissionDecision"], "ask");
+    assert_eq!(
+        decision(&stdout)["hookSpecificOutput"]["permissionDecision"],
+        "ask"
+    );
 
     let (code, stdout) =
         run(r#"{"tool_name":"Bash","tool_input":{"command":"git push --force origin"}}"#);
     assert_eq!(code, Some(0), "deny must exit 0");
-    assert_eq!(decision(&stdout)["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        decision(&stdout)["hookSpecificOutput"]["permissionDecision"],
+        "deny"
+    );
 
     // read-only commands keep the silent exit 0
     let (code, stdout) = run(r#"{"tool_name":"Bash","tool_input":{"command":"git status"}}"#);

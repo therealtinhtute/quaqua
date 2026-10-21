@@ -12,7 +12,10 @@
 pub mod policy;
 pub mod tokenizer;
 
-pub use policy::{check, check_ctx, check_segments, Verdict};
+pub use policy::{
+    check, check_ctx, check_segments, check_with_pr, OfflinePrLookup, PrFacts, PrLookup, RealGh,
+    Verdict,
+};
 
 const BLOCK_MESSAGE: &str = "blocked: spawn/move panes and workspaces only via quaqua worker spawn / quaqua lead spawn / quaqua worker cleanup / quaqua lead cleanup or `quaqua grid reconcile` — rules/_all/fanout-agent-grid.md";
 
@@ -38,7 +41,9 @@ pub fn run() -> i32 {
     if cmd.is_empty() {
         return 0;
     }
-    match check_ctx(&cmd, cwd.as_deref()) {
+    // The hook is the only caller that may run `gh`: a merge whose PR state
+    // cannot be verified asks, and the lookup is timeout-bounded.
+    match check_with_pr(&cmd, cwd.as_deref(), &RealGh::from_env()) {
         Verdict::Block => {
             eprintln!("{BLOCK_MESSAGE}");
             2
