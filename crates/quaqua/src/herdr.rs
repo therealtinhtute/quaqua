@@ -24,6 +24,44 @@ pub trait HerdrOps {
     fn agent_send_keys(&self, name: &str, key: &str) -> std::io::Result<Output>;
     fn agent_wait_idle(&self, name: &str, timeout_ms: u32) -> std::io::Result<Output>;
     fn agent_prompt_nowait(&self, name: &str, prompt: &str) -> std::io::Result<Output>;
+    /// One blocking wait. Default implementation drives `run`; the live
+    /// `Herdr` also has inherent methods with the same behaviour.
+    fn agent_wait(
+        &self,
+        name: &str,
+        until: &[&str],
+        timeout_ms: u64,
+    ) -> std::io::Result<Output> {
+        if timeout_ms == 0 {
+            return self.run(&["agent", "get", name]);
+        }
+        let timeout = timeout_ms.to_string();
+        let mut args = vec!["agent", "wait", name];
+        for state in until {
+            args.push("--until");
+            args.push(state);
+        }
+        args.push("--timeout");
+        args.push(&timeout);
+        self.run(&args)
+    }
+    fn agent_prompt_wait(
+        &self,
+        name: &str,
+        prompt: &str,
+        until: &[&str],
+        timeout_ms: u64,
+    ) -> std::io::Result<Output> {
+        let timeout = timeout_ms.to_string();
+        let mut args = vec!["agent", "prompt", name, prompt, "--wait"];
+        for state in until {
+            args.push("--until");
+            args.push(state);
+        }
+        args.push("--timeout");
+        args.push(&timeout);
+        self.run(&args)
+    }
     fn agent_prompt_wait_background(
         &self,
         name: &str,
@@ -50,6 +88,46 @@ pub fn bin_path() -> String {
 impl Herdr {
     pub fn new() -> Self {
         Herdr { bin: bin_path() }
+    }
+
+    /// One blocking native `agent wait`. `until` empty means herdr's default
+    /// set (`idle`, `done`, `blocked`); `timeout_ms == 0` is a plain `agent get`.
+    pub fn agent_wait(
+        &self,
+        name: &str,
+        until: &[&str],
+        timeout_ms: u64,
+    ) -> std::io::Result<Output> {
+        if timeout_ms == 0 {
+            return self.run(&["agent", "get", name]);
+        }
+        let timeout = timeout_ms.to_string();
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["agent", "wait", name]);
+        for state in until {
+            cmd.args(["--until", state]);
+        }
+        cmd.args(["--timeout", &timeout]);
+        cmd.output()
+    }
+
+    /// Submit a prompt and wait for the first landed state. herdr's own land
+    /// check: `agent_prompt_stalled` means the input never reached the turn.
+    pub fn agent_prompt_wait(
+        &self,
+        name: &str,
+        prompt: &str,
+        until: &[&str],
+        timeout_ms: u64,
+    ) -> std::io::Result<Output> {
+        let timeout = timeout_ms.to_string();
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["agent", "prompt", name, prompt, "--wait"]);
+        for state in until {
+            cmd.args(["--until", state]);
+        }
+        cmd.args(["--timeout", &timeout]);
+        cmd.output()
     }
 }
 

@@ -8,7 +8,6 @@ pub mod init;
 pub mod hash;
 pub mod git;
 pub mod herdr;
-pub mod herdr_events;
 pub mod cap;
 pub mod launch;
 pub mod worker;

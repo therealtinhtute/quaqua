@@ -7,10 +7,8 @@ pub mod workflow;
 
 pub use crate::util::now_sec;
 pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
-pub use observer::{is_provider_timeout, observe, Observation};
-pub use watchdog::{
-    is_lessons_heading, nap, prepend_header, run_watchdog, validate_report_content, WatchdogParams,
-};
+pub use observer::{lead_waiting, report_ready};
+pub use watchdog::{is_lessons_heading, nap, prepend_header, validate_report_content};
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -27,11 +25,10 @@ use crate::engine::journal::Journal;
 use crate::engine::journal_sqlite::SqliteJournal;
 use crate::engine::runner::RunnerOutcome;
 use crate::git::GitOps;
-use crate::herdr::HerdrOps;
+use crate::herdr::{Herdr, HerdrOps};
 use crate::state::WorkerMetadata;
 use crate::worker::cleanup::default_runs_dir;
 use crate::worker::prompt::cost::CostTracker;
-use crate::worker::prompt::observer::lead_waiting;
 use crate::worker::prompt::workflow::{SingleWorkerState, SingleWorkerWorkflow, WatchdogConfig};
 pub const USAGE: &str = "\
 # Usage: quaqua worker prompt <name> <task>        submit task brief, wait for runs file
@@ -226,26 +223,6 @@ pub fn parse_prompt_args(p_args: &[String]) -> Result<PromptAction, (i32, String
     Ok(PromptAction::Prompt { name, task })
 }
 
-#[derive(Clone, Default)]
-struct ObsSnapshot {
-    status: String,
-    ctx: String,
-    last_tool: String,
-    diffstat: String,
-    pane_text: String,
-}
-
-impl ObsSnapshot {
-    fn from_obs(obs: &Observation) -> Self {
-        Self {
-            status: obs.status.clone(),
-            ctx: obs.ctx.clone(),
-            last_tool: obs.last_tool.clone(),
-            diffstat: obs.diffstat.clone(),
-            pane_text: obs.pane_text.clone(),
-        }
-    }
-}
 #[derive(Debug, Clone, Default)]
 struct PromptClock {
     timers: BinaryHeap<Reverse<(u64, u64, String)>>,
@@ -322,65 +299,65 @@ impl crate::engine::runner::RunnerClock for PromptClock {
     }
 }
 
+#[derive(Clone, Default)]
+struct WaitSnapshot {
+    status: String,
+    ctx: String,
+    diffstat: String,
+    quiet_sec: u64,
+}
+
+/// Reads the status and error code from an `agent prompt --wait` /
+/// `agent wait` payload. Tolerant to both `result.agent` and `result` shapes.
+fn parse_submit_output(out: &std::process::Output) -> (bool, String, String) {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let text = if stdout.trim().is_empty() {
+        stderr.as_ref()
+    } else {
+        stdout.as_ref()
+    };
+    let mut status = String::new();
+    let mut code = String::new();
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(c) = json
+            .pointer("/error/code")
+            .and_then(|v| v.as_str())
+        {
+            code = c.to_string();
+        }
+        let agent = json
+            .pointer("/result/agent")
+            .or_else(|| json.get("result").filter(|r| r.is_object()));
+        if let Some(a) = agent {
+            status = a
+                .get("agent_status")
+                .or_else(|| a.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+        }
+    }
+    (out.status.success(), status, code)
+}
+
 struct PromptActivities {
     inner: SystemActivities,
     runs_dir: PathBuf,
+    name: String,
     time_budget_sec: u64,
     nudge_pct: u64,
     heartbeat_sec: u64,
-    land_sec: u64,
-    is_resume: bool,
     start_sec: u64,
     cost_tracker: Mutex<CostTracker>,
-    last_obs: Mutex<Option<ObsSnapshot>>,
-    last_change: Mutex<u64>,
+    last_wait: Mutex<Option<WaitSnapshot>>,
+    last_progress: Mutex<u64>,
+    last_diff: Mutex<String>,
     last_heartbeat: Mutex<u64>,
-    prev_fp: Mutex<String>,
-    fp_seen: Mutex<bool>,
-    prompt_landed: Mutex<bool>,
-    prompt_recovered: Mutex<bool>,
-    recover_at: Mutex<u64>,
-    recover_deadline: Mutex<u64>,
-    prompt_not_landed: Mutex<bool>,
-    provider_retried: Mutex<bool>,
 }
 
 impl Activity for PromptActivities {
     fn execute(&self, req: &ActivityRequest) -> Result<ActivityResult, ActivityError> {
-        if let ActivityRequest::HerdrEvents(ev_req) = req {
-            if let Ok(r) = self.inner.execute(req) {
-                return Ok(r);
-            }
-            match ev_req {
-                crate::engine::activity::HerdrEventRequest::Subscribe { agent, .. } => {
-                    return Ok(ActivityResult::HerdrEvents(
-                        crate::engine::activity::HerdrEventResult::Subscribed {
-                            agent: agent.clone(),
-                        },
-                    ));
-                }
-                crate::engine::activity::HerdrEventRequest::Unsubscribe { agent } => {
-                    return Ok(ActivityResult::HerdrEvents(
-                        crate::engine::activity::HerdrEventResult::Unsubscribed {
-                            agent: agent.clone(),
-                        },
-                    ));
-                }
-                crate::engine::activity::HerdrEventRequest::PollEventsFor { agent } => {
-                    return Ok(ActivityResult::HerdrEvents(
-                        crate::engine::activity::HerdrEventResult::ScopedEvents {
-                            agent: agent.clone(),
-                            events: Vec::new(),
-                        },
-                    ));
-                }
-                crate::engine::activity::HerdrEventRequest::PollEvents => {
-                    return Ok(ActivityResult::HerdrEvents(
-                        crate::engine::activity::HerdrEventResult::Events(Vec::new()),
-                    ));
-                }
-            }
-        }
         if let ActivityRequest::Git(crate::engine::activity::GitRequest::DiffHash { path }) = req {
             let target = std::path::Path::new(path);
             if !target.exists() || !target.is_dir() || !self.inner.git.is_git_dir(target) {
@@ -402,15 +379,13 @@ impl Activity for PromptActivities {
                     crate::engine::activity::ReportFileResult::MtimeMs(0),
                 ));
             }
-            if crate::worker::prompt::observer::report_ready(p) {
-                return Ok(ActivityResult::ReportFile(
-                    crate::engine::activity::ReportFileResult::MtimeMs(1),
-                ));
-            } else {
-                return Ok(ActivityResult::ReportFile(
-                    crate::engine::activity::ReportFileResult::MtimeMs(0),
-                ));
-            }
+            return Ok(ActivityResult::ReportFile(
+                crate::engine::activity::ReportFileResult::MtimeMs(if report_ready(p) {
+                    1
+                } else {
+                    0
+                }),
+            ));
         }
         if let ActivityRequest::ReportFile(crate::engine::activity::ReportFileRequest::Read {
             path,
@@ -422,102 +397,79 @@ impl Activity for PromptActivities {
                 ));
             }
         }
-        if let ActivityRequest::Herdr(HerdrRequest::ReadAgent { .. }) = req {
-            match self.inner.execute(req) {
-                Ok(r) => return Ok(r),
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    if err_msg.contains("agent_not_found") {
-                        return Ok(ActivityResult::Herdr(
-                            crate::engine::activity::HerdrResult::AgentOutput {
-                                content: String::new(),
-                            },
-                        ));
-                    }
-                    return Err(e);
-                }
-            }
-        }
+
         let res = self.inner.execute(req);
         match req {
-            ActivityRequest::Herdr(HerdrRequest::AgentInfo { name }) => {
-                let obs = observe(&self.inner.herdr, &self.inner.git, name);
-                *self.last_obs.lock().unwrap() = obs.as_ref().map(ObsSnapshot::from_obs);
-
-                if let Some(o) = &obs {
-                    self.cost_tracker
-                        .lock()
-                        .unwrap()
-                        .check(&self.runs_dir, name, o);
-
+            ActivityRequest::Herdr(HerdrRequest::AgentWait { name, .. }) => {
+                if let Ok(ActivityResult::Herdr(crate::engine::activity::HerdrResult::AgentWait {
+                    status,
+                    err,
+                    session_kind,
+                    session_value,
+                    harness,
+                    cwd,
+                    ..
+                })) = &res
+                {
                     let now = now_sec();
+                    self.cost_tracker.lock().unwrap().check(
+                        &self.runs_dir,
+                        name,
+                        session_value,
+                        cwd,
+                        harness,
+                    );
+                    let quiet = now.saturating_sub(*self.last_progress.lock().unwrap());
+                    let diff = self.last_diff.lock().unwrap().clone();
+                    let diffstat = if diff.is_empty() {
+                        "clean".to_string()
+                    } else {
+                        diff.chars().take(8).collect()
+                    };
+                    *self.last_wait.lock().unwrap() = Some(WaitSnapshot {
+                        status: if err.is_empty() {
+                            status.clone()
+                        } else {
+                            format!("{status} ({err})")
+                        },
+                        ctx: session_kind.clone(),
+                        diffstat: diffstat.clone(),
+                        quiet_sec: quiet,
+                    });
                     let mut lh = self.last_heartbeat.lock().unwrap();
                     if now.saturating_sub(*lh) >= self.heartbeat_sec {
                         *lh = now;
                         let elapsed = now.saturating_sub(self.start_sec);
-                        let quiet = now.saturating_sub(*self.last_change.lock().unwrap());
-                        let last_tool = if o.last_tool.is_empty() {
-                            "none"
-                        } else {
-                            &o.last_tool
-                        };
                         eprintln!(
-                            "WATCHDOG heartbeat | name={name} elapsed={elapsed}s status={} ctx={} quiet={quiet}s last={last_tool}",
-                            o.status, o.ctx
+                            "WATCHDOG heartbeat | name={name} elapsed={elapsed}s status={status} quiet={quiet}s | diff={diffstat}"
                         );
                     }
-
-                    if (o.status == "idle" || o.status == "done")
-                        && !*self.provider_retried.lock().unwrap()
-                        && is_provider_timeout(&o.pane_text)
-                    {
-                        *self.provider_retried.lock().unwrap() = true;
-                        let _ = WorkerMetadata::record_provider_retry(&self.runs_dir, name, now);
-                        let _ = self.inner.herdr.agent_prompt_nowait(name, "continue");
-                        eprintln!("WATCHDOG provider timeout detected | name={name} — re-prompted session with 'continue'");
-                    }
-
-                    if !self.is_resume && self.land_sec > 0 {
-                        let mut pl = self.prompt_landed.lock().unwrap();
-                        let has_report = self.runs_dir.join(format!("{name}.md")).is_file();
-                        if has_report {
-                            *pl = true;
-                            *self.prompt_recovered.lock().unwrap() = false;
-                            *self.prompt_not_landed.lock().unwrap() = false;
-                        } else if !*pl {
-                            let is_waiting = lead_waiting(&self.runs_dir, name, &o.watcher_pane);
-                            if o.status == "working" || o.status == "blocked" || is_waiting {
-                                *pl = true;
-                            } else if o.status == "idle" || o.status == "done" {
-                                let mut pr = self.prompt_recovered.lock().unwrap();
-                                if *pr {
-                                    if now >= *self.recover_deadline.lock().unwrap() {
-                                        *self.prompt_not_landed.lock().unwrap() = true;
-                                    }
-                                } else if now >= self.start_sec + self.land_sec {
-                                    *pr = true;
-                                    *self.recover_at.lock().unwrap() = now;
-                                    *self.recover_deadline.lock().unwrap() = now + self.land_sec;
-                                    let _ = self.inner.herdr.agent_send_keys(name, "enter");
-                                    eprintln!(
-                                        "WATCHDOG prompt-not-landed | name={name} {} {}s after prompt — sent enter once (input may be typed but unsubmitted)",
-                                        o.status,
-                                        now.saturating_sub(self.start_sec)
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    let mut prev_fp = self.prev_fp.lock().unwrap();
-                    if *prev_fp != o.fp {
-                        *prev_fp = o.fp.clone();
-                        if *self.fp_seen.lock().unwrap() {
-                            *self.last_change.lock().unwrap() = now;
-                        }
-                        *self.fp_seen.lock().unwrap() = true;
-                    }
                 }
+                res
+            }
+            ActivityRequest::Git(crate::engine::activity::GitRequest::DiffHash { .. }) => {
+                if let Ok(ActivityResult::Git(
+                    crate::engine::activity::GitResult::DiffHash { hash, stat },
+                )) = &res
+                {
+                    let mut prev = self.last_diff.lock().unwrap();
+                    if *prev != *hash {
+                        *prev = hash.clone();
+                        *self.last_progress.lock().unwrap() = now_sec();
+                    }
+                    let _ = stat;
+                    *self.last_wait.lock().unwrap() = Some(WaitSnapshot {
+                        status: String::new(),
+                        ctx: String::new(),
+                        diffstat: if hash.is_empty() {
+                            "clean".to_string()
+                        } else {
+                            hash.chars().take(8).collect()
+                        },
+                        quiet_sec: 0,
+                    });
+                }
+                res
             }
             ActivityRequest::Herdr(HerdrRequest::Prompt { task, .. }) => {
                 if task.starts_with("Time check: you are past") {
@@ -526,21 +478,20 @@ impl Activity for PromptActivities {
                         self.nudge_pct, self.time_budget_sec
                     );
                 }
+                res
             }
-            _ => {}
+            _ => res,
         }
-
-        res
     }
 }
 
-pub fn prompt_worker<G: GitOps, H: HerdrOps>(
+pub fn prompt_worker<G: GitOps>(
     name: &str,
     task: Option<&str>,
     resume: bool,
     extend: Option<u64>,
     _git: &G,
-    herdr: &H,
+    herdr: &Herdr,
 ) -> Result<(), (i32, String)> {
     validate_env_budget()?;
 
@@ -559,7 +510,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let poll_sec: u64 = std::env::var("PROMPT_WORKER_POLL_SEC")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(30)
+        .unwrap_or(60)
         .max(1);
     let stall_sec: u64 = std::env::var("PROMPT_WORKER_STALL_SEC")
         .ok()
@@ -585,10 +536,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(300);
-    let land_sec: u64 = std::env::var("PROMPT_WORKER_LAND_SEC")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(15);
+    let land_sec: u64 = 0;
 
     let expect_verdict = WorkerMetadata::has_review(&runs_dir, name);
 
@@ -720,13 +668,51 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             }
         }
 
-        // Background prompt dispatch
+        // Synchronous land check: herdr's own "the prompt reached the turn"
+        // signal. A stalled submission gets exactly one enter + re-wait.
         let prompt_body = format!(
             "{task_str}. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/{name}.md (publish it atomically, never a partial file); reply only the path."
         );
-        let submit_file = std::fs::File::create(&submit_log).ok();
-        if let Some(file) = submit_file {
-            let _ = herdr.agent_prompt_wait_background(name, &prompt_body, 1800000, file);
+        let landed = match herdr.agent_prompt_wait(
+            name,
+            &prompt_body,
+            &["working", "blocked"],
+            10_000,
+        ) {
+            Ok(out) => {
+                let (ok, status, code) = parse_submit_output(&out);
+                let _ = std::fs::write(
+                    &submit_log,
+                    String::from_utf8_lossy(&out.stdout).as_bytes(),
+                );
+                if ok && (status == "working" || status == "blocked" || status.is_empty()) {
+                    // An empty successful payload is an older herdr without
+                    // the land-check fields: the prompt was accepted.
+                    true
+                } else if code == "agent_blocked" {
+                    return Err((5, String::new()));
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        };
+        if !landed {
+            eprintln!(
+                "WATCHDOG prompt-not-landed | name={name} — sent enter once (input may be typed but unsubmitted)"
+            );
+            let _ = herdr.agent_send_keys(name, "enter");
+            let recovered = match herdr.agent_wait(name, &["working", "blocked"], 10_000) {
+                Ok(out) => {
+                    let (ok, status, _) = parse_submit_output(&out);
+                    ok && (status == "working" || status == "blocked")
+                }
+                Err(_) => false,
+            };
+            if !recovered {
+                eprintln!("WATCHDOG exit=3 prompt not landed | name={name}");
+                return Err((3, String::new()));
+            }
         }
 
         let next_k = k_max + 1;
@@ -889,28 +875,16 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
     let prompt_acts = PromptActivities {
         inner: sys_acts,
         runs_dir: runs_dir.clone(),
+        name: name.to_string(),
         time_budget_sec: active_budget,
         nudge_pct,
         heartbeat_sec,
-        land_sec,
-        is_resume: resume,
         start_sec,
         cost_tracker: Mutex::new(CostTracker::new(&runs_dir, name, cost_budget)),
-        last_obs: Mutex::new(None),
-        last_change: Mutex::new(start_sec),
+        last_wait: Mutex::new(None),
+        last_progress: Mutex::new(start_sec),
+        last_diff: Mutex::new(String::new()),
         last_heartbeat: Mutex::new(start_sec),
-        prev_fp: Mutex::new(String::new()),
-        fp_seen: Mutex::new(false),
-        prompt_landed: Mutex::new(resume || land_sec == 0),
-        prompt_recovered: Mutex::new(false),
-        recover_at: Mutex::new(0),
-        recover_deadline: Mutex::new(0),
-        prompt_not_landed: Mutex::new(false),
-        provider_retried: Mutex::new(if resume {
-            WorkerMetadata::has_provider_retry(&runs_dir, name)
-        } else {
-            false
-        }),
     };
     let mut acts = prompt_acts;
     let mut clock = PromptClock::new();
@@ -970,34 +944,25 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         }
     }
 
-    let final_obs = acts.last_obs.lock().unwrap().clone().or_else(|| {
-        observe(&acts.inner.herdr, &acts.inner.git, name)
-            .as_ref()
-            .map(ObsSnapshot::from_obs)
-    });
-    let change_ts = *acts.last_change.lock().unwrap();
+    let final_wait = acts.last_wait.lock().unwrap().clone().unwrap_or_default();
+    let change_ts = *acts.last_progress.lock().unwrap();
 
     let watchdog_exit = |code: i32, reason: &str| -> (i32, String) {
         let now = now_sec();
-        let status = final_obs
-            .as_ref()
-            .map(|o| o.status.as_str())
-            .unwrap_or("unknown");
-        let ctx = final_obs.as_ref().map(|o| o.ctx.as_str()).unwrap_or("?");
+        let status = if final_wait.status.is_empty() {
+            "unknown"
+        } else {
+            final_wait.status.as_str()
+        };
         let quiet = now.saturating_sub(change_ts);
-        let last_tool = final_obs
-            .as_ref()
-            .map(|o| o.last_tool.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("none");
-        let diffstat = final_obs
-            .as_ref()
-            .map(|o| o.diffstat.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("n/a");
+        let diffstat = if final_wait.diffstat.is_empty() {
+            "n/a"
+        } else {
+            final_wait.diffstat.as_str()
+        };
         let elapsed = now.saturating_sub(start_sec);
         eprintln!(
-            "WATCHDOG exit={code} {reason} | name={name} elapsed={elapsed}s status={status} ctx={ctx} quiet={quiet}s last={last_tool} | diff={diffstat}"
+            "WATCHDOG exit={code} {reason} | name={name} elapsed={elapsed}s status={status} quiet={quiet}s | diff={diffstat}"
         );
         (code, String::new())
     };
@@ -1025,33 +990,18 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
         }
         3 => {
             let now = now_sec();
-            let has_report = out.is_file();
-            let is_pnl = !has_report
-                && (*acts.prompt_not_landed.lock().unwrap()
-                    || *acts.prompt_recovered.lock().unwrap());
-            let st = final_obs
-                .as_ref()
-                .map(|o| o.status.as_str())
-                .unwrap_or("unknown");
+            let st = if final_wait.status.is_empty() {
+                "unknown"
+            } else {
+                final_wait.status.as_str()
+            };
             let quiet = now.saturating_sub(change_ts);
-            let reason = if is_pnl {
-                let rec_at = *acts.recover_at.lock().unwrap();
-                format!(
-                    "prompt not landed: agent {st} for {}s after a send-keys enter",
-                    now.saturating_sub(rec_at)
-                )
-            } else if st == "gone"
-                || (st == "unknown"
-                    && final_obs
-                        .as_ref()
-                        .map(|o| o.pane_text.is_empty())
-                        .unwrap_or(false))
-            {
+            let reason = if st.starts_with("gone") {
                 format!("agent gone: status={st} for {quiet}s")
             } else if st == "idle" || st == "done" {
                 format!("agent {st} for {quiet}s without run file")
             } else {
-                format!("stall: no pane/worktree change for {quiet}s")
+                format!("stall: no worktree diff or session write for {quiet}s")
             };
             Err(watchdog_exit(3, &reason))
         }
@@ -1060,16 +1010,7 @@ pub fn prompt_worker<G: GitOps, H: HerdrOps>(
             Err(watchdog_exit(4, &reason))
         }
         5 => {
-            let st = final_obs
-                .as_ref()
-                .map(|o| o.status.as_str())
-                .unwrap_or("unknown");
-            let reason = if st == "blocked" {
-                "agent blocked (question/permission pending)"
-            } else {
-                "pane shows a pending question/permission prompt"
-            };
-            Err(watchdog_exit(5, reason))
+            Err(watchdog_exit(5, "agent blocked (question/permission pending)"))
         }
         6 => {
             let report_content = std::fs::read_to_string(&out).unwrap_or_default();

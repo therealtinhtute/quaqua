@@ -128,13 +128,18 @@ impl std::error::Error for RunnerError {}
 #[derive(Serialize, Deserialize)]
 struct ActivityScheduledData {
     id: String,
-    activity: ActivityRequest,
+    /// Kept as raw JSON: replay only needs the id, and old journals may name
+    /// activity variants this release removed.
+    #[serde(default)]
+    activity: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize)]
 struct ActivityCompletedData {
     id: String,
-    result: ActivityResult,
+    /// Raw JSON so a removed result variant in an old journal resumes as a
+    /// no-op instead of failing the whole replay.
+    result: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -208,7 +213,7 @@ fn dispatch_activity(
             "activity_scheduled",
             serde_json::to_string(&ActivityScheduledData {
                 id: id.to_string(),
-                activity: activity.clone(),
+                activity: serde_json::to_value(activity).unwrap_or_default(),
             })
             .map_err(|e| RunnerError::Serialization(e.to_string()))?,
         ),
@@ -225,7 +230,7 @@ fn dispatch_activity(
             "activity_completed",
             serde_json::to_string(&ActivityCompletedData {
                 id: id.to_string(),
-                result: result.clone(),
+                result: serde_json::to_value(&result).unwrap_or_default(),
             })
             .map_err(|e| RunnerError::Serialization(e.to_string()))?,
         ),
@@ -444,9 +449,11 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                 *history_activity_completed
                     .entry(data.id.clone())
                     .or_default() += 1;
+                let result = serde_json::from_value(data.result)
+                    .unwrap_or(ActivityResult::Unknown);
                 historical_events_to_deliver.push_back(WorkflowEvent::ActivityCompleted {
                     id: data.id,
-                    result: data.result,
+                    result,
                 });
             }
             "timer_scheduled" => {
@@ -668,7 +675,7 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                         "activity_completed",
                         serde_json::to_string(&ActivityCompletedData {
                             id: id.clone(),
-                            result: result.clone(),
+                            result: serde_json::to_value(&result).unwrap_or_default(),
                         })
                         .map_err(|e| RunnerError::Serialization(e.to_string()))?,
                     ),
@@ -877,7 +884,7 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                         "activity_completed",
                         serde_json::to_string(&ActivityCompletedData {
                             id: id.clone(),
-                            result: result.clone(),
+                            result: serde_json::to_value(&result).unwrap_or_default(),
                         })
                         .map_err(|e| RunnerError::Serialization(e.to_string()))?,
                     ),
@@ -1497,7 +1504,7 @@ mod tests {
                     "activity_scheduled",
                     serde_json::to_string(&ActivityScheduledData {
                         id: "act_1".to_string(),
-                        activity: req1.clone(),
+                        activity: serde_json::to_value(&req1).unwrap_or_default(),
                     })
                     .unwrap(),
                 ),
@@ -1512,7 +1519,7 @@ mod tests {
                     "activity_completed",
                     serde_json::to_string(&ActivityCompletedData {
                         id: "act_1".to_string(),
-                        result: res1,
+                        result: serde_json::to_value(&res1).unwrap_or_default(),
                     })
                     .unwrap(),
                 ),
@@ -1919,7 +1926,7 @@ mod tests {
                     "activity_scheduled",
                     serde_json::to_string(&ActivityScheduledData {
                         id: "act_1".to_string(),
-                        activity: req.clone(),
+                        activity: serde_json::to_value(&req).unwrap_or_default(),
                     })
                     .unwrap(),
                 ),
@@ -1934,7 +1941,7 @@ mod tests {
                     "activity_completed",
                     serde_json::to_string(&ActivityCompletedData {
                         id: "act_1".to_string(),
-                        result: res,
+                        result: serde_json::to_value(&res).unwrap_or_default(),
                     })
                     .unwrap(),
                 ),

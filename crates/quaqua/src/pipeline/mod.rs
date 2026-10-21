@@ -9,7 +9,7 @@ pub use gate::{decide_build_gate, BuildFacts, BuildGate};
 use crate::engine::activities::SystemActivities;
 use crate::engine::activity::{
     Activity, ActivityError, ActivityRequest, ActivityResult, GitRequest, GitResult, GridRequest,
-    HerdrEventRequest, HerdrEventResult, HerdrRequest, ReportFileRequest, ReportFileResult,
+    HerdrRequest, ReportFileRequest, ReportFileResult,
 };
 use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
 use crate::engine::clock::RealClock;
@@ -130,41 +130,6 @@ struct PipelineActivities {
 impl Activity for PipelineActivities {
     fn execute(&self, req: &ActivityRequest) -> Result<ActivityResult, ActivityError> {
         match req {
-            ActivityRequest::HerdrEvents(HerdrEventRequest::Subscribe { agent, .. }) => {
-                match self.system.execute(req) {
-                    Ok(res) => Ok(res),
-                    Err(_) => Ok(ActivityResult::HerdrEvents(HerdrEventResult::Subscribed {
-                        agent: agent.clone(),
-                    })),
-                }
-            }
-            ActivityRequest::HerdrEvents(HerdrEventRequest::PollEventsFor { agent }) => {
-                match self.system.execute(req) {
-                    Ok(res) => Ok(res),
-                    Err(_) => Ok(ActivityResult::HerdrEvents(
-                        HerdrEventResult::ScopedEvents {
-                            agent: agent.clone(),
-                            events: Vec::new(),
-                        },
-                    )),
-                }
-            }
-            ActivityRequest::HerdrEvents(HerdrEventRequest::PollEvents) => {
-                match self.system.execute(req) {
-                    Ok(res) => Ok(res),
-                    Err(_) => Ok(ActivityResult::HerdrEvents(HerdrEventResult::Events(
-                        Vec::new(),
-                    ))),
-                }
-            }
-            ActivityRequest::HerdrEvents(HerdrEventRequest::Unsubscribe { agent }) => {
-                let _ = self.system.execute(req);
-                Ok(ActivityResult::HerdrEvents(
-                    HerdrEventResult::Unsubscribed {
-                        agent: agent.clone(),
-                    },
-                ))
-            }
             ActivityRequest::ReportFile(ReportFileRequest::CheckMtime { .. }) => {
                 match self.system.execute(req) {
                     Ok(res) => Ok(res),
@@ -181,19 +146,6 @@ impl Activity for PipelineActivities {
                     stat: String::new(),
                 })),
             },
-            ActivityRequest::Herdr(HerdrRequest::AgentInfo { name }) => {
-                match self.system.execute(req) {
-                    Ok(res) => Ok(res),
-                    Err(_) => Ok(ActivityResult::Herdr(
-                        crate::engine::activity::HerdrResult::AgentInfo {
-                            name: name.clone(),
-                            status: "working".to_string(),
-                            harness: None,
-                            hook_active: false,
-                        },
-                    )),
-                }
-            }
             _ => self.system.execute(req),
         }
     }
@@ -4149,12 +4101,14 @@ none
 REPEOF
                 ;;
             esac
+            echo '{"result":{"agent":{"agent_status":"working","state_change_seq":1}}}'
             exit 0
             ;;
           suhuynh-*r1)
             if [ -f "$QUAQUA_RUNS_DIR/stub_review_r1" ]; then
               cp "$QUAQUA_RUNS_DIR/stub_review_r1" "$QUAQUA_RUNS_DIR/$NAME.md"
-              exit 0
+              echo '{"result":{"agent":{"agent_status":"working","state_change_seq":1}}}'
+            exit 0
             fi
             cat <<'REPEOF' > "$QUAQUA_RUNS_DIR/$NAME.md"
 # Review
@@ -4164,6 +4118,7 @@ Verdict: 1 finding
 ## Lessons
 none
 REPEOF
+            echo '{"result":{"agent":{"agent_status":"working","state_change_seq":1}}}'
             exit 0
             ;;
           suhuynh-*r2)
@@ -4173,11 +4128,15 @@ Verdict: clean
 ## Lessons
 none
 REPEOF
+            echo '{"result":{"agent":{"agent_status":"working","state_change_seq":1}}}'
             exit 0
             ;;
         esac
+        echo '{"result":{"agent":{"agent_status":"working","state_change_seq":1}}}'
         exit 0
         ;;
+      wait)
+        echo '{"result": {"agent": {"agent_status": "idle", "state_change_seq": 2}}}'; exit 0 ;;
       start) exit 0 ;;
       get)
         if [ -f "$QUAQUA_RUNS_DIR/stub_observer_active" ]; then

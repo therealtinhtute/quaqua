@@ -35,7 +35,7 @@ impl std::error::Error for ActivityError {}
 // Herdr Control
 // ----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum HerdrRequest {
     Spawn {
         name: String,
@@ -59,16 +59,18 @@ pub enum HerdrRequest {
     Stop {
         name: String,
     },
-    ReadAgent {
+    /// One blocking native wait (or a plain `agent get` when `timeout_ms` is 0).
+    AgentWait {
         name: String,
-        lines: usize,
+        #[serde(default)]
+        until: Vec<String>,
+        timeout_ms: u64,
     },
-    AgentInfo {
-        name: String,
-    },
+    /// Deserialize-only tombstone for removed variants.
+    Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum HerdrResult {
     Spawned {
         name: String,
@@ -85,42 +87,49 @@ pub enum HerdrResult {
     Stopped {
         name: String,
     },
+    /// Journal tombstone: old runs may carry a pane read result.
     AgentOutput {
         content: String,
     },
-    AgentInfo {
+    AgentWait {
         name: String,
         status: String,
-        harness: Option<String>,
+        seq: u64,
+        session_kind: String,
+        session_value: String,
+        harness: String,
+        cwd: String,
+        /// `agent_not_running`, `agent_not_found`, an io/socket error, or empty.
+        err: String,
+        /// True when this agent is the Lead of a live pipeline.
+        lead_waiting: bool,
+        /// herdr's screen-detection flag (`screen_detection_skipped`).
+        #[serde(default)]
         hook_active: bool,
     },
+    /// Deserialize-only tombstone for removed result variants.
+    Unknown,
 }
 
 // ----------------------------------------------------------------------------
-// Herdr Events
+// Harness session store
 // ----------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum HerdrEventRequest {
-    Subscribe {
-        agent: String,
-        event_types: Vec<String>,
-    },
-    Unsubscribe {
-        agent: String,
-    },
-    PollEvents,
-    PollEventsFor {
-        agent: String,
+pub enum SessionRequest {
+    /// Last write timestamp of the harness session store for one session.
+    Mtime {
+        harness: String,
+        session_kind: String,
+        session_value: String,
+        cwd: String,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum HerdrEventResult {
-    Subscribed { agent: String },
-    Unsubscribed { agent: String },
-    Events(Vec<String>),
-    ScopedEvents { agent: String, events: Vec<String> },
+pub enum SessionResult {
+    /// Milliseconds since the epoch, or `None` when the store is unreadable.
+    Mtime(Option<u64>),
 }
 
 // ----------------------------------------------------------------------------
@@ -225,24 +234,114 @@ pub enum CostResult {
 // Unified Request / Result Enums
 // ----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ActivityRequest {
     Herdr(HerdrRequest),
-    HerdrEvents(HerdrEventRequest),
     Git(GitRequest),
     Grid(GridRequest),
     ReportFile(ReportFileRequest),
     Cost(CostRequest),
+    Session(SessionRequest),
+    /// Deserialize-only tombstone for removed activity families.
+    Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ActivityResult {
     Herdr(HerdrResult),
-    HerdrEvents(HerdrEventResult),
     Git(GitResult),
     Grid(GridResult),
     ReportFile(ReportFileResult),
     Cost(CostResult),
+    Session(SessionResult),
+    /// Deserialize-only tombstone for removed activity families.
+    Unknown,
+}
+
+// Journals written before the event-driven watchdog contain removed variants
+// (events, pane reads, agent info). Decode those as tombstones instead
+// of failing the whole replay: a known tag with an unknown shape is a no-op.
+fn tag_value(value: serde_json::Value) -> Option<(String, serde_json::Value)> {
+    let obj = value.as_object()?;
+    let (tag, inner) = obj.iter().next()?;
+    Some((tag.clone(), inner.clone()))
+}
+
+impl<'de> Deserialize<'de> for HerdrRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        let Some((tag, inner)) = tag_value(value) else {
+            return Ok(HerdrRequest::Unknown);
+        };
+        Ok(match tag.as_str() {
+            "Spawn" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
+            "Cleanup" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
+            "Prompt" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
+            "SendKeys" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
+            "Stop" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
+            "AgentWait" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
+            _ => HerdrRequest::Unknown,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for HerdrResult {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        let Some((tag, inner)) = tag_value(value) else {
+            return Ok(HerdrResult::Unknown);
+        };
+        Ok(match tag.as_str() {
+            "Spawned" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
+            "Cleaned" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
+            "Prompted" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
+            "KeysSent" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
+            "Stopped" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
+            "AgentOutput" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
+            "AgentWait" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
+            _ => HerdrResult::Unknown,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ActivityRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        let Some((tag, inner)) = tag_value(value) else {
+            return Ok(ActivityRequest::Unknown);
+        };
+        Ok(match tag.as_str() {
+            "Herdr" => ActivityRequest::Herdr(
+                serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
+            ),
+            "Git" => serde_json::from_value(inner).unwrap_or(ActivityRequest::Unknown),
+            "Grid" => serde_json::from_value(inner).unwrap_or(ActivityRequest::Unknown),
+            "ReportFile" => serde_json::from_value(inner).unwrap_or(ActivityRequest::Unknown),
+            "Cost" => serde_json::from_value(inner).unwrap_or(ActivityRequest::Unknown),
+            "Session" => serde_json::from_value(inner).unwrap_or(ActivityRequest::Unknown),
+            _ => ActivityRequest::Unknown,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ActivityResult {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        let Some((tag, inner)) = tag_value(value) else {
+            return Ok(ActivityResult::Unknown);
+        };
+        Ok(match tag.as_str() {
+            "Herdr" => ActivityResult::Herdr(
+                serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
+            ),
+            "Git" => serde_json::from_value(inner).unwrap_or(ActivityResult::Unknown),
+            "Grid" => serde_json::from_value(inner).unwrap_or(ActivityResult::Unknown),
+            "ReportFile" => serde_json::from_value(inner).unwrap_or(ActivityResult::Unknown),
+            "Cost" => serde_json::from_value(inner).unwrap_or(ActivityResult::Unknown),
+            "Session" => serde_json::from_value(inner).unwrap_or(ActivityResult::Unknown),
+            _ => ActivityResult::Unknown,
+        })
+    }
 }
 
 /// Object-safe activity execution interface.

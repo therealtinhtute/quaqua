@@ -3,7 +3,6 @@
 use crate::engine::activity::{ActivityResult, CostResult, ReportFileResult};
 use crate::state::WorkerMetadata;
 use crate::worker::cleanup::default_runs_dir;
-use crate::worker::prompt::observer::Observation;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
@@ -228,6 +227,119 @@ pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) 
     None
 }
 
+/// Milliseconds since the epoch from a file's mtime.
+fn file_mtime_ms(path: &Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
+}
+
+/// Last write time of an opencode session store row.
+///
+/// Uses `session_message.time_updated` for the session id (the shared db-wal
+/// mtime is not a per-session signal).
+fn opencode_session_mtime(session_id: &str) -> Option<u64> {
+    let mut db_candidates = Vec::new();
+    if let Ok(env_db) = std::env::var("QUAQUA_COST_DB_PATH") {
+        if !env_db.is_empty() {
+            db_candidates.push(std::path::PathBuf::from(env_db));
+        }
+    }
+    let state_dir = default_runs_dir().join(".opencode-state");
+    if let Ok(entries) = std::fs::read_dir(&state_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path().join("opencode").join("opencode.db");
+            if p.is_file() {
+                db_candidates.push(p);
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        db_candidates.push(std::path::PathBuf::from(home).join(".local/share/opencode/opencode.db"));
+    }
+    for db_path in db_candidates {
+        if !db_path.is_file() {
+            continue;
+        }
+        let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            continue;
+        };
+        let query =
+            "SELECT COALESCE(max(time_updated), 0) FROM session_message WHERE session_id = ?1";
+        let Ok(mut stmt) = conn.prepare(query) else {
+            continue;
+        };
+        if let Ok(value) = stmt.query_row(rusqlite::params![session_id], |row| {
+            row.get::<_, i64>(0)
+        }) {
+            if value > 0 {
+                return Some(value as u64);
+            }
+        }
+    }
+    None
+}
+
+/// claude's per-project session transcript: `~/.claude/projects/<slug>/<id>.jsonl`.
+fn claude_session_mtime(session_id: &str, cwd: &str) -> Option<u64> {
+    let home = std::env::var("HOME").ok()?;
+    let projects = Path::new(&home).join(".claude/projects");
+    if !cwd.is_empty() {
+        let slug: String = cwd
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let direct = projects.join(slug).join(format!("{session_id}.jsonl"));
+        if let Some(ms) = file_mtime_ms(&direct) {
+            return Some(ms);
+        }
+    }
+    // A cwd that does not map cleanly (symlink, home elsewhere): find the id.
+    let entries = std::fs::read_dir(&projects).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry.path().join(format!("{session_id}.jsonl"));
+        if let Some(ms) = file_mtime_ms(&candidate) {
+            return Some(ms);
+        }
+    }
+    None
+}
+
+/// Last write time of the harness session store. This is the glyph-free
+/// progress signal for workers whose worktree never moves (reviewers).
+pub fn session_store_mtime(
+    harness: &str,
+    session_kind: &str,
+    session_value: &str,
+    cwd: &str,
+) -> Option<u64> {
+    if session_value.is_empty() {
+        return None;
+    }
+    if session_kind == "path" {
+        return file_mtime_ms(Path::new(session_value));
+    }
+    match harness {
+        "opencode" => opencode_session_mtime(session_value),
+        "claude" => claude_session_mtime(session_value, cwd),
+        "omp" => {
+            let home = std::env::var("HOME").ok()?;
+            let root = match std::env::var("OMP_SESSIONS_DIR") {
+                Ok(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir),
+                _ => Path::new(&home).join(".omp/agent/sessions"),
+            };
+            file_mtime_ms(&root.join(omp_session_dir_name(cwd, &home)).join(session_value))
+        }
+        _ => file_mtime_ms(Path::new(session_value)),
+    }
+}
+
 /// Tracks cost budget warnings (80% and 100%) during watchdog execution.
 pub struct CostTracker {
     pub cost_cap: Option<f64>,
@@ -244,12 +356,10 @@ impl CostTracker {
         }
     }
 
-    pub fn check(&mut self, runs_dir: &Path, name: &str, obs: &Observation) {
+    pub fn check(&mut self, runs_dir: &Path, name: &str, session_id: &str, cwd: &str, harness: &str) {
         if let Some(budget_val) = self.cost_cap {
             if !self.cost100_warned || !self.cost80_warned {
-                if let Some(current_cost) =
-                    read_worker_cost(name, &obs.session_id, &obs.cwd, &obs.harness)
-                {
+                if let Some(current_cost) = read_worker_cost(name, session_id, cwd, harness) {
                     if !self.cost80_warned && current_cost >= budget_val * 0.8 {
                         let _ = WorkerMetadata::record_cost80(runs_dir, name, current_cost);
                         self.cost80_warned = true;
