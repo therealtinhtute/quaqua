@@ -314,11 +314,26 @@ impl<'de> Deserialize<'de> for ActivityRequest {
             "Herdr" => ActivityRequest::Herdr(
                 serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
             ),
-            "Git" => serde_json::from_value(inner).unwrap_or(ActivityRequest::Unknown),
-            "Grid" => serde_json::from_value(inner).unwrap_or(ActivityRequest::Unknown),
-            "ReportFile" => serde_json::from_value(inner).unwrap_or(ActivityRequest::Unknown),
-            "Cost" => serde_json::from_value(inner).unwrap_or(ActivityRequest::Unknown),
-            "Session" => serde_json::from_value(inner).unwrap_or(ActivityRequest::Unknown),
+            "Git" => match serde_json::from_value(inner) {
+                Ok(v) => ActivityRequest::Git(v),
+                Err(_) => ActivityRequest::Unknown,
+            },
+            "Grid" => match serde_json::from_value(inner) {
+                Ok(v) => ActivityRequest::Grid(v),
+                Err(_) => ActivityRequest::Unknown,
+            },
+            "ReportFile" => match serde_json::from_value(inner) {
+                Ok(v) => ActivityRequest::ReportFile(v),
+                Err(_) => ActivityRequest::Unknown,
+            },
+            "Cost" => match serde_json::from_value(inner) {
+                Ok(v) => ActivityRequest::Cost(v),
+                Err(_) => ActivityRequest::Unknown,
+            },
+            "Session" => match serde_json::from_value(inner) {
+                Ok(v) => ActivityRequest::Session(v),
+                Err(_) => ActivityRequest::Unknown,
+            },
             _ => ActivityRequest::Unknown,
         })
     }
@@ -334,11 +349,26 @@ impl<'de> Deserialize<'de> for ActivityResult {
             "Herdr" => ActivityResult::Herdr(
                 serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
             ),
-            "Git" => serde_json::from_value(inner).unwrap_or(ActivityResult::Unknown),
-            "Grid" => serde_json::from_value(inner).unwrap_or(ActivityResult::Unknown),
-            "ReportFile" => serde_json::from_value(inner).unwrap_or(ActivityResult::Unknown),
-            "Cost" => serde_json::from_value(inner).unwrap_or(ActivityResult::Unknown),
-            "Session" => serde_json::from_value(inner).unwrap_or(ActivityResult::Unknown),
+            "Git" => match serde_json::from_value(inner) {
+                Ok(v) => ActivityResult::Git(v),
+                Err(_) => ActivityResult::Unknown,
+            },
+            "Grid" => match serde_json::from_value(inner) {
+                Ok(v) => ActivityResult::Grid(v),
+                Err(_) => ActivityResult::Unknown,
+            },
+            "ReportFile" => match serde_json::from_value(inner) {
+                Ok(v) => ActivityResult::ReportFile(v),
+                Err(_) => ActivityResult::Unknown,
+            },
+            "Cost" => match serde_json::from_value(inner) {
+                Ok(v) => ActivityResult::Cost(v),
+                Err(_) => ActivityResult::Unknown,
+            },
+            "Session" => match serde_json::from_value(inner) {
+                Ok(v) => ActivityResult::Session(v),
+                Err(_) => ActivityResult::Unknown,
+            },
             _ => ActivityResult::Unknown,
         })
     }
@@ -348,4 +378,19 @@ impl<'de> Deserialize<'de> for ActivityResult {
 pub trait Activity: Send + Sync {
     /// Executes a typed activity request and returns a typed result.
     fn execute(&self, req: &ActivityRequest) -> Result<ActivityResult, ActivityError>;
+}
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+
+    #[test]
+    fn cost_result_roundtrips_through_value() {
+        let r = ActivityResult::Cost(CostResult::Spend(10.0));
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ActivityResult>(v).unwrap(),
+            r
+        );
+    }
 }

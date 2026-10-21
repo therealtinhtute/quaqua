@@ -14,9 +14,9 @@ Enforced in W2 with: `cargo test --locked -p quaqua -- --ignored test_w1_owners_
 | K1 | crates/quaqua/src/worker/prompt/workflow.rs | worker-lead | sude-arch-k1 | SingleWorkerWorkflow state machine with budget, grace, autoext, stall timers |
 | K1 | crates/quaqua/src/worker/prompt/mod.rs | worker-lead | sude-arch-k1 | Prompt worker entry point and workflow runner integration |
 | K1 | crates/quaqua/src/worker/prompt/watchdog.rs | worker-lead | sude-arch-k1 | Watchdog timer state machine adaptation |
-| K2 | crates/quaqua/src/herdr_events.rs | worker-lead | sude-arch-k2 | herdr event subscriber activity (agent_status_changed, pane.exited) |
+| K2 | crates/quaqua/src/herdr.rs | worker-lead | sude-arch-k2 | Blocking herdr agent wait + synchronous prompt land check |
 | K3 | crates/quaqua/src/worker/prompt/cost.rs | worker-lead | sude-arch-k3 | Cost tracking activity (cost80/cost100 and report mtime checks) |
-| K3 | crates/quaqua/src/worker/prompt/observer.rs | worker-lead | sude-arch-k3 | Observer updates: drop ANSI scraping in favour of activity results |
+| K3 | crates/quaqua/src/worker/prompt/observer.rs | worker-lead | sude-arch-k3 | Glyph-free report readiness and Lead/pipeline liveness |
 | K4 | crates/quaqua/src/taskforce/mod.rs | worker-lead | sude-arch-k4 | TaskforceWorkflow implementation (quorum, dual-lens, advisor) |
 | P1 | crates/quaqua/src/pipeline/mod.rs | pipe-lead | sude-arch-p1 | PipelineWorkflow: plan gate, build child, review child, fix cycle |
 | P1 | crates/quaqua/src/pipeline/state.rs | pipe-lead | sude-arch-p1 | Pipeline state transitions and durable event recovery |

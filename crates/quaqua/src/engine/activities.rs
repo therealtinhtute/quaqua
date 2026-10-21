@@ -8,7 +8,7 @@ use std::time::UNIX_EPOCH;
 
 use crate::engine::activity::{
     Activity, ActivityError, ActivityRequest, ActivityResult, CostRequest, CostResult, GitRequest,
-    GitResult, GridRequest, GridResult, HerdrRequest, HerdrResult, ReportFileRequest,
+    GitResult, GridRequest, HerdrRequest, HerdrResult, ReportFileRequest,
     ReportFileResult, SessionRequest, SessionResult,
 };
 use crate::git::{Git, GitOps};
@@ -229,7 +229,6 @@ impl SystemActivities {
                     name: name.clone(),
                 }))
             }
-            HerdrRequest::Unknown => Ok(ActivityResult::Herdr(HerdrResult::Unknown)),
             HerdrRequest::Stop { name } => {
                 let (ok, output) = Self::run_with_etxtbusy_retry(|| self.herdr.agent_get(name))
                     .map_err(|e| {
@@ -757,6 +756,7 @@ impl Activity for SystemActivities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::activity::GridResult;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;

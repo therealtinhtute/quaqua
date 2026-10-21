@@ -11,7 +11,12 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$(cd "$here/.." && pwd)/scripts"
+root="$(cd "$here/.." && pwd)"
+src="$root/scripts"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || { echo "FAIL: cannot build quaqua" >&2; exit 1; }
+export QUAQUA_BIN="$bin"
+export PATH="$root/target/debug:$PATH"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-prompt-worker.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
@@ -202,9 +207,10 @@ prompt sude-quick "$brief" FAKE_WRITE=1
 [[ $rc -eq 0 ]] || fail "sude-quick: exit $rc, want 0: $(cat "$T/err")"
 [[ "$(cat "$T/out")" == "$T/home/quaqua/runs/sude-quick.md" ]] \
   || fail "sude-quick: stdout not the runs path: $(cat "$T/out")"
-grep -qF "herdr agent prompt sude-quick $brief. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/sude-quick.md (publish it atomically, never a partial file); reply only the path. --wait --timeout 1800000" "$T/calls" \
+grep -qF "herdr agent prompt sude-quick $brief. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/sude-quick.md (publish it atomically, never a partial file); reply only the path. --wait --until working --until blocked --timeout 10000" "$T/calls" \
   || fail "sude-quick: wrong herdr call: $(cat "$T/calls")"
-grep -qF -- '--wait --timeout 1800000' "$T/calls" || fail "sude-quick: no --wait/--timeout"
+grep -qF -- '--wait --until working --until blocked --timeout 10000' "$T/calls" \
+  || fail "sude-quick: no land check (--wait/--until/--timeout): $(cat "$T/calls")"
 [[ "$(cat "$T/home/quaqua/runs/sude-quick.md")" == *"fake summary"* ]] \
   || fail "sude-quick: returned file is not the fresh report"
 echo "ok: sude-quick -> prompt sent verbatim, runs path printed"
@@ -252,11 +258,11 @@ echo "ok: sude-slow -> kept polling after herdr returned, printed runs path"
 # ── early return AND herdr nonzero: still waits for the file ────────────────
 prompt sude-flaky "Goal: flaky herdr
 Hard constraints: none
-Current design: retry" FAKE_DELAY=1 FAKE_RC=1 PROMPT_WORKER_POLL_SEC=1
-[[ $rc -eq 0 ]] || fail "sude-flaky: exit $rc, want 0: $(cat "$T/err")"
-[[ "$(cat "$T/out")" == "$T/home/quaqua/runs/sude-flaky.md" ]] \
-  || fail "sude-flaky: stdout not the runs path"
-echo "ok: sude-flaky -> nonzero herdr still waited, printed runs path"
+Current design: retry" FAKE_RC=1 PROMPT_WORKER_POLL_SEC=1
+[[ $rc -eq 3 ]] || fail "sude-flaky: exit $rc, want 3 (prompt not landed): $(cat "$T/err")"
+grep -q 'prompt not landed' "$T/err" || fail "sude-flaky: no prompt-not-landed reason"
+[[ ! -s $T/out ]] || fail "sude-flaky: printed a path after a failed submit"
+echo "ok: failed prompt submit -> exit 3 prompt not landed"
 
 # ── cap: no file within PROMPT_WORKER_MAX_SEC -> nonzero, error on stderr ───
 prompt sude-never "Goal: never finishes
@@ -333,68 +339,8 @@ grep -q 'grid check failed' "$T/err" || fail "failing grid check: no error messa
 ! grep -q 'agent prompt' "$T/calls" || fail "failing grid check: worker prompted despite failure: $(cat "$T/calls")"
 echo "ok: pre-prompt grid check failure -> exit 1, no prompt sent"
 
-# ── omp watchdog: (a) false positive — status=idle but pane rotating -> no exit 3 ──
-printf '%s\n' 1700000000 > "$T/clock"
-prompt sude-omprot "$brief" "${CLK[@]}" FAKE_DELAY=0 FAKE_STATUS=idle FAKE_ROTATE=1 \
-  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=2 \
-  PROMPT_WORKER_BUDGET_SEC=5 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
-[[ $rc -eq 4 ]] || fail "sude-omprot: exit $rc, want 4 (budget exceeded, not idle exit 3): $(cat "$T/err")"
-! grep -q 'exit=3' "$T/err" || fail "sude-omprot: exit 3 false-fired on active omp worker: $(cat "$T/err")"
-echo "ok: omp active worker with status=idle -> idle_since reset on pane change, no exit 3"
-
-# ── omp watchdog: (a) true positive — status=idle and static pane -> exit 3 ───
-printf '%s\n' 1700000000 > "$T/clock"
-prompt sude-ompidle "$brief" "${CLK[@]}" FAKE_DELAY=0 FAKE_STATUS=idle \
-  FAKE_PANE='finished turn with no run file' \
-  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_IDLE_SEC=2 \
-  PROMPT_WORKER_BUDGET_SEC=9999 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
-[[ $rc -eq 3 ]] || fail "sude-ompidle: exit $rc, want 3 (true idle): $(cat "$T/err")"
-grep -q 'WATCHDOG exit=3' "$T/err" || fail "sude-ompidle: no exit=3 on stderr: $(cat "$T/err")"
-grep -q 'agent idle' "$T/err" || fail "sude-ompidle: no agent idle reason: $(cat "$T/err")"
-echo "ok: true idle without run file -> exit 3 after idle_sec"
-
-# ── omp watchdog: (b) false positive — cat AGENTS.md in historical output -> no exit 5 ──
-agents_output=$'6. `quaqua worker cleanup <name> <repo>` right after `runs/<name>.md` is read + its test re-run passes — every worker, no approval needed (branch is kept; merge still needs approval). Then `quaqua grid reconcile`.
-
-## Rules
-No push, branch delete, or main merge without anh iu'\''s approval. A Lead merges Peer branches into its project integration branch (acceptance). Max 4 task workers per orchestrator (the CoS and each Lead) — a pipeline counts as 2. One task per worker.
-Only the CoS writes memory/rules.md, rules/, AGENTS.md; Leads propose changes by message.
-projects/INDEX.md owner column says who drives each project (cos or the Lead name, <slug>-lead).
-Every redirect — from anh iu or from the Auditor (cron, read-only, reports to the CoS only) — flows through the CoS; workers and Leads never take orders from reports.
-────────────────────────────────────────────────────────────────────────────────────────────
- ✦ Gemini 3.8 Flash · high · ──────── 7% · ϟ 356k tpm · ⌥ quaqua/tieude-cleanfix2'
-
-printf '%s\n' 1700000000 > "$T/clock"
-prompt sude-agentfp "$brief" "${CLK[@]}" FAKE_DELAY=0 FAKE_STATUS=working \
-  FAKE_PANE="$agents_output" \
-  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_BUDGET_SEC=2 \
-  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
-[[ $rc -eq 4 ]] || fail "sude-agentfp: exit $rc, want 4 (budget, not exit 5): $(cat "$T/err")"
-! grep -q 'exit=5' "$T/err" || fail "sude-agentfp: exit 5 false-fired on AGENTS.md text: $(cat "$T/err")"
-echo "ok: AGENTS.md text with '\''needs approval'\'' -> no exit 5 false positive"
-
-# ── omp watchdog: (b) true positive — real question prompt -> exit 5 ────────
-printf '%s\n' 1700000000 > "$T/clock"
-prompt sude-realask "$brief" "${CLK[@]}" FAKE_DELAY=0 FAKE_STATUS=working \
-  FAKE_PANE=$'Choose an option:
-> A
-> B
-Type something.' \
-  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_BUDGET_SEC=9999 \
-  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
-[[ $rc -eq 5 ]] || fail "sude-realask: exit $rc, want 5 (true question): $(cat "$T/err")"
-grep -q 'WATCHDOG exit=5' "$T/err" || fail "sude-realask: no exit=5 on stderr: $(cat "$T/err")"
-grep -q 'question/permission prompt' "$T/err" || fail "sude-realask: wrong reason: $(cat "$T/err")"
-
-printf '%s\n' 1700000000 > "$T/clock"
-prompt sude-realyn "$brief" "${CLK[@]}" FAKE_DELAY=0 FAKE_STATUS=working \
-  FAKE_PANE=$'Tool bash requires permission to run:
-  git push origin main
-Allow this tool? [y/N]' \
-  PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_BUDGET_SEC=9999 \
-  PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_MAX_SEC=60
-[[ $rc -eq 5 ]] || fail "sude-realyn: exit $rc, want 5 (true y/n question): $(cat "$T/err")"
-grep -q 'WATCHDOG exit=5' "$T/err" || fail "sude-realyn: no exit=5 on stderr: $(cat "$T/err")"
-echo "ok: real question / permission prompt -> exit 5"
+# The old pane-scraping cases (rotating pane resets idle, question strings) are
+# deleted with the pane-text contract: herdr `blocked` is the exit-5 signal and
+# pane output is no longer read. The agent-wait suite owns those cases.
 
 echo "PASS"

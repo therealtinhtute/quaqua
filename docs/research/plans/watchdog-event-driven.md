@@ -1,6 +1,6 @@
 # Event-driven worker watchdog without screen scraping (issues #47 P1, #87)
 
-Status: **design** · truonglao-wddesign · 2026-10-21 · herdr 0.9.5
+Status: **implemented** (quaqua/tieude-wdbuild, 8101e30) · design by truonglao-wddesign · 2026-10-21 · herdr 0.9.5
 Inputs: `docs/research/probes/wdprobe/REPORT.md` (branch `quaqua/tieude-wdprobe`, PR #88),
 `docs/research/probes/evtprobe/REPORT-2026-10-17.md`, live probes below.
 

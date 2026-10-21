@@ -302,9 +302,7 @@ impl crate::engine::runner::RunnerClock for PromptClock {
 #[derive(Clone, Default)]
 struct WaitSnapshot {
     status: String,
-    ctx: String,
     diffstat: String,
-    quiet_sec: u64,
 }
 
 /// Reads the status and error code from an `agent prompt --wait` /
@@ -344,7 +342,6 @@ fn parse_submit_output(out: &std::process::Output) -> (bool, String, String) {
 struct PromptActivities {
     inner: SystemActivities,
     runs_dir: PathBuf,
-    name: String,
     time_budget_sec: u64,
     nudge_pct: u64,
     heartbeat_sec: u64,
@@ -404,7 +401,6 @@ impl Activity for PromptActivities {
                 if let Ok(ActivityResult::Herdr(crate::engine::activity::HerdrResult::AgentWait {
                     status,
                     err,
-                    session_kind,
                     session_value,
                     harness,
                     cwd,
@@ -432,9 +428,7 @@ impl Activity for PromptActivities {
                         } else {
                             format!("{status} ({err})")
                         },
-                        ctx: session_kind.clone(),
                         diffstat: diffstat.clone(),
-                        quiet_sec: quiet,
                     });
                     let mut lh = self.last_heartbeat.lock().unwrap();
                     if now.saturating_sub(*lh) >= self.heartbeat_sec {
@@ -458,16 +452,6 @@ impl Activity for PromptActivities {
                         *self.last_progress.lock().unwrap() = now_sec();
                     }
                     let _ = stat;
-                    *self.last_wait.lock().unwrap() = Some(WaitSnapshot {
-                        status: String::new(),
-                        ctx: String::new(),
-                        diffstat: if hash.is_empty() {
-                            "clean".to_string()
-                        } else {
-                            hash.chars().take(8).collect()
-                        },
-                        quiet_sec: 0,
-                    });
                 }
                 res
             }
@@ -875,7 +859,6 @@ pub fn prompt_worker<G: GitOps>(
     let prompt_acts = PromptActivities {
         inner: sys_acts,
         runs_dir: runs_dir.clone(),
-        name: name.to_string(),
         time_budget_sec: active_budget,
         nudge_pct,
         heartbeat_sec,

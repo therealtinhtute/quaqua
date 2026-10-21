@@ -295,7 +295,7 @@ impl HerdrOps for MockActivitiesHerdr {
         }
     }
 
-    fn agent_read(&self, name: &str, _source: &str, lines: u32) -> std::io::Result<String> {
+    fn agent_read(&self, name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
         let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: name.to_string(), until: Vec::new(), timeout_ms: 0 });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.agent_read", &req) {
@@ -422,7 +422,7 @@ impl HerdrOps for MockActivitiesHerdr {
         false
     }
 
-    fn pane_read(&self, pane: &str, _source: &str, lines: u32) -> std::io::Result<String> {
+    fn pane_read(&self, pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
         let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: pane.to_string(), until: Vec::new(), timeout_ms: 0 });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.pane_read", &req) {
