@@ -206,7 +206,8 @@ pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -
     let entries = std::fs::read_dir(&dir).ok()?;
     let mut total_cost = 0.0;
     let mut tokens = Tokens::default();
-    let mut found = false;
+    let mut found_cost = false;
+    let mut found_usage = false;
     let mut last_model: Option<String> = None;
 
     for entry in entries.flatten() {
@@ -236,7 +237,7 @@ pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -
 
             if let Some(c) = session_line_cost(&v) {
                 total_cost += c;
-                found = true;
+                found_cost = true;
             }
 
             let usage = v.pointer("/message/usage").or_else(|| v.get("usage"));
@@ -256,7 +257,7 @@ pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -
                 tokens.reasoning += trsn;
                 tokens.cache_read += tcr;
                 tokens.cache_write += tcw;
-                found = true;
+                found_usage = true;
             }
 
             let model = v
@@ -271,10 +272,10 @@ pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -
         }
     }
 
-    if found {
+    if found_cost || found_usage {
         Some(Spend {
-            usd: Some(total_cost),
-            tokens: Some(tokens),
+            usd: if found_cost { Some(total_cost) } else { None },
+            tokens: if found_usage { Some(tokens) } else { None },
             spend_src: "omp-session".to_string(),
             model: last_model,
         })
@@ -427,40 +428,12 @@ pub fn claude_spend_in(
     })
 }
 
-/// Reads opencode spend from an sqlite database file, summing over every session in `cwd`.
-pub fn opencode_spend_in(
-    db_path: &Path,
-    session_id: &str,
-    cwd: &str,
+fn execute_opencode_query(
+    conn: &rusqlite::Connection,
+    query: &str,
+    param: &str,
     since_ms: Option<u64>,
 ) -> Option<Spend> {
-    if !db_path.is_file() {
-        return None;
-    }
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
-
-    let (query, param): (&str, &str) = if !cwd.is_empty() {
-        (
-            "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
-             tokens_cache_write, model, time_created \
-             FROM session_v2 WHERE directory = ?1 ORDER BY time_created ASC;",
-            cwd,
-        )
-    } else if !session_id.is_empty() {
-        (
-            "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
-             tokens_cache_write, model, time_created \
-             FROM session_v2 WHERE id = ?1 ORDER BY time_created ASC;",
-            session_id,
-        )
-    } else {
-        return None;
-    };
-
     let mut stmt = conn.prepare(query).ok()?;
     let mut rows = stmt.query(rusqlite::params![param]).ok()?;
 
@@ -516,6 +489,46 @@ pub fn opencode_spend_in(
     } else {
         None
     }
+}
+
+/// Reads opencode spend from an sqlite database file, summing over every session in `cwd`.
+/// Falls back to querying by `session_id` if querying by `cwd` yields no records.
+pub fn opencode_spend_in(
+    db_path: &Path,
+    session_id: &str,
+    cwd: &str,
+    since_ms: Option<u64>,
+) -> Option<Spend> {
+    if !db_path.is_file() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+
+    let query_dir = "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
+                     tokens_cache_write, model, time_created \
+                     FROM session_v2 WHERE directory = ?1 ORDER BY time_created ASC;";
+
+    let query_id = "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
+                    tokens_cache_write, model, time_created \
+                    FROM session_v2 WHERE id = ?1 ORDER BY time_created ASC;";
+
+    if !cwd.is_empty() {
+        if let Some(spend) = execute_opencode_query(&conn, query_dir, cwd, since_ms) {
+            return Some(spend);
+        }
+    }
+
+    if !session_id.is_empty() {
+        if let Some(spend) = execute_opencode_query(&conn, query_id, session_id, since_ms) {
+            return Some(spend);
+        }
+    }
+
+    None
 }
 
 fn opencode_db_candidates(name: &str) -> Vec<PathBuf> {
@@ -643,7 +656,36 @@ pub fn read_worker_spend(
 }
 
 pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) -> Option<f64> {
-    read_worker_spend(name, session_id, cwd, harness, None).usd
+    if let Some(cost) = read_worker_spend(name, session_id, cwd, harness, None).usd {
+        return Some(cost);
+    }
+
+    if is_opencode_worker(harness, name) && !session_id.is_empty() {
+        let mut cmd = std::process::Command::new("opencode");
+        cmd.args(["api", "GET", &format!("/api/session/{session_id}")]);
+
+        let state_dir = default_runs_dir().join(".opencode-state").join(name);
+        if state_dir.is_dir() {
+            cmd.env("XDG_STATE_HOME", &state_dir);
+        }
+        if let Ok(out) = cmd.output() {
+            if out.status.success() {
+                if let Ok(json_str) = std::str::from_utf8(&out.stdout) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Some(c) = v
+                            .get("data")
+                            .and_then(|d| d.get("cost"))
+                            .and_then(|c| c.as_f64())
+                        {
+                            return Some(c);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Milliseconds since the epoch from a file's mtime.
@@ -1460,5 +1502,80 @@ pub(crate) mod spend {
 
         let frac = parse_iso_timestamp_ms("2026-10-21T13:40:00.500Z").unwrap();
         assert_eq!(frac, utc + 500);
+    }
+
+    #[test]
+    fn test_omp_usage_only_and_cost_only() {
+        let tmp = std::env::temp_dir().join(format!("omp-split-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("sessions");
+        let cwd = "/path/to/worktree/.wt/sude-split";
+        let dir = root.join("-.wt-sude-split");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1. Usage only (no cost.total)
+        std::fs::write(
+            dir.join("usage-only.jsonl"),
+            r#"{"timestamp":"2026-10-21T10:00:00.000Z","message":{"model":"gemini-3.8-flash","usage":{"input":100,"output":20,"reasoningTokens":5,"cacheRead":50,"cacheWrite":10}}}"#,
+        ).unwrap();
+
+        let spend_usage = omp_spend_in(&root, cwd, "/path/to/worktree", None).unwrap();
+        assert_eq!(spend_usage.usd, None, "usage-only transcript must have usd: None, not 0.0");
+        let tok = spend_usage.tokens.unwrap();
+        assert_eq!(tok.in_tokens, 100);
+        assert_eq!(tok.out_tokens, 20);
+
+        // 2. Cost only (no usage)
+        std::fs::remove_file(dir.join("usage-only.jsonl")).unwrap();
+        std::fs::write(
+            dir.join("cost-only.jsonl"),
+            r#"{"timestamp":"2026-10-21T10:00:00.000Z","message":{"cost":{"total":0.042}}}"#,
+        ).unwrap();
+
+        let spend_cost = omp_spend_in(&root, cwd, "/path/to/worktree", None).unwrap();
+        assert!((spend_cost.usd.unwrap() - 0.042).abs() < 1e-9);
+        assert_eq!(spend_cost.tokens, None, "cost-only transcript must have tokens: None, not 0s");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_opencode_fallback_to_session_id_when_cwd_mismatch() {
+        let tmp = std::env::temp_dir().join(format!("opencode-fallback-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = tmp.join("opencode.db");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                directory TEXT NOT NULL,
+                cost REAL DEFAULT 0 NOT NULL,
+                tokens_input INTEGER DEFAULT 0 NOT NULL,
+                tokens_output INTEGER DEFAULT 0 NOT NULL,
+                tokens_reasoning INTEGER DEFAULT 0 NOT NULL,
+                tokens_cache_read INTEGER DEFAULT 0 NOT NULL,
+                tokens_cache_write INTEGER DEFAULT 0 NOT NULL,
+                model TEXT,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO session_v2 (id, directory, cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, model, time_created, time_updated)
+             VALUES ('ses-fallback-99', '/private/tmp/scratchpad', 0.123, 500, 100, 0, 2000, 0, '{\"id\":\"deepseek-v4.1-flash\"}', 1000, 1500);",
+            [],
+        ).unwrap();
+
+        // CWD mismatch: herdr reports '/tmp/scratchpad' instead of '/private/tmp/scratchpad'
+        let spend = opencode_spend_in(&db_path, "ses-fallback-99", "/tmp/scratchpad", None).unwrap();
+        assert!((spend.usd.unwrap() - 0.123).abs() < 1e-9);
+        assert_eq!(spend.tokens.unwrap().in_tokens, 500);
+        assert_eq!(spend.spend_src, "opencode-db");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

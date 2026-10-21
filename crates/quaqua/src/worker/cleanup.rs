@@ -110,7 +110,6 @@ pub fn append_worker_telemetry(
         let mut kind: Option<String> = None;
         let mut budget_sec: Option<u64> = None;
         let mut usd_budget: Option<f64> = None;
-        let mut journal_repo: Option<String> = None;
 
         if db_path.is_file() {
             if let Ok(journal) = crate::engine::journal_sqlite::SqliteJournal::open(&db_path) {
@@ -158,9 +157,6 @@ pub fn append_worker_telemetry(
                             if harness.is_none() {
                                 harness = state.harness.clone();
                             }
-                            if journal_repo.is_none() && !state.input.repo.is_empty() {
-                                journal_repo = Some(state.input.repo.clone());
-                            }
                         }
                     }
                 }
@@ -195,7 +191,7 @@ pub fn append_worker_telemetry(
             since_ms,
         );
 
-        let repo_str = journal_repo.unwrap_or_else(|| format_repo_path(repo));
+        let repo_str = format_repo_path(repo);
         let ts_str = crate::usage::format_iso_vn(now_ms);
 
         let row = WorkerTelemetryRow {
@@ -337,16 +333,6 @@ pub fn cleanup_worker_in<G: GitOps, H: HerdrOps>(
     let owner = std::env::var("QUAQUA_OWNER")
         .ok()
         .unwrap_or_else(|| WorkerMetadata::load_owner(&runs_dir, name));
-    // Record worker telemetry BEFORE cleanup_worker_files removes state and metadata!
-    append_worker_telemetry(
-        name,
-        &repo,
-        &wt,
-        parsed_json.as_ref(),
-        Some(&owner),
-        &runs_dir,
-    );
-
     let repo_name = repo
         .file_name()
         .and_then(|n| n.to_str())
@@ -365,10 +351,21 @@ pub fn cleanup_worker_in<G: GitOps, H: HerdrOps>(
         return Err((rm_out.status.code().unwrap_or(1), err_text));
     }
 
+    run_grid_hook(&grid_tab, Some(&owner))?;
+
+    // Record worker telemetry after fallible worktree remove and grid steps,
+    // but BEFORE cleanup_worker_files removes state and metadata!
+    append_worker_telemetry(
+        name,
+        &repo,
+        &wt,
+        parsed_json.as_ref(),
+        Some(&owner),
+        &runs_dir,
+    );
+
     WorkerMetadata::cleanup_worker_files(&runs_dir, name);
     println!("cleaned {name} (branch quaqua/{name} kept)");
-
-    run_grid_hook(&grid_tab, Some(&owner))?;
     Ok(())
 }
 
@@ -537,13 +534,16 @@ pub(crate) mod metrics {
         let _lock = TEST_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join(format!("cleanup-metrics-happy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = std::fs::canonicalize(&tmp).unwrap();
         let runs_dir = tmp.join("runs");
         let repo = tmp.join("repo");
         let wt = tmp.join(".wt").join("tieude-clean1");
         std::fs::create_dir_all(&runs_dir).unwrap();
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
-
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
         std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
         std::env::set_var("GRID_SKIP", "1");
         std::env::set_var("QUAQUA_TEST", "1");
@@ -607,9 +607,15 @@ pub(crate) mod metrics {
         assert_eq!(tok.in_tokens, 94574);
         assert_eq!(tok.out_tokens, 16991);
         assert_eq!(tok.cache_read, 3754496);
+        assert_eq!(row.repo.as_deref(), Some("~/repo"));
 
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::remove_var("QUAQUA_RUNS_DIR");
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 
     #[test]
@@ -731,6 +737,181 @@ pub(crate) mod metrics {
         let tok = row2.tokens.unwrap();
         assert_eq!(tok.in_tokens, 1000);
         assert_eq!(tok.out_tokens, 200);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::remove_var("QUAQUA_RUNS_DIR");
+    }
+
+    #[test]
+    fn test_cleanup_failure_retry_produces_single_row() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("cleanup-fail-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let runs_dir = tmp.join("runs");
+        let repo = tmp.join("repo");
+        let wt = tmp.join(".wt").join("tieude-retry");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+
+        std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+        std::env::set_var("GRID_SKIP", "1");
+        std::env::set_var("QUAQUA_TEST", "1");
+
+        let herdr = MockHerdr {
+            agent_get_response: r#"{"result":{"agent":{"agent":"opencode","pane_id":"%1","cwd":"","agent_session":{"value":"ses-1"}}}}"#.to_string(),
+        };
+
+        // 1. Initial attempt fails at worktree_remove
+        let failing_git = MockGit { worktree_remove_ok: false };
+        let err = cleanup_worker_in("tieude-retry", &repo, &failing_git, &herdr, Some(&runs_dir));
+        assert!(err.is_err());
+
+        let tele_path = runs_dir.join("telemetry.jsonl");
+        assert!(!tele_path.exists(), "no telemetry row must be written when cleanup fails");
+
+        // 2. Retry succeeds
+        let success_git = MockGit { worktree_remove_ok: true };
+        let res = cleanup_worker_in("tieude-retry", &repo, &success_git, &herdr, Some(&runs_dir));
+        assert!(res.is_ok());
+
+        assert!(tele_path.is_file());
+        let content = std::fs::read_to_string(&tele_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1, "retry after failure must produce exactly 1 row");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::remove_var("QUAQUA_RUNS_DIR");
+    }
+
+    #[test]
+    fn test_cleanup_metrics_journal_fields() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("cleanup-journal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = std::fs::canonicalize(&tmp).unwrap();
+        let runs_dir = tmp.join("runs");
+        let repo = tmp.join("repo");
+        let wt = tmp.join(".wt").join("tieude-journal");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+        std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+        let db_path = runs_dir.join("quaqua.db");
+        let mut journal = crate::engine::journal_sqlite::SqliteJournal::open(&db_path).unwrap();
+
+        let mut state = crate::worker::prompt::workflow::SingleWorkerState::new(
+            crate::engine::child::SingleWorkerInput::new(
+                "tieude-journal",
+                "tieude",
+                repo.to_string_lossy(),
+                "brief",
+                1800,
+                Some(2.50),
+            ),
+        );
+        state.harness = Some("opencode".to_string());
+        let state_json = serde_json::to_string(&state).unwrap();
+        journal.append_snapshot("worker:tieude-journal#1", &crate::engine::journal::SnapshotRecord::new(1, state_json)).unwrap();
+
+        let now_ms = crate::util::now_sec() * 1000;
+        journal.append_event("worker:tieude-journal#1", &crate::engine::journal::EventRecord::new(1, now_ms.saturating_sub(60_000), "workflow_started".to_string(), "{}".to_string())).unwrap();
+        journal.append_event("worker:tieude-journal#1", &crate::engine::journal::EventRecord::new(2, now_ms.saturating_sub(10_000), "workflow_completed".to_string(), r#"{"exit":0,"report_path":"/tmp/r.md"}"#.to_string())).unwrap();
+
+        let herdr = MockHerdr {
+            agent_get_response: format!(
+                r#"{{"result":{{"agent":{{"agent":"opencode","pane_id":"%1","cwd":"{}","agent_session":{{"value":"ses-j1"}}}}}}}}"#,
+                wt.display()
+            ),
+        };
+        let git = MockGit { worktree_remove_ok: true };
+
+        cleanup_worker_in("tieude-journal", &repo, &git, &herdr, Some(&runs_dir)).unwrap();
+
+        let tele_path = runs_dir.join("telemetry.jsonl");
+        assert!(tele_path.is_file());
+        let content = std::fs::read_to_string(&tele_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1);
+
+        let row: WorkerTelemetryRow = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(row.prompts, 1);
+        assert_eq!(row.exit, Some(0));
+        assert!(row.wall_sec.unwrap() >= 10);
+        assert_eq!(row.kind.as_deref(), Some("tieude"));
+        assert_eq!(row.budget_sec, Some(1800));
+        assert!((row.usd_budget.unwrap() - 2.50).abs() < 1e-6);
+        assert_eq!(row.repo.as_deref(), Some("~/repo"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::remove_var("QUAQUA_RUNS_DIR");
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn test_cleanup_metrics_failing_harness_readers() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("cleanup-failing-readers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let runs_dir = tmp.join("runs");
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+
+        std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+        std::env::set_var("GRID_SKIP", "1");
+        std::env::set_var("QUAQUA_TEST", "1");
+
+        let git = MockGit { worktree_remove_ok: true };
+
+        // 1. OMP failing reader (no session directory)
+        let herdr_omp = MockHerdr {
+            agent_get_response: r#"{"result":{"agent":{"agent":"omp","pane_id":"%1","cwd":"/nonexistent/wt/.wt/sude-fail","agent_session":{"value":"ses-omp"}}}}"#.to_string(),
+        };
+        cleanup_worker_in("sude-fail", &repo, &git, &herdr_omp, Some(&runs_dir)).unwrap();
+
+        // 2. Opencode failing reader (no sqlite db)
+        let herdr_open = MockHerdr {
+            agent_get_response: r#"{"result":{"agent":{"agent":"opencode","pane_id":"%2","cwd":"/nonexistent/wt/.wt/tieude-fail","agent_session":{"value":"ses-open"}}}}"#.to_string(),
+        };
+        cleanup_worker_in("tieude-fail", &repo, &git, &herdr_open, Some(&runs_dir)).unwrap();
+
+        // 3. Claude failing reader (no projects transcripts)
+        let herdr_claude = MockHerdr {
+            agent_get_response: r#"{"result":{"agent":{"agent":"claude","pane_id":"%3","cwd":"/nonexistent/wt/.wt/truonglao-fail","agent_session":{"value":"ses-claude"}}}}"#.to_string(),
+        };
+        cleanup_worker_in("truonglao-fail", &repo, &git, &herdr_claude, Some(&runs_dir)).unwrap();
+
+        let tele_path = runs_dir.join("telemetry.jsonl");
+        let content = std::fs::read_to_string(&tele_path).unwrap();
+        let rows: Vec<WorkerTelemetryRow> = content.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(rows.len(), 3);
+
+        // OMP: usd null, tokens null, spend_src omp-session-not-found
+        assert_eq!(rows[0].name, "sude-fail");
+        assert_eq!(rows[0].usd, None);
+        assert_eq!(rows[0].tokens, None);
+        assert_eq!(rows[0].spend_src, "omp-session-not-found");
+
+        // Opencode: usd null, tokens null, spend_src opencode-db-not-found
+        assert_eq!(rows[1].name, "tieude-fail");
+        assert_eq!(rows[1].usd, None);
+        assert_eq!(rows[1].tokens, None);
+        assert_eq!(rows[1].spend_src, "opencode-db-not-found");
+
+        // Claude: usd null, tokens null, spend_src claude-tokens-not-found
+        assert_eq!(rows[2].name, "truonglao-fail");
+        assert_eq!(rows[2].usd, None);
+        assert_eq!(rows[2].tokens, None);
+        assert_eq!(rows[2].spend_src, "claude-tokens-not-found");
 
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::remove_var("QUAQUA_RUNS_DIR");

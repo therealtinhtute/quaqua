@@ -604,6 +604,9 @@ pub struct MetricsReport {
 pub struct MetricsTotal {
     pub workers: usize,
     pub usd: f64,
+    #[serde(default)]
+    pub unpriced: usize,
+    #[serde(default)]
     pub claude_unpriced: usize,
     pub wall_sec: u64,
 }
@@ -677,14 +680,18 @@ pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
     }
 
     let mut total_usd = 0.0;
+    let mut unpriced = 0usize;
     let mut claude_unpriced = 0usize;
     let mut total_wall_sec = 0u64;
 
     for w in &workers {
         if let Some(usd) = w.usd {
             total_usd += usd;
-        } else if w.harness.as_deref() == Some("claude") || w.spend_src == "claude-tokens" {
-            claude_unpriced += 1;
+        } else {
+            unpriced += 1;
+            if w.harness.as_deref() == Some("claude") || w.spend_src == "claude-tokens" {
+                claude_unpriced += 1;
+            }
         }
         if let Some(wall) = w.wall_sec {
             total_wall_sec += wall;
@@ -698,6 +705,7 @@ pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
         total: MetricsTotal {
             workers: worker_count,
             usd: (total_usd * 10000.0).round() / 10000.0,
+            unpriced,
             claude_unpriced,
             wall_sec: total_wall_sec,
         },
@@ -794,20 +802,30 @@ pub fn render_metrics_text(report: &MetricsReport) -> String {
     }
 
     if !report.pipelines.is_empty() {
-        let p_strs: Vec<String> = report
-            .pipelines
+        let len = report.pipelines.len();
+        let (slice, extra) = if len > 8 {
+            (&report.pipelines[len - 8..], len - 8)
+        } else {
+            (&report.pipelines[..], 0)
+        };
+        let mut p_strs: Vec<String> = slice
             .iter()
             .map(|p| format!("{} {} r{} {}m", p.task, p.status, p.rounds, p.minutes))
             .collect();
+        if extra > 0 {
+            p_strs.push(format!("+{extra} more"));
+        }
         out.push_str(&format!("pipelines: {}\n", p_strs.join(" · ")));
     } else {
         out.push_str("pipelines: none\n");
     }
 
-    let unpriced_str = if report.total.claude_unpriced > 0 {
-        format!(" (+{} claude unpriced)", report.total.claude_unpriced)
-    } else {
+    let unpriced_str = if report.total.unpriced == 0 {
         String::new()
+    } else if report.total.unpriced == report.total.claude_unpriced {
+        format!(" (+{} claude unpriced)", report.total.unpriced)
+    } else {
+        format!(" (+{} unpriced)", report.total.unpriced)
     };
     let total_wall_str = format_duration_metric(report.total.wall_sec);
     out.push_str(&format!(
@@ -1664,6 +1682,90 @@ pub(crate) mod metrics {
         let other_rendered = render_metrics(&runs_dir, &other_args).unwrap();
         assert!(!other_rendered.contains("tieude-p74lock"));
         assert!(other_rendered.contains("total: 0 workers"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_worker_telemetry_row_roundtrip_unpriced_and_pipeline_cap() {
+        let tmp = std::env::temp_dir().join(format!("status-metrics-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let runs_dir = tmp.join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        let tele_path = runs_dir.join("telemetry.jsonl");
+
+        // 1. Round-trip WorkerTelemetryRow with repo ~/quaqua and unpriced non-claude worker
+        let row = WorkerTelemetryRow {
+            ts: "2026-10-21T12:00:00+07:00".to_string(),
+            rec: "worker".to_string(),
+            name: "sude-rt".to_string(),
+            kind: Some("sude".to_string()),
+            harness: Some("omp".to_string()),
+            owner: Some("cos".to_string()),
+            pipeline: None,
+            repo: Some("~/quaqua".to_string()),
+            prompts: 1,
+            exit: Some(0),
+            wall_sec: Some(300),
+            budget_sec: Some(1500),
+            usd: None, // OMP reader failed
+            usd_budget: Some(1.0),
+            tokens: None,
+            spend_src: "omp-session-not-found".to_string(),
+            model: None,
+        };
+        let row_json = serde_json::to_string(&row).unwrap();
+
+        // 2. Ten pipeline items to test newest 8 cap and +N more
+        let mut lines = vec![row_json];
+        for i in 1..=10 {
+            let p = PipelineTelemetryItem {
+                ts: format!("2026-10-21T12:{:02}:00+07:00", i),
+                rec: "pipeline".to_string(),
+                task: format!("task-{i}"),
+                repo: "~/quaqua".to_string(),
+                builder: "sude".to_string(),
+                reviewer: "suhuynh".to_string(),
+                review: "run".to_string(),
+                rounds: 1,
+                review_changed_outcome: false,
+                status: "clean".to_string(),
+                minutes: 10 + i as u64,
+            };
+            lines.push(serde_json::to_string(&p).unwrap());
+        }
+        std::fs::write(&tele_path, lines.join("\n") + "\n").unwrap();
+
+        let args = MetricsArgs {
+            metrics: true,
+            since: "24h".to_string(),
+            owner: None,
+            json: false,
+        };
+
+        let rendered = render_metrics(&runs_dir, &args).unwrap();
+        // Round-trip repo was read properly
+        let report = read_metrics(&runs_dir, &args);
+        assert_eq!(report.workers.len(), 1);
+        assert_eq!(report.workers[0].repo.as_deref(), Some("~/quaqua"));
+        // Unpriced marker is general (+1 unpriced), not (+1 claude unpriced)
+        assert_eq!(report.total.unpriced, 1);
+        assert_eq!(report.total.claude_unpriced, 0);
+        assert!(rendered.contains("total: 1 workers · $0.00 (+1 unpriced)"));
+
+        // Pipelines capped at newest 8 (task-3 to task-10), task-1 and task-2 omitted
+        assert!(rendered.contains("+2 more"));
+        assert!(rendered.contains("task-10 clean r1 20m"));
+        assert!(rendered.contains("task-3 clean r1 13m"));
+        assert!(!rendered.contains("task-1 clean"));
+        assert!(!rendered.contains("task-2 clean"));
+
+        // 3. Test --since cutoff
+        let now_sec = crate::util::now_sec();
+        let now_ms = now_sec * 1000;
+        let c_24h = parse_since_cutoff("24h", now_ms);
+        let c_7d = parse_since_cutoff("7d", now_ms);
+        assert!(c_24h > c_7d);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
