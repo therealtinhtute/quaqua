@@ -398,6 +398,29 @@ pub(crate) mod metrics {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     use std::process::Output;
 
+    /// Restores an environment variable when dropped, including on panic.
+    struct TestEnvVarGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl TestEnvVarGuard {
+        fn set(key: &'static str, val: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for TestEnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(val) => std::env::set_var(self.key, val),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     struct MockGit {
         worktree_remove_ok: bool,
     }
@@ -553,11 +576,10 @@ pub(crate) mod metrics {
         std::fs::create_dir_all(&runs_dir).unwrap();
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
-        let old_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
-        std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
-        std::env::set_var("GRID_SKIP", "1");
-        std::env::set_var("QUAQUA_TEST", "1");
+        let _env_home = TestEnvVarGuard::set("HOME", &tmp);
+        let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
+        let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
 
         // Fixture opencode DB
         let state_dir = runs_dir.join(".opencode-state").join("tieude-clean1").join("opencode");
@@ -622,12 +644,6 @@ pub(crate) mod metrics {
         assert_eq!(row.repo.as_deref(), Some("~/repo"));
 
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var("QUAQUA_RUNS_DIR");
-        if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 
     #[test]
@@ -642,9 +658,9 @@ pub(crate) mod metrics {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
 
-        std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
-        std::env::set_var("GRID_SKIP", "1");
-        std::env::set_var("QUAQUA_TEST", "1");
+        let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
+        let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
 
         let herdr = MockHerdr {
             agent_get_response: r#"{"error":{"code":"agent_not_found"}}"#.to_string(),
@@ -669,7 +685,6 @@ pub(crate) mod metrics {
         assert_eq!(row.prompts, None);
 
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var("QUAQUA_RUNS_DIR");
     }
 
     #[test]
@@ -684,9 +699,9 @@ pub(crate) mod metrics {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
 
-        std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
-        std::env::set_var("GRID_SKIP", "1");
-        std::env::set_var("QUAQUA_TEST", "1");
+        let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
+        let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
 
         // Seed telemetry.jsonl with previous lifecycle for tieude-reused at ts=2026-10-21T10:00:00Z
         let tele_path = runs_dir.join("telemetry.jsonl");
@@ -752,7 +767,6 @@ pub(crate) mod metrics {
         assert_eq!(tok.out_tokens, 200);
 
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var("QUAQUA_RUNS_DIR");
     }
 
     #[test]
@@ -767,9 +781,9 @@ pub(crate) mod metrics {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
 
-        std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
-        std::env::set_var("GRID_SKIP", "1");
-        std::env::set_var("QUAQUA_TEST", "1");
+        let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
+        let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
 
         let herdr = MockHerdr {
             agent_get_response: r#"{"result":{"agent":{"agent":"opencode","pane_id":"%1","cwd":"","agent_session":{"value":"ses-1"}}}}"#.to_string(),
@@ -794,7 +808,6 @@ pub(crate) mod metrics {
         assert_eq!(lines.len(), 1, "retry after failure must produce exactly 1 row");
 
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var("QUAQUA_RUNS_DIR");
     }
 
     #[test]
@@ -811,9 +824,8 @@ pub(crate) mod metrics {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
 
-        let old_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
-        std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+        let _env_home = TestEnvVarGuard::set("HOME", &tmp);
+        let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
         let db_path = runs_dir.join("quaqua.db");
         let mut journal = crate::engine::journal_sqlite::SqliteJournal::open(&db_path).unwrap();
 
@@ -861,12 +873,6 @@ pub(crate) mod metrics {
         assert_eq!(row.repo.as_deref(), Some("~/repo"));
 
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var("QUAQUA_RUNS_DIR");
-        if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 
     #[test]
@@ -879,9 +885,9 @@ pub(crate) mod metrics {
         std::fs::create_dir_all(&runs_dir).unwrap();
         std::fs::create_dir_all(&repo).unwrap();
 
-        std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
-        std::env::set_var("GRID_SKIP", "1");
-        std::env::set_var("QUAQUA_TEST", "1");
+        let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
+        let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
 
         let git = MockGit { worktree_remove_ok: true };
 
@@ -927,24 +933,16 @@ pub(crate) mod metrics {
         assert_eq!(rows[2].spend_src, "claude-tokens-not-found");
 
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var("QUAQUA_RUNS_DIR");
     }
 
     #[test]
     fn test_format_repo_path_boundary() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let old_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", "/mock/root/user");
+        let _env_home = TestEnvVarGuard::set("HOME", "/mock/root/user");
 
         assert_eq!(format_repo_path(Path::new("/mock/root/user/quaqua")), "~/quaqua");
         assert_eq!(format_repo_path(Path::new("/mock/root/user")), "~");
         // Must not strip as prefix when path boundary does not match:
         assert_eq!(format_repo_path(Path::new("/mock/root/user2/quaqua")), "/mock/root/user2/quaqua");
-
-        if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 }
