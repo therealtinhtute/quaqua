@@ -3,7 +3,7 @@
 Probe run 2026-10-21 on herdr **0.9.5**, branch `quaqua/tieude-wdprobe`.
 Throwaway workspace `w9` (label `wdprobe`), three panes, all created and closed by this
 probe. No product code changed. Scripts: `probe.py` (1 s sampler + event subscriber),
-`question-probe.py` (question UI sequence), `scenario.sh` (prompt driver), raw logs in `raw/`.
+`question-probe.py` (question UI sequence), `scenario.sh` (prompt driver), raw logs in `logs/`.
 
 Method (exact commands):
 
