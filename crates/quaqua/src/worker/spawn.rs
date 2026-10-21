@@ -316,7 +316,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     }
 
     prepare_worktree(git, &repo, &wt, &opts.name, opts.base.as_deref())?;
-    crate::init::ensure_git_hooks(&repo).map_err(|e| (1, format!("{e}\n")))?;
+    crate::init::ensure_worker_push_guard(&repo).map_err(|e| (1, format!("{e}\n")))?;
 
     // Worker rules dump
     let rules_dir = crate::workspace::workspace_root().join("rules");

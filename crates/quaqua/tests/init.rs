@@ -908,6 +908,121 @@ fn find_git() -> Option<PathBuf> {
     None
 }
 
+/// `worker spawn`'s hook step: only the push guard, in git's effective hooks
+/// dir, with `core.hooksPath` untouched. A foreign `core.hooksPath` and an
+/// existing foreign `pre-push` are left alone — spawn never redirects or
+/// overwrites a hook setup it did not create.
+#[test]
+fn worker_push_guard_installs_pre_push_only() {
+    let Some(_git) = find_git() else {
+        return;
+    };
+    let sb = Sandbox::new("pushguard");
+    let repo = sb.target("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .arg(&repo)
+        .status()
+        .unwrap()
+        .success());
+
+    quaqua::init::ensure_worker_push_guard(&repo).expect("push guard install");
+
+    let hook = repo.join(".git/hooks/pre-push");
+    assert!(hook.is_file(), "pre-push guard was not installed");
+    assert_eq!(
+        path_mode(&hook) & 0o111,
+        0o111,
+        "push guard is not executable"
+    );
+    assert!(
+        !repo.join(".git/hooks/pre-commit").exists(),
+        "spawn installed the opt-in pre-commit",
+    );
+    let hooks_path = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .unwrap();
+    assert!(
+        hooks_path.stdout.is_empty(),
+        "spawn redirected core.hooksPath: {}",
+        String::from_utf8_lossy(&hooks_path.stdout),
+    );
+
+    let run = |owner: Option<&str>| {
+        let mut cmd = Command::new(&hook);
+        cmd.current_dir(&repo)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match owner {
+            Some(v) => {
+                cmd.env("QUAQUA_OWNER", v);
+            }
+            None => {
+                cmd.env_remove("QUAQUA_OWNER");
+            }
+        }
+        cmd.status().unwrap()
+    };
+    assert!(!run(Some("tieude-x")).success(), "worker push must fail");
+    assert!(run(None).success(), "principal push must pass");
+
+    // A foreign core.hooksPath: refused with a warning, config and dir untouched.
+    let foreign = sb.target("foreign-repo");
+    std::fs::create_dir_all(&foreign).unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .arg(&foreign)
+        .status()
+        .unwrap()
+        .success());
+    let theirs = sb.target("their-hooks");
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&foreign)
+        .args(["config", "core.hooksPath", theirs.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .success());
+    quaqua::init::ensure_worker_push_guard(&foreign).expect("foreign hooksPath is a no-op");
+    let got = Command::new("git")
+        .arg("-C")
+        .arg(&foreign)
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&got.stdout).trim(),
+        theirs.to_string_lossy().trim(),
+        "the foreign core.hooksPath was overwritten",
+    );
+    assert!(!theirs.exists(), "wrote into a foreign hooks dir");
+
+    // An existing foreign pre-push is never overwritten.
+    let occupied = sb.target("occupied-repo");
+    std::fs::create_dir_all(&occupied).unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .arg(&occupied)
+        .status()
+        .unwrap()
+        .success());
+    let their_hook = occupied.join(".git/hooks/pre-push");
+    write_file(&their_hook, "#!/bin/sh\necho theirs\n", 0o755);
+    quaqua::init::ensure_worker_push_guard(&occupied).expect("occupied pre-push is a no-op");
+    assert_eq!(
+        read(&their_hook),
+        "#!/bin/sh\necho theirs\n",
+        "an existing pre-push was overwritten",
+    );
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
 /// A worker pane carries `QUAQUA_OWNER`; the pre-push hook must reject that and
 /// pass a plain shell. Runs the installed hook directly — no remote needed.
 #[test]

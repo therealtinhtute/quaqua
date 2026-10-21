@@ -16,6 +16,8 @@
 //! - `--git-hooks <repo>` installs only the embedded hooks (portable-paths
 //!   pre-commit and the worker pre-push) into an existing git repo (no
 //!   workspace sync, working tree untouched).
+//! - `worker spawn` installs only the worker push guard (`pre-push`); the
+//!   portable-paths pre-commit stays an explicit `init` opt-in.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -114,6 +116,9 @@ const PRE_PUSH_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # Principal (issue #4). `quaqua worker spawn` exports QUAQUA_OWNER into the
 # pane, so every process the worker starts carries it, git included. Run the
 # push from a shell without QUAQUA_OWNER (the Lead/CoS) and it passes.
+#
+# Installed by `quaqua worker spawn` (push guard only, into the repo's
+# effective hooks dir) and by `quaqua init` (beside the portable-paths hook).
 if [[ -n "${QUAQUA_OWNER-}" ]]; then
   echo "pre-push: refused — QUAQUA_OWNER='$QUAQUA_OWNER' marks a worker; workers never push." >&2
   echo "Hand the branch to the Lead; it merges via the queue." >&2
@@ -628,11 +633,114 @@ fn install_hook(hooks_dir: &Path, name: &str, template: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// Refresh both embedded hooks (pre-commit, pre-push) on an existing repo.
-/// `worker spawn` calls this on the repo before any pane exists: linked
-/// worktrees share `core.hooksPath`, so the pairs run there too.
-pub(crate) fn ensure_git_hooks(root: &Path) -> Result<(), String> {
-    wire_hooks(root)
+/// `worker spawn`: install ONLY the worker push guard (`pre-push`) on the
+/// target repo. The portable-paths `pre-commit` stays an explicit
+/// `quaqua init` opt-in — a spawn must not police the repo's commits.
+///
+/// Where the guard goes is git's own answer, never a config rewrite:
+/// - `core.hooksPath` unset → git's default `<common-git-dir>/hooks`, which
+///   every linked worktree shares, so a push from the worker's worktree is
+///   guarded without touching any config;
+/// - `core.hooksPath` pointing at the quaqua-owned dir → that dir.
+///
+/// A foreign `core.hooksPath` and an existing non-quaqua `pre-push` are left
+/// untouched with a warning: spawn never redirects or overwrites a hook setup
+/// it did not create. `Ok(())` when there is nothing safe to do.
+pub fn ensure_worker_push_guard(root: &Path) -> Result<(), String> {
+    if !git_ok(root, &["rev-parse", "--git-dir"]) {
+        return Ok(());
+    }
+
+    let Some(hooks_dir) = worker_hooks_dir(root) else {
+        return Ok(());
+    };
+
+    let hook_file = hooks_dir.join("pre-push");
+    match std::fs::read_to_string(&hook_file) {
+        Ok(body) if body == PRE_PUSH_TEMPLATE => {
+            apply_mode(&hook_file, 0o755)?;
+            return Ok(());
+        }
+        Ok(_) => {
+            eprintln!(
+                "worker: {} already exists and is not the quaqua push guard — left unchanged",
+                hook_file.display()
+            );
+            return Ok(());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!(
+                "worker: cannot read {}: {e} — push guard not installed",
+                hook_file.display()
+            );
+            return Ok(());
+        }
+    }
+
+    write_file(&hook_file, PRE_PUSH_TEMPLATE.as_bytes(), 0o755)
+        .map_err(|e| format!("worker: cannot install the push guard: {e}"))?;
+    println!("worker: push guard installed at {}", hook_file.display());
+    Ok(())
+}
+
+/// The directory `ensure_worker_push_guard` may write to, or `None` with a
+/// warning when the repo's hook setup belongs to someone else. `git rev-parse
+/// --git-path hooks` is the single source of truth: it resolves
+/// `core.hooksPath` when set and otherwise the shared `<common-git-dir>/hooks`
+/// (linked worktrees included).
+fn worker_hooks_dir(root: &Path) -> Option<PathBuf> {
+    let effective = git_hooks_path(root);
+    if let Some(have) = git_output(root, &["config", "--get", "core.hooksPath"]) {
+        if !have.is_empty() {
+            let ours = quaqua_hooks_dir(root);
+            let owned = hooks_path_is_ours(&have, root, &ours)
+                || effective.as_deref() == Some(ours.as_path());
+            if !owned {
+                eprintln!(
+                    "worker: core.hooksPath is already set to '{have}' — left untouched; \
+                     the worker push guard was not installed"
+                );
+                return None;
+            }
+        }
+    }
+    match effective {
+        Some(dir) => Some(dir),
+        None => {
+            eprintln!(
+                "worker: git cannot name the repository's hooks directory — push guard not installed"
+            );
+            None
+        }
+    }
+}
+
+/// The hooks directory git will actually run: `core.hooksPath` when set, else
+/// `<common-git-dir>/hooks` (shared by linked worktrees). `--path-format` needs
+/// git 2.31+; the plain form is retried and anchored at the repo root.
+fn git_hooks_path(root: &Path) -> Option<PathBuf> {
+    git_path(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+    )
+    .or_else(|| git_path(root, &["rev-parse", "--git-path", "hooks"]))
+}
+
+/// A `git rev-parse` answer that names a path. Empty output (a git that cannot
+/// answer, as in the test stubs) is not a path, and a relative answer is
+/// anchored at the repo root — never at the process cwd.
+fn git_path(root: &Path, args: &[&str]) -> Option<PathBuf> {
+    let out = git_output(root, args)?;
+    if out.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(out);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
 }
 
 fn wire_hooks(root: &Path) -> Result<(), String> {
@@ -727,8 +835,7 @@ pub fn run_git_hooks(repo: &Path) -> Result<i32, String> {
 /// The directory quaqua owns for git hooks: `<absolute git dir>/quaqua-hooks`.
 /// Works for a normal checkout, a linked worktree, and a path inside a repo.
 fn quaqua_hooks_dir(root: &Path) -> PathBuf {
-    git_output(root, &["rev-parse", "--absolute-git-dir"])
-        .map(PathBuf::from)
+    git_path(root, &["rev-parse", "--absolute-git-dir"])
         .map(|p| p.join("quaqua-hooks"))
         .unwrap_or_else(|| root.join(".git/quaqua-hooks"))
 }
