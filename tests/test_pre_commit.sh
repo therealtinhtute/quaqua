@@ -204,4 +204,67 @@ out3=$(unset HERDR_PANE_ID; cd "$M" && "$QUAQUA_BIN" init "$M" 2>&1)
 cmp -s "$M/.git/quaqua-hooks/pre-commit" "$hook" || fail "refreshed hook content differs from template"
 echo "ok: legacy core.hooksPath migrated and hook refresh idempotent"
 
+# ── 11. `init --git-hooks <repo>`: hook-only install into an existing repo ──
+H="$T/hooks-only"
+mkdir -p "$H"; git -C "$H" init -q
+git -C "$H" config user.email test@example.invalid
+git -C "$H" config user.name test
+printf 'baseline\n' > "$H/README.md"
+git -C "$H" add -A; git -C "$H" commit -qm baseline
+
+"$QUAQUA_BIN" init --git-hooks "$H" >"$T/gh.log" 2>&1 \
+  || fail "init --git-hooks failed: $(cat "$T/gh.log")"
+gh_hook="$H/.git/quaqua-hooks/pre-commit"
+[[ -x $gh_hook ]] || fail "--git-hooks did not install an executable pre-commit"
+cmp -s "$gh_hook" "$hook" || fail "--git-hooks hook body differs from the workspace one"
+[[ "$(git -C "$H" config --get core.hooksPath)" == "$H/.git/quaqua-hooks" ]] \
+  || fail "--git-hooks did not set core.hooksPath"
+# no workspace sync: only README.md and .git exist in the target
+[[ -z "$(find "$H" -mindepth 1 -maxdepth 1 ! -name .git ! -name README.md -print)" ]] \
+  || fail "--git-hooks wrote workspace files into the target repo"
+echo "ok: --git-hooks installs the same hook and skips the workspace sync"
+
+# the installed hook really fires: dirty commit rejected, clean commit accepted
+printf '#!/usr/bin/env bash\ncd /home/someone/x\n' > "$H/tool.sh"
+git -C "$H" add -A
+if git -C "$H" commit -qm dirty >"$T/out" 2>&1; then
+  fail "--git-hooks commit with a machine path was allowed"
+fi
+grep -q 'tool.sh' "$T/out" || fail "--git-hooks commit output does not name the file"
+git -C "$H" reset -q --hard HEAD; git -C "$H" clean -qfd
+printf '#!/usr/bin/env bash\ncd "$(dirname "$0")"\n' > "$H/tool.sh"
+git -C "$H" add -A
+git -C "$H" commit -qm clean >"$T/out" 2>&1 \
+  || fail "clean commit through the --git-hooks hook was blocked: $(cat "$T/out")"
+echo "ok: --git-hooks rejects a machine-path commit and accepts a clean one"
+
+# idempotent: the second run rewrites neither .git/config nor the hook
+cp "$H/.git/config" "$T/gh.config"
+cp "$gh_hook" "$T/gh.hook"
+"$QUAQUA_BIN" init --git-hooks "$H" >"$T/gh2.log" 2>&1 \
+  || fail "--git-hooks re-run failed: $(cat "$T/gh2.log")"
+cmp -s "$H/.git/config" "$T/gh.config" || fail "--git-hooks re-run rewrote .git/config"
+cmp -s "$gh_hook" "$T/gh.hook" || fail "--git-hooks re-run rewrote the hook"
+echo "ok: --git-hooks re-run is a no-op"
+
+# a foreign core.hooksPath is refused untouched
+git -C "$H" config core.hooksPath "$H/their-hooks"
+if out=$("$QUAQUA_BIN" init --git-hooks "$H" 2>&1); then
+  fail "--git-hooks overwrote a foreign core.hooksPath"
+fi
+[[ "$(git -C "$H" config --get core.hooksPath)" == "$H/their-hooks" ]] \
+  || fail "--git-hooks changed a foreign core.hooksPath"
+[[ $out == *"refusing"* && $out == *"$H/their-hooks"* ]] \
+  || fail "unclear refusal for a foreign core.hooksPath: $out"
+echo "ok: --git-hooks refuses a foreign core.hooksPath"
+
+# not a git repo -> clear error, non-zero, nothing written
+N="$T/not-a-repo"; mkdir -p "$N"
+if out=$("$QUAQUA_BIN" init --git-hooks "$N" 2>&1); then
+  fail "--git-hooks accepted a non-repo"
+fi
+[[ $out == *"is not a git repository"* ]] || fail "unclear non-repo error: $out"
+[[ -z "$(ls -A "$N")" ]] || fail "--git-hooks wrote into a non-repo: $(ls -A "$N")"
+echo "ok: --git-hooks rejects a non-repo without writing"
+
 echo "PASS"

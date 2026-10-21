@@ -78,6 +78,17 @@ card), and continue with the auditor install below. Templates live in
 `templates/seed/` under depth-safe names because `.gitignore`'s `memory/` and
 `projects/` patterns match at any depth.
 
+The same portable-paths pre-commit can be installed into another checkout
+without bootstrapping a workspace there:
+
+```bash
+quaqua init --git-hooks ~/Lab/quaqua
+```
+
+It writes only `<git-dir>/quaqua-hooks/pre-commit` and sets `core.hooksPath` in
+that repo; a repo whose `core.hooksPath` already points somewhere else is
+refused untouched, and re-running is a no-op.
+
 ## Install
 
 Requires a Rust toolchain (install `rustup` if `cargo --version` fails).

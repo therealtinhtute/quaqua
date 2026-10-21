@@ -392,11 +392,11 @@ pub fn run_hook() -> Result<(), String> {
         return Ok(());
     }
 
-    // Finding 9 remainder: Read deferred_statuses from team.toml
-    let team_file_path = std::env::var("QUAQUA_TEAM_TOML")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("team.toml"));
-    let def_statuses = crate::config::load(&team_file_path)
+    // Finding 9 remainder: deferred_statuses from the one team.toml resolution
+    // every command uses ($QUAQUA_TEAM_TOML, ./team.toml, <workspace>/team.toml,
+    // embedded). The herdr plugin runs the hook from an arbitrary cwd, so a
+    // cwd-only read silently ignored ~/quaqua/team.toml.
+    let def_statuses = crate::config::load_team_config()
         .ok()
         .map(|c| c.grid.deferred_statuses);
     let def_slices: Option<Vec<&str>> = def_statuses

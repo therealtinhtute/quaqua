@@ -1856,3 +1856,120 @@ fn test_check_from_a_lead_workspace_ignores_foreign_workspace_panes() {
         "check must ignore other workspaces' pending ops: {res:?}"
     );
 }
+
+/// The grid readers (`hook`, `plan`, `reconcile`) run from an arbitrary cwd, so
+/// team.toml must resolve like every other command: $QUAQUA_TEAM_TOML, then
+/// ./team.toml, then <workspace_root>/team.toml (QUAQUA_HOME), then the
+/// embedded default. A cwd-only read silently ignored ~/quaqua/team.toml.
+#[test]
+fn test_grid_plan_resolves_team_toml_from_the_workspace_root() {
+    let root = std::env::temp_dir().join(format!("quaqua-grid-teamcwd-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let cwd = root.join("cwd");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(&workspace).unwrap();
+
+    let template = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates/workspace/team.toml"),
+    )
+    .unwrap();
+    let workspace_team = template.replace(
+        "deferred_statuses = [\"working\"]",
+        "deferred_statuses = [\"blocked\"]",
+    );
+    assert_ne!(
+        workspace_team, template,
+        "template must still carry the [grid] deferred_statuses default"
+    );
+    fs::write(workspace.join("team.toml"), &workspace_team).unwrap();
+
+    // One worker (status "blocked") beside its owner's pane in a scratch tab:
+    // the built-in default ("working") would not defer it, the workspace file
+    // will. With one worker the planner emits one split op.
+    let snapshot = serde_json::json!({
+        "snapshot": {
+            "workspaces": [{ "workspace_id": "w1", "label": "qa" }],
+            "tabs": [
+                { "tab_id": "w1:t1", "workspace_id": "w1", "label": "main", "pane_count": 1 },
+                { "tab_id": "w1:t2", "workspace_id": "w1", "label": "scratch", "pane_count": 1 }
+            ],
+            "panes": [
+                {
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                    "workspace_id": "w1",
+                    "agent": "claude",
+                    "agent_status": "idle",
+                    "tokens": {
+                        "grid_role": "orchestrator",
+                        "grid_owner": "cos",
+                        "grid_ready": "1"
+                    }
+                },
+                {
+                    "pane_id": "w1:p5",
+                    "tab_id": "w1:t2",
+                    "workspace_id": "w1",
+                    "agent": "pi",
+                    "agent_status": "blocked",
+                    "tokens": {
+                        "grid_role": "worker",
+                        "grid_owner": "cos",
+                        "grid_group": "qa-workers",
+                        "grid_ready": "1"
+                    }
+                }
+            ],
+            "layouts": [],
+            "agents": []
+        }
+    });
+    let snap_path = root.join("snapshot.json");
+    fs::write(&snap_path, snapshot.to_string()).unwrap();
+
+    let plan_from = |cwd: &PathBuf, home: &PathBuf| -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_quaqua"))
+            .args(["grid", "plan", "--file"])
+            .arg(&snap_path)
+            .current_dir(cwd)
+            .env("QUAQUA_HOME", home)
+            .env_remove("QUAQUA_TEAM_TOML")
+            .env_remove("QUAQUA_ROOT")
+            .output()
+            .expect("failed to spawn quaqua grid plan");
+        assert!(
+            out.status.success(),
+            "grid plan failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("grid plan must print ops JSON")
+    };
+
+    let ops = plan_from(&cwd, &workspace);
+    assert_eq!(
+        ops.as_array().map(Vec::len),
+        Some(1),
+        "one worker must yield one op: {ops}"
+    );
+    assert_eq!(
+        ops[0]["deferred"], true,
+        "deferred_statuses from <workspace>/team.toml must be used: {ops}"
+    );
+
+    // No behaviour change when the cwd holds a team.toml: it wins over the
+    // workspace root (its list names "idle", so the same blocked worker is no
+    // longer deferred).
+    let cwd_team = template.replace(
+        "deferred_statuses = [\"working\"]",
+        "deferred_statuses = [\"idle\"]",
+    );
+    fs::write(cwd.join("team.toml"), cwd_team).unwrap();
+    let ops = plan_from(&cwd, &workspace);
+    assert_eq!(
+        ops[0]["deferred"], false,
+        "./team.toml must win over <workspace>/team.toml: {ops}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
