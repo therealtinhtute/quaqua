@@ -70,6 +70,8 @@ enum Command {
     },
     /// PreToolUse(Bash) hook: block direct pane/workspace spawn/move calls.
     Gate,
+    /// Check the installed quaqua binary (missing, stale, shadowed).
+    Doctor,
     /// Boot (or update) a workspace from the embedded template.
     Init {
         /// Target workspace (default: the workspace root).
@@ -519,6 +521,7 @@ fn main() {
             },
         },
         Some(Command::Gate) => quaqua::gate::run(),
+        Some(Command::Doctor) => quaqua::doctor::run(),
         Some(Command::Init {
             dir,
             update,

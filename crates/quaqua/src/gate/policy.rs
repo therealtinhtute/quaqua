@@ -4,9 +4,145 @@
 //! subcommands are `Ask` (the user confirms via Claude Code's native prompt),
 //! force pushes / pushes to main or master / `gh pr merge <main>` are `Deny`
 //! (AGENTS.md rule 3).
+//!
+//! Two retro slips are enforced here too (issue #55): `gh pr merge` asks with
+//! the reason when the PR body/comments still say WIP, "cancelled mid-run" or
+//! carry an unchecked `- [ ]` item (and asks when the lookup itself fails,
+//! never silently allowing), and a call to a removed `scripts/worker/*` path
+//! is denied with the `quaqua` command that replaced it.
 
 use super::tokenizer::tokenize;
 use std::cell::OnceCell;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// What a PR lookup returns: the body and every comment body, the two places
+/// a stale "work in progress" marker hides (issue #55 item 2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrFacts {
+    pub body: String,
+    pub comments: Vec<String>,
+}
+
+/// The `gh pr view --json body,comments` boundary. Kept behind a trait so the
+/// policy tests never touch the network, and so a failed lookup is a value the
+/// gate can turn into `Ask` instead of letting the merge through silently.
+pub trait PrLookup {
+    fn view(&self, selector: Option<&str>, cwd: Option<&str>) -> Result<PrFacts, String>;
+}
+
+/// In-process default: no lookup available, so a merge cannot be verified and
+/// the gate asks instead of silently allowing it.
+pub struct OfflinePrLookup;
+
+impl PrLookup for OfflinePrLookup {
+    fn view(&self, _selector: Option<&str>, _cwd: Option<&str>) -> Result<PrFacts, String> {
+        Err("PR lookup unavailable in this context".to_string())
+    }
+}
+
+const NO_PR_LOOKUP: OfflinePrLookup = OfflinePrLookup;
+
+/// The real lookup: `gh pr view`, bounded by a timeout so a hung network call
+/// cannot hang the PreToolUse hook.
+pub struct RealGh {
+    pub bin: String,
+    pub timeout: Duration,
+}
+
+impl RealGh {
+    /// `QUAQUA_GH_BIN` overrides the binary (tests use a stub); an empty value
+    /// counts as unset. `QUAQUA_GATE_PR_TIMEOUT_MS` overrides the timeout.
+    pub fn from_env() -> Self {
+        let bin = std::env::var("QUAQUA_GH_BIN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "gh".to_string());
+        let timeout = std::env::var("QUAQUA_GATE_PR_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_millis(3000));
+        RealGh { bin, timeout }
+    }
+}
+
+impl PrLookup for RealGh {
+    fn view(&self, selector: Option<&str>, cwd: Option<&str>) -> Result<PrFacts, String> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["pr", "view"]);
+        if let Some(s) = selector {
+            cmd.arg(s);
+        }
+        cmd.args(["--json", "body,comments"]);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        let out = run_with_timeout(cmd, self.timeout, &self.bin)?;
+        parse_pr_json(&out.stdout)
+    }
+}
+
+/// Run a command, killing it after `timeout`. `std::process` has no
+/// wait-timeout, so poll `try_wait`; any failure (spawn, non-zero exit,
+/// timeout) is the lookup's error reason.
+fn run_with_timeout(mut cmd: Command, timeout: Duration, what: &str) -> Result<Output, String> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run {what}: {e}"))?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("{what} timed out after {}ms", timeout.as_millis()));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(format!("waiting for {what} failed: {e}")),
+        }
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("reading {what} output failed: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let err = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        return Err(format!("{what} failed: {err}"));
+    }
+    Ok(out)
+}
+
+fn parse_pr_json(raw: &[u8]) -> Result<PrFacts, String> {
+    let v: serde_json::Value =
+        serde_json::from_slice(raw).map_err(|e| format!("invalid gh JSON: {e}"))?;
+    let body = v
+        .get("body")
+        .and_then(|b| b.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let comments = v
+        .get("comments")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| c.get("body").and_then(|b| b.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(PrFacts { body, comments })
+}
 
 /// The gate's decision for one command.
 ///
@@ -42,14 +178,22 @@ fn worst(a: Verdict, b: Verdict) -> Verdict {
 }
 
 /// `check_text <shell-source>`: tokenize, then check every simple command.
+/// Offline: a merge whose PR state would need `gh` asks instead of shelling out
+/// (the hook binary uses [`check_with_pr`] with the real lookup).
 pub fn check(command: &str) -> Verdict {
-    check_ctx(command, None)
+    check_with_pr(command, None, &OfflinePrLookup)
 }
 
 /// `check_text` with the hook's `cwd`, needed only to resolve the branch a
 /// bare `git push` (no refspec in the command text) would push.
 pub fn check_ctx(command: &str, cwd: Option<&str>) -> Verdict {
-    let ctx = Ctx::with_cwd(cwd);
+    check_with_pr(command, cwd, &OfflinePrLookup)
+}
+
+/// `check_text` with an explicit PR lookup — the hook passes the real `gh`
+/// one; tests pass a stub.
+pub fn check_with_pr(command: &str, cwd: Option<&str>, pr: &dyn PrLookup) -> Verdict {
+    let ctx = Ctx::with_cwd(cwd, pr);
     check_segments_ctx(&tokenize(command), &ctx)
 }
 
@@ -66,10 +210,12 @@ fn check_segments_ctx(segs: &[Vec<String>], ctx: &Ctx) -> Verdict {
 }
 
 /// Per-invocation context. `branch_of` runs `git symbolic-ref` only for a
-/// refspec-less `git push`, memoized for the hook's own cwd.
+/// refspec-less `git push`, memoized for the hook's own cwd. `pr` resolves the
+/// PR a `gh pr merge` would merge.
 struct Ctx<'a> {
     cwd: Option<&'a str>,
     branch: OnceCell<Option<String>>,
+    pr: &'a dyn PrLookup,
 }
 
 impl<'a> Ctx<'a> {
@@ -77,13 +223,15 @@ impl<'a> Ctx<'a> {
         Ctx {
             cwd: None,
             branch: OnceCell::new(),
+            pr: &NO_PR_LOOKUP,
         }
     }
 
-    fn with_cwd(cwd: Option<&'a str>) -> Self {
+    fn with_cwd(cwd: Option<&'a str>, pr: &'a dyn PrLookup) -> Self {
         Ctx {
             cwd,
             branch: OnceCell::new(),
+            pr,
         }
     }
 
@@ -143,6 +291,45 @@ fn ask(what: &str) -> Verdict {
 
 fn deny(what: &str, why: &str) -> Verdict {
     Verdict::Deny(format!("{what}: {why} (AGENTS.md rule 3)"))
+}
+
+/// The bash wrappers removed in a35a54d and the binary command that replaced
+/// each (issue #55 item 3). The whole `scripts/worker/` directory is gone, so a
+/// path below it that is not in this table still gets the generic hint.
+const REMOVED_WORKER_SCRIPTS: &[(&str, &str)] = &[
+    ("spawn-worker.sh", "quaqua worker spawn"),
+    ("prompt-worker.sh", "quaqua worker prompt"),
+    ("cleanup-worker.sh", "quaqua worker cleanup"),
+    ("grid-workers.sh", "quaqua grid reconcile"),
+    ("worker-cap.sh", "quaqua cap"),
+];
+
+const REMOVED_WORKER_HINT: &str =
+    "quaqua worker {spawn,prompt,cleanup,stop} / quaqua cap / quaqua grid reconcile";
+
+/// The replacement command when `word` names a removed `scripts/worker/*`
+/// script (any prefix: `./`, `~/quaqua/`, absolute).
+fn removed_worker_script(word: &str) -> Option<&'static str> {
+    let path = word.replace('\\', "/");
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    if let Some((_, cmd)) = REMOVED_WORKER_SCRIPTS.iter().find(|(n, _)| *n == name) {
+        return Some(cmd);
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts
+        .windows(2)
+        .any(|w| w[0] == "scripts" && w[1] == "worker")
+    {
+        return Some(REMOVED_WORKER_HINT);
+    }
+    None
+}
+
+fn deny_removed(word: &str, replacement: &str) -> Verdict {
+    deny(
+        word,
+        &format!("that script was removed — use `{replacement}`"),
+    )
 }
 
 /// `_gw_keyword`: compound-shell keywords. `time` is deliberately absent — it is
@@ -242,15 +429,39 @@ fn check_words(w: &[String], ctx: &Ctx) -> Verdict {
     // executable word: quotes stripped, path removed
     let base = w[i].rsplit('/').next().unwrap_or(w[i].as_str());
     let a: &[String] = if i + 1 < w.len() { &w[i + 1..] } else { &[] };
+    // A removed wrapper in executable position is a call to code that no
+    // longer exists (issue #55 item 3), never a plain run.
+    if let Some(replacement) = removed_worker_script(&w[i]) {
+        return deny_removed(&w[i], replacement);
+    }
     match base {
         "herdr" => check_herdr(a),
         "git" => check_git(a, ctx),
-        "gh" => check_gh(a),
+        "gh" => check_gh(a, ctx),
         "bash" | "sh" | "dash" | "zsh" => {
             for k in 0..a.len() {
                 if is_c_flag(&a[k]) && k + 1 < a.len() {
                     // the -c payload; trailing args are $0/$1
                     return check_segments_ctx(&tokenize(&a[k + 1]), ctx);
+                }
+            }
+            // `bash scripts/worker/prompt-worker.sh …`: the script argument is
+            // the command being run, not argument text.
+            for arg in a {
+                if !arg.starts_with('-') {
+                    if let Some(replacement) = removed_worker_script(arg) {
+                        return deny_removed(arg, replacement);
+                    }
+                }
+            }
+            Verdict::Allow
+        }
+        "source" | "." => {
+            for arg in a {
+                if !arg.starts_with('-') {
+                    if let Some(replacement) = removed_worker_script(arg) {
+                        return deny_removed(arg, replacement);
+                    }
                 }
             }
             Verdict::Allow
@@ -478,7 +689,7 @@ fn check_push(a: &[String], ctx: &Ctx, dir: Option<&str>) -> Verdict {
 /// `gh` arm: only the enumerated outward subcommands ask (or deny). Read-only
 /// subcommands (view, list, status, diff, download, clone, …) stay untouched,
 /// and `--help`/`-h` in a help position exits before anything runs.
-fn check_gh(a: &[String]) -> Verdict {
+fn check_gh(a: &[String], ctx: &Ctx) -> Verdict {
     let mut i = 0;
     while i < a.len() && a[i].starts_with('-') {
         // global options: -R/--repo take a value, everything else is boolean
@@ -511,17 +722,7 @@ fn check_gh(a: &[String]) -> Verdict {
     match group {
         "pr" => match sub {
             "create" | "edit" | "close" | "comment" | "ready" => ask(&format!("gh pr {sub}")),
-            "merge" => {
-                for w in rest {
-                    if !w.starts_with('-') && is_main(w) {
-                        return deny(
-                            &format!("gh pr merge {w}"),
-                            "merging to main/master is denied",
-                        );
-                    }
-                }
-                ask("gh pr merge")
-            }
+            "merge" => check_merge(rest, ctx),
             _ => Verdict::Allow,
         },
         "issue" => match sub {
@@ -539,6 +740,103 @@ fn check_gh(a: &[String]) -> Verdict {
         },
         _ => Verdict::Allow,
     }
+}
+
+/// `gh pr merge`: deny main/master first (no lookup needed), then ask — with
+/// the reason when the PR still says WIP / "cancelled mid-run" / has an
+/// unchecked `- [ ]`, or when the lookup itself failed. A clean PR or an
+/// unreachable `gh` both ask; neither ever allows (issue #55 item 2).
+fn check_merge(rest: &[String], ctx: &Ctx) -> Verdict {
+    let target = merge_target(rest);
+    if let Some(t) = target {
+        if is_main(t) {
+            return deny(
+                &format!("gh pr merge {t}"),
+                "merging to main/master is denied",
+            );
+        }
+    }
+    let what = match target {
+        Some(t) => format!("gh pr merge {t}"),
+        None => "gh pr merge".to_string(),
+    };
+    match ctx.pr.view(target, ctx.cwd) {
+        Ok(facts) => match pr_problem(&facts) {
+            Some(reason) => Verdict::Ask(format!(
+                "{what} — {reason}; needs anh iu approval (AGENTS.md rule 3)"
+            )),
+            None => ask(&what),
+        },
+        Err(e) => Verdict::Ask(format!(
+            "{what} — could not verify the PR state ({e}); needs anh iu approval (AGENTS.md rule 3)"
+        )),
+    }
+}
+
+/// `gh pr merge [<number> | <url> | <branch>] [flags]`: the first positional
+/// after the value-taking flags. `None` means gh resolves the current branch.
+fn merge_target(rest: &[String]) -> Option<&str> {
+    let mut i = 0;
+    while i < rest.len() {
+        let w = rest[i].as_str();
+        if w == "--" {
+            return rest.get(i + 1).map(|s| s.as_str());
+        }
+        if w.starts_with('-') {
+            i += if matches!(
+                w,
+                "-b" | "--body"
+                    | "-F"
+                    | "--body-file"
+                    | "-t"
+                    | "--subject"
+                    | "--match-head-commit"
+                    | "-R"
+                    | "--repo"
+            ) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        return Some(w);
+    }
+    None
+}
+
+/// The first stale-work marker in the PR, as the reason to show. Body first,
+/// then each comment in order.
+fn pr_problem(facts: &crate::gate::policy::PrFacts) -> Option<String> {
+    if let Some(why) = text_problem(&facts.body) {
+        return Some(format!("the PR body {why}"));
+    }
+    for (i, comment) in facts.comments.iter().enumerate() {
+        if let Some(why) = text_problem(comment) {
+            return Some(format!("PR comment #{} {why}", i + 1));
+        }
+    }
+    None
+}
+
+fn text_problem(text: &str) -> Option<&'static str> {
+    // "WIP" as a word: `WIP:`, `[wip]`, `wip —` all match; "swipe" does not.
+    if text
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("wip"))
+    {
+        return Some("contains WIP");
+    }
+    if text.to_lowercase().contains("cancelled mid-run") {
+        return Some("contains \"cancelled mid-run\"");
+    }
+    if text.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("- [ ]") || t.starts_with("* [ ]")
+    }) {
+        return Some("has an unchecked '- [ ]' item");
+    }
+    None
 }
 
 /// Prefix wrappers: the real command follows their options and `VAR=` prefixes.

@@ -60,10 +60,25 @@ flat=$(find "$ws/scripts" -maxdepth 1 -name '*.sh' -print)
 # Two roots now: managed refs name the workspace layout (templates/workspace/…),
 # engine-only files still name the repo root. A ref resolves if it exists under
 # either root; a typo resolves under neither.
+# Issue #55: the gate deliberately names the removed wrappers so it can deny
+# calls to them; accept exactly those five in the gate's own files, never
+# anywhere else (a bare basename here keeps this file out of its own scan).
+gate_removed_ref() {
+  [[ $1 == scripts/worker/* ]] || return 1
+  case "${1##*/}" in
+    spawn-worker.sh|prompt-worker.sh|cleanup-worker.sh|grid-workers.sh|worker-cap.sh) return 0 ;;
+  esac
+  return 1
+}
+
 missing=()
 while IFS= read -r f; do
   while IFS= read -r ref; do
     ref="scripts/${ref#*scripts/}"
+    if [[ $f == crates/quaqua/src/gate/policy.rs || $f == crates/quaqua/tests/gate.rs ]] \
+       && gate_removed_ref "$ref"; then
+      continue
+    fi
     [[ -e $root/$ref || -e $ws/$ref ]] || missing+=("$f: $ref")
   done < <(grep -aoE '(^|[^A-Za-z0-9_./-])scripts/[A-Za-z0-9_./-]+\.sh' "$root/$f" 2>/dev/null | sort -u)
 done < <(git -C "$root" ls-files | grep -v -E '^(templates/workspace/scripts/hooks/|templates/workspace/scripts/auditor/|docs/research/)')

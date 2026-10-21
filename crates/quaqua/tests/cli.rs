@@ -1,9 +1,11 @@
-//! One smoke test for the R0 stub: the built binary answers `--version` and
-//! `--help`, which is all it is allowed to do before later phases add commands.
+//! CLI smoke tests for the built binary: `--version`/`--help`, and the
+//! `quaqua doctor` checks against a synthetic PATH and shell.
 //! `CARGO_BIN_EXE_quaqua` is the path cargo builds for this crate's binary, so
 //! the test never hard-codes a machine-specific path.
 
-use std::process::Command;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 #[test]
 fn version_and_help_are_available() {
@@ -29,4 +31,149 @@ fn version_and_help_are_available() {
         help_text.contains("Usage: quaqua"),
         "--help does not print a usage line: {help_text}",
     );
+}
+
+fn temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("quaqua-cli-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("temp dir");
+    dir
+}
+
+fn stub_shell(dir: &Path, output: &str) -> PathBuf {
+    let path = dir.join("shell");
+    fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' '{output}'\n")).expect("write shell");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod shell");
+    path
+}
+
+/// Run `quaqua doctor` with an isolated PATH/HOME/checkout and the given shell
+/// stub. `path_dir` must already contain (or omit) `quaqua`.
+fn doctor(path_dir: &Path, home: &Path, cwd: &Path, shell: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_quaqua"))
+        .arg("doctor")
+        .env("PATH", path_dir)
+        .env("HOME", home)
+        .env("QUAQUA_SHELL", shell)
+        .env_remove("QUAQUA_CHECKOUT")
+        .current_dir(cwd)
+        .output()
+        .expect("failed to spawn quaqua doctor")
+}
+
+#[test]
+fn doctor_fails_when_quaqua_is_missing_from_path() {
+    let dir = temp_dir("missing");
+    let path_dir = dir.join("bin");
+    let home = dir.join("home");
+    let cwd = dir.join("cwd");
+    for d in [&path_dir, &home, &cwd] {
+        fs::create_dir_all(d).expect("dir");
+    }
+    let shell = stub_shell(&dir, "quaqua not found");
+
+    let out = doctor(&path_dir, &home, &cwd, &shell);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not on PATH"), "{stderr}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn doctor_fails_when_a_shell_function_shadows_quaqua() {
+    let dir = temp_dir("shadow");
+    let path_dir = dir.join("bin");
+    let home = dir.join("home");
+    let cwd = dir.join("cwd");
+    let checkout = dir.join("checkout");
+    for d in [&path_dir, &home, &cwd] {
+        fs::create_dir_all(d).expect("dir");
+    }
+    fs::create_dir_all(checkout.join("crates/quaqua/src")).expect("checkout");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_quaqua"), path_dir.join("quaqua"))
+        .expect("symlink quaqua");
+    let shell = stub_shell(&dir, "quaqua is a shell function");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_quaqua"))
+        .arg("doctor")
+        .env("PATH", &path_dir)
+        .env("HOME", &home)
+        .env("QUAQUA_SHELL", &shell)
+        .env("QUAQUA_CHECKOUT", &checkout)
+        .current_dir(&cwd)
+        .output()
+        .expect("spawn doctor");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("function/alias"), "{stderr}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn doctor_accepts_a_healthy_setup() {
+    let dir = temp_dir("healthy");
+    let path_dir = dir.join("bin");
+    let home = dir.join("home");
+    let cwd = dir.join("cwd");
+    let checkout = dir.join("checkout");
+    for d in [&path_dir, &home, &cwd] {
+        fs::create_dir_all(d).expect("dir");
+    }
+    fs::create_dir_all(checkout.join("crates/quaqua/src")).expect("checkout");
+    let installed = path_dir.join("quaqua");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_quaqua"), &installed).expect("symlink");
+    let shell = stub_shell(&dir, "quaqua is /tmp/bin/quaqua");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_quaqua"))
+        .arg("doctor")
+        .env("PATH", &path_dir)
+        .env("HOME", &home)
+        .env("QUAQUA_SHELL", &shell)
+        .env("QUAQUA_CHECKOUT", &checkout)
+        .current_dir(&cwd)
+        .output()
+        .expect("spawn doctor");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("ok:"), "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn doctor_fails_when_the_binary_is_older_than_the_checkout() {
+    let dir = temp_dir("stale");
+    let path_dir = dir.join("bin");
+    let home = dir.join("home");
+    let cwd = dir.join("cwd");
+    let checkout = dir.join("checkout");
+    for d in [&path_dir, &home, &cwd] {
+        fs::create_dir_all(d).expect("dir");
+    }
+    let src = checkout.join("crates/quaqua/src");
+    fs::create_dir_all(&src).expect("checkout");
+    let installed = path_dir.join("quaqua");
+    fs::copy(env!("CARGO_BIN_EXE_quaqua"), &installed).expect("copy quaqua");
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .open(&installed)
+        .expect("open");
+    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000))
+        .expect("set mtime");
+    fs::write(src.join("changed.rs"), "fn changed() {}").expect("new source");
+    let shell = stub_shell(&dir, "quaqua is /tmp/bin/quaqua");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_quaqua"))
+        .arg("doctor")
+        .env("PATH", &path_dir)
+        .env("HOME", &home)
+        .env("QUAQUA_SHELL", &shell)
+        .env("QUAQUA_CHECKOUT", &checkout)
+        .current_dir(&cwd)
+        .output()
+        .expect("spawn doctor");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("older than the checkout"), "{stderr}");
+    let _ = fs::remove_dir_all(&dir);
 }
