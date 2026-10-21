@@ -23,12 +23,33 @@ Cost budget: $<x>
 ## Challenge
 `## Challenge` (premise + evidence) in `runs/<name>.md` — the Lead (CoS on no-SLP work) resolves it before acceptance. A right, not a duty.
 
-## Format (machine-read — get this exactly right)
-- Headings are exactly `## Blockers` and `## Lessons` — never numbered (`## 5. Lessons` fails the watchdog as malformed, exit 6).
-- `## Blockers` body: only real blockers. When there are none, the body must be exactly `none` — any sentence there is read as an unfinished-work blocker and the pipeline stops.
-- `## Lessons` is the last section (≤2 lines or `none`).
+## Report format (machine-read — get this exactly right)
 
-`runs/<name>.md` ends with `## Lessons` — ≤2 lines of durable lessons worth a `rules/` entry, or `none`. CoS promotes 0–1 at cleanup. (Pipeline reviewers end with the `Verdict:` line their prompt requires instead.)
+Write the report to the path the brief gives (`runs/<name>.md`). One format, six fields first,
+then the machine-read headings:
+
+```
+Outcome:         COMPLETE | REOPEN_REQUEST | DEPENDENCY_REQUEST | BLOCKED
+Snapshot:        SHA + branch + worktree path (omit if nothing was written)
+Scope:           files changed / read, concrete paths
+Verification:    commands run + REAL output, and what you deliberately skipped
+Unknown / risk:  assumptions you rely on, decisions that need the Human
+Ownership:       scope released, or still held and why
+
+## Blockers
+none
+
+## Lessons
+none
+```
+
+- `Outcome:` starts its line at column 1, no list marker: the pipeline reads it to tell an unfinished phase (`BLOCKED`/`PARTIAL`/`INCOMPLETE`/`FAILED`) from a finished one, and a builder that changed nothing says `Outcome: no changes`.
+- `## Blockers` body: write `none` when there are none. Any other non-empty line is read as an unfinished-work blocker and the pipeline stops.
+- `## Lessons` may be numbered (`## 5. Lessons` passes) but must be an `##` heading (`###` fails). The watchdog checks that the heading exists, not where it sits; keep it last so the machine-read tail stays one block.
+- Pipeline reviewers end with exactly one `Verdict: clean` or `Verdict: <N> findings` line instead of `## Lessons`.
+- Put any extra section before `## Blockers`, never after `## Lessons`, so the machine-read tail stays one block.
+
+`runs/<name>.md` ends with `## Lessons` — ≤2 lines of durable lessons worth a `rules/` entry, or `none`. CoS promotes 0–1 at cleanup.
 
 Publish atomically: write `runs/.<name>.tmp` then `mv` it to `runs/<name>.md` — the pipeline reads the file the moment it exists; a partial file is a corrupted report. Stale reports from earlier tasks are archived, never consumed.
 - Lead/CoS acceptance conditions go in the review or fix brief, never appended to the plan file after plan-ready (BUILD ignores them) — 2026-10-14, runs/mu-lead.md

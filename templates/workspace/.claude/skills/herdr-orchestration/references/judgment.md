@@ -40,7 +40,7 @@ For hard-to-reverse design decisions, ask the Principal before buying two blind 
 - Read the actual diff and rerun the brief's exact verification command; report real output.
 - Review required by the pipeline or risk conditions exists for this exact snapshot.
 - Identify who settled each new public contract; resolve every `## Challenge` and finding or explicitly escalate it.
-- An independent bounded-task handback has all six fields from `PEER.md`; do not invent missing fields. Scripted task reports publish atomically under `runs/` and end in `## Lessons`, or `Verdict:` for pipeline reviewers.
+- A handback is the `runs/<name>.md` report in the one format from `rules/_all/brief.md` (`## Report format`): the six fields, then `## Blockers` / `## Lessons`, or `Verdict:` for a pipeline reviewer; don't invent missing fields.
 - Rewrite the card's `## Now`, append the daily outcome/decisions, promote at most one durable lesson via CoS, and clean up verified task workers immediately.
 
 ## Failure smells
