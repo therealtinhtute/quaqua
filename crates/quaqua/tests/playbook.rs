@@ -394,7 +394,7 @@ when: Testing 4 leaves + prove-it-works fails.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn s6_acceptance_1_fixture_test_loads_all_3_playbooks_and_6_leaves() {
+fn p2a_acceptance_1_fixture_test_loads_all_6_playbooks_and_17_leaves() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
     let playbooks_dir = repo_root.join("templates/workspace/playbooks");
@@ -420,10 +420,21 @@ fn s6_acceptance_1_fixture_test_loads_all_3_playbooks_and_6_leaves() {
 
     let expected_leaves = [
         "attack-the-premise",
+        "encode-lessons-in-structure",
+        "explain-the-number",
         "fix-root-causes",
+        "foundational-thinking",
+        "guard-the-context-window",
+        "laziness-protocol",
         "make-operations-idempotent",
+        "migrate-callers-then-delete-legacy-apis",
+        "minimize-reader-load",
+        "model-the-domain",
+        "never-block-on-the-human",
         "prove-it-works",
+        "redesign-from-first-principles",
         "sequence-verifiable-units",
+        "subtract-before-you-add",
         "test-behavior-not-implementation",
     ];
     for leaf in expected_leaves {
@@ -435,10 +446,20 @@ fn s6_acceptance_1_fixture_test_loads_all_3_playbooks_and_6_leaves() {
     }
 
     let playbooks = load_playbooks(&playbooks_dir, &principles_dir)
-        .expect("all 3 playbooks must load and validate against principles");
-    assert_eq!(playbooks.len(), 3, "must load exactly 3 playbooks");
+        .expect("all playbooks must load and validate against principles");
+    assert_eq!(playbooks.len(), 6, "must load exactly 6 playbooks");
     let names: Vec<&str> = playbooks.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, vec!["bug-fix", "feature", "figure-it-out"]);
+    assert_eq!(
+        names,
+        vec![
+            "bug-fix",
+            "feature",
+            "figure-it-out",
+            "multi-phase-plan",
+            "perf-issue",
+            "refactoring"
+        ]
+    );
 }
 
 #[test]
@@ -498,11 +519,10 @@ fn s6_acceptance_3_every_worker_ends_with_verified_step() {
         .expect("all 3 playbooks must load and validate");
 
     for pb in &playbooks {
-        assert!(
-            !pb.steps.is_empty(),
-            "playbook '{}' has no worker steps",
-            pb.name
-        );
+        if pb.steps.is_empty() {
+            // Orchestrator-only playbooks (e.g. multi-phase-plan) have empty worker steps per § P2
+            continue;
+        }
         let last_step = pb.steps.last().unwrap();
         assert!(
             last_step

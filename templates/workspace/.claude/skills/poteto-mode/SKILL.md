@@ -32,12 +32,13 @@ The Principles section below grounds every trigger. In your reply, name each pri
 MVP triggers:
 
 - About to ask a question on a "which approach", "how should I", or "what should this do" fork: classify it before asking. If the answer is an observable fact (behavior, timing, layout, output, perf), it is not the human's to answer. Settle it by running an experiment, reproduction, or prototype and let the result decide. If the task is a read-only investigation whose deliverable is a cited answer, answer from evidence. Reserve questions for genuine product or preference calls no experiment can settle. Under a full-autonomy grant, decide calls covered by the grant, act, and report. Irreversible writes in Autonomy always pause.
-- Any code: routes to `feature` in the MVP; once P2 lands, name the data shape first and choose its organizing structure per **principle-model-the-domain** (P2).
+- Any code: routes to `feature` in the MVP; once P2 lands, name the data shape first and choose its organizing structure per **principle-model-the-domain** (active in P2a).
+- Behavior-preserving change to structure or shape (rename, extract, inline, dedupe, move): routes to `refactoring` (active in P2a).
 - Nontrivial multi-step: establish the throughput checkpoint across blocking first steps, independent workstreams, shared mutable state, and smallest safe decomposition.
 - Any PR-status request ("babysit this", "get it green"): routes to `figure-it-out` in the MVP (routes to Babysit once P2 lands).
 - Asked to land or ship a green stack: routes to `figure-it-out` in the MVP (routes to Shipping once P2 lands). Green is not safe; require independent verification per unit.
 - Broken skill mid-task: fix it in its own unit. Do not block. Do not silently work around it.
-- Long, autonomous, or multi-phase work, or work the operator steps away from to review later: routes to `figure-it-out` in the MVP (routes to `multi-phase-plan` once P2 lands; maps pstack `show-me-your-work`), maintaining an auditable decision trail.
+- Long, autonomous, or multi-phase work, or work the operator steps away from to review later: routes to `multi-phase-plan` (routes to `figure-it-out` in the MVP (routes to `multi-phase-plan` once P2 lands); active in P2a; maps pstack `show-me-your-work`), maintaining an auditable decision trail.
 
 Deferred routes with quaqua mappings (P2):
 
@@ -46,7 +47,7 @@ Deferred routes with quaqua mappings (P2):
 - Parallel fan-out (P2): routes to worker fan-out per `models.md` kinds and grid layout (maps pstack `swarm`). For bakeoffs or competitive designs, routes to N workers of different kinds + judge (maps pstack `arena`).
 - Contested design (P2): routes to cross-harness reviewer on a different model (maps pstack `interrogate`).
 - Docs, RFCs, readmes, PR descriptions, or commit messages (P2): deferred to P2 documentation skill (maps pstack `technical-writing`).
-- Running a benchmark or reporting measured numbers (P2): follow **Explain the Number**; deferred to P2 benchmark checklist (maps pstack `benchmark-checklist`).
+- Running a benchmark, measuring perf, or reporting measured numbers (P2): routes to `perf-issue` and follow **Explain the Number** (`principle-explain-the-number`, active in P2a); deferred to P2 benchmark checklist (maps pstack `benchmark-checklist`).
 
 ## Principles
 
