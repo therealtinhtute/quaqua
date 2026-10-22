@@ -1140,6 +1140,10 @@ fn s6_acceptance_5_fresh_init_has_agents_coordinator_lines_and_playbooks() {
     assert!(ws.join("playbooks/bug-fix.md").is_file());
     assert!(ws.join("playbooks/feature.md").is_file());
     assert!(ws.join("playbooks/figure-it-out.md").is_file());
+    assert!(ws.join("playbooks/runtime-forensics.md").is_file());
+    assert!(ws.join("playbooks/trace-forensics.md").is_file());
+    assert!(ws.join("playbooks/visual-parity.md").is_file());
+    assert!(ws.join("playbooks/eval.md").is_file());
     assert!(
         !ws.join("playbooks/fixture.md").exists(),
         "fixture.md must not be installed in playbooks/"
@@ -1191,6 +1195,10 @@ fn f1_fresh_init_has_no_fixture() {
     assert!(ws.join("playbooks/bug-fix.md").is_file());
     assert!(ws.join("playbooks/feature.md").is_file());
     assert!(ws.join("playbooks/figure-it-out.md").is_file());
+    assert!(ws.join("playbooks/runtime-forensics.md").is_file());
+    assert!(ws.join("playbooks/trace-forensics.md").is_file());
+    assert!(ws.join("playbooks/visual-parity.md").is_file());
+    assert!(ws.join("playbooks/eval.md").is_file());
 
     let _ = std::fs::remove_dir_all(&root);
 }

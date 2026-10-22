@@ -394,7 +394,7 @@ when: Testing 4 leaves + prove-it-works fails.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn p2b_acceptance_1_fixture_test_loads_all_11_playbooks_and_20_leaves() {
+fn p2c_acceptance_1_fixture_test_loads_all_15_playbooks_and_20_leaves() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
     let playbooks_dir = repo_root.join("templates/workspace/playbooks");
@@ -450,12 +450,13 @@ fn p2b_acceptance_1_fixture_test_loads_all_11_playbooks_and_20_leaves() {
 
     let playbooks = load_playbooks(&playbooks_dir, &principles_dir)
         .expect("all playbooks must load and validate against principles");
-    assert_eq!(playbooks.len(), 11, "must load exactly 11 playbooks");
+    assert_eq!(playbooks.len(), 15, "must load exactly 15 playbooks");
     let names: Vec<&str> = playbooks.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(
         names,
         vec![
             "bug-fix",
+            "eval",
             "feature",
             "figure-it-out",
             "hillclimb",
@@ -465,7 +466,10 @@ fn p2b_acceptance_1_fixture_test_loads_all_11_playbooks_and_20_leaves() {
             "perf-issue",
             "prototype",
             "refactoring",
+            "runtime-forensics",
             "session-pickup",
+            "trace-forensics",
+            "visual-parity",
         ]
     );
 }
@@ -1100,4 +1104,70 @@ fn p2b_investigation_and_prototype_conform_to_contract() {
         "prototype step 4 must cite principle-exhaust-the-design-space"
     );
     assert_worker_contract(&proto);
+}
+
+#[test]
+fn p2c_playbooks_conform_to_contract() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+
+    // runtime-forensics
+    let rf = load_playbook(&playbooks_dir.join("runtime-forensics.md"), &principles_dir)
+        .expect("runtime-forensics should parse");
+    assert_eq!(rf.step_ids(), vec![1, 2, 3, 4, 5, 6]);
+    assert!(
+        rf.steps[1]
+            .cited_principles
+            .contains(&"principle-guard-the-context-window".to_string()),
+        "runtime-forensics step 2 must cite principle-guard-the-context-window"
+    );
+    assert_worker_contract(&rf);
+
+    // trace-forensics
+    let tf = load_playbook(&playbooks_dir.join("trace-forensics.md"), &principles_dir)
+        .expect("trace-forensics should parse");
+    assert_eq!(tf.step_ids(), vec![1, 2, 3, 4, 5, 6, 7]);
+    assert!(
+        tf.steps[0]
+            .cited_principles
+            .contains(&"principle-guard-the-context-window".to_string()),
+        "trace-forensics step 1 must cite principle-guard-the-context-window"
+    );
+    assert_worker_contract(&tf);
+
+    // visual-parity
+    let vp = load_playbook(&playbooks_dir.join("visual-parity.md"), &principles_dir)
+        .expect("visual-parity should parse");
+    assert_eq!(vp.step_ids(), vec![1, 2, 3, 4, 5]);
+    assert!(
+        vp.steps[2]
+            .cited_principles
+            .contains(&"principle-separate-before-serializing-shared-state".to_string()),
+        "visual-parity step 3 must cite principle-separate-before-serializing-shared-state"
+    );
+    assert!(
+        vp.steps[3].text.contains("rules/_all/no-gui-driving.md"),
+        "visual-parity step 4 must cite rules/_all/no-gui-driving.md"
+    );
+    assert_worker_contract(&vp);
+
+    // eval
+    let ev =
+        load_playbook(&playbooks_dir.join("eval.md"), &principles_dir).expect("eval should parse");
+    assert_eq!(ev.step_ids(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert!(
+        ev.steps[5]
+            .cited_principles
+            .contains(&"principle-guard-the-context-window".to_string()),
+        "eval step 6 must cite principle-guard-the-context-window"
+    );
+    assert!(
+        ev.steps[6]
+            .cited_principles
+            .contains(&"principle-explain-the-number".to_string()),
+        "eval step 7 must cite principle-explain-the-number"
+    );
+    assert_worker_contract(&ev);
 }

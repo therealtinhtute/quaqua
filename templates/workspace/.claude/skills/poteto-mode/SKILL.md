@@ -42,19 +42,23 @@ MVP triggers:
 - Long, autonomous, or multi-phase work, or work the operator steps away from to review later: routes to `multi-phase-plan` (active in P2a; maps pstack `show-me-your-work`), maintaining an auditable decision trail.
 - Resuming or taking over prior in-flight work from the report, branch, or journal: routes to `session-pickup` (active in P2b).
 - Suspending in-flight work cleanly on explicit pause or before coordinator compaction: routes to `pause-safely` (active in P2b).
+- Diagnosing a runtime symptom (leak, idle-CPU spin, glitch) from live instrumentation: routes to `runtime-forensics` (active in P2c).
+- Diagnosing a captured profiling artifact (cpuprofile, trace, spindump, heap snapshot): routes to `trace-forensics` (active in P2c).
+- Pixel-exact UI equivalence or migrating a styling system: routes to `visual-parity` (active in P2c), running headless only per `rules/_all/no-gui-driving.md`.
+- Testing how a skill, structure, or prompt change affects agent behavior before promoting it, or evaluating playbook spread and telemetry across runs: routes to `eval` (active in P2c).
 
 Deferred routes with quaqua mappings (P2):
 
 - Nontrivial change, contested architecture decision, or technical fork (P2): routes to taskforce advisor (`quaqua taskforce advisor`).
 - Code crossing a function boundary (P2): routes to taskforce `dual-lens` (`quaqua taskforce dual-lens`) for parallel design exploration before implementing (maps pstack `architect`).
-- Parallel fan-out (P2): routes to worker fan-out per `models.md` kinds and grid layout (maps pstack `swarm`). For bakeoffs or competitive designs, routes to N workers of different kinds + judge (maps pstack `arena`).
+- Parallel fan-out (P2): routes to worker fan-out per `models.md` kinds and grid layout (maps pstack `swarm`). For bakeoffs or competitive designs, routes to N workers of different kinds + judge (maps pstack `arena`; active in P2c under `eval`).
 - Contested design (P2): routes to cross-harness reviewer on a different model (maps pstack `interrogate`).
 - Docs, RFCs, readmes, PR descriptions, or commit messages (P2): deferred to P2 documentation skill (maps pstack `technical-writing`).
 - Running a benchmark or reporting measured numbers (P2): follow **Explain the Number** (`principle-explain-the-number`, active in P2a); deferred to P2 benchmark checklist (maps pstack `benchmark-checklist`).
 
 ## Principles
 
-Read the leaf in full for any principle you cite. Each leaf lives under `principles/<name>.md`. In the MVP, S6 shipped 6 leaves; P2a brought the library to 17 leaves; P2b brings the library to 20 leaves (4 remaining in P2).
+In the MVP, S6 shipped 6 leaves; P2a brought the library to 17 leaves; P2b brought the library to 20 leaves; P2c activates 4 playbooks (runtime-forensics, trace-forensics, visual-parity, eval) reusing existing leaves (4 remaining in P2).
 
 **Core**
 
@@ -140,7 +144,7 @@ Keep comments clean as you go. Keep a comment only for a non-obvious *why* the c
 
 Instead of maintaining a static file index that can drift, the router queries `quaqua playbook list` dynamically.
 
-A task is matched to an installed playbook (`quaqua playbook list`), which outputs each playbook's name and its `when:` trigger condition. S6 shipped the initial 3 playbooks (`bug-fix`, `feature`, `figure-it-out`); P2 expands the library to 18 playbooks.
+S6 shipped the initial 3 playbooks (bug-fix, feature, figure-it-out); P2 expands the library to 18 playbooks (15 active in P2c).
 
 - **Figure-it-out fallback:** A large or cross-cutting effort (a migration across many call sites, an ambitious multi-part change), or work the user steps away from to trust later, routes to `figure-it-out` even when a narrower playbook like Feature fits. Use `figure-it-out` whenever no bundled playbook fits. It designs a bespoke, rigorous workflow for the task.
 - **Orchestration:** A standing project-scale program routes to a project Lead (`<slug>-lead`).
