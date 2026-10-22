@@ -132,14 +132,23 @@ pub fn resolve_cost_budget(task: &str) -> Option<f64> {
     brief_cost_budget(task)
 }
 
+fn guess_harness_from_config(name: &str) -> Option<Harness> {
+    let prefix = name.split('-').next()?;
+    if prefix.is_empty() {
+        return None;
+    }
+    let cfg = crate::config::load_team_config().ok()?;
+    let kind_info = cfg.kinds.get(prefix)?;
+    Harness::parse(&kind_info.harness)
+}
+
 /// True when this worker reported spend through omp session transcripts.
 pub fn is_omp_worker(harness: &str, name: &str) -> bool {
     Harness::parse(harness) == Some(Harness::Omp)
-        || (harness.is_empty() && (name.starts_with("sude-") || name.starts_with("detu-")))
+        || (harness.is_empty() && guess_harness_from_config(name) == Some(Harness::Omp))
 }
 
-/// True when this worker reports spend through pi session transcripts. No name
-/// fallback: pi kinds share prefixes with opencode ones (`tieude-`, `suhuynh-`).
+/// True when this worker reports spend through pi session transcripts.
 pub fn is_pi_worker(harness: &str) -> bool {
     Harness::parse(harness) == Some(Harness::Pi)
 }
@@ -152,15 +161,14 @@ pub fn pi_session_dir(runs_dir: &Path, name: &str) -> PathBuf {
 /// True when this worker reported spend through claude session transcripts.
 pub fn is_claude_worker(harness: &str, name: &str) -> bool {
     Harness::parse(harness) == Some(Harness::Claude)
-        || (harness.is_empty() && (name.starts_with("ni-") || name.starts_with("truonglao-")))
+        || (harness.is_empty() && guess_harness_from_config(name) == Some(Harness::Claude))
 }
 
 /// True when this worker reported spend through opencode sqlite database.
 pub fn is_opencode_worker(harness: &str, name: &str) -> bool {
     Harness::parse(harness) == Some(Harness::Opencode)
-        || (harness.is_empty() && (name.starts_with("tieude-") || name.starts_with("suhuynh-")))
+        || (harness.is_empty() && guess_harness_from_config(name) == Some(Harness::Opencode))
 }
-
 /// omp's session directory name for a worktree path: `$HOME` is stripped, then
 /// every `/` becomes `-` (the leading dash is kept).
 ///

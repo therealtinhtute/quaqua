@@ -1145,6 +1145,32 @@ fn test_spawn_args_parsing() {
     ];
     assert!(parse_spawn_args(&bad).is_err());
 }
+#[test]
+fn test_spawn_args_parsing_with_purpose() {
+    // --purpose with 2 positional args (name and repo)
+    let args = vec![
+        "--purpose".to_string(),
+        "review".to_string(),
+        "suhuynh-rev1".to_string(),
+        "/repo".to_string(),
+    ];
+    let opts = parse_spawn_args(&args).expect("valid args with purpose");
+    assert_eq!(opts.name, "suhuynh-rev1");
+    assert_eq!(opts.kind, "purpose:review");
+    assert_eq!(opts.repo_path, PathBuf::from("/repo"));
+
+    // --purpose= syntax with 3 positional args
+    let args2 = vec![
+        "--purpose=build".to_string(),
+        "sude-build1".to_string(),
+        "sude".to_string(),
+        "/repo".to_string(),
+    ];
+    let opts2 = parse_spawn_args(&args2).expect("valid args with purpose=");
+    assert_eq!(opts2.name, "sude-build1");
+    assert_eq!(opts2.kind, "purpose:build");
+}
+
 
 #[test]
 fn test_cli_cap_smoke() {
@@ -1870,8 +1896,164 @@ impl Drop for EnvLockGuard {
         std::env::remove_var("HERDR_PANE_ID");
         std::env::remove_var("GRID_SKIP");
         std::env::remove_var("QUAQUA_TEST");
+        std::env::remove_var("QUAQUA_TEAM_TOML");
         ENV_BUSY.store(false, std::sync::atomic::Ordering::Release);
     }
+}
+
+#[test]
+fn test_spawn_worker_resolving_purpose() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = test_cfg_with_fallback();
+    cfg.kinds.insert(
+        "suhuynh".to_string(),
+        config::Kind {
+            harness: "claude".to_string(),
+            model: "opus".to_string(),
+            effort: Some("low".to_string()),
+            fallback: None,
+            can_review: true,
+            spawn: config::SPAWN_AUTO.to_string(),
+        },
+    );
+    cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
+
+    let git = SpawnTestGit;
+    let mut mock = MockActivities::new();
+    mock.register(
+        "herdr.pane_split",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+        name: String::new(),
+    }));
+    let herdr = MockActivitiesHerdr::new(mock);
+
+    let opts = parse_spawn_args(&[
+        "--purpose".to_string(),
+        "review".to_string(),
+        "suhuynh-purptest".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    assert_eq!(opts.kind, "purpose:review");
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+    assert!(res.is_ok(), "spawn should resolve purpose and succeed: {:?}", res.err());
+
+    let starts = herdr.agent_starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].0, "suhuynh-purptest");
+    assert_eq!(starts[0].1, "claude");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_renamed_kind_passes_cap_cleanup_cost() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-renamed-kind-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+
+    let team_path = temp.join("team.toml");
+    let team_content = r#"schema_version = 2
+[limits]
+depth = 2
+max_workers_per_orchestrator = 4
+weights = { default = 1, pipeline = 2 }
+
+[timers]
+budget_default = "45m"
+hard_cap = "120m"
+stall = "10m"
+idle = "2m"
+nudge_at = 0.8
+grace = 0.25
+pilot_budget = "30m"
+
+[strategy]
+default_kind = "nhanvat"
+default_reviewer = ["nhanvat"]
+builder_reviewer_differ = "none"
+
+[purposes]
+work = "nhanvat"
+
+[kinds.tieude]
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+effort = "max"
+
+[kinds.sude]
+harness = "omp"
+model = "google-antigravity/gemini-3.8-flash"
+effort = "high"
+
+[kinds.suhuynh]
+harness = "claude"
+model = "opus-5.5"
+effort = "high"
+can_review = true
+
+[kinds.nhanvat]
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+effort = "max"
+can_review = true
+
+[grid]
+workers_tab = "workers"
+"#;
+    std::fs::write(&team_path, team_content).unwrap();
+
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::set_var("QUAQUA_TEAM_TOML", team_path.to_str().unwrap());
+
+    let cfg = quaqua::config::load_team_config().expect("loads custom team.toml");
+    assert!(cfg.kinds.contains_key("nhanvat"));
+
+    // 1. Cap: is_task_worker_name dynamically recognizes nhanvat from team.toml
+    assert!(quaqua::cap::is_task_worker_name("nhanvat-test1"));
+    assert!(!quaqua::cap::is_task_worker_name("nhanvat-lead"));
+    assert!(!quaqua::cap::is_task_worker_name("unknown-test1"));
+
+    // 2. Cost: guess_harness_from_config correctly maps nhanvat to opencode
+    assert!(quaqua::worker::prompt::cost::is_opencode_worker("", "nhanvat-test1"));
+    assert!(!quaqua::worker::prompt::cost::is_omp_worker("", "nhanvat-test1"));
+
+    // 3. Cleanup: cleanup_worker correctly records telemetry with kind = "nhanvat"
+    let worker_name = "nhanvat-test1";
+    let wt = temp.join(".wt").join(worker_name);
+    let _ = std::fs::create_dir_all(&wt);
+    std::fs::write(runs_dir.join(format!("{worker_name}.owner")), "cos\n").unwrap();
+
+    let herdr = MockActivitiesHerdr::for_cleanup("w1:p3");
+    let git = SpawnTestGit;
+    let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
+    assert!(res.is_ok(), "cleanup failed: {:?}", res);
+
+    // Verify telemetry JSONL has kind: "nhanvat"
+    let tele_path = runs_dir.join("telemetry.jsonl");
+    assert!(tele_path.exists());
+    let content = std::fs::read_to_string(&tele_path).unwrap();
+    assert!(content.contains("\"kind\":\"nhanvat\""), "telemetry missing kind 'nhanvat': {content}");
+
+    let _ = std::fs::remove_dir_all(&temp);
 }
 #[test]
 fn test_spawn_worker_fallback_scenarios() {

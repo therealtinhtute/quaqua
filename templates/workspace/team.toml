@@ -38,6 +38,16 @@ lead_kind = "tieude"
 default_reviewer = ["suhuynh"]           # first available wins (anh iu, 2026-10-16)
 builder_reviewer_differ = "kind"
 
+[purposes]
+build = "sude"
+review = "suhuynh"
+research = "detu"
+quick = "tieude"
+design = "truonglao"
+
+[opencode_models]
+"deepseek-v4.1-flash" = ["low", "high", "max"]
+
 [kinds.tieude]                    # harness · model · effort live here; models.md prose stays prose
 harness = "pi"                    # H3a: was opencode (still a supported fallback harness)
 model = "opencode-go/deepseek-v4.1-flash"

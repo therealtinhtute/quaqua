@@ -39,6 +39,10 @@ pub struct Config {
     #[serde(default)]
     pub kinds: BTreeMap<String, Kind>,
     #[serde(default)]
+    pub purposes: BTreeMap<String, String>,
+    #[serde(default = "default_opencode_models")]
+    pub opencode_models: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     pub taskforce: BTreeMap<String, Taskforce>,
     #[serde(default)]
     pub merge: Merge,
@@ -57,6 +61,8 @@ impl Default for Config {
             roles: BTreeMap::new(),
             strategy: Strategy::default(),
             kinds: BTreeMap::new(),
+            purposes: BTreeMap::new(),
+            opencode_models: default_opencode_models(),
             taskforce: BTreeMap::new(),
             merge: Merge::default(),
             grid: Grid::default(),
@@ -205,14 +211,61 @@ pub fn effort_allowed(harness: &str, effort: &str) -> bool {
     crate::harness::Harness::parse(harness).is_some_and(|h| h.effort_allowed(effort))
 }
 
+fn default_opencode_models() -> BTreeMap<String, Vec<String>> {
+    let mut m = BTreeMap::new();
+    m.insert(
+        "deepseek-v4.1-flash".to_string(),
+        vec!["low".to_string(), "high".to_string(), "max".to_string()],
+    );
+    m
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelVariants(pub Vec<String>);
+
+impl ModelVariants {
+    pub fn contains(&self, effort: &str) -> bool {
+        self.0.iter().any(|s| s == effort)
+    }
+
+    pub fn join(&self, sep: &str) -> String {
+        self.0.join(sep)
+    }
+}
+
+impl std::ops::Deref for ModelVariants {
+    type Target = [String];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Config {
+    pub fn opencode_model_variants(&self, model: &str) -> Option<ModelVariants> {
+        let model_id = model.rsplit('/').next().unwrap_or(model);
+        self.opencode_models
+            .get(model)
+            .or_else(|| self.opencode_models.get(model_id))
+            .map(|v| ModelVariants(v.clone()))
+    }
+}
+
+/// Resolve a kind from a purpose name in config.
+pub fn resolve_purpose<'a>(cfg: &'a Config, purpose: &str) -> Result<&'a str, String> {
+    let kind = cfg.purposes.get(purpose).ok_or_else(|| {
+        format!("unknown purpose '{purpose}'")
+    })?;
+    if !cfg.kinds.contains_key(kind) {
+        return Err(format!("purpose '{purpose}': unknown kind '{kind}'"));
+    }
+    Ok(kind.as_str())
+}
+
 /// The variant vocabulary allowed for known opencode models.
 /// Key is the last path segment of the model ID (e.g. "deepseek-v4.1-flash").
-pub fn opencode_model_variants(model: &str) -> Option<&'static [&'static str]> {
-    let model_id = model.rsplit('/').next().unwrap_or(model);
-    match model_id {
-        "deepseek-v4.1-flash" => Some(&["low", "high", "max"]),
-        _ => None,
-    }
+pub fn opencode_model_variants(model: &str) -> Option<ModelVariants> {
+    let cfg = load_team_config().ok()?;
+    cfg.opencode_model_variants(model)
 }
 
 /// Check if an effort/variant value is allowed for a specific harness and model.
@@ -222,7 +275,7 @@ pub fn model_effort_allowed(harness: &str, model: &str, effort: &str) -> bool {
         return true;
     }
     match opencode_model_variants(model) {
-        Some(allowed) => allowed.contains(&effort),
+        Some(allowed) => allowed.contains(effort),
         None => false,
     }
 }
@@ -464,6 +517,12 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             cfg.merge.integ_branch
         ));
     }
+    for (purpose, kind) in &cfg.purposes {
+        if !cfg.kinds.contains_key(kind) {
+            return Err(format!("purpose '{purpose}': unknown kind '{kind}'"));
+        }
+    }
+
 
     // team.toml is the only source of harness/model/effort: fail closed on a kind
     // that cannot launch, or on a fallback that names a missing kind or itself.
@@ -496,9 +555,9 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         if crate::harness::Harness::parse(&kind.harness)
             == Some(crate::harness::Harness::Opencode)
         {
-            match opencode_model_variants(&kind.model) {
+            match cfg.opencode_model_variants(&kind.model) {
                 Some(allowed) => {
-                    if !allowed.contains(&effort) {
+                    if !allowed.contains(effort) {
                         return Err(format!(
                             "kind '{name}': harness 'opencode' model '{}' does not take effort '{effort}' (allowed: {})",
                             kind.model,
@@ -508,7 +567,7 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
                 }
                 None => {
                     return Err(format!(
-                        "kind '{name}': opencode model '{}' is not in allowlist (fix: add model and variants to config.rs model_effort_allowed)",
+                        "kind '{name}': opencode model '{}' is not in allowlist (fix: add model and variants to team.toml [opencode_models])",
                         kind.model
                     ));
                 }
@@ -558,6 +617,15 @@ pub fn check_spawn_policy(
 pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, String> {
     let cfg = resolve(raw.clone(), project)?;
     let unknown = || format!("unknown key '{key}'");
+    if let Some(m) = key.strip_prefix("opencode_models.") {
+        let model_id = m.rsplit('/').next().unwrap_or(m);
+        return cfg
+            .opencode_models
+            .get(m)
+            .or_else(|| cfg.opencode_models.get(model_id))
+            .map(|v| v.join("\n"))
+            .ok_or_else(unknown);
+    }
     let parts: Vec<&str> = key.split('.').collect();
     let out = match parts.as_slice() {
         ["schema_version"] => cfg.schema_version.to_string(),
@@ -583,7 +651,13 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
             .strategy
             .lead_kind
             .clone()
-            .unwrap_or_else(|| "tieude".to_string()),
+            .unwrap_or_else(|| cfg.strategy.default_kind.clone()),
+        ["purposes", p] => cfg.purposes.get(*p).cloned().ok_or_else(unknown)?,
+        ["opencode_models", m] => cfg
+            .opencode_models
+            .get(*m)
+            .map(|v| v.join("\n"))
+            .ok_or_else(unknown)?,
         ["strategy", "default_reviewer"] => cfg.strategy.default_reviewer.join("\n"),
         ["strategy", "builder_reviewer_differ"] => cfg.strategy.builder_reviewer_differ.clone(),
         ["kinds", k, field] => {
@@ -826,7 +900,7 @@ workers_tab = "workers"
         c.kinds.get_mut("tieude").unwrap().effort = Some("max".to_string());
         let err = validate(&c).unwrap_err();
         assert!(
-            err.contains("is not in allowlist (fix: add model and variants to config.rs model_effort_allowed)"),
+            err.contains("is not in allowlist (fix: add model and variants to team.toml [opencode_models])"),
             "{err}"
         );
 
@@ -836,5 +910,49 @@ workers_tab = "workers"
         assert!(validate(&c).is_ok());
         c.kinds.get_mut("tieude").unwrap().effort = Some("max".to_string());
         assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn test_opencode_model_from_team_toml_fixture() {
+        let mut c = base();
+        // Add a new model via opencode_models table in config
+        c.opencode_models.insert(
+            "my-custom-model".to_string(),
+            vec!["low".to_string(), "high".to_string()],
+        );
+        c.kinds.get_mut("tieude").unwrap().model = "my-custom-model".to_string();
+        c.kinds.get_mut("tieude").unwrap().effort = Some("high".to_string());
+        assert!(validate(&c).is_ok());
+
+        // Removing it fails with the fix hint naming team.toml
+        c.opencode_models.remove("my-custom-model");
+        let err = validate(&c).unwrap_err();
+        assert!(
+            err.contains("is not in allowlist (fix: add model and variants to team.toml [opencode_models])"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_purposes_resolution_and_validation() {
+        let mut c = base();
+        c.purposes.insert("review".to_string(), "suhuynh".to_string());
+        c.purposes.insert("build".to_string(), "tieude".to_string());
+
+        // Valid purpose resolves to kind
+        assert_eq!(resolve_purpose(&c, "review").unwrap(), "suhuynh");
+        assert_eq!(resolve_purpose(&c, "build").unwrap(), "tieude");
+
+        // Unknown purpose fails with offending key
+        let err = resolve_purpose(&c, "research").unwrap_err();
+        assert!(err.contains("unknown purpose 'research'"), "{err}");
+
+        // Dangling kind fails config validation with offending key
+        c.purposes.insert("design".to_string(), "ghost-kind".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(
+            err.contains("purpose 'design': unknown kind 'ghost-kind'"),
+            "{err}"
+        );
     }
 }

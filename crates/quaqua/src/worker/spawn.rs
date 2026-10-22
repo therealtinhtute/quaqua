@@ -32,11 +32,12 @@ const CREDENTIAL_ENV_VARS: &[&str] = &[
 ];
 
 pub const USAGE: &str = "\
-# Usage: quaqua worker spawn [--base <ref>] [--review] [--approve-kind <kind>] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
+# Usage: quaqua worker spawn [--base <ref>] [--review] [--approve-kind <kind>] [--purpose <purpose>] <name> [<kind>] <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — quaqua lead spawn <slug>)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
 #   --review      any kind with can_review = true: repo read-only, $HOME/quaqua/runs writable
+#   --purpose <p> resolve kind from [purposes] in team.toml
 #   --approve-kind <kind>  approve a spawn when kinds.<kind>.spawn = \"approve\" (repeatable)";
 
 pub struct SpawnOptions {
@@ -52,9 +53,9 @@ pub struct SpawnOptions {
 pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> {
     let mut base: Option<String> = None;
     let mut review = false;
+    let mut purpose: Option<String> = None;
     let mut approve_kinds: Vec<String> = Vec::new();
     let mut pos = Vec::new();
-
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -93,6 +94,22 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
             }
             base = Some(val.to_string());
             i += 1;
+        } else if arg == "--purpose" {
+            if i + 1 >= args.len() {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            let val = &args[i + 1];
+            if val.is_empty() || val.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            purpose = Some(val.clone());
+            i += 2;
+        } else if let Some(val) = arg.strip_prefix("--purpose=") {
+            if val.is_empty() || val.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            purpose = Some(val.to_string());
+            i += 1;
         } else if arg.starts_with('-') {
             return Err((1, format!("{}\n", USAGE)));
         } else {
@@ -101,16 +118,26 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
         }
     }
 
-    if pos.len() < 3 {
+    let (name, kind, repo_path) = if pos.len() == 2 && purpose.is_some() {
+        let p = purpose.as_ref().unwrap();
+        (pos[0].clone(), format!("purpose:{p}"), PathBuf::from(&pos[1]))
+    } else if pos.len() >= 3 {
+        let k = if let Some(p) = &purpose {
+            format!("purpose:{p}")
+        } else {
+            pos[1].clone()
+        };
+        (pos[0].clone(), k, PathBuf::from(&pos[2]))
+    } else {
         return Err((1, format!("{}\n", USAGE)));
-    }
+    };
 
     Ok(SpawnOptions {
         base,
         review,
-        name: pos[0].clone(),
-        kind: pos[1].clone(),
-        repo_path: PathBuf::from(&pos[2]),
+        name,
+        kind,
+        repo_path,
         approve_kinds,
     })
 }
@@ -263,11 +290,21 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     git: &G,
     herdr: &H,
 ) -> Result<(), (i32, String)> {
+    let mut opts = opts;
+    if let Some(p) = opts.kind.strip_prefix("purpose:") {
+        opts.kind = crate::config::resolve_purpose(cfg, p)
+            .map_err(|e| (1, format!("error: {e}\n")))?
+            .to_string();
+    } else if !cfg.kinds.contains_key(&opts.kind) {
+        if let Ok(resolved) = crate::config::resolve_purpose(cfg, &opts.kind) {
+            opts.kind = resolved.to_string();
+        }
+    }
+
     let kind_info = cfg.kinds.get(&opts.kind).ok_or_else(|| {
         let line2 = USAGE.lines().next().unwrap_or(USAGE);
         (1, format!("{line2}\n"))
     })?;
-
     if !is_valid_name(&opts.name, &opts.kind) {
         let lines: Vec<&str> = USAGE.lines().take(2).collect();
         return Err((1, format!("{}\n", lines.join("\n"))));
@@ -279,7 +316,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
 
     if opts.review && !kind_info.can_review {
         eprintln!(
-            "error: --review requires a kind with can_review = true in team.toml (ni, suhuynh, truonglao), not {}",
+            "error: --review requires a kind with can_review = true in team.toml, not {}",
             opts.kind
         );
         return Err((1, format!("{}\n", USAGE)));

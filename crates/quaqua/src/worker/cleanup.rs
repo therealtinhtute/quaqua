@@ -180,8 +180,19 @@ pub fn append_worker_telemetry(
 
         if kind.is_none() {
             let prefix = name.split('-').next().unwrap_or("");
-            if matches!(prefix, "tieude" | "suhuynh" | "sude" | "detu" | "ni" | "truonglao") {
-                kind = Some(prefix.to_string());
+            if let Ok(cfg) = crate::config::load_team_config() {
+                if cfg.kinds.contains_key(prefix) {
+                    kind = Some(prefix.to_string());
+                }
+            }
+        }
+        if harness.is_none() {
+            if let Some(k) = &kind {
+                if let Ok(cfg) = crate::config::load_team_config() {
+                    if let Some(kind_info) = cfg.kinds.get(k) {
+                        harness = Some(kind_info.harness.clone());
+                    }
+                }
             }
         }
 

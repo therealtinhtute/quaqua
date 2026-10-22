@@ -6,16 +6,21 @@ use crate::util::is_pid_alive;
 use serde_json::Value;
 use std::path::Path;
 
-const WORKER_KINDS: [&str; 6] = [
-    "tieude", "detu", "sude", "ni", "suhuynh", "truonglao",
-];
-
 /// Check if a worker name matches `<kind>-...` and does not end with `-lead`.
 pub fn is_task_worker_name(name: &str) -> bool {
+    if let Ok(cfg) = crate::config::load_team_config() {
+        is_task_worker_name_in_config(name, &cfg)
+    } else {
+        false
+    }
+}
+
+/// Check if a worker name matches `<kind>-...` for any kind in `cfg.kinds` and does not end with `-lead`.
+pub fn is_task_worker_name_in_config(name: &str, cfg: &crate::config::Config) -> bool {
     if name.ends_with("-lead") {
         return false;
     }
-    for k in WORKER_KINDS {
+    for k in cfg.kinds.keys() {
         if name.starts_with(&format!("{k}-")) {
             return true;
         }
