@@ -132,6 +132,18 @@ impl VerdictRecord {
         };
         source_score + level_score
     }
+
+    /// Returns true if this verdict represents an independent passing verification.
+    /// Self-reports and non-passing verifier verdicts are never verified.
+    pub fn is_verified(&self) -> bool {
+        self.source == VerdictSource::Verifier
+            && matches!(
+                self.level,
+                VerdictLevel::ReviewClean
+                    | VerdictLevel::UnitTestVerified
+                    | VerdictLevel::TypeCheckOnly
+            )
+    }
 }
 
 /// SQLite-backed persistent journal implementing [`Journal`].
@@ -357,13 +369,64 @@ impl SqliteJournal {
     }
 
     /// Returns the strongest verdict for the specified branch and SHA, if any.
+    ///
+    /// Rules:
+    /// - Verifier verdicts always override self-reports.
+    /// - Between verifier verdicts on the same branch and SHA (e.g. dual-lens or re-review),
+    ///   any failed, blocked, or inconclusive verifier verdict dominates over a pass (F4).
+    /// - A self-report alone is never presented as verified (F6); its effective level
+    ///   is inconclusive and `is_verified()` is false.
     pub fn strongest_verdict(
         &self,
         branch: &str,
         sha: &str,
     ) -> Result<Option<VerdictRecord>, JournalError> {
         let list = self.load_verdicts(branch, sha)?;
-        Ok(list.into_iter().max_by_key(|v| v.strength()))
+        if list.is_empty() {
+            return Ok(None);
+        }
+
+        let verifier_verdicts: Vec<VerdictRecord> = list
+            .iter()
+            .filter(|v| v.source == VerdictSource::Verifier)
+            .cloned()
+            .collect();
+
+        if !verifier_verdicts.is_empty() {
+            // F4 rule: Any failed, blocked, or inconclusive verifier verdict dominates
+            if let Some(v) = verifier_verdicts
+                .iter()
+                .find(|v| v.level == VerdictLevel::VerifierFailed)
+            {
+                return Ok(Some(v.clone()));
+            }
+            if let Some(v) = verifier_verdicts
+                .iter()
+                .find(|v| v.level == VerdictLevel::VerifierBlocked)
+            {
+                return Ok(Some(v.clone()));
+            }
+            if let Some(v) = verifier_verdicts
+                .iter()
+                .find(|v| v.level == VerdictLevel::Inconclusive)
+            {
+                return Ok(Some(v.clone()));
+            }
+            // All verifier verdicts are clean/pass; return the strongest pass
+            let best = verifier_verdicts
+                .into_iter()
+                .max_by_key(|v| v.strength())
+                .unwrap();
+            return Ok(Some(best));
+        }
+
+        // F6 rule: Only self-reports exist; a self-report alone is never presented as verified.
+        if let Some(mut self_report) = list.into_iter().last() {
+            self_report.level = VerdictLevel::Inconclusive;
+            return Ok(Some(self_report));
+        }
+
+        Ok(None)
     }
 
     /// Loads all verdict records across all workflows.
@@ -923,10 +986,11 @@ mod tests {
         };
         journal.record_verdict("wf-builder", &v_builder).unwrap();
 
-        // Builder self-report is currently strongest
+        // Builder self-report alone cannot be presented as verified (F6)
         let cur = journal.strongest_verdict(branch, sha).unwrap().unwrap();
         assert_eq!(cur.source, VerdictSource::SelfReport);
-        assert_eq!(cur.level, VerdictLevel::UnitTestVerified);
+        assert_eq!(cur.level, VerdictLevel::Inconclusive);
+        assert!(!cur.is_verified());
 
         // Reviewer clean arrives -> overrides self-report
         let v_rev_clean = VerdictRecord {

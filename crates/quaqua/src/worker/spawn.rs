@@ -369,6 +369,14 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     if let Ok(pt) = std::env::var("PIPELINE_TASK") {
         let _ = WorkerMetadata::save_pipeline(&runs_dir, &opts.name, &pt);
     }
+    if let Some(base_ref) = &opts.base {
+        let _ = crate::state::atomic_write(
+            &runs_dir.join(format!("{}.base", opts.name)),
+            format!("{base_ref}\n"),
+        );
+    } else {
+        let _ = std::fs::remove_file(runs_dir.join(format!("{}.base", opts.name)));
+    }
 
     let rf_str = rf.to_string_lossy().to_string();
     let runs_str = runs_dir.to_string_lossy().to_string();

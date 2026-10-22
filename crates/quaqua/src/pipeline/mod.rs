@@ -2665,7 +2665,7 @@ fn report_has_outcome_no_changes(content: &str) -> bool {
     false
 }
 
-fn parse_verdict_str(verdict_line: &str) -> Result<(u32, bool), String> {
+pub(crate) fn parse_verdict_str(verdict_line: &str) -> Result<(u32, bool), String> {
     if verdict_line.contains("## Challenge") {
         return Ok((0, true));
     }

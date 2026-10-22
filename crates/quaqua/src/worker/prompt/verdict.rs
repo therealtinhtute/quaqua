@@ -114,16 +114,13 @@ pub fn parse_reviewer_report(report_content: &str) -> (VerdictLevel, String) {
         .last();
 
     if let Some((raw_line, rest)) = last_verdict {
-        let lower = rest.to_lowercase();
-        if lower.starts_with("clean") {
-            (VerdictLevel::ReviewClean, raw_line.to_string())
-        } else if lower.starts_with("blocked") {
-            (VerdictLevel::VerifierBlocked, raw_line.to_string())
-        } else if lower.contains("finding") {
-            (VerdictLevel::VerifierFailed, raw_line.to_string())
-        } else {
-            (VerdictLevel::Inconclusive, raw_line.to_string())
-        }
+        let vline = format!("Verdict: {rest}");
+        let lvl = match crate::pipeline::parse_verdict_str(&vline) {
+            Ok((0, _)) => VerdictLevel::ReviewClean,
+            Ok((n, _)) if n > 0 => VerdictLevel::VerifierFailed,
+            _ => VerdictLevel::Inconclusive,
+        };
+        (lvl, raw_line.to_string())
     } else {
         (
             VerdictLevel::Inconclusive,
@@ -181,6 +178,11 @@ pub fn record_verdict_on_acceptance<G: GitOps>(
     git: &G,
     repo_dir: Option<&Path>,
 ) -> Result<Option<VerdictRecord>, String> {
+    // Exclude taskforce workers from recording branch review verdicts
+    if runs_dir.join(format!("{name}.taskforce")).is_file() {
+        return Ok(None);
+    }
+
     let kind = name.split('-').next().unwrap_or(name);
     let team_cfg = crate::config::load_team_config().ok();
     let harness = team_cfg
@@ -193,7 +195,7 @@ pub fn record_verdict_on_acceptance<G: GitOps>(
 
     let (branch, sha, level, evidence, source, builder_kind, verifier_kind) = if expect_verdict {
         // Reviewer
-        let (lvl, ev) = parse_reviewer_report(report_content);
+        let (mut lvl, ev) = parse_reviewer_report(report_content);
 
         // SHA from H4 baseline
         let baseline_sha = readonly::baseline_sha(runs_dir, name).unwrap_or_default();
@@ -208,6 +210,10 @@ pub fn record_verdict_on_acceptance<G: GitOps>(
         } else {
             String::new()
         };
+        // F5 guard: a reviewer verdict with no resolvable SHA is never journalled as a pass
+        if head_sha.is_empty() {
+            lvl = VerdictLevel::Inconclusive;
+        }
 
         // Branch & builder_kind from pipeline state if available
         let pipeline_task_opt = WorkerMetadata::load_pipeline(runs_dir, name);
@@ -227,6 +233,30 @@ pub fn record_verdict_on_acceptance<G: GitOps>(
                                 break;
                             }
                         }
+                    }
+                }
+            }
+        }
+        // If no pipeline state, check for persisted base ref (F1)
+        if b_name.is_empty() {
+            let base_file = runs_dir.join(format!("{name}.base"));
+            if let Ok(base_content) = std::fs::read_to_string(&base_file) {
+                let base_ref = base_content.trim();
+                if !base_ref.is_empty() {
+                    let branch_name = if let Some(stripped) = base_ref.strip_prefix("refs/heads/") {
+                        stripped
+                    } else {
+                        base_ref
+                    };
+                    b_name = if branch_name.starts_with("quaqua/") {
+                        branch_name.to_string()
+                    } else {
+                        format!("quaqua/{branch_name}")
+                    };
+                    let worker_part = b_name.strip_prefix("quaqua/").unwrap_or(&b_name);
+                    let k = worker_part.split('-').next().unwrap_or(worker_part);
+                    if !k.is_empty() {
+                        b_kind = Some(k.to_string());
                     }
                 }
             }
@@ -750,5 +780,205 @@ mod tests {
         let json = r#"{"branch":"quaqua/sude-task","sha":"3333333333333333333333333333333333333333","level":"unheard-of-level","evidence":"","verifier":"sude-task","source":"self","harness":"omp"}"#;
         let decoded: VerdictRecord = serde_json::from_str(json).unwrap();
         assert_eq!(decoded.level, VerdictLevel::Inconclusive);
+    }
+
+    #[test]
+    fn test_f1_standalone_reviewer_with_base_records_on_builder_branch_with_kind() {
+        let tmp = TempDir::new("f1");
+        let runs_dir = tmp.path().join("runs");
+        fs::create_dir_all(&runs_dir).unwrap();
+
+        let reviewer_name = "suhuynh-pstackverdr";
+        let builder_branch = "quaqua/sude-pstackverdict";
+        let builder_kind = "sude";
+        let sha = "c63689f8dabcbacaf01a9637c436b030a22b9126";
+
+        WorkerMetadata::mark_review(&runs_dir, reviewer_name).unwrap();
+        fs::write(
+            runs_dir.join(format!("{reviewer_name}.base")),
+            format!("{builder_branch}\n"),
+        )
+        .unwrap();
+
+        let r_wt = tmp.path().join(".wt").join(reviewer_name);
+        fs::create_dir_all(&r_wt).unwrap();
+        fs::write(
+            runs_dir.join(format!(".{reviewer_name}.readonly")),
+            format!("{}\nHEAD {sha}\n", r_wt.display()),
+        )
+        .unwrap();
+
+        let r_report = "# Review\nVerdict: clean\n## Lessons\nnone\n";
+        let git = MockGit::new(sha, "quaqua/suhuynh-pstackverdr");
+
+        let res = record_verdict_on_acceptance(
+            &runs_dir,
+            reviewer_name,
+            r_report,
+            true,
+            &git,
+            Some(tmp.path()),
+        );
+        let verdict = res.unwrap().expect("must record verdict");
+        assert_eq!(verdict.branch, builder_branch);
+        assert_eq!(verdict.builder_kind.as_deref(), Some(builder_kind));
+
+        let journal = SqliteJournal::open(&runs_dir.join("quaqua.db")).unwrap();
+        let loaded = journal.strongest_verdict(builder_branch, sha).unwrap();
+        assert!(
+            loaded.is_some(),
+            "lookup for builder branch at that SHA must find it"
+        );
+        assert_eq!(loaded.unwrap().builder_kind.as_deref(), Some(builder_kind));
+    }
+
+    #[test]
+    fn test_f3_reviewer_verdict_parser_matches_pipeline_strictness() {
+        let (lvl_0, _) = parse_reviewer_report("# Report\nVerdict: 0 findings\n## Lessons\nnone\n");
+        assert_eq!(
+            lvl_0,
+            VerdictLevel::ReviewClean,
+            "0 findings must be parsed as clean"
+        );
+
+        let (lvl_dot, _) = parse_reviewer_report("# Report\nVerdict: clean.\n## Lessons\nnone\n");
+        assert_eq!(
+            lvl_dot,
+            VerdictLevel::Inconclusive,
+            "clean. with trailing dot must fail closed as inconclusive"
+        );
+
+        let (lvl_trailing, _) =
+            parse_reviewer_report("# Report\nVerdict: clean but see finding 2\n## Lessons\nnone\n");
+        assert_eq!(
+            lvl_trailing,
+            VerdictLevel::Inconclusive,
+            "clean with trailing commentary must fail closed"
+        );
+    }
+
+    #[test]
+    fn test_f4_two_verifier_verdicts_negative_dominates() {
+        let tmp = TempDir::new("f4");
+        let runs_dir = tmp.path().join("runs");
+        fs::create_dir_all(&runs_dir).unwrap();
+        let mut journal = SqliteJournal::open(&runs_dir.join("quaqua.db")).unwrap();
+
+        let branch = "quaqua/sude-task";
+        let sha = "abcd1234abcd1234abcd1234abcd1234abcd1234";
+
+        let v1_clean = VerdictRecord {
+            branch: branch.to_string(),
+            sha: sha.to_string(),
+            level: VerdictLevel::ReviewClean,
+            evidence: "clean".to_string(),
+            verifier: "suhuynh-r1".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "opencode".to_string(),
+        };
+        let v2_failed = VerdictRecord {
+            branch: branch.to_string(),
+            sha: sha.to_string(),
+            level: VerdictLevel::VerifierFailed,
+            evidence: "2 findings".to_string(),
+            verifier: "truonglao-r2".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("truonglao".to_string()),
+            harness: "opencode".to_string(),
+        };
+
+        journal.record_verdict("wf-v1", &v1_clean).unwrap();
+        journal.record_verdict("wf-v2", &v2_failed).unwrap();
+
+        let strongest = journal.strongest_verdict(branch, sha).unwrap().unwrap();
+        assert_eq!(strongest.level, VerdictLevel::VerifierFailed);
+        assert_ne!(strongest.level, VerdictLevel::ReviewClean);
+    }
+
+    #[test]
+    fn test_f5_reviewer_without_resolvable_sha_never_passes() {
+        let tmp = TempDir::new("f5");
+        let runs_dir = tmp.path().join("runs");
+        fs::create_dir_all(&runs_dir).unwrap();
+
+        let rev_name = "suhuynh-nosha";
+        WorkerMetadata::mark_review(&runs_dir, rev_name).unwrap();
+        let report = "# Review\nVerdict: clean\n## Lessons\nnone\n";
+        let git = MockGit::new("", "quaqua/suhuynh-nosha");
+
+        let res = record_verdict_on_acceptance(&runs_dir, rev_name, report, true, &git, None);
+        let verdict = res.unwrap().expect("must return verdict record");
+        assert_eq!(verdict.sha, "");
+        assert_ne!(verdict.level, VerdictLevel::ReviewClean);
+        assert_eq!(verdict.level, VerdictLevel::Inconclusive);
+    }
+
+    #[test]
+    fn test_f6_query_cannot_present_self_report_alone_as_verified() {
+        let tmp = TempDir::new("f6");
+        let runs_dir = tmp.path().join("runs");
+        fs::create_dir_all(&runs_dir).unwrap();
+        let mut journal = SqliteJournal::open(&runs_dir.join("quaqua.db")).unwrap();
+
+        let branch = "quaqua/sude-task";
+        let sha = "abcd1234abcd1234abcd1234abcd1234abcd1234";
+
+        let v_builder = VerdictRecord {
+            branch: branch.to_string(),
+            sha: sha.to_string(),
+            level: VerdictLevel::UnitTestVerified,
+            evidence: "tests passed".to_string(),
+            verifier: "sude-task".to_string(),
+            source: VerdictSource::SelfReport,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: None,
+            harness: "omp".to_string(),
+        };
+        journal.record_verdict("wf-builder", &v_builder).unwrap();
+
+        let cur = journal.strongest_verdict(branch, sha).unwrap().unwrap();
+        assert_ne!(
+            cur.level,
+            VerdictLevel::UnitTestVerified,
+            "self-report alone cannot be presented as unit-test-verified"
+        );
+        assert_eq!(cur.level, VerdictLevel::Inconclusive);
+        assert!(!cur.is_verified());
+    }
+
+    #[test]
+    fn test_taskforce_reviewer_does_not_record_branch_verdict() {
+        let tmp = TempDir::new("tf-verdict");
+        let runs_dir = tmp.path().join("runs");
+        fs::create_dir_all(&runs_dir).unwrap();
+
+        let tf_name = "suhuynh-advisor-task";
+        WorkerMetadata::mark_review(&runs_dir, tf_name).unwrap();
+        fs::write(
+            runs_dir.join(format!("{tf_name}.taskforce")),
+            "advisor-task\n",
+        )
+        .unwrap();
+
+        let r_report = "# Report\nVerdict: clean\n## Lessons\nnone\n";
+        let git = MockGit::new("1234567890", "quaqua/suhuynh-advisor-task");
+
+        let res = record_verdict_on_acceptance(
+            &runs_dir,
+            tf_name,
+            r_report,
+            true,
+            &git,
+            Some(tmp.path()),
+        );
+        assert!(res.is_ok());
+        assert_eq!(
+            res.unwrap(),
+            None,
+            "taskforce workers must not record branch verdicts"
+        );
     }
 }

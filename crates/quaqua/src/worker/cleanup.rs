@@ -376,6 +376,7 @@ pub fn cleanup_worker_in<G: GitOps, H: HerdrOps>(
     );
 
     WorkerMetadata::cleanup_worker_files(&runs_dir, name);
+    let _ = std::fs::remove_file(runs_dir.join(format!("{name}.base")));
     println!("cleaned {name} (branch quaqua/{name} kept)");
     Ok(())
 }
