@@ -71,7 +71,12 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 STUB
-chmod +x "$T/bin/git" "$T/bin/herdr"
+cat > "$T/bin/quaqua" <<'STUB'
+#!/usr/bin/env bash
+echo "FAIL: stale PATH quaqua invoked: $*" >&2
+exit 99
+STUB
+chmod +x "$T/bin/git" "$T/bin/herdr" "$T/bin/quaqua"
 export HERDR_BIN_PATH="$T/bin/herdr"
 export HERDR_SOCKET_PATH="$T/herdr.sock"
 export PATH="$T/bin:$PATH"
