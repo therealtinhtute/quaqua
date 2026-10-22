@@ -166,6 +166,71 @@ pub fn filter_ops_for_check<'a>(
         .collect()
 }
 
+/// True when `op` re-places a pane into a workers tab whose current shape is
+/// wrong while another op into that same tab is deferred (its pane is
+/// `working`).
+///
+/// A rebuild re-places the panes of a full workers tab in cell order and is
+/// atomic: while a deferred pane still has to move, an idle pane's rebuild op
+/// cannot reach its cell, and applying it only repeats the same op on every
+/// poll (the live 4-pane vertical stack: pB idle, p9/pA working). Such an op
+/// must not fail the check; a later spawn/cleanup/prompt heals it once the
+/// deferred panes idle.
+fn blocked_by_deferred_rebuild(snap: &Snapshot, ops: &[Op], op: &Op) -> bool {
+    let Target::Split { tab, .. } = &op.target else {
+        return false;
+    };
+    // `@workers*` is resolved by apply_ops; leave those to the apply path.
+    if tab.starts_with('@') {
+        return false;
+    }
+    let layout = match snap.layouts.iter().find(|l| &l.tab_id == tab) {
+        Some(l) => l,
+        None => return false,
+    };
+    let occupants: Vec<&super::types::Pane> = snap
+        .panes
+        .iter()
+        .filter(|p| p.tab_id.as_deref() == Some(tab.as_str()))
+        .collect();
+    let m = occupants.len();
+    if m < 2 {
+        return false;
+    }
+    let area = layout.area.unwrap_or(super::types::Rect {
+        x: 0,
+        y: 0,
+        width: 200,
+        height: 50,
+    });
+    let rects: Vec<Option<super::types::Rect>> = occupants
+        .iter()
+        .map(|p| {
+            layout
+                .panes
+                .iter()
+                .find(|pl| pl.pane_id == p.pane_id)
+                .and_then(|pl| pl.rect)
+        })
+        .collect();
+    if !super::plan::layout_wrong(m, &area, &rects) {
+        return false;
+    }
+    let group = |pane_id: &str| {
+        snap.panes
+            .iter()
+            .find(|p| p.pane_id == pane_id)
+            .and_then(|p| p.tokens.as_ref())
+            .and_then(|t| t.grid_group.as_deref())
+    };
+    let op_group = group(&op.pane);
+    ops.iter().any(|other| {
+        other.deferred
+            && group(&other.pane) == op_group
+            && matches!(&other.target, Target::Split { tab: t, .. } if t == tab)
+    })
+}
+
 /// True for the tag that names a project team's Lead (`<slug>-lead`). Such an
 /// owner is specific; `cos` is the default a pane falls back to when its shell
 /// lost the variable, and a herdr restart restores panes with the daemon's env.
@@ -332,6 +397,23 @@ pub fn reconcile_core<D: HerdrDriver>(
                 return Ok(false);
             }
 
+            // A rebuild op whose shape needs a deferred (`working`) sibling
+            // cannot reach its cell: applying it just repeats the same op on
+            // every poll and times the check out while `worker prompt` waits.
+            // Report it deferred and converge; a later pass heals it once the
+            // sibling idles.
+            let runnable: Vec<Op> = rem_ops
+                .iter()
+                .filter(|op| !blocked_by_deferred_rebuild(&snap, &ops, op))
+                .cloned()
+                .collect();
+            if runnable.is_empty() {
+                for op in &rem_ops {
+                    eprintln!("deferred: {} (waiting for a working sibling)", op.pane);
+                }
+                return Ok(false);
+            }
+
             let elapsed = now_sec().saturating_sub(start_ts);
             if elapsed >= timeout_sec {
                 let serialized = serde_json::to_string(&rem_ops).unwrap_or_default();
@@ -349,7 +431,7 @@ pub fn reconcile_core<D: HerdrDriver>(
             // moving it. An apply error is a pane that went busy between the
             // plan and the move; the next poll re-plans it as deferred, while a
             // persistent one leaves the ops pending for the timeout report.
-            if let Err(e) = apply_ops(driver, &rem_ops, Some(&snap)) {
+            if let Err(e) = apply_ops(driver, &runnable, Some(&snap)) {
                 eprintln!("grid check: apply skipped: {e}");
             }
 
@@ -1042,7 +1124,9 @@ mod tests {
         Activity, ActivityError, ActivityRequest, ActivityResult, CostRequest, GridRequest,
         GridResult,
     };
-    use crate::grid::types::{Agent, Op, Pane, Snapshot, Tab, Target, Tokens};
+    use crate::grid::types::{
+        Agent, Layout, Op, Pane, PaneLayout, Rect, Snapshot, Tab, Target, Tokens,
+    };
     use crate::grid::MoveResult;
 
     fn make_worker(id: &str, group: &str, tab_id: Option<&str>, status: Option<&str>) -> Pane {
@@ -1470,6 +1554,92 @@ mod tests {
             p2.tab_id.as_deref(),
             Some("tab:cos"),
             "the working pane must stay in its tab"
+        );
+    }
+
+    /// Live repro (2026-10-22): four workers already live in `quaqua-workers`,
+    /// stacked vertically (the wrong shape); p6/pB are idle, p9/pA are
+    /// `working`. The 2x2 rebuild asks pB to split below p6, but that op can
+    /// only land once p9 moves right of p6 — p9 is deferred, so the op cannot
+    /// converge and the check used to time out (blocking `worker prompt`).
+    fn stacked_workers_snapshot() -> Snapshot {
+        let rect = |x, y, width, height| {
+            Some(Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        Snapshot {
+            tabs: vec![Tab {
+                tab_id: "w1:t3".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                label: Some("quaqua-workers".to_string()),
+                pane_count: Some(4),
+            }],
+            layouts: vec![Layout {
+                tab_id: "w1:t3".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                area: Some(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 64,
+                }),
+                panes: vec![
+                    PaneLayout {
+                        pane_id: "w1:t3:p6".to_string(),
+                        rect: rect(0, 0, 200, 8),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:pB".to_string(),
+                        rect: rect(0, 8, 200, 8),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:pA".to_string(),
+                        rect: rect(0, 16, 200, 16),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:p9".to_string(),
+                        rect: rect(0, 32, 200, 32),
+                    },
+                ],
+                zoomed: Some(false),
+            }],
+            panes: vec![
+                make_worker("w1:t3:p6", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:p9", "quaqua", Some("w1:t3"), Some("working")),
+                make_worker("w1:t3:pA", "quaqua", Some("w1:t3"), Some("working")),
+                make_worker("w1:t3:pB", "quaqua", Some("w1:t3"), Some("idle")),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_check_defers_rebuild_that_waits_on_working_siblings() {
+        let mut driver = MockHerdrDriver {
+            snapshot: stacked_workers_snapshot(),
+            ..Default::default()
+        };
+        let opts = super::ReconcileOptions {
+            check: true,
+            repair: false,
+            tab: Some("quaqua-workers".to_string()),
+            only: Some("w1:t3:pB".to_string()),
+            owner: Some("cos".to_string()),
+            dry_run: false,
+            timeout_sec: Some(2),
+        };
+
+        run_reconcile(&mut driver, &opts, "quaqua-workers", None)
+            .expect("a rebuild that waits on working siblings must not fail the check");
+
+        assert!(
+            !driver.move_calls.iter().any(|(p, _)| p == "w1:t3:pB"),
+            "the blocked rebuild op must stay deferred instead of being applied every poll: {:?}",
+            driver.move_calls
         );
     }
 
