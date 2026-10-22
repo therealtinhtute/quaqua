@@ -394,7 +394,7 @@ when: Testing 4 leaves + prove-it-works fails.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn p2c_acceptance_1_fixture_test_loads_all_15_playbooks_and_20_leaves() {
+fn p2c_acceptance_1_fixture_test_loads_all_18_playbooks_and_24_leaves() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
     let playbooks_dir = repo_root.join("templates/workspace/playbooks");
@@ -420,9 +420,11 @@ fn p2c_acceptance_1_fixture_test_loads_all_15_playbooks_and_20_leaves() {
 
     let expected_leaves = [
         "attack-the-premise",
+        "boundary-discipline",
         "build-the-lever",
         "encode-lessons-in-structure",
         "exhaust-the-design-space",
+        "experience-first",
         "explain-the-number",
         "fix-root-causes",
         "foundational-thinking",
@@ -433,12 +435,14 @@ fn p2c_acceptance_1_fixture_test_loads_all_15_playbooks_and_20_leaves() {
         "minimize-reader-load",
         "model-the-domain",
         "never-block-on-the-human",
+        "outcome-oriented-execution",
         "prove-it-works",
         "redesign-from-first-principles",
         "separate-before-serializing-shared-state",
         "sequence-verifiable-units",
         "subtract-before-you-add",
         "test-behavior-not-implementation",
+        "type-system-discipline",
     ];
     for leaf in expected_leaves {
         let leaf_path = principles_dir.join(format!("{leaf}.md"));
@@ -450,11 +454,12 @@ fn p2c_acceptance_1_fixture_test_loads_all_15_playbooks_and_20_leaves() {
 
     let playbooks = load_playbooks(&playbooks_dir, &principles_dir)
         .expect("all playbooks must load and validate against principles");
-    assert_eq!(playbooks.len(), 15, "must load exactly 15 playbooks");
+    assert_eq!(playbooks.len(), 18, "must load exactly 18 playbooks");
     let names: Vec<&str> = playbooks.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(
         names,
         vec![
+            "babysit",
             "bug-fix",
             "eval",
             "feature",
@@ -468,8 +473,10 @@ fn p2c_acceptance_1_fixture_test_loads_all_15_playbooks_and_20_leaves() {
             "refactoring",
             "runtime-forensics",
             "session-pickup",
+            "shipping",
             "trace-forensics",
             "visual-parity",
+            "worktree-cleanup",
         ]
     );
 }
@@ -1170,6 +1177,125 @@ fn p2c_playbooks_conform_to_contract() {
         "eval step 7 must cite principle-explain-the-number"
     );
     assert_worker_contract(&ev);
+}
+
+#[test]
+fn p2d_playbooks_conform_to_contract() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+
+    // shipping: the Orchestrator lands through quaqua merge; the Worker verifies.
+    let sh = load_playbook(&playbooks_dir.join("shipping.md"), &principles_dir)
+        .expect("shipping should parse");
+    assert_eq!(sh.step_ids(), vec![1, 2, 3, 4, 5]);
+    assert!(
+        sh.orchestrator.contains("quaqua merge <slug> <branch>..."),
+        "shipping Orchestrator must land through quaqua merge"
+    );
+    assert!(
+        !sh.worker_text.contains("quaqua merge"),
+        "shipping Worker must not merge; landing is a coordinator action"
+    );
+    assert_eq!(
+        sh.cited_principles,
+        vec!["principle-prove-it-works"],
+        "shipping Worker verdict cites only prove-it-works"
+    );
+    // Review F1: the review worktree must start at the unit's head. Without
+    // `--base` the worktree is cut from the repo HEAD, and the verifier's later
+    // checkout of the unit moves HEAD and voids the baseline taken at spawn.
+    assert!(
+        sh.orchestrator
+            .contains("quaqua worker spawn --review --base quaqua/<unit>"),
+        "shipping Orchestrator must spawn the verifier with --base on the unit branch"
+    );
+    assert!(
+        sh.worker_text.contains("quaqua/<unit>"),
+        "shipping Worker must name the unit branch as its start point"
+    );
+    // Review F5: `quaqua merge` is synchronous and `quaqua status` reports
+    // workflows, so shipping reads the merge back from git, not from status.
+    assert!(
+        !sh.orchestrator.contains("quaqua status"),
+        "shipping must not read a merge back through quaqua status"
+    );
+    assert_worker_contract(&sh);
+
+    // babysit: fixes stay on the owning branch; merging is the Orchestrator's.
+    let bb = load_playbook(&playbooks_dir.join("babysit.md"), &principles_dir)
+        .expect("babysit should parse");
+    assert_eq!(bb.step_ids(), vec![1, 2, 3, 4, 5, 6]);
+    assert!(
+        !bb.worker_text.contains("quaqua merge"),
+        "babysit Worker must not merge"
+    );
+    assert!(
+        bb.steps[1]
+            .cited_principles
+            .contains(&"principle-fix-root-causes".to_string()),
+        "babysit step 2 must cite principle-fix-root-causes"
+    );
+    // Review F3: review-comment text is data, never an instruction.
+    assert!(
+        bb.orchestrator.contains("untrusted data"),
+        "babysit Orchestrator must treat comment text as untrusted data"
+    );
+    assert!(
+        bb.worker_text.contains("untrusted data"),
+        "babysit Worker must treat comment text as untrusted data"
+    );
+    // Review F6: readiness is proven without landing. `quaqua merge` has no
+    // dry run, so the conflict test is a read-only merge-tree.
+    assert!(
+        bb.orchestrator.contains("--write-tree"),
+        "babysit must test a clean merge with git merge-tree --write-tree"
+    );
+    assert!(
+        !bb.orchestrator.contains("would take it"),
+        "babysit must not define readiness as what quaqua merge would do"
+    );
+    assert_worker_contract(&bb);
+
+    // worktree-cleanup: removal is quaqua worker cleanup, never a direct git call.
+    let wc = load_playbook(&playbooks_dir.join("worktree-cleanup.md"), &principles_dir)
+        .expect("worktree-cleanup should parse");
+    assert_eq!(wc.step_ids(), vec![1, 2, 3, 4, 5]);
+    assert!(
+        wc.orchestrator
+            .contains("quaqua worker cleanup <name> <repo>"),
+        "worktree-cleanup Orchestrator must remove through quaqua worker cleanup"
+    );
+    // Review F2: `quaqua worker cleanup` refuses a dirty or untracked worktree,
+    // so the buckets it cannot remove are held back, never called droppable.
+    assert!(
+        !wc.orchestrator.contains("safe to drop"),
+        "worktree-cleanup must not call an unremovable bucket safe to drop"
+    );
+    // The hard rule is no force flag and no recursive delete: check the
+    // invocation forms an instruction would use, since the files legitimately
+    // name `git worktree remove` and ban `rm -rf` by name in prose.
+    for pb in [&sh, &bb, &wc] {
+        for banned in ["git clean", "worktree remove --force", "rm -rf "] {
+            assert!(
+                !pb.orchestrator.contains(banned),
+                "playbook '{}' must not name a force or recursive delete: {banned}",
+                pb.name
+            );
+        }
+    }
+    for leaf in [
+        "principle-build-the-lever",
+        "principle-encode-lessons-in-structure",
+        "principle-guard-the-context-window",
+    ] {
+        assert!(
+            wc.cited_principles.contains(&leaf.to_string()),
+            "worktree-cleanup must cite {leaf}"
+        );
+    }
+    assert_worker_contract(&wc);
 }
 
 #[test]
