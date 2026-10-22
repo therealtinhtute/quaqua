@@ -394,7 +394,7 @@ when: Testing 4 leaves + prove-it-works fails.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn p2a_acceptance_1_fixture_test_loads_all_6_playbooks_and_17_leaves() {
+fn p2b_acceptance_1_fixture_test_loads_all_11_playbooks_and_20_leaves() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
     let playbooks_dir = repo_root.join("templates/workspace/playbooks");
@@ -420,7 +420,9 @@ fn p2a_acceptance_1_fixture_test_loads_all_6_playbooks_and_17_leaves() {
 
     let expected_leaves = [
         "attack-the-premise",
+        "build-the-lever",
         "encode-lessons-in-structure",
+        "exhaust-the-design-space",
         "explain-the-number",
         "fix-root-causes",
         "foundational-thinking",
@@ -433,6 +435,7 @@ fn p2a_acceptance_1_fixture_test_loads_all_6_playbooks_and_17_leaves() {
         "never-block-on-the-human",
         "prove-it-works",
         "redesign-from-first-principles",
+        "separate-before-serializing-shared-state",
         "sequence-verifiable-units",
         "subtract-before-you-add",
         "test-behavior-not-implementation",
@@ -447,7 +450,7 @@ fn p2a_acceptance_1_fixture_test_loads_all_6_playbooks_and_17_leaves() {
 
     let playbooks = load_playbooks(&playbooks_dir, &principles_dir)
         .expect("all playbooks must load and validate against principles");
-    assert_eq!(playbooks.len(), 6, "must load exactly 6 playbooks");
+    assert_eq!(playbooks.len(), 11, "must load exactly 11 playbooks");
     let names: Vec<&str> = playbooks.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(
         names,
@@ -455,9 +458,14 @@ fn p2a_acceptance_1_fixture_test_loads_all_6_playbooks_and_17_leaves() {
             "bug-fix",
             "feature",
             "figure-it-out",
+            "hillclimb",
+            "investigation",
             "multi-phase-plan",
+            "pause-safely",
             "perf-issue",
-            "refactoring"
+            "prototype",
+            "refactoring",
+            "session-pickup",
         ]
     );
 }
@@ -1012,4 +1020,84 @@ Prose without numbered steps.
 "#;
     let pb = parse_playbook(content, &pr_dir).expect("should parse");
     assert_worker_contract(&pb);
+}
+
+#[test]
+fn p2b_perf_issue_routes_to_hillclimb() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let content = fs::read_to_string(playbooks_dir.join("perf-issue.md")).unwrap();
+    assert!(
+        content.contains("route to `hillclimb`"),
+        "perf-issue.md must route to hillclimb"
+    );
+    assert!(
+        !content.contains("temporary fallback until P2b"),
+        "perf-issue.md must no longer contain temporary fallback note"
+    );
+}
+
+#[test]
+fn p2b_orchestrator_only_playbooks_conform_to_contract() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+
+    for name in ["session-pickup", "pause-safely", "multi-phase-plan"] {
+        let pb = load_playbook(&playbooks_dir.join(format!("{name}.md")), &principles_dir)
+            .unwrap_or_else(|e| panic!("failed to load {name}: {e}"));
+        assert!(
+            pb.steps.is_empty(),
+            "playbook {name} must have empty worker steps"
+        );
+        assert!(
+            pb.worker_text.is_empty(),
+            "playbook {name} must have empty worker_text"
+        );
+        assert_worker_contract(&pb);
+    }
+}
+
+#[test]
+fn p2b_hillclimb_steps_have_no_duplicate_ids() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+
+    let pb = load_playbook(&playbooks_dir.join("hillclimb.md"), &principles_dir)
+        .expect("hillclimb should parse");
+    assert_eq!(
+        pb.step_ids(),
+        vec![1, 2, 3, 4, 5, 6, 7],
+        "hillclimb step_ids must be exactly [1, 2, 3, 4, 5, 6, 7] without duplicate ids from mantras or loop"
+    );
+    assert_eq!(pb.steps.len(), 7, "hillclimb must have exactly 7 steps");
+    assert_worker_contract(&pb);
+}
+
+#[test]
+fn p2b_investigation_and_prototype_conform_to_contract() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+
+    let inv = load_playbook(&playbooks_dir.join("investigation.md"), &principles_dir)
+        .expect("investigation should parse");
+    assert_eq!(inv.step_ids(), vec![1, 2, 3]);
+    assert_worker_contract(&inv);
+
+    let proto = load_playbook(&playbooks_dir.join("prototype.md"), &principles_dir)
+        .expect("prototype should parse");
+    assert_eq!(proto.step_ids(), vec![1, 2, 3, 4, 5, 6, 7]);
+    assert!(
+        proto.steps[3]
+            .cited_principles
+            .contains(&"principle-exhaust-the-design-space".to_string()),
+        "prototype step 4 must cite principle-exhaust-the-design-space"
+    );
+    assert_worker_contract(&proto);
 }

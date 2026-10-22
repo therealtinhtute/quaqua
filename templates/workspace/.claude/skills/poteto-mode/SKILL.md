@@ -31,15 +31,17 @@ The Principles section below grounds every trigger. In your reply, name each pri
 
 MVP triggers:
 
-- About to ask a question on a "which approach", "how should I", or "what should this do" fork: classify it before asking. If the answer is an observable fact (behavior, timing, layout, output, perf), it is not the human's to answer. Settle it by running an experiment, reproduction, or prototype and let the result decide. If the task is a read-only investigation whose deliverable is a cited answer, answer from evidence. Reserve questions for genuine product or preference calls no experiment can settle. Under a full-autonomy grant, decide calls covered by the grant, act, and report. Irreversible writes in Autonomy always pause.
+- About to ask a question on a "which approach", "how should I", or "what should this do" fork: classify it before asking. If the answer is an observable fact (behavior, timing, layout, output, perf), it is not the human's to answer. Settle it by running an experiment, reproduction, or prototype (routes to `prototype`, active in P2b) and let the result decide. If the task is a read-only investigation whose deliverable is a cited answer, answer from evidence (routes to `investigation`, active in P2b). Reserve questions for genuine product or preference calls no experiment can settle. Under a full-autonomy grant, decide calls covered by the grant, act, and report. Irreversible writes in Autonomy always pause.
 - Any code: name the data shape first and choose its organizing structure per **principle-model-the-domain** (active in P2a); routes to `feature`.
 - Behavior-preserving change to structure or shape (rename, extract, inline, dedupe, move): routes to `refactoring` (active in P2a).
-- Running a benchmark, measuring perf, or reporting measured numbers: routes to `perf-issue` and follow **Explain the Number** (`principle-explain-the-number`, active in P2a).
+- Running a benchmark, measuring perf, or reporting measured numbers: routes to `perf-issue` and follow **Explain the Number** (`principle-explain-the-number`, active in P2a). For sustained, scientific improvement of one metric against a target across multiple hypotheses, routes to `hillclimb` (active in P2b).
 - Nontrivial multi-step: establish the throughput checkpoint across blocking first steps, independent workstreams, shared mutable state, and smallest safe decomposition.
 - Any PR-status request ("babysit this", "get it green"): routes to `figure-it-out` in the MVP (routes to Babysit once P2 lands).
 - Asked to land or ship a green stack: routes to `figure-it-out` in the MVP (routes to Shipping once P2 lands). Green is not safe; require independent verification per unit.
 - Broken skill mid-task: fix it in its own unit. Do not block. Do not silently work around it.
 - Long, autonomous, or multi-phase work, or work the operator steps away from to review later: routes to `multi-phase-plan` (active in P2a; maps pstack `show-me-your-work`), maintaining an auditable decision trail.
+- Resuming or taking over prior in-flight work from the report, branch, or journal: routes to `session-pickup` (active in P2b).
+- Suspending in-flight work cleanly on explicit pause or before coordinator compaction: routes to `pause-safely` (active in P2b).
 
 Deferred routes with quaqua mappings (P2):
 
@@ -52,12 +54,7 @@ Deferred routes with quaqua mappings (P2):
 
 ## Principles
 
-Read the leaf in full for any principle you cite. Each leaf lives under `principles/<name>.md`. In the MVP, S6 shipped 6 leaves; P2a brought the library to 17 leaves (7 remaining in P2).
-
-<!-- MVP route compatibility notes for init test suite:
-- routes to `feature` in the MVP; once P2 lands
-- routes to `figure-it-out` in the MVP (routes to `multi-phase-plan` once P2 lands)
--->
+Read the leaf in full for any principle you cite. Each leaf lives under `principles/<name>.md`. In the MVP, S6 shipped 6 leaves; P2a brought the library to 17 leaves; P2b brings the library to 20 leaves (4 remaining in P2).
 
 **Core**
 

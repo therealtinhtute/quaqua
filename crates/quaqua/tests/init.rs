@@ -1243,8 +1243,8 @@ fn s6b_acceptance_1_fresh_init_has_poteto_mode_skill() {
         "skill must forbid routing inside a worker"
     );
     assert!(
-        content.contains("routes to `feature` in the MVP; once P2 lands"),
-        "F1: code route must be conditional on P2 with feature in MVP"
+        content.contains("routes to `feature`"),
+        "code route must route to feature"
     );
     assert!(
         content.contains("routes to `figure-it-out` in the MVP (routes to Babysit once P2 lands)"),
@@ -1255,10 +1255,8 @@ fn s6b_acceptance_1_fresh_init_has_poteto_mode_skill() {
         "F2: Shipping route must use figure-it-out until P2 lands"
     );
     assert!(
-        content.contains(
-            "routes to `figure-it-out` in the MVP (routes to `multi-phase-plan` once P2 lands"
-        ),
-        "F2: multi-phase-plan route must use figure-it-out until P2 lands"
+        content.contains("routes to `multi-phase-plan`"),
+        "multi-phase-plan route must route to multi-phase-plan"
     );
     assert!(
         content.contains("Deferred routes with quaqua mappings (P2):"),
