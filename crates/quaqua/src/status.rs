@@ -883,6 +883,47 @@ pub struct MetricsReport {
     pub workers: Vec<WorkerTelemetryRow>,
     pub pipelines: Vec<PipelineTelemetryItem>,
     pub total: MetricsTotal,
+    #[serde(default)]
+    pub journal: JournalMetrics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_error: Option<String>,
+}
+
+/// `playbook_gap` rollup for one playbook name (§ S5, counted in § S7).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlaybookGapTally {
+    pub events: usize,
+    pub missing: usize,
+    pub unreasoned: usize,
+}
+
+/// Journal-derived counts for the pstack success metrics (§ S7).
+///
+/// Verdicts, `playbook_gap` and watchdog exits come from `runs/quaqua.db` read
+/// only. G1 (merges with no verdict at the incoming head) cannot come from the
+/// journal alone: the engine records no merge event, so merge commits are listed
+/// from git on `main` and `*-integ` and matched against the recorded verdicts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JournalMetrics {
+    /// Verdict events inside the `--since` window, one entry per level.
+    pub verdicts: BTreeMap<String, usize>,
+    pub verdicts_total: usize,
+    /// `playbook_gap` events inside the window, per playbook name.
+    pub playbook_gaps: BTreeMap<String, PlaybookGapTally>,
+    pub playbook_gap_events: usize,
+    pub playbook_gap_missing: usize,
+    pub playbook_gap_unreasoned: usize,
+    /// G1: incoming merge heads checked against the whole journal.
+    pub merges_checked: usize,
+    pub merges_without_verdict: usize,
+    /// Up to five `target@sha` of the merges counted in `merges_without_verdict`.
+    #[serde(default)]
+    pub merges_missing_samples: Vec<String>,
+    pub merge_repos: usize,
+    /// G2: watchdog exits inside the window.
+    pub accepted_reports: usize,
+    pub exit6: usize,
+    pub exit6_resumed: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -993,6 +1034,12 @@ pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
         }
     }
     let worker_count = workers.len();
+    let repos = metric_repos(runs_dir);
+    let (journal, journal_error) =
+        match load_journal_metrics(&runs_dir.join("quaqua.db"), cutoff_ms, &repos, &Git::new()) {
+            Ok(metrics) => (metrics, None),
+            Err(err) => (JournalMetrics::default(), Some(err)),
+        };
     MetricsReport {
         since: args.since.clone(),
         workers,
@@ -1004,7 +1051,319 @@ pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
             claude_unpriced,
             wall_sec: total_wall_sec,
         },
+        journal,
+        journal_error,
     }
+}
+
+/// Upper bound on merge commits scanned per integration target.
+const MERGE_SCAN_LIMIT: usize = 500;
+
+/// One merge commit and the heads it brought in (every parent after the first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergeCommit {
+    pub target: String,
+    pub sha: String,
+    pub incoming: Vec<String>,
+}
+
+/// Repos whose integration branches G1 looks at: every `projects/INDEX.md` row
+/// plus the workspace root itself when it is a checkout.
+pub(crate) fn metric_repos(runs_dir: &Path) -> Vec<PathBuf> {
+    let ws_root = runs_dir.parent().unwrap_or_else(|| Path::new("."));
+    let mut repos = crate::merge::resolve_project_repos_from_workspace(ws_root);
+    if ws_root.join(".git").exists() {
+        let root = ws_root.to_path_buf();
+        if !repos.contains(&root) {
+            repos.push(root);
+        }
+    }
+    repos
+}
+
+fn merge_targets<G: GitOps>(repo: &Path, git: &G) -> Vec<String> {
+    let Ok(out) = git.run_in(
+        repo,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    ) else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let mut targets: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|b| !b.is_empty() && (*b == "main" || b.ends_with("-integ")))
+        .map(str::to_string)
+        .collect();
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+/// Lists merge commits reachable from `main` or any `*-integ` branch, newest
+/// first and capped at [`MERGE_SCAN_LIMIT`] per target. Deduplicated by SHA.
+fn collect_merge_commits<G: GitOps>(repos: &[PathBuf], git: &G) -> Vec<MergeCommit> {
+    let limit = MERGE_SCAN_LIMIT.to_string();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut commits = Vec::new();
+    for repo in repos {
+        for target in merge_targets(repo, git) {
+            let Ok(out) = git.run_in(
+                repo,
+                &["log", "--merges", "-n", &limit, "--format=%H %P", &target],
+            ) else {
+                continue;
+            };
+            if !out.status.success() {
+                continue;
+            }
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let mut it = line.split_whitespace();
+                let Some(sha) = it.next() else { continue };
+                let parents: Vec<&str> = it.collect();
+                if parents.len() < 2 {
+                    continue;
+                }
+                if !seen.insert(sha.to_string()) {
+                    continue;
+                }
+                commits.push(MergeCommit {
+                    target: target.clone(),
+                    sha: sha.to_string(),
+                    incoming: parents[1..].iter().map(|p| p.to_string()).collect(),
+                });
+            }
+        }
+    }
+    commits
+}
+
+fn sha_matches(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
+}
+
+/// G1: counts incoming merge heads, and how many carry no verdict at all.
+///
+/// "Has a verdict" is decided by [`strongest_verdict_from_slice`] over the
+/// journal records for that SHA, so the S1 selection rule stays the only one.
+///
+/// Returns `(incoming heads checked, heads without a verdict, up to five
+/// `target@sha` samples of the offenders)`.
+pub(crate) fn count_merges_without_verdict(
+    commits: &[MergeCommit],
+    verdicts: &[VerdictRecord],
+) -> (usize, usize, Vec<String>) {
+    let mut checked = 0usize;
+    let mut without = 0usize;
+    let mut samples: Vec<String> = Vec::new();
+    for commit in commits {
+        for head in &commit.incoming {
+            checked += 1;
+            let matching: Vec<&VerdictRecord> = verdicts
+                .iter()
+                .filter(|v| sha_matches(&v.sha, head))
+                .collect();
+            if strongest_verdict_from_slice(&matching).is_none() {
+                without += 1;
+                if samples.len() < 5 {
+                    let short: String = head.chars().take(7).collect();
+                    samples.push(format!("{}@{short}", commit.target));
+                }
+            }
+        }
+    }
+    (checked, without, samples)
+}
+
+/// Splits `worker:<name>#<n>` into its base and session number.
+fn session_base(id: &str) -> Option<(&str, u64)> {
+    let (base, n) = id.rsplit_once('#')?;
+    Some((base, n.parse().ok()?))
+}
+
+/// G2 numerator: an exit-6 session counts as resumed when a later session
+/// (`worker:<name>#<n+>`) exists for the same worker.
+fn exit6_was_resumed(wf_id: &str, max_session: &BTreeMap<String, u64>) -> bool {
+    let Some((base, n)) = session_base(wf_id) else {
+        return false;
+    };
+    max_session.get(base).is_some_and(|max| *max > n)
+}
+
+fn load_journal_metrics<G: GitOps>(
+    db_path: &Path,
+    cutoff_ms: u64,
+    repos: &[PathBuf],
+    git: &G,
+) -> Result<JournalMetrics, String> {
+    if !db_path.is_file() {
+        return Err(format!("journal not found at {}", db_path.display()));
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("db error: cannot open {}: {e}", db_path.display()))?;
+    conn.busy_timeout(Duration::from_millis(5000))
+        .map_err(|e| format!("db error: cannot set busy timeout: {e}"))?;
+
+    let has_events: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='events');",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("db error: checking events table: {e}"))?;
+    if !has_events {
+        return Ok(JournalMetrics::default());
+    }
+
+    let mut metrics = JournalMetrics {
+        merge_repos: repos.len(),
+        ..JournalMetrics::default()
+    };
+
+    // Verdicts: level counts inside the window, and every record for the G1
+    // check (an old verdict still covers a merge inside the window).
+    let mut all_verdicts: Vec<VerdictRecord> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ts_ms, payload_json FROM events WHERE kind = 'verdict' ORDER BY ts_ms ASC;",
+            )
+            .map_err(|e| format!("db error: preparing verdict query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("db error: reading verdicts: {e}"))?;
+        for row in rows {
+            let (ts_ms, payload) =
+                row.map_err(|e| format!("db error: reading verdict row: {e}"))?;
+            let Ok(record) = serde_json::from_str::<VerdictRecord>(&payload) else {
+                continue;
+            };
+            if (ts_ms.max(0) as u64) >= cutoff_ms {
+                metrics.verdicts_total += 1;
+                *metrics
+                    .verdicts
+                    .entry(record.level.as_str().to_string())
+                    .or_insert(0) += 1;
+            }
+            all_verdicts.push(record);
+        }
+    }
+
+    // playbook_gap events, rolled up by playbook name.
+    {
+        let mut stmt = conn
+            .prepare("SELECT ts_ms, payload_json FROM events WHERE kind = 'playbook_gap' ORDER BY ts_ms ASC;")
+            .map_err(|e| format!("db error: preparing playbook_gap query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("db error: reading playbook gaps: {e}"))?;
+        for row in rows {
+            let (ts_ms, payload) =
+                row.map_err(|e| format!("db error: reading playbook_gap row: {e}"))?;
+            if (ts_ms.max(0) as u64) < cutoff_ms {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            let name = value
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let missing = value
+                .get("missing")
+                .and_then(|m| m.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            let unreasoned = value
+                .get("unreasoned")
+                .and_then(|m| m.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            let tally = metrics.playbook_gaps.entry(name).or_default();
+            tally.events += 1;
+            tally.missing += missing;
+            tally.unreasoned += unreasoned;
+            metrics.playbook_gap_events += 1;
+            metrics.playbook_gap_missing += missing;
+            metrics.playbook_gap_unreasoned += unreasoned;
+        }
+    }
+
+    // G2: accepted reports (exit 0) and exit-6 sessions, with resumes.
+    let max_session = {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT workflow_id FROM events;")
+            .map_err(|e| format!("db error: preparing session query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("db error: reading sessions: {e}"))?;
+        let mut max_session: BTreeMap<String, u64> = BTreeMap::new();
+        for row in rows {
+            let wf_id = row.map_err(|e| format!("db error: reading session id: {e}"))?;
+            if let Some((base, n)) = session_base(&wf_id) {
+                let entry = max_session.entry(base.to_string()).or_insert(0);
+                *entry = (*entry).max(n);
+            }
+        }
+        max_session
+    };
+    {
+        let mut stmt = conn
+            .prepare("SELECT workflow_id, ts_ms, payload_json FROM events WHERE kind = 'workflow_completed' ORDER BY ts_ms ASC;")
+            .map_err(|e| format!("db error: preparing workflow_completed query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| format!("db error: reading workflow_completed: {e}"))?;
+        for row in rows {
+            let (wf_id, ts_ms, payload) =
+                row.map_err(|e| format!("db error: reading workflow_completed row: {e}"))?;
+            if (ts_ms.max(0) as u64) < cutoff_ms {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            let Some(exit) = value.get("exit").and_then(|e| e.as_i64()) else {
+                continue;
+            };
+            match exit {
+                0 => metrics.accepted_reports += 1,
+                6 => {
+                    metrics.exit6 += 1;
+                    if exit6_was_resumed(&wf_id, &max_session) {
+                        metrics.exit6_resumed += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // G1: merges are not journaled, so list them from git.
+    let commits = collect_merge_commits(repos, git);
+    let (checked, without, samples) = count_merges_without_verdict(&commits, &all_verdicts);
+    metrics.merges_checked = checked;
+    metrics.merges_without_verdict = without;
+    metrics.merges_missing_samples = samples;
+
+    Ok(metrics)
 }
 
 fn format_token_metric(tok: Option<&Tokens>) -> String {
@@ -1138,6 +1497,70 @@ pub fn render_metrics_text(report: &MetricsReport) -> String {
         "total: {} workers · ${:.2}{} · {}\n",
         report.total.workers, report.total.usd, unpriced_str, total_wall_str
     ));
+
+    // § S7: journal counts, appended so every line above stays byte-identical.
+    match &report.journal_error {
+        Some(err) => out.push_str(&format!("journal: unavailable - {err}\n")),
+        None => {
+            let j = &report.journal;
+            if j.verdicts.is_empty() {
+                out.push_str("verdicts: none\n");
+            } else {
+                let levels: Vec<String> = j
+                    .verdicts
+                    .iter()
+                    .map(|(level, count)| format!("{level}={count}"))
+                    .collect();
+                out.push_str(&format!(
+                    "verdicts: {} total - {}\n",
+                    j.verdicts_total,
+                    levels.join(" ")
+                ));
+            }
+            if j.playbook_gaps.is_empty() {
+                out.push_str("playbook_gap: none\n");
+            } else {
+                let per: Vec<String> = j
+                    .playbook_gaps
+                    .iter()
+                    .map(|(name, tally)| {
+                        format!(
+                            "{name}={} (missing {}, unreasoned {})",
+                            tally.events, tally.missing, tally.unreasoned
+                        )
+                    })
+                    .collect();
+                out.push_str(&format!(
+                    "playbook_gap: {} events - {} - total missing {} unreasoned {}\n",
+                    j.playbook_gap_events,
+                    per.join(" - "),
+                    j.playbook_gap_missing,
+                    j.playbook_gap_unreasoned
+                ));
+            }
+            let samples = if j.merges_missing_samples.is_empty() {
+                String::new()
+            } else {
+                format!(" - {}", j.merges_missing_samples.join(", "))
+            };
+            out.push_str(&format!(
+                "merges: {} checked, {} without a verdict at the incoming head (G1) - {} repo(s), from git (no merge event is journaled){}\n",
+                j.merges_checked, j.merges_without_verdict, j.merge_repos, samples
+            ));
+            let rate = if j.accepted_reports == 0 {
+                "n/a".to_string()
+            } else {
+                format!(
+                    "{:.1}%",
+                    100.0 * j.exit6_resumed as f64 / j.accepted_reports as f64
+                )
+            };
+            out.push_str(&format!(
+                "exits: {} accepted, {} exit-6, {} resumed after exit 6 (G2 {})\n",
+                j.accepted_reports, j.exit6, j.exit6_resumed, rate
+            ));
+        }
+    }
 
     out
 }
@@ -2534,6 +2957,7 @@ model = "m3"
 #[cfg(test)]
 pub(crate) mod metrics {
     use super::*;
+    use crate::engine::journal::Journal;
 
     #[test]
     fn test_status_metrics_rendering_and_json_roundtrip() {
@@ -2749,11 +3173,280 @@ pub(crate) mod metrics {
                 claude_unpriced: 0,
                 wall_sec: 300,
             },
+            journal: JournalMetrics::default(),
+            journal_error: None,
         };
         let rendered_long = render_metrics_text(&long_report);
         // 18 chars for suhuynh-metricsrev means header "name" is padded to 18 chars
         assert!(rendered_long.contains("name               kind/harness"));
         assert!(rendered_long.contains("suhuynh-metricsrev suhuynh/omp"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn temp_runs_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("status-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let runs_dir = dir.join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        dir
+    }
+
+    fn append_event(db: &Path, wf_id: &str, ts_ms: u64, kind: &str, payload: &str) {
+        let mut journal = SqliteJournal::open(db).expect("open journal");
+        journal
+            .append_event(
+                wf_id,
+                &crate::engine::journal::EventRecord::new(0, ts_ms, kind, payload),
+            )
+            .expect("append event");
+    }
+
+    fn verdict_payload(level: VerdictLevel, sha: &str) -> String {
+        serde_json::to_string(&VerdictRecord {
+            branch: "quaqua/s7".to_string(),
+            sha: sha.to_string(),
+            level,
+            evidence: "cargo test --locked -p quaqua metrics".to_string(),
+            verifier: "suhuynh-s7rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "omp".to_string(),
+        })
+        .unwrap()
+    }
+
+    fn gap_payload(name: &str, missing: &[u32], unreasoned: &[u32]) -> String {
+        serde_json::json!({
+            "name": name,
+            "missing": missing,
+            "unreasoned": unreasoned,
+        })
+        .to_string()
+    }
+
+    fn metrics_args() -> MetricsArgs {
+        MetricsArgs {
+            metrics: true,
+            since: "24h".to_string(),
+            owner: None,
+            json: false,
+        }
+    }
+
+    #[test]
+    fn test_metrics_verdicts_by_level_and_playbook_gaps() {
+        let tmp = temp_runs_dir("metrics-journal");
+        let runs_dir = tmp.join("runs");
+        let db = runs_dir.join("quaqua.db");
+        let now_ms = crate::util::now_sec() * 1000;
+
+        append_event(
+            &db,
+            "worker:sude-s7#1",
+            now_ms,
+            "verdict",
+            &verdict_payload(VerdictLevel::UnitTestVerified, "aaaa1111"),
+        );
+        append_event(
+            &db,
+            "worker:sude-s7b#1",
+            now_ms,
+            "verdict",
+            &verdict_payload(VerdictLevel::UnitTestVerified, "bbbb2222"),
+        );
+        append_event(
+            &db,
+            "worker:suhuynh-s7r#1",
+            now_ms,
+            "verdict",
+            &verdict_payload(VerdictLevel::ReviewClean, "cccc3333"),
+        );
+        append_event(
+            &db,
+            "worker:suhuynh-s7r#1",
+            now_ms,
+            "verdict",
+            &verdict_payload(VerdictLevel::Inconclusive, "dddd4444"),
+        );
+        // Outside the 24h window: still a verdict for G1, not counted by level.
+        append_event(
+            &db,
+            "worker:sude-old#1",
+            1_000,
+            "verdict",
+            &verdict_payload(VerdictLevel::VerifierFailed, "eeee5555"),
+        );
+
+        append_event(
+            &db,
+            "worker:sude-s7#1",
+            now_ms,
+            "playbook_gap",
+            &gap_payload("feature", &[1, 2], &[3]),
+        );
+        append_event(
+            &db,
+            "worker:sude-s7b#1",
+            now_ms,
+            "playbook_gap",
+            &gap_payload("feature", &[1], &[]),
+        );
+        append_event(
+            &db,
+            "worker:sude-s7c#1",
+            now_ms,
+            "playbook_gap",
+            &gap_payload("bug-fix", &[4, 5], &[6]),
+        );
+
+        let report = read_metrics(&runs_dir, &metrics_args());
+        assert_eq!(report.journal_error, None);
+        assert_eq!(report.journal.verdicts_total, 4);
+        assert_eq!(report.journal.verdicts.get("unit-test-verified"), Some(&2));
+        assert_eq!(report.journal.verdicts.get("review-clean"), Some(&1));
+        assert_eq!(report.journal.verdicts.get("inconclusive"), Some(&1));
+        assert_eq!(report.journal.verdicts.get("verifier-failed"), None);
+
+        assert_eq!(report.journal.playbook_gap_events, 3);
+        let feature = report.journal.playbook_gaps.get("feature").unwrap();
+        assert_eq!(
+            (feature.events, feature.missing, feature.unreasoned),
+            (2, 3, 1)
+        );
+        let bug = report.journal.playbook_gaps.get("bug-fix").unwrap();
+        assert_eq!((bug.events, bug.missing, bug.unreasoned), (1, 2, 1));
+        assert_eq!(report.journal.playbook_gap_missing, 5);
+        assert_eq!(report.journal.playbook_gap_unreasoned, 2);
+
+        let rendered = render_metrics(&runs_dir, &metrics_args()).unwrap();
+        assert!(rendered
+            .contains("verdicts: 4 total - inconclusive=1 review-clean=1 unit-test-verified=2\n"));
+        assert!(rendered.contains(
+            "playbook_gap: 3 events - bug-fix=1 (missing 2, unreasoned 1) - feature=2 (missing 3, unreasoned 1) - total missing 5 unreasoned 2\n"
+        ));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_metrics_exit6_resumes() {
+        let tmp = temp_runs_dir("metrics-exits");
+        let runs_dir = tmp.join("runs");
+        let db = runs_dir.join("quaqua.db");
+        let now_ms = crate::util::now_sec() * 1000;
+
+        append_event(&db, "worker:aa#1", now_ms, "workflow_started", "{}");
+        append_event(
+            &db,
+            "worker:aa#1",
+            now_ms,
+            "workflow_completed",
+            r#"{"exit":0}"#,
+        );
+
+        // bb hit exit 6 and was prompted again as #2: a resume.
+        append_event(
+            &db,
+            "worker:bb#1",
+            now_ms,
+            "workflow_completed",
+            r#"{"exit":6}"#,
+        );
+        append_event(&db, "worker:bb#2", now_ms, "workflow_started", "{}");
+
+        // cc hit exit 6 and was never resumed.
+        append_event(
+            &db,
+            "worker:cc#1",
+            now_ms,
+            "workflow_completed",
+            r#"{"exit":6}"#,
+        );
+
+        // Other exits are neither accepted nor exit-6.
+        append_event(
+            &db,
+            "worker:dd#1",
+            now_ms,
+            "workflow_completed",
+            r#"{"exit":3}"#,
+        );
+
+        let report = read_metrics(&runs_dir, &metrics_args());
+        assert_eq!(report.journal.accepted_reports, 1);
+        assert_eq!(report.journal.exit6, 2);
+        assert_eq!(report.journal.exit6_resumed, 1);
+
+        let rendered = render_metrics(&runs_dir, &metrics_args()).unwrap();
+        assert!(
+            rendered.contains("exits: 1 accepted, 2 exit-6, 1 resumed after exit 6 (G2 100.0%)\n")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_metrics_merge_without_verdict() {
+        let commits = vec![
+            MergeCommit {
+                target: "main".to_string(),
+                sha: "m1".to_string(),
+                incoming: vec![
+                    "aaaa111122223333".to_string(),
+                    "bbbb222233334444".to_string(),
+                ],
+            },
+            MergeCommit {
+                target: "quaqua/s7-integ".to_string(),
+                sha: "m2".to_string(),
+                incoming: vec!["cccc333344445555".to_string()],
+            },
+        ];
+        let verdicts = vec![
+            VerdictRecord {
+                branch: "quaqua/s7".to_string(),
+                sha: "aaaa111122223333".to_string(),
+                level: VerdictLevel::UnitTestVerified,
+                evidence: "cargo test".to_string(),
+                verifier: "suhuynh-s7rev".to_string(),
+                source: VerdictSource::Verifier,
+                builder_kind: Some("sude".to_string()),
+                verifier_kind: Some("suhuynh".to_string()),
+                harness: "omp".to_string(),
+            },
+            VerdictRecord {
+                branch: "quaqua/s7b".to_string(),
+                sha: "cccc3333".to_string(),
+                level: VerdictLevel::ReviewClean,
+                evidence: "review".to_string(),
+                verifier: "suhuynh-s7rev".to_string(),
+                source: VerdictSource::Verifier,
+                builder_kind: Some("sude".to_string()),
+                verifier_kind: Some("suhuynh".to_string()),
+                harness: "omp".to_string(),
+            },
+        ];
+
+        let (checked, without, samples) = count_merges_without_verdict(&commits, &verdicts);
+        assert_eq!(checked, 3);
+        assert_eq!(without, 1);
+        assert_eq!(samples, vec!["main@bbbb222".to_string()]);
+
+        // No verdict records at all: every incoming head is unverified.
+        let (checked, without, _) = count_merges_without_verdict(&commits, &[]);
+        assert_eq!((checked, without), (3, 3));
+    }
+
+    #[test]
+    fn test_metrics_journal_unavailable_prints_a_line() {
+        let tmp = temp_runs_dir("metrics-nodb");
+        let runs_dir = tmp.join("runs");
+
+        let rendered = render_metrics(&runs_dir, &metrics_args()).unwrap();
+        assert!(rendered.contains("journal: unavailable - journal not found at"));
+        assert!(rendered.starts_with("=== Metrics (runs/telemetry.jsonl, since 24h) ==="));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
