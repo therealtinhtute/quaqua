@@ -1677,7 +1677,7 @@ fn test_launch_fails_closed_without_model_or_effort() {
     )
     .unwrap_err()
     .1;
-    assert!(e.contains("is not in allowlist"), "{e}");
+    assert!(e.contains("fix: add model and variants to team.toml [opencode_models]"), "{e}");
 
     // claude's vocabulary is narrower than opencode's
     let e = resolve_launch(&kind("claude", "m", Some("minimal")), "ni")
@@ -2052,6 +2052,94 @@ workers_tab = "workers"
     assert!(tele_path.exists());
     let content = std::fs::read_to_string(&tele_path).unwrap();
     assert!(content.contains("\"kind\":\"nhanvat\""), "telemetry missing kind 'nhanvat': {content}");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+#[test]
+fn test_hyphenated_kind_resolution_ni_fast_vs_ni() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-hyphen-kind-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+
+    let team_path = temp.join("team.toml");
+    let team_content = r#"schema_version = 2
+[limits]
+depth = 2
+max_workers_per_orchestrator = 4
+weights = { default = 1, pipeline = 2 }
+
+[timers]
+budget_default = "45m"
+hard_cap = "120m"
+stall = "10m"
+idle = "2m"
+nudge_at = 0.8
+grace = 0.25
+pilot_budget = "30m"
+
+[strategy]
+default_kind = "ni"
+default_reviewer = ["ni"]
+builder_reviewer_differ = "none"
+
+[kinds.ni]
+harness = "claude"
+model = "opus-5.5"
+effort = "low"
+can_review = true
+
+[kinds.ni-fast]
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+effort = "max"
+can_review = true
+
+[grid]
+workers_tab = "workers"
+"#;
+    std::fs::write(&team_path, team_content).unwrap();
+
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::set_var("QUAQUA_TEAM_TOML", team_path.to_str().unwrap());
+
+    let worker_name = "ni-fast-worker1";
+
+    // 1. Cost harness guessing must resolve to opencode, not claude
+    assert!(
+        quaqua::worker::prompt::cost::is_opencode_worker("", worker_name),
+        "ni-fast-worker1 must be recognized as opencode worker"
+    );
+    assert!(
+        !quaqua::worker::prompt::cost::is_claude_worker("", worker_name),
+        "ni-fast-worker1 must NOT be recognized as claude worker"
+    );
+
+    // 2. Cleanup telemetry must record kind = "ni-fast", not "ni"
+    let wt = temp.join(".wt").join(worker_name);
+    let _ = std::fs::create_dir_all(&wt);
+    std::fs::write(runs_dir.join(format!("{worker_name}.owner")), "cos\n").unwrap();
+
+    let herdr = MockActivitiesHerdr::for_cleanup("w1:p3");
+    let git = SpawnTestGit;
+    let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
+    assert!(res.is_ok(), "cleanup failed: {:?}", res);
+
+    let tele_path = runs_dir.join("telemetry.jsonl");
+    assert!(tele_path.exists());
+    let content = std::fs::read_to_string(&tele_path).unwrap();
+    assert!(
+        content.contains("\"kind\":\"ni-fast\""),
+        "telemetry must record kind 'ni-fast', got: {content}"
+    );
+    assert!(
+        content.contains("\"harness\":\"opencode\""),
+        "telemetry must record harness 'opencode', got: {content}"
+    );
 
     let _ = std::fs::remove_dir_all(&temp);
 }
