@@ -940,7 +940,7 @@ pub struct JournalMetrics {
     pub exit6_resumed: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MetricsTotal {
     pub workers: usize,
     pub usd: f64,
@@ -974,6 +974,8 @@ pub struct MergeRepoStat {
 pub struct MergeRefStat {
     pub target: String,
     pub merges: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 pub fn parse_since_cutoff(since: &str, now_ms: u64) -> Result<u64, String> {
@@ -1105,6 +1107,7 @@ pub(crate) struct MergeCommit {
     pub target: String,
     pub sha: String,
     pub incoming: Vec<String>,
+    pub target_truncated: bool,
 }
 
 /// Repos whose integration branches G1 looks at: every `projects/INDEX.md` row
@@ -1181,13 +1184,19 @@ fn collect_merge_commits<G: GitOps>(
     git: &G,
     cutoff_ms: u64,
 ) -> Vec<MergeCommit> {
-    let limit = MERGE_SCAN_LIMIT.to_string();
+    let fetch_limit = (MERGE_SCAN_LIMIT + 1).to_string();
     let since = format!("--since=@{}", cutoff_ms / 1000);
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut commits = Vec::new();
     for repo in repos {
         for target in merge_targets(repo, git) {
-            let mut args = vec!["log", "--merges", "-n", limit.as_str(), "--format=%H %P"];
+            let mut args = vec![
+                "log",
+                "--merges",
+                "-n",
+                fetch_limit.as_str(),
+                "--format=%H %P",
+            ];
             if cutoff_ms > 0 {
                 args.push(since.as_str());
             }
@@ -1198,6 +1207,7 @@ fn collect_merge_commits<G: GitOps>(
             if !out.status.success() {
                 continue;
             }
+            let mut target_commits = Vec::new();
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 let mut it = line.split_whitespace();
                 let Some(sha) = it.next() else { continue };
@@ -1205,14 +1215,26 @@ fn collect_merge_commits<G: GitOps>(
                 if parents.len() < 2 {
                     continue;
                 }
-                if !seen.insert(sha.to_string()) {
+                target_commits.push((
+                    sha.to_string(),
+                    parents[1..]
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            let is_truncated = target_commits.len() > MERGE_SCAN_LIMIT;
+            target_commits.truncate(MERGE_SCAN_LIMIT);
+            for (sha, incoming) in target_commits {
+                if !seen.insert(sha.clone()) {
                     continue;
                 }
                 commits.push(MergeCommit {
                     repo: repo.clone(),
                     target: target.clone(),
-                    sha: sha.to_string(),
-                    incoming: parents[1..].iter().map(|p| p.to_string()).collect(),
+                    sha,
+                    incoming,
+                    target_truncated: is_truncated,
                 });
             }
         }
@@ -1271,10 +1293,14 @@ pub(crate) fn count_merges_without_pass(
                 ..MergeRepoStat::default()
             });
         match entry.refs.iter_mut().find(|r| r.target == commit.target) {
-            Some(r) => r.merges += 1,
+            Some(r) => {
+                r.merges += 1;
+                r.truncated |= commit.target_truncated;
+            }
             None => entry.refs.push(MergeRefStat {
                 target: commit.target.clone(),
                 merges: 1,
+                truncated: commit.target_truncated,
             }),
         }
         entry.merges += 1;
@@ -1714,7 +1740,13 @@ pub fn render_metrics_text(report: &MetricsReport) -> String {
                     stat.without_verdict,
                     stat.refs
                         .iter()
-                        .map(|r| format!("{}={}", r.target, r.merges))
+                        .map(|r| {
+                            if r.truncated {
+                                format!("{}={} (capped)", r.target, r.merges)
+                            } else {
+                                format!("{}={}", r.target, r.merges)
+                            }
+                        })
                         .collect::<Vec<_>>()
                         .join(", ")
                 ));
@@ -3581,6 +3613,7 @@ pub(crate) mod metrics {
             target: target.to_string(),
             sha: sha.to_string(),
             incoming: incoming.iter().map(|h| h.to_string()).collect(),
+            target_truncated: false,
         }
     }
 
@@ -3641,6 +3674,7 @@ pub(crate) mod metrics {
                 refs: vec![MergeRefStat {
                     target: "origin/main".to_string(),
                     merges: 1,
+                    truncated: false,
                 }],
                 merges: 1,
                 checked: 6,
@@ -3863,7 +3897,7 @@ pub(crate) mod metrics {
         for call in &log_calls {
             assert!(call.iter().any(|a| a == "--since=@1700000000"));
             assert!(call.iter().any(|a| a == "-n"));
-            assert!(call.iter().any(|a| a == "500"));
+            assert!(call.iter().any(|a| a == "501"));
         }
 
         // Cutoff 0 means all history: no `--since` argument at all.
@@ -3910,10 +3944,12 @@ pub(crate) mod metrics {
                     MergeRefStat {
                         target: "origin/main".to_string(),
                         merges: 1,
+                        truncated: false,
                     },
                     MergeRefStat {
                         target: "quaqua/pstack-int2".to_string(),
                         merges: 1,
+                        truncated: false,
                     },
                 ],
                 merges: 2,
@@ -3966,6 +4002,90 @@ pub(crate) mod metrics {
         let rendered = render_metrics(&runs_dir, &metrics_args()).unwrap();
         assert!(rendered.contains("journal: unavailable - journal not found at"));
         assert!(rendered.starts_with("=== Metrics (runs/telemetry.jsonl, since 24h) ==="));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_metrics_cap_truncation_notice_in_text_and_json() {
+        let tmp = temp_runs_dir("metrics-truncation");
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        // 501 merges: exceeds MERGE_SCAN_LIMIT (500) by 1
+        let mut log_501 = Vec::new();
+        for i in 0..501 {
+            log_501.push(format!("m{i:04} p{i:04}_1 p{i:04}_2"));
+        }
+        let log_501_refs: Vec<&str> = log_501.iter().map(|s| s.as_str()).collect();
+
+        let git = MergeGit::new(&["main"], true).with_log("origin/main", &log_501_refs);
+        let commits = collect_merge_commits(&[repo.clone()], &git, 0);
+        assert_eq!(commits.len(), 500);
+        assert!(commits.iter().all(|c| c.target_truncated));
+
+        let tally = count_merges_without_pass(&commits, &[]);
+        assert_eq!(tally.repos.len(), 1);
+        let ref_stat = &tally.repos[0].refs[0];
+        assert_eq!(ref_stat.target, "origin/main");
+        assert_eq!(ref_stat.merges, 500);
+        assert!(ref_stat.truncated);
+
+        let report = MetricsReport {
+            since: "7d".to_string(),
+            workers: Vec::new(),
+            pipelines: Vec::new(),
+            total: MetricsTotal::default(),
+            journal: JournalMetrics {
+                merges: tally.merges,
+                merges_checked: tally.checked,
+                merges_without_verdict: tally.without_verdict,
+                merges_no_verdict: tally.no_verdict,
+                merges_not_pass: tally.not_pass,
+                merges_missing_samples: tally.samples,
+                merge_repos: 1,
+                merges_per_repo: tally.repos,
+                ..Default::default()
+            },
+            journal_error: None,
+        };
+
+        // Text output surfaces the truncation notice on that ref's line
+        let text = render_metrics_text(&report);
+        assert!(text.contains("refs origin/main=500 (capped)"));
+
+        // JSON output surfaces truncated: true
+        let json_str = serde_json::to_string_pretty(&report).unwrap();
+        assert!(json_str.contains("\"truncated\": true"));
+
+        let deserialized: MetricsReport = serde_json::from_str(&json_str).unwrap();
+        assert!(deserialized.journal.merges_per_repo[0].refs[0].truncated);
+
+        // When exactly at or below cap (e.g. 500 merges): truncated must be false
+        let log_500_refs = &log_501_refs[..500];
+        let git_500 = MergeGit::new(&["main"], true).with_log("origin/main", log_500_refs);
+        let commits_500 = collect_merge_commits(&[repo.clone()], &git_500, 0);
+        assert_eq!(commits_500.len(), 500);
+        assert!(!commits_500.iter().any(|c| c.target_truncated));
+
+        let tally_500 = count_merges_without_pass(&commits_500, &[]);
+        let ref_stat_500 = &tally_500.repos[0].refs[0];
+        assert_eq!(ref_stat_500.merges, 500);
+        assert!(!ref_stat_500.truncated);
+
+        let report_500 = MetricsReport {
+            journal: JournalMetrics {
+                merges_per_repo: tally_500.repos,
+                ..Default::default()
+            },
+            ..report.clone()
+        };
+        let text_500 = render_metrics_text(&report_500);
+        assert!(text_500.contains("refs origin/main=500\n"));
+        assert!(!text_500.contains("(capped)"));
+
+        let json_500 = serde_json::to_string_pretty(&report_500).unwrap();
+        assert!(!json_500.contains("\"truncated\""));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
