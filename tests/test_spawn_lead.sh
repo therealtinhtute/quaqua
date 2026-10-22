@@ -115,12 +115,12 @@ grep -q 'agent get coucou-island-lead' "$T/calls" \
   || fail "happy: no duplicate check: $(cat "$T/calls")"
 grep -qF "workspace create --label coucou-island --no-focus --cwd $T --env QUAQUA_OWNER=coucou-island-lead" "$T/calls" \
   || fail "happy: Lead not in its own <slug> workspace at the repo root: $(cat "$T/calls")"
-grep -q 'agent start coucou-island-lead --kind pi --pane %7 --timeout 60000' "$T/calls" \
+grep -q 'agent start coucou-island-lead --kind claude --pane %7 --timeout 60000' "$T/calls" \
   || fail "happy: bad agent start: $(cat "$T/calls")"
-grep -q -- '--model opencode-go/deepseek-v4.1-flash --thinking max' "$T/calls" \
-  || fail "happy: pi model/thinking args missing: $(cat "$T/calls")"
-grep -qF -- "--append-system-prompt $T/runs/coucou-island-lead.rules.md" "$T/calls" \
-  || fail "happy: pi rules arg missing: $(cat "$T/calls")"
+grep -q -- '--model claude-opus-5-5 --effort low' "$T/calls" \
+  || fail "happy: claude model/effort args missing: $(cat "$T/calls")"
+grep -qF -- "--append-system-prompt-file $T/runs/coucou-island-lead.rules.md" "$T/calls" \
+  || fail "happy: claude rules arg missing: $(cat "$T/calls")"
 grep -q 'r1 stay in the project' "$T/runs/coucou-island-lead.rules.md" \
   || fail "happy: rules file missing rules/_all content"
 grep -q 'agent prompt coucou-island-lead' "$T/calls" \

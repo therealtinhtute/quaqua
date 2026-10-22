@@ -1071,8 +1071,8 @@ fn test_team_toml_harness_routing() {
         .values()
         .all(|k| ["pi", "omp", "claude"].contains(&k.harness.as_str())));
 
-    // strategy.lead_kind defaults to tieude
-    assert_eq!(cfg.strategy.lead_kind.as_deref(), Some("tieude"));
+    // strategy.lead_kind defaults to ni (Lead on claude · opus-5.5 · low)
+    assert_eq!(cfg.strategy.lead_kind.as_deref(), Some("ni"));
 }
 
 #[test]
@@ -1081,12 +1081,12 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates/workspace/team.toml");
     let cfg = config::load(&team_path).expect("valid team.toml");
 
-    // 1. Default lead launch uses strategy.lead_kind ("tieude" on pi)
+    // 1. Default lead launch uses strategy.lead_kind ("ni" on claude)
     let (kind, launch) = quaqua::lead::spawn::resolve_lead_launch(&cfg, None).expect("lead launch");
-    assert_eq!(kind, "tieude");
-    assert_eq!(launch.harness, "pi");
-    assert_eq!(launch.model, "opencode-go/deepseek-v4.1-flash");
-    assert_eq!(launch.effort, "high");
+    assert_eq!(kind, "ni");
+    assert_eq!(launch.harness, "claude");
+    assert_eq!(launch.model, "opus-5.5");
+    assert_eq!(launch.effort, "low");
 
     let cmd = build_launch_cmd(
         &launch,
@@ -1098,7 +1098,18 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     )
     .unwrap();
     assert!(cmd.split_envs.is_empty());
-    assert!(cmd.agent_args.join(" ").contains("--thinking high --append-system-prompt /runs/test.rules.md"));
+    assert_eq!(
+        cmd.agent_args,
+        vec![
+            "--",
+            "--model",
+            "claude-opus-5-5",
+            "--effort",
+            "low",
+            "--append-system-prompt-file",
+            "/runs/test.rules.md",
+        ]
+    );
 
     // 2. LEAD_KIND env override switches lead to detu (omp)
     let (kind_detu, launch_detu) =
@@ -1132,16 +1143,16 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
         ]
     );
 
-    // 3. LEAD_KIND env override switches lead to ni (claude)
-    let (kind_ni, launch_ni) =
-        quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("ni")).expect("ni lead");
-    assert_eq!(kind_ni, "ni");
-    assert_eq!(launch_ni.harness, "claude");
-    assert_eq!(launch_ni.model, "opus-5.5");
-    assert_eq!(launch_ni.effort, "low");
+    // 3. LEAD_KIND env override switches lead back to tieude (pi)
+    let (kind_tieude, launch_tieude) =
+        quaqua::lead::spawn::resolve_lead_launch(&cfg, Some("tieude")).expect("tieude lead");
+    assert_eq!(kind_tieude, "tieude");
+    assert_eq!(launch_tieude.harness, "pi");
+    assert_eq!(launch_tieude.model, "opencode-go/deepseek-v4.1-flash");
+    assert_eq!(launch_tieude.effort, "high");
 
-    let cmd_ni = build_launch_cmd(
-        &launch_ni,
+    let cmd_tieude = build_launch_cmd(
+        &launch_tieude,
         "quaqua-rs-lead",
         "/runs/test.rules.md",
         "/runs",
@@ -1149,19 +1160,11 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
         false,
     )
     .unwrap();
-    assert!(cmd_ni.split_envs.is_empty());
-    assert_eq!(
-        cmd_ni.agent_args,
-        vec![
-            "--",
-            "--model",
-            "claude-opus-5-5",
-            "--effort",
-            "low",
-            "--append-system-prompt-file",
-            "/runs/test.rules.md",
-        ]
-    );
+    assert!(cmd_tieude.split_envs.is_empty());
+    assert!(cmd_tieude
+        .agent_args
+        .join(" ")
+        .contains("--thinking high --append-system-prompt /runs/test.rules.md"));
 
     // 4. Unknown LEAD_KIND falls back to tieude
     let (kind_fallback, launch_fallback) =

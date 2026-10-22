@@ -35,8 +35,8 @@ echo "ok: cap 8, zimage override 3"
   || fail "tieude.can_review"
 echo "ok: kinds.<k>.can_review"
 
-# team.toml is the only source of effort/fallback: tieude=max, sude falls back to suhuynh.
-[[ "$("$bin" config get kinds.tieude.effort --file "$root/templates/workspace/team.toml")" == "max" ]] \
+# team.toml is the only source of effort/fallback: tieude=high, sude falls back to suhuynh.
+[[ "$("$bin" config get kinds.tieude.effort --file "$root/templates/workspace/team.toml")" == "high" ]] \
   || fail "tieude.effort"
 [[ "$("$bin" config get kinds.detu.effort --file "$root/templates/workspace/team.toml")" == "high" ]] \
   || fail "detu.effort"
