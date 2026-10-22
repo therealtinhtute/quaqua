@@ -16,7 +16,11 @@ pub struct Launch {
 /// Resolve a kind's launch from team.toml, failing closed when the kind has no
 /// model or effort, or the harness cannot take that effort value. No defaults:
 /// team.toml is the only source (the old `unwrap_or("medium"/"high")` are gone).
-pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, String)> {
+pub fn resolve_launch(
+    kind: &Kind,
+    kind_name: &str,
+    cfg: &crate::config::Config,
+) -> Result<Launch, (i32, String)> {
     let Some(harness) = crate::harness::Harness::parse(&kind.harness) else {
         return Err((
             1,
@@ -40,7 +44,7 @@ pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, Stri
         ));
     }
     if harness == crate::harness::Harness::Opencode {
-        match crate::config::opencode_model_variants(&kind.model) {
+        match cfg.opencode_model_variants(&kind.model) {
             Some(allowed) => {
                 if !allowed.contains(&effort) {
                     return Err((
@@ -56,7 +60,7 @@ pub fn resolve_launch(kind: &Kind, kind_name: &str) -> Result<Launch, (i32, Stri
                 return Err((
                     1,
                     format!(
-                        "error: opencode model '{}' is not in allowlist (fix: add model and variants to config.rs model_effort_allowed) (kind '{kind_name}')\n",
+                        "error: opencode model '{}' is not in allowlist (fix: add model and variants to team.toml [opencode_models]) (kind '{kind_name}')\n",
                         kind.model
                     ),
                 ));

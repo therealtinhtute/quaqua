@@ -133,12 +133,9 @@ pub fn resolve_cost_budget(task: &str) -> Option<f64> {
 }
 
 fn guess_harness_from_config(name: &str) -> Option<Harness> {
-    let prefix = name.split('-').next()?;
-    if prefix.is_empty() {
-        return None;
-    }
     let cfg = crate::config::load_team_config().ok()?;
-    let kind_info = cfg.kinds.get(prefix)?;
+    let kind_name = crate::config::kind_of_worker(&cfg, name)?;
+    let kind_info = cfg.kinds.get(kind_name)?;
     Harness::parse(&kind_info.harness)
 }
 

@@ -260,6 +260,26 @@ pub fn resolve_purpose<'a>(cfg: &'a Config, purpose: &str) -> Result<&'a str, St
     }
     Ok(kind.as_str())
 }
+/// Resolve the kind of a worker from its name by finding the longest key K in
+/// `cfg.kinds` where `name` starts with `format!("{K}-")`.
+/// Returns `None` if `name` ends with "-lead" or matches no configured kind prefix.
+pub fn kind_of_worker<'a>(cfg: &'a Config, name: &str) -> Option<&'a str> {
+    if name.ends_with("-lead") {
+        return None;
+    }
+    let mut best: Option<&str> = None;
+    for k in cfg.kinds.keys() {
+        let prefix = format!("{k}-");
+        if name.starts_with(&prefix) {
+            match best {
+                Some(prev) if k.len() <= prev.len() => {}
+                _ => best = Some(k.as_str()),
+            }
+        }
+    }
+    best
+}
+
 
 /// The variant vocabulary allowed for known opencode models.
 /// Key is the last path segment of the model ID (e.g. "deepseek-v4.1-flash").

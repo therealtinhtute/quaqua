@@ -324,7 +324,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
 
     // team.toml is the only source of harness/model/effort: reject a kind that
     // cannot launch before any worktree or pane exists.
-    let primary_launch = resolve_launch(kind_info, &opts.kind)?;
+    let primary_launch = resolve_launch(kind_info, &opts.kind, cfg)?;
     let primary_fallback = kind_info.fallback.clone();
 
     let repo = canonicalize_repo_path(&opts.repo_path);
@@ -564,7 +564,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
                     return Err((1, String::new()));
                 }
                 crate::config::check_spawn_policy(fb, fb_kind, &opts.approve_kinds)?;
-                let fb_launch = resolve_launch(fb_kind, fb)?;
+                let fb_launch = resolve_launch(fb_kind, fb, cfg)?;
                 eprintln!("WARN: fallback: {}→{fb} ({reason})", opts.kind);
                 attempts.push(fb_launch);
                 idx += 1;

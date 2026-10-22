@@ -150,12 +150,18 @@ fn run_advisor(
     git: &Git,
     herdr: &Herdr,
 ) -> Result<(), (i32, String)> {
+    let default_advisor = cfg
+        .purposes
+        .get("review")
+        .or_else(|| cfg.strategy.default_reviewer.first())
+        .unwrap_or(&cfg.strategy.default_kind)
+        .clone();
     let members = cfg
         .taskforce
         .get("advisor")
         .map(|t| t.members.clone())
-        .unwrap_or_else(|| vec!["suhuynh".to_string()]);
-    let kind = members.first().map(|s| s.as_str()).unwrap_or("suhuynh");
+        .unwrap_or_else(|| vec![default_advisor.clone()]);
+    let kind = members.first().map(|s| s.as_str()).unwrap_or(&default_advisor);
     let worker_name = format!("{kind}-{}", args.task);
 
     let opts = crate::worker::spawn::SpawnOptions {
@@ -207,13 +213,25 @@ fn run_dual_lens(
     git: &Git,
     herdr: &Herdr,
 ) -> Result<(), (i32, String)> {
+    let default_lens1 = cfg
+        .purposes
+        .get("design")
+        .or_else(|| cfg.purposes.get("research"))
+        .unwrap_or(&cfg.strategy.default_kind)
+        .clone();
+    let default_lens2 = cfg
+        .purposes
+        .get("review")
+        .or_else(|| cfg.strategy.default_reviewer.first())
+        .unwrap_or(&cfg.strategy.default_kind)
+        .clone();
     let members = cfg
         .taskforce
         .get("dual-lens")
         .map(|t| t.members.clone())
-        .unwrap_or_else(|| vec!["truonglao".to_string(), "suhuynh".to_string()]);
-    let kind1 = members.first().map(|s| s.as_str()).unwrap_or("truonglao");
-    let kind2 = members.get(1).map(|s| s.as_str()).unwrap_or("suhuynh");
+        .unwrap_or_else(|| vec![default_lens1.clone(), default_lens2.clone()]);
+    let kind1 = members.first().map(|s| s.as_str()).unwrap_or(&default_lens1);
+    let kind2 = members.get(1).map(|s| s.as_str()).unwrap_or(&default_lens2);
 
     let w1 = format!("{kind1}-{}dl1", args.task);
     let w2 = format!("{kind2}-{}dl2", args.task);

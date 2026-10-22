@@ -4,7 +4,7 @@ use quaqua::engine::activity::{ActivityRequest, ActivityResult, HerdrRequest, He
 use quaqua::engine::testkit::MockActivities;
 use quaqua::git::GitOps;
 use quaqua::herdr::HerdrOps;
-use quaqua::launch::{build_launch_cmd, resolve_launch, Launch};
+use quaqua::launch::{build_launch_cmd, Launch};
 use quaqua::lead::spawn::{update_index_content, update_project_index_owner};
 use quaqua::worker::cleanup::{resolve_default_runs_dir, resolve_home_quaqua_runs};
 use quaqua::worker::prompt::{brief_budget_sec, brief_headers_ok, validate_env_budget_val};
@@ -1450,6 +1450,10 @@ fn kind(harness: &str, model: &str, effort: Option<&str>) -> config::Kind {
     }
 }
 
+fn resolve_launch(kind: &config::Kind, kind_name: &str) -> Result<Launch, (i32, String)> {
+    let cfg = config::Config::default();
+    quaqua::launch::resolve_launch(kind, kind_name, &cfg)
+}
 #[test]
 fn test_launch_args_carry_exact_model_and_effort() {
     // opencode: model+effort travel as `provider/model#variant` in the pane env —
@@ -1694,6 +1698,26 @@ fn test_launch_fails_closed_without_model_or_effort() {
         .unwrap_err()
         .1;
     assert!(e.contains("unsupported harness"), "{e}");
+}
+#[test]
+fn test_resolve_launch_uses_passed_cfg_for_opencode_models() {
+    let mut cfg = config::Config::default();
+    cfg.opencode_models.insert(
+        "my-custom-model".to_string(),
+        vec!["max".to_string()],
+    );
+    // Custom model passes because passed cfg has it in opencode_models
+    let k = kind("opencode", "my-custom-model", Some("max"));
+    let res = quaqua::launch::resolve_launch(&k, "custom-kind", &cfg);
+    assert!(res.is_ok(), "expected custom model to launch: {:?}", res.err());
+
+    // Without that entry in cfg, fails with hint naming team.toml
+    let default_cfg = config::Config::default();
+    let err = quaqua::launch::resolve_launch(&k, "custom-kind", &default_cfg).unwrap_err().1;
+    assert!(
+        err.contains("fix: add model and variants to team.toml [opencode_models]"),
+        "got: {err}"
+    );
 }
 
 #[test]

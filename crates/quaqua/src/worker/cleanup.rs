@@ -179,10 +179,9 @@ pub fn append_worker_telemetry(
 
 
         if kind.is_none() {
-            let prefix = name.split('-').next().unwrap_or("");
             if let Ok(cfg) = crate::config::load_team_config() {
-                if cfg.kinds.contains_key(prefix) {
-                    kind = Some(prefix.to_string());
+                if let Some(k) = crate::config::kind_of_worker(&cfg, name) {
+                    kind = Some(k.to_string());
                 }
             }
         }

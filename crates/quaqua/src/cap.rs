@@ -17,15 +17,7 @@ pub fn is_task_worker_name(name: &str) -> bool {
 
 /// Check if a worker name matches `<kind>-...` for any kind in `cfg.kinds` and does not end with `-lead`.
 pub fn is_task_worker_name_in_config(name: &str, cfg: &crate::config::Config) -> bool {
-    if name.ends_with("-lead") {
-        return false;
-    }
-    for k in cfg.kinds.keys() {
-        if name.starts_with(&format!("{k}-")) {
-            return true;
-        }
-    }
-    false
+    crate::config::kind_of_worker(cfg, name).is_some()
 }
 
 fn contains_prefix_digit(w: &str, prefix: &str) -> bool {

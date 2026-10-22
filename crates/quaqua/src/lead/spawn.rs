@@ -55,7 +55,7 @@ pub fn resolve_lead_launch(
         (1, format!("error: default lead kind '{kind_name}' not found in team.toml\n"))
     })?;
 
-    let launch = crate::launch::resolve_launch(kind_info, &kind_name)?;
+    let launch = crate::launch::resolve_launch(kind_info, &kind_name, cfg)?;
     Ok((kind_name, launch))
 }
 pub fn spawn_lead<G: GitOps, H: HerdrOps>(
