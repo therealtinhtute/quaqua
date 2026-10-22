@@ -1454,11 +1454,13 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                             // the prompt text is prefixed with engine context
                             // (the approved plan), so its header block is not
                             // the brief's. Reviewer prompts are the engine's own
-                            // review brief and never carry the worker steps. A
+                            // review brief and never carry the worker steps; a
+                            // plan report (Phase PLAN) does not claim the steps
+                            // ran either, so it is left out too. A
                             // named-but-unresolvable playbook blocks before the
                             // prompt: the worker would otherwise be promised
                             // steps it never received.
-                            let playbook_source = if is_reviewer {
+                            let playbook_source = if is_reviewer || kind == ChildKind::Plan {
                                 ""
                             } else {
                                 ctx.brief_text.as_str()
