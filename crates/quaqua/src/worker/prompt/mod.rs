@@ -3,6 +3,7 @@
 pub mod brief;
 pub mod cost;
 pub mod observer;
+pub mod playbook_check;
 pub mod readonly;
 pub mod watchdog;
 pub mod workflow;
@@ -1007,6 +1008,18 @@ pub fn prompt_worker<G: GitOps>(
                 expect_verdict,
                 git,
                 Some(&repo_dir),
+            );
+
+            // § S5: warn-only. A builder report that does not account for the
+            // steps pinned in `runs/.<name>.playbook` prints a warning and
+            // journals a `playbook_gap`; the acceptance exit stays 0. This block
+            // is shared by a fresh run and by `--resume`, so both paths check.
+            playbook_check::warn_playbook_gaps(
+                &mut journal,
+                &runs_dir,
+                name,
+                &report_content,
+                expect_verdict,
             );
 
             let read_marker = runs_dir.join(format!(".{name}.read"));
