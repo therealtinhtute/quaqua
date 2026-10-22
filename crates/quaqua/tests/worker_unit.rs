@@ -16,19 +16,20 @@ use std::sync::Mutex;
 
 #[test]
 fn test_task_worker_name_validation() {
-    assert!(is_task_worker_name("tieude-task1"));
-    assert!(is_task_worker_name("sude-hardimpl"));
-    assert!(is_task_worker_name("suhuynh-review2"));
-    assert!(is_task_worker_name("ni-quickfix"));
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
+    assert!(is_task_worker_name("tieude-task1", &cfg));
+    assert!(is_task_worker_name("sude-hardimpl", &cfg));
+    assert!(is_task_worker_name("suhuynh-review2", &cfg));
+    assert!(is_task_worker_name("ni-quickfix", &cfg));
 
     // Leads do not count as task workers
-    assert!(!is_task_worker_name("coucou-lead"));
-    assert!(!is_task_worker_name("sude-lead"));
-    assert!(!is_task_worker_name("quaqua-rs-lead"));
+    assert!(!is_task_worker_name("coucou-lead", &cfg));
+    assert!(!is_task_worker_name("sude-lead", &cfg));
+    assert!(!is_task_worker_name("quaqua-rs-lead", &cfg));
 
     // Unknown kinds
-    assert!(!is_task_worker_name("random-worker"));
-    assert!(!is_task_worker_name("unknown-task"));
+    assert!(!is_task_worker_name("random-worker", &cfg));
+    assert!(!is_task_worker_name("unknown-task", &cfg));
 }
 
 #[test]
@@ -724,6 +725,7 @@ fn test_unsupported_effort_rejected_before_split() {
 fn test_cap_pipeline_slot_reservation_mock() {
     let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
 
     // Write owner files: 1 live worker tieude-prompt (not a reviewer!)
     std::fs::write(temp_dir.join("tieude-prompt.owner"), "cos\n").unwrap();
@@ -746,7 +748,7 @@ fn test_cap_pipeline_slot_reservation_mock() {
     // Pipeline 'feature' has 1 active worker (sude-feature), so it reserves 2 - 1 = 1 slot.
     // Total should be 2 live + 1 reserved = 3 slots!
     // Under the old bug, tieude-prompt was counted as a pipeline reviewer for 'feature', reserving 0 slots (giving 2).
-    let count = count_owner_slots(&temp_dir, "cos", None, &mock);
+    let count = count_owner_slots(&temp_dir, "cos", None, &mock, &cfg);
     assert_eq!(count, 3);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -758,6 +760,7 @@ fn test_cap_pipeline_rust_state_without_task_line() {
     // The same 2-slot pipeline must not also count its live builder as a standalone worker.
     let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-notask-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
     let owner = "quaqua-intake-lead";
 
     std::fs::write(temp_dir.join("sude-blockedfix.owner"), format!("{owner}\n")).unwrap();
@@ -773,7 +776,7 @@ fn test_cap_pipeline_rust_state_without_task_line() {
     );
 
     // 1 live builder + (2 - 1 already counted) reserved = 2, not 1 + 2 = 3.
-    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    let count = count_owner_slots(&temp_dir, owner, None, &mock, &cfg);
     assert_eq!(count, 2);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -784,6 +787,7 @@ fn test_cap_pipeline_rust_state_review_round() {
     // Builder + fresh reviewer of the same pipeline are its 2 slots, not 2 live + 2 reserved.
     let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-review-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
     let owner = "quaqua-intake-lead";
 
     std::fs::write(temp_dir.join("sude-blockedfix.owner"), format!("{owner}\n")).unwrap();
@@ -808,7 +812,7 @@ fn test_cap_pipeline_rust_state_review_round() {
         r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"},{"name":"suhuynh-blockedfixr1","agent_status":"working"}]}}"#,
     );
 
-    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    let count = count_owner_slots(&temp_dir, owner, None, &mock, &cfg);
     assert_eq!(count, 2);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -819,6 +823,7 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
     // Legacy/shell states carry `task=`; an explicit line is the task, not the file name.
     let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-taskline-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
     let owner = "cos";
 
     std::fs::write(temp_dir.join("sude-other.owner"), "cos\n").unwrap();
@@ -835,7 +840,7 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
     let mock = MockActivitiesHerdr::with_agent_list(
         r#"{"result":{"agents":[{"name":"sude-other","agent_status":"working"}]}}"#,
     );
-    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock), 2);
+    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock, &cfg), 2);
 
     std::fs::write(temp_dir.join("sude-blockedfix.owner"), "cos\n").unwrap();
     std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
@@ -851,7 +856,59 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
         r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#,
     );
     // Not part of pipeline 'other': 1 live + full 2 reservation.
-    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock), 3);
+    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock, &cfg), 3);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_cap_count_ignores_process_env_team_toml() {
+    // Repro: another test in this binary points QUAQUA_TEAM_TOML at a config
+    // whose kinds are not the default set. Slot counting must not let that
+    // env decide who is a task worker, and a failed load must not silently
+    // demote every worker to a non-worker (which skips the pipeline reserve).
+    let _env_lock = lock_env();
+    let temp_dir =
+        std::env::temp_dir().join(format!("quaqua-cap-envfree-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let owner = "cos";
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
+
+    std::fs::write(temp_dir.join("sude-blockedfix.owner"), "cos\n").unwrap();
+    std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!(
+            "task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+
+    let mock = MockActivitiesHerdr::with_agent_list(
+        r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#,
+    );
+
+    // A valid config that only knows kind `ni`, plus an override that cannot
+    // be loaded at all. Neither may change the count: 1 live standalone
+    // worker + the 2-slot pipeline reserve.
+    let foreign = temp_dir.join("foreign-team.toml");
+    std::fs::write(
+        &foreign,
+        "schema_version = 2\n\n[kinds.ni]\nharness = \"claude\"\nmodel = \"m\"\neffort = \"low\"\n",
+    )
+    .unwrap();
+
+    for override_path in [foreign.as_path(), Path::new("/nonexistent/quaqua-team.toml")] {
+        std::env::set_var("QUAQUA_TEAM_TOML", override_path);
+        assert_eq!(
+            count_owner_slots(&temp_dir, owner, None, &mock, &cfg),
+            3,
+            "QUAQUA_TEAM_TOML={} must not change the slot count",
+            override_path.display()
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -863,6 +920,7 @@ fn test_cap_pipeline_double_count_repro() {
     let temp_dir =
         std::env::temp_dir().join(format!("quaqua-cap-doublecount-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
     let owner = "quaqua-rs-lead";
 
     std::fs::write(temp_dir.join("tieude-gridown2.owner"), format!("{owner}\n")).unwrap();
@@ -877,7 +935,7 @@ fn test_cap_pipeline_double_count_repro() {
         r#"{"result":{"agents":[{"name":"tieude-gridown2","agent_status":"working"}]}}"#,
     );
 
-    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    let count = count_owner_slots(&temp_dir, owner, None, &mock, &cfg);
     assert_eq!(
         count, 2,
         "a pipeline must count once (2 slots), never double-count to 3"
@@ -1175,22 +1233,45 @@ fn test_spawn_args_parsing_with_purpose() {
 #[test]
 fn test_cli_cap_smoke() {
     let bin = env!("CARGO_BIN_EXE_quaqua");
+    let tmp = std::env::temp_dir().join(format!("quaqua-cap-cli-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let team = tmp.join("team.toml");
+    std::fs::write(&team, "schema_version = 2\n").unwrap();
+    let runs = tmp.join("runs");
+    let _ = std::fs::create_dir_all(&runs);
     let out = Command::new(bin)
         .arg("cap")
+        .env("QUAQUA_TEAM_TOML", &team)
+        .env("QUAQUA_RUNS_DIR", &runs)
         .output()
         .expect("runs quaqua cap");
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.trim().parse::<i64>().is_ok());
+
+    // A team.toml that cannot load must surface, never silently count as if
+    // every worker were a non-task worker.
+    let bad = Command::new(bin)
+        .arg("cap")
+        .env("QUAQUA_TEAM_TOML", tmp.join("missing-team.toml"))
+        .env("QUAQUA_RUNS_DIR", &runs)
+        .output()
+        .expect("runs quaqua cap");
+    assert!(!bad.status.success());
+    let err = String::from_utf8_lossy(&bad.stderr);
+    assert!(err.contains("error:"), "stderr: {err}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 #[test]
 fn test_taskforce_dual_lens_cap_reservation() {
     let tmp = std::env::temp_dir().join(format!("quaqua-cap-tf-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
     let mock = MockActivitiesHerdr::with_agent_list(r#"{"result":{"agents":[]}}"#);
 
     // Zero workers, no state -> 0
-    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 0);
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock, &cfg), 0);
 
     // Active dual-lens state with current PID (alive) -> reserves 2 slots
     let state_file = tmp.join("taskforce-mytest.state");
@@ -1203,7 +1284,7 @@ fn test_taskforce_dual_lens_cap_reservation() {
     )
     .unwrap();
 
-    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 2);
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock, &cfg), 2);
 
     // Finished dual-lens -> 0 slots reserved
     std::fs::write(
@@ -1214,7 +1295,7 @@ fn test_taskforce_dual_lens_cap_reservation() {
         ),
     )
     .unwrap();
-    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 0);
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock, &cfg), 0);
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -2052,9 +2133,9 @@ workers_tab = "workers"
     assert!(cfg.kinds.contains_key("nhanvat"));
 
     // 1. Cap: is_task_worker_name dynamically recognizes nhanvat from team.toml
-    assert!(quaqua::cap::is_task_worker_name("nhanvat-test1"));
-    assert!(!quaqua::cap::is_task_worker_name("nhanvat-lead"));
-    assert!(!quaqua::cap::is_task_worker_name("unknown-test1"));
+    assert!(quaqua::cap::is_task_worker_name("nhanvat-test1", &cfg));
+    assert!(!quaqua::cap::is_task_worker_name("nhanvat-lead", &cfg));
+    assert!(!quaqua::cap::is_task_worker_name("unknown-test1", &cfg));
 
     // 2. Cost: guess_harness_from_config correctly maps nhanvat to opencode
     assert!(quaqua::worker::prompt::cost::is_opencode_worker("", "nhanvat-test1"));

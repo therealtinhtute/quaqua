@@ -357,7 +357,8 @@ fn handle_cap(args: &[String], herdr: &Herdr) -> Result<(), (i32, String)> {
     let owner = args.first().map(String::as_str).unwrap_or("cos");
     let exclude = args.get(1).map(String::as_str);
     let runs_dir = default_runs_dir();
-    let count = count_owner_slots(&runs_dir, owner, exclude, herdr);
+    let cfg = config::load_team_config()?;
+    let count = count_owner_slots(&runs_dir, owner, exclude, herdr, &cfg);
     println!("{count}");
     Ok(())
 }

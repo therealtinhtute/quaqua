@@ -386,19 +386,24 @@ pub fn team_config_path() -> Option<PathBuf> {
     None
 }
 
+/// The `team.toml` baked into the binary: the config used when no file is found.
+///
+/// Callers that must not read process-global env (tests) pass this explicitly.
+pub fn embedded_team_config() -> Result<Config, (i32, String)> {
+    const DEFAULT_TOML: &str = include_str!("../../../templates/workspace/team.toml");
+    toml::from_str(DEFAULT_TOML).map_err(|e| {
+        (
+            1,
+            format!("error: failed to parse default team.toml: {e}\n"),
+        )
+    })
+}
+
 /// Load team config from environment, relative path, workspace root, or embedded fallback.
 pub fn load_team_config() -> Result<Config, (i32, String)> {
     match team_config_path() {
         Some(path) => load(&path).map_err(|e| (1, format!("error: {e}\n"))),
-        None => {
-            const DEFAULT_TOML: &str = include_str!("../../../templates/workspace/team.toml");
-            toml::from_str(DEFAULT_TOML).map_err(|e| {
-                (
-                    1,
-                    format!("error: failed to parse default team.toml: {e}\n"),
-                )
-            })
-        }
+        None => embedded_team_config(),
     }
 }
 
