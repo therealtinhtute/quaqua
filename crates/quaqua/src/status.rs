@@ -2582,6 +2582,7 @@ mod tests {
 
     #[test]
     fn test_status_table_formatting_text_output() {
+        let _env_lock = crate::test_env::lock_env();
         let tmp = temp_test_dir("format");
         let _cleaner = TempDirCleaner(tmp.clone());
 
@@ -2629,6 +2630,31 @@ mod tests {
         assert!(out.contains("arch-lead"));
         assert!(out.contains("sude-w1"));
         assert!(out.contains("WAIT"));
+    }
+
+    #[test]
+    fn test_status_renders_all_sections_when_team_config_fails_to_load() {
+        let tmp = temp_test_dir("bad-team-config");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let db_path = tmp.join("quaqua.db");
+        let mock = MockHerdr::new(r#"{"result":{"agents":[]}}"#);
+
+        // A broken explicit team.toml must surface in the orchestration section;
+        // the workflows and verdicts sections still have to render.
+        let missing = tmp.join("missing-team.toml");
+        let _env_lock = crate::test_env::lock_env();
+        let _guard = EnvGuard::capture(&["QUAQUA_TEAM_TOML"]);
+        std::env::set_var("QUAQUA_TEAM_TOML", &missing);
+
+        let out = render_status(&db_path, &tmp, &mock)
+            .expect("status must keep rendering when team.toml fails to load");
+        assert!(out.contains("=== Workflows (runs/quaqua.db) ==="), "{out}");
+        assert!(out.contains("=== Verdicts ==="), "{out}");
+        assert!(out.contains("=== Orchestration ==="), "{out}");
+        assert!(
+            out.contains("missing-team.toml"),
+            "orchestration section must show the team.toml error: {out}"
+        );
     }
 
     #[test]
@@ -2718,6 +2744,7 @@ mod tests {
     }
     #[test]
     fn test_render_status_with_git_resolves_repo_from_index_and_flags_stale_or_unresolved() {
+        let _env_lock = crate::test_env::lock_env();
         let ws = temp_test_dir("ws-render-status");
         let _cleaner_ws = TempDirCleaner(ws.clone());
         let proj_repo = temp_test_dir("proj-repo");
