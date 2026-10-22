@@ -229,3 +229,24 @@ fn config_get_opencode_models() {
     assert!(out.status.success(), "get failed: {}", stderr(&out));
     assert!(stdout(&out).contains("max"));
 }
+
+#[test]
+fn config_opencode_models_table_merges_over_defaults() {
+    let temp = std::env::temp_dir().join(format!("quaqua-test-models-merge-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp);
+    let toml_path = temp.join("team.toml");
+    let content = r#"schema_version = 2
+[opencode_models]
+"custom-model" = ["low"]
+"#;
+    std::fs::write(&toml_path, content).unwrap();
+    let out = run(&["config", "get", "opencode_models.deepseek-v4.1-flash", "--file", toml_path.to_str().unwrap()]);
+    assert!(out.status.success(), "get deepseek failed: {}", stderr(&out));
+    assert!(stdout(&out).contains("max"));
+
+    let out2 = run(&["config", "get", "opencode_models.custom-model", "--file", toml_path.to_str().unwrap()]);
+    assert!(out2.status.success(), "get custom failed: {}", stderr(&out2));
+    assert!(stdout(&out2).contains("low"));
+
+    let _ = std::fs::remove_dir_all(&temp);
+}

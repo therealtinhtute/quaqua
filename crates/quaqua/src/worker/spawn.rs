@@ -123,7 +123,7 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
         (pos[0].clone(), format!("purpose:{p}"), PathBuf::from(&pos[1]))
     } else if pos.len() >= 3 {
         let k = if let Some(p) = &purpose {
-            format!("purpose:{p}")
+            format!("purpose:{p}:{}", pos[1])
         } else {
             pos[1].clone()
         };
@@ -291,10 +291,24 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     herdr: &H,
 ) -> Result<(), (i32, String)> {
     let mut opts = opts;
-    if let Some(p) = opts.kind.strip_prefix("purpose:") {
-        opts.kind = crate::config::resolve_purpose(cfg, p)
-            .map_err(|e| (1, format!("error: {e}\n")))?
-            .to_string();
+    if let Some(rest) = opts.kind.strip_prefix("purpose:") {
+        let (purpose, positional) = match rest.split_once(':') {
+            Some((p, pos)) => (p, Some(pos)),
+            None => (rest, None),
+        };
+        let resolved = crate::config::resolve_purpose(cfg, purpose)
+            .map_err(|e| (1, format!("error: {e}\n")))?;
+        if let Some(pos) = positional {
+            if pos != resolved {
+                return Err((
+                    1,
+                    format!(
+                        "error: --purpose '{purpose}' resolves to kind '{resolved}', but positional kind is '{pos}'\n"
+                    ),
+                ));
+            }
+        }
+        opts.kind = resolved.to_string();
     } else if !cfg.kinds.contains_key(&opts.kind) {
         if let Ok(resolved) = crate::config::resolve_purpose(cfg, &opts.kind) {
             opts.kind = resolved.to_string();
