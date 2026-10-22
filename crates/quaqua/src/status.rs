@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use crate::cap::is_task_worker_name;
 use crate::config::{load_team_config, Config};
-use crate::engine::journal_sqlite::{SqliteJournal, VerdictLevel, VerdictRecord, VerdictSource};
+use crate::engine::journal_sqlite::{
+    strongest_verdict_from_slice, SqliteJournal, VerdictLevel, VerdictRecord, VerdictSource,
+};
 use crate::git::{Git, GitOps};
 use crate::herdr::HerdrOps;
 use crate::state::WorkerMetadata;
@@ -171,46 +173,6 @@ fn resolve_branch_head_in_repos<G: GitOps>(
     None
 }
 
-fn strongest_verdict_from_slice<'a>(records: &[&'a VerdictRecord]) -> Option<&'a VerdictRecord> {
-    if records.is_empty() {
-        return None;
-    }
-
-    let verifier_verdicts: Vec<&'a VerdictRecord> = records
-        .iter()
-        .copied()
-        .filter(|v| v.source == VerdictSource::Verifier)
-        .collect();
-
-    if !verifier_verdicts.is_empty() {
-        if let Some(v) = verifier_verdicts
-            .iter()
-            .find(|v| v.level == VerdictLevel::VerifierFailed)
-        {
-            return Some(*v);
-        }
-        if let Some(v) = verifier_verdicts
-            .iter()
-            .find(|v| v.level == VerdictLevel::VerifierBlocked)
-        {
-            return Some(*v);
-        }
-        if let Some(v) = verifier_verdicts
-            .iter()
-            .find(|v| v.level == VerdictLevel::Inconclusive)
-        {
-            return Some(*v);
-        }
-        let best = verifier_verdicts
-            .into_iter()
-            .max_by_key(|v| v.strength())
-            .unwrap();
-        return Some(best);
-    }
-
-    records.last().copied()
-}
-
 /// Query branch verdict rows from the journal and repository (§ S2).
 pub fn query_branch_verdicts<G: GitOps>(
     db_path: &Path,
@@ -254,17 +216,12 @@ pub fn query_branch_verdicts<G: GitOps>(
                 let verdict_at_head = strongest_verdict_from_slice(&records_at_head);
 
                 if let Some(v) = verdict_at_head {
-                    let same_harness = is_same_harness(v, team_cfg.as_ref());
-                    let effective_level = if v.source == VerdictSource::SelfReport {
-                        VerdictLevel::Inconclusive
-                    } else {
-                        v.level
-                    };
+                    let same_harness = is_same_harness(&v, team_cfg.as_ref());
                     rows.push(BranchVerdictRow {
                         branch,
                         head_sha,
                         verdict_sha: v.sha.clone(),
-                        level: effective_level,
+                        level: v.level,
                         is_verified: v.is_verified(),
                         stale: false,
                         unresolved: false,
@@ -280,18 +237,13 @@ pub fn query_branch_verdicts<G: GitOps>(
                     let strongest_old = strongest_verdict_from_slice(&records_at_last_sha);
 
                     if let Some(v) = strongest_old {
-                        let same_harness = is_same_harness(v, team_cfg.as_ref());
+                        let same_harness = is_same_harness(&v, team_cfg.as_ref());
                         let stale = head_sha != v.sha;
-                        let effective_level = if v.source == VerdictSource::SelfReport {
-                            VerdictLevel::Inconclusive
-                        } else {
-                            v.level
-                        };
                         rows.push(BranchVerdictRow {
                             branch,
                             head_sha,
                             verdict_sha: v.sha.clone(),
-                            level: effective_level,
+                            level: v.level,
                             is_verified: false,
                             stale,
                             unresolved: false,
@@ -310,17 +262,12 @@ pub fn query_branch_verdicts<G: GitOps>(
                 let strongest = strongest_verdict_from_slice(&records_at_last_sha);
 
                 if let Some(v) = strongest {
-                    let same_harness = is_same_harness(v, team_cfg.as_ref());
-                    let effective_level = if v.source == VerdictSource::SelfReport {
-                        VerdictLevel::Inconclusive
-                    } else {
-                        v.level
-                    };
+                    let same_harness = is_same_harness(&v, team_cfg.as_ref());
                     rows.push(BranchVerdictRow {
                         branch,
                         head_sha: String::new(),
                         verdict_sha: v.sha.clone(),
-                        level: effective_level,
+                        level: v.level,
                         is_verified: false,
                         stale: false,
                         unresolved: true,
@@ -2225,11 +2172,11 @@ mod tests {
         assert_eq!(rows[0].level, VerdictLevel::ReviewClean);
         assert!(rows[0].is_verified);
 
-        // 3. Negative dominates: second verifier records verifier-failed
-        let v_rev_failed = VerdictRecord {
+        // 3. Negative dominates: second verifier records verifier-blocked
+        let v_rev_blocked = VerdictRecord {
             branch: "quaqua/feat-strong".to_string(),
             sha: sha.clone(),
-            level: VerdictLevel::VerifierFailed,
+            level: VerdictLevel::VerifierBlocked,
             evidence: "Verdict: 1 findings".to_string(),
             verifier: "truonglao-rev".to_string(),
             source: VerdictSource::Verifier,
@@ -2238,21 +2185,87 @@ mod tests {
             harness: "claude".to_string(),
         };
         journal
-            .record_verdict("wf-rev-fail", &v_rev_failed)
+            .record_verdict("wf-rev-blocked", &v_rev_blocked)
             .unwrap();
 
         let rows2 = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts 2");
         assert_eq!(rows2.len(), 1);
         assert_eq!(
             rows2[0].level,
-            VerdictLevel::VerifierFailed,
-            "verifier-failed must dominate over review-clean"
+            VerdictLevel::VerifierBlocked,
+            "verifier-blocked must dominate over review-clean"
         );
         assert!(!rows2[0].is_verified);
 
         let report = format_status_report(Ok(&[]), Ok(&[]), Ok(&rows2));
         assert!(report.contains("quaqua/feat-strong"));
-        assert!(report.contains("verifier-failed"));
+        assert!(report.contains("verifier-blocked"));
+    }
+
+    #[test]
+    fn test_status_verdict_self_report_at_head_is_inconclusive() {
+        let tmp = temp_test_dir("self-report-head");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let repo = tmp.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let git = Git::new();
+        let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git.run_in(&repo, &["config", "user.name", "test"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "initial"])
+            .unwrap();
+
+        let _ = git
+            .run_in(&repo, &["checkout", "-qb", "quaqua/feat-self"])
+            .unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "work"])
+            .unwrap();
+        let sha =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let db_path = tmp.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+
+        // The only verdict for this branch is the builder's own report at head.
+        let v_builder = VerdictRecord {
+            branch: "quaqua/feat-self".to_string(),
+            sha: sha.clone(),
+            level: VerdictLevel::UnitTestVerified,
+            evidence: "builder unit tests pass".to_string(),
+            verifier: "sude-build".to_string(),
+            source: VerdictSource::SelfReport,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: None,
+            harness: "omp".to_string(),
+        };
+        journal.record_verdict("wf-builder", &v_builder).unwrap();
+
+        // The selector `quaqua status` uses must apply S1's F6 rule itself.
+        let records = vec![&v_builder];
+        let best = strongest_verdict_from_slice(&records).expect("verdict");
+        assert_eq!(
+            best.level,
+            VerdictLevel::Inconclusive,
+            "self-report alone must select as inconclusive, never its self-reported level"
+        );
+        assert!(!best.is_verified());
+
+        let rows = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].level, VerdictLevel::Inconclusive);
+        assert!(!rows[0].is_verified);
+
+        let report = format_status_report(Ok(&[]), Ok(&[]), Ok(&rows));
+        assert!(report.contains("quaqua/feat-self"));
+        assert!(report.contains("inconclusive"));
+        assert!(!report.contains("unit-test-verified"));
     }
 
     #[test]

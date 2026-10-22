@@ -3,6 +3,7 @@
 //! Stores workflow events and snapshots at `<workspace_root>/runs/quaqua.db`
 //! using SQLite WAL mode and busy timeout.
 
+use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -144,6 +145,60 @@ impl VerdictRecord {
                     | VerdictLevel::TypeCheckOnly
             )
     }
+}
+
+/// Picks the strongest verdict from a slice of records using the S1 rules.
+///
+/// This is the single implementation of the rule; the journal lookup and
+/// `quaqua status` both select verdicts through it.
+///
+/// Rules:
+/// - Verifier verdicts always override self-reports.
+/// - Between verifier verdicts on the same branch and SHA (e.g. dual-lens or re-review),
+///   any failed, blocked, or inconclusive verifier verdict dominates over a pass (F4).
+/// - A self-report alone is never presented as verified (F6); its effective level
+///   is inconclusive and `is_verified()` is false.
+pub(crate) fn strongest_verdict_from_slice<T: Borrow<VerdictRecord>>(
+    records: &[T],
+) -> Option<VerdictRecord> {
+    let verifier_verdicts: Vec<&VerdictRecord> = records
+        .iter()
+        .map(|r| r.borrow())
+        .filter(|v| v.source == VerdictSource::Verifier)
+        .collect();
+
+    if !verifier_verdicts.is_empty() {
+        // F4 rule: Any failed, blocked, or inconclusive verifier verdict dominates
+        if let Some(v) = verifier_verdicts
+            .iter()
+            .find(|v| v.level == VerdictLevel::VerifierFailed)
+        {
+            return Some((*v).clone());
+        }
+        if let Some(v) = verifier_verdicts
+            .iter()
+            .find(|v| v.level == VerdictLevel::VerifierBlocked)
+        {
+            return Some((*v).clone());
+        }
+        if let Some(v) = verifier_verdicts
+            .iter()
+            .find(|v| v.level == VerdictLevel::Inconclusive)
+        {
+            return Some((*v).clone());
+        }
+        // All verifier verdicts are clean/pass; return the strongest pass
+        let best = verifier_verdicts
+            .into_iter()
+            .max_by_key(|v| v.strength())
+            .unwrap();
+        return Some(best.clone());
+    }
+
+    // F6 rule: Only self-reports exist; a self-report alone is never presented as verified.
+    let mut self_report = records.last()?.borrow().clone();
+    self_report.level = VerdictLevel::Inconclusive;
+    Some(self_report)
 }
 
 /// SQLite-backed persistent journal implementing [`Journal`].
@@ -370,63 +425,15 @@ impl SqliteJournal {
 
     /// Returns the strongest verdict for the specified branch and SHA, if any.
     ///
-    /// Rules:
-    /// - Verifier verdicts always override self-reports.
-    /// - Between verifier verdicts on the same branch and SHA (e.g. dual-lens or re-review),
-    ///   any failed, blocked, or inconclusive verifier verdict dominates over a pass (F4).
-    /// - A self-report alone is never presented as verified (F6); its effective level
-    ///   is inconclusive and `is_verified()` is false.
+    /// Selection follows the S1 rules implemented once in
+    /// [`strongest_verdict_from_slice`].
     pub fn strongest_verdict(
         &self,
         branch: &str,
         sha: &str,
     ) -> Result<Option<VerdictRecord>, JournalError> {
         let list = self.load_verdicts(branch, sha)?;
-        if list.is_empty() {
-            return Ok(None);
-        }
-
-        let verifier_verdicts: Vec<VerdictRecord> = list
-            .iter()
-            .filter(|v| v.source == VerdictSource::Verifier)
-            .cloned()
-            .collect();
-
-        if !verifier_verdicts.is_empty() {
-            // F4 rule: Any failed, blocked, or inconclusive verifier verdict dominates
-            if let Some(v) = verifier_verdicts
-                .iter()
-                .find(|v| v.level == VerdictLevel::VerifierFailed)
-            {
-                return Ok(Some(v.clone()));
-            }
-            if let Some(v) = verifier_verdicts
-                .iter()
-                .find(|v| v.level == VerdictLevel::VerifierBlocked)
-            {
-                return Ok(Some(v.clone()));
-            }
-            if let Some(v) = verifier_verdicts
-                .iter()
-                .find(|v| v.level == VerdictLevel::Inconclusive)
-            {
-                return Ok(Some(v.clone()));
-            }
-            // All verifier verdicts are clean/pass; return the strongest pass
-            let best = verifier_verdicts
-                .into_iter()
-                .max_by_key(|v| v.strength())
-                .unwrap();
-            return Ok(Some(best));
-        }
-
-        // F6 rule: Only self-reports exist; a self-report alone is never presented as verified.
-        if let Some(mut self_report) = list.into_iter().last() {
-            self_report.level = VerdictLevel::Inconclusive;
-            return Ok(Some(self_report));
-        }
-
-        Ok(None)
+        Ok(strongest_verdict_from_slice(&list))
     }
 
     /// Loads all verdict records across all workflows.
@@ -1010,5 +1017,25 @@ mod tests {
         assert_eq!(strongest.source, VerdictSource::Verifier);
         assert_eq!(strongest.level, VerdictLevel::ReviewClean);
         assert_eq!(strongest.verifier, "suhuynh-rev");
+
+        // A failing verifier verdict dominates the earlier clean one (F4)
+        let v_rev_failed = VerdictRecord {
+            branch: branch.to_string(),
+            sha: sha.to_string(),
+            level: VerdictLevel::VerifierFailed,
+            evidence: "1 finding".to_string(),
+            verifier: "truonglao-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("truonglao".to_string()),
+            harness: "claude".to_string(),
+        };
+        journal
+            .record_verdict("wf-rev-failed", &v_rev_failed)
+            .unwrap();
+
+        let dominant = journal.strongest_verdict(branch, sha).unwrap().unwrap();
+        assert_eq!(dominant.level, VerdictLevel::VerifierFailed);
+        assert!(!dominant.is_verified());
     }
 }
