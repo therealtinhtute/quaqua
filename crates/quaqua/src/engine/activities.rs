@@ -1913,4 +1913,46 @@ spawn = "auto"
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_activities_suite_completes_with_16_threads() {
+        const MARK: &str = "QUAQUA_ACTIVITIES_STRESS_CHILD";
+        if std::env::var_os(MARK).is_some() {
+            // The child runs this test too; it only has to take its turn.
+            return;
+        }
+        let exe = std::env::current_exe().expect("locate test binary");
+        let mut child = {
+            // Snapshot the environment while no other test can mutate it: the
+            // child inherits this copy at spawn time.
+            let _env = crate::test_env::lock_env();
+            Command::new(exe)
+                .args([
+                    "--test-threads=16",
+                    "activities",
+                    "--skip",
+                    "test_activities_suite_completes_with_16_threads",
+                ])
+                .env(MARK, "1")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn activities stress child")
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match child.try_wait().expect("poll activities stress child") {
+                Some(status) => {
+                    assert!(status.success(), "activities suite failed: {status}");
+                    return;
+                }
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("activities suite deadlocked at 16 threads (still running after 30s)");
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+    }
 }
