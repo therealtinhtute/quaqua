@@ -2,9 +2,11 @@
 //! `Context:` headers, the playbook injection appended to the submitted prompt,
 //! and the `runs/.<name>.playbook` pin (name + step ids).
 //!
-//! Everything here warns except one case: a named playbook missing from a
-//! resolvable index is rejected, because the worker would otherwise get a
-//! prompt that names a playbook whose steps were never delivered.
+//! Everything here warns except one case: when the workspace's playbook index
+//! is present, a named playbook it cannot resolve or render is rejected —
+//! the worker would otherwise get a prompt naming a playbook whose steps were
+//! never delivered. An index that is absent or incomplete cannot decide
+//! anything, so it only warns: the brief is not wrong because the workspace is.
 
 use std::path::Path;
 
@@ -22,12 +24,31 @@ pub enum PlaybookHeader {
     None { reason: String },
     /// `Playbook: <name>`.
     Named(String),
+    /// `Playbook: <name from …>` — the documented skeleton copied unfilled.
+    Placeholder,
+}
+
+/// The header block of a brief: the leading lines up to the first blank line.
+/// The headers sit there (`rules/_all/brief.md`); everything below is prose,
+/// and `Context:` in particular relays arbitrary text (an upstream brief
+/// included), so an unbounded scan would let that text decide a header value.
+fn header_block(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .skip_while(|line| line.trim().is_empty())
+        .take_while(|line| !line.trim().is_empty())
+}
+
+/// A value still holding the documented `<…>` placeholder, e.g.
+/// `Playbook: <name from \`quaqua playbook list\`>` copied out of
+/// `rules/_all/brief.md` without being filled in.
+fn is_placeholder(value: &str) -> bool {
+    value.trim_start().starts_with('<')
 }
 
 /// Value of an advisory brief header (`Playbook`, `Context`), matched at the
 /// start of a line so prose that mentions the header does not count.
 pub fn header_value<'a>(text: &'a str, name: &str) -> Option<&'a str> {
-    for line in text.lines() {
+    for line in header_block(text) {
         let Some((key, rest)) = line.trim().split_once(':') else {
             continue;
         };
@@ -71,6 +92,9 @@ pub fn playbook_header(text: &str) -> PlaybookHeader {
     let Some(value) = header_value(text, "Playbook") else {
         return PlaybookHeader::Missing;
     };
+    if is_placeholder(value) {
+        return PlaybookHeader::Placeholder;
+    }
     if let Some(reason) = none_reason(value) {
         return PlaybookHeader::None { reason };
     }
@@ -102,6 +126,9 @@ pub fn brief_header_warnings(text: &str) -> Vec<String> {
         PlaybookHeader::None { reason } if reason.is_empty() => warnings.push(
             "warning: 'Playbook: none' needs a reason: 'Playbook: none, <why this unit has no playbook>'".to_string(),
         ),
+        PlaybookHeader::Placeholder => warnings.push(
+            "warning: 'Playbook:' still holds the '<…>' placeholder — replace it with a name from `quaqua playbook list`, or 'Playbook: none, <reason>' (rules/_all/brief.md)".to_string(),
+        ),
         _ => {}
     }
     match header_value(text, "Context") {
@@ -110,6 +137,9 @@ pub fn brief_header_warnings(text: &str) -> Vec<String> {
         ),
         Some(value) if value.is_empty() => warnings.push(
             "warning: 'Context:' is empty; name the files/PRs, or paste the upstream report in full".to_string(),
+        ),
+        Some(value) if is_placeholder(value) => warnings.push(
+            "warning: 'Context:' still holds the '<…>' placeholder — name the files/PRs, or paste the upstream report in full (rules/_all/brief.md)".to_string(),
         ),
         Some(value) if none_reason(value).is_some_and(|r| r.is_empty()) => warnings.push(
             "warning: 'Context: none' needs a reason: 'Context: none, <why nothing upstream matters>'"
@@ -174,9 +204,12 @@ pub fn render_injection(
 }
 
 /// Resolve the brief's playbook in an explicit index and build the injection.
-/// `None` when the brief names no playbook. An unknown name is rejected with
-/// the brief-error exit code; a broken or unreadable index is not the brief's
-/// fault and is left to [`prepare_injection_in_workspace`] to downgrade.
+/// `None` when the brief names no playbook. A name the index cannot resolve
+/// (unknown, unreadable file, citation it cannot read) is rejected with the
+/// brief-error exit code: the submitted prompt would otherwise promise steps
+/// the worker never got. An index that is absent or unreadable is not the
+/// brief's fault and is left to [`prepare_injection_in_workspace`] to
+/// downgrade.
 pub fn prepare_injection(
     task: &str,
     playbooks_dir: &Path,
@@ -219,6 +252,10 @@ pub fn prepare_injection_in_workspace(
                 return Ok(None);
             }
         };
+    // Both directories are required: with either one absent no playbook can
+    // be resolved at all, so a name that looks unknown may just be unresolvable
+    // — the whole header is left unchecked (warn) rather than failing every
+    // named brief in a workspace whose index is incomplete.
     if !playbooks_dir.is_dir() || !principles_dir.is_dir() {
         eprintln!(
             "warning: playbook index missing ({} / {}); 'Playbook:' not checked",

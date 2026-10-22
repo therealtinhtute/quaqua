@@ -161,7 +161,8 @@ pub fn do_check_brief(task: &str) -> Result<(), (i32, String)> {
         ));
     }
     brief::warn_brief_headers(task);
-    // An unknown playbook name is the one rejection here; a missing index only warns.
+    // A name the present index cannot resolve or render is the one rejection
+    // here; a missing or incomplete index only warns.
     brief::prepare_injection_in_workspace(task)?;
     let (budget, src) = resolve_budget_sec(task);
     println!("budget={budget}s source={src}");
@@ -638,6 +639,12 @@ pub fn prompt_worker<G: GitOps>(
         }
         let _ = std::fs::remove_file(WorkerMetadata::provider_retry_path(&runs_dir, name));
 
+        // § S4: a new task starts with no playbook pin. Dropping it before the
+        // prompt means a submission that never lands (or a pin write that
+        // fails) leaves no file for S5 to check against this task's report.
+        let playbook_state = runs_dir.join(format!(".{name}.playbook"));
+        let _ = std::fs::remove_file(&playbook_state);
+
         // Pre-prompt grid check
         if std::env::var("GRID_SKIP").as_deref() != Ok("1")
             || (std::env::var("PIPELINE_TASK").is_err()
@@ -713,17 +720,15 @@ pub fn prompt_worker<G: GitOps>(
         }
 
         // The worker only got the steps if the prompt landed, so the pin
-        // (`runs/.<name>.playbook`) is written after the land check. A brief
-        // without a playbook drops any stale pin from an earlier task.
-        let playbook_state = runs_dir.join(format!(".{name}.playbook"));
-        match &injection {
-            Some(injection) => {
-                if let Err(e) = std::fs::write(&playbook_state, injection.state_content()) {
-                    eprintln!("warning: cannot write {}: {e}", playbook_state.display());
-                }
-            }
-            None => {
-                let _ = std::fs::remove_file(&playbook_state);
+        // (`runs/.<name>.playbook`) is written here, after the land check, via
+        // a temp file + rename: a failed write must never leave a partial pin.
+        if let Some(injection) = &injection {
+            let tmp = runs_dir.join(format!(".{name}.playbook.tmp"));
+            let written = std::fs::write(&tmp, injection.state_content())
+                .and_then(|()| std::fs::rename(&tmp, &playbook_state));
+            if let Err(e) = written {
+                let _ = std::fs::remove_file(&tmp);
+                eprintln!("warning: cannot write {}: {e}", playbook_state.display());
             }
         }
 

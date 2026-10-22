@@ -1,6 +1,6 @@
 # Worker briefs
 
-Every worker brief has these two headers and five parts, in this order (the three `Goal:`/`Hard constraints:`/`Current design` lines are machine-checked by `quaqua worker prompt --check-brief`):
+Every worker brief starts with these two headers, then five parts, in this order (the headers are the leading lines, up to the first blank line; the three `Goal:`/`Hard constraints:`/`Current design` lines are machine-checked by `quaqua worker prompt --check-brief`):
 
 ```
 Playbook: <name from `quaqua playbook list`, or `none, <reason>` for a trivial one-command unit>
@@ -14,9 +14,9 @@ Time budget: <N> min
 Cost budget: $<x>
 ```
 
-- `Playbook:` and `Context:` warn when missing, or on a `none` without a reason; an unknown playbook name is rejected. No playbook fits, or the work is large and cross-cutting → `figure-it-out`, never a blank.
-- `worker prompt` appends the playbook's `## Worker` steps and each cited leaf to the submitted prompt, and pins the name + step ids in `runs/.<name>.playbook`. The `## Orchestrator` section is the coordinator's and never reaches the worker.
-- `Context:` is a relay: an upstream unit's report pasted in full is exempt from brief sizing.
+- `Playbook:` and `Context:` warn when missing, on a `none` without a reason, or on an unfilled `<…>` placeholder; with the workspace's `playbooks/` and `principles/` index present, a playbook name that index cannot resolve is rejected (an absent or incomplete index only warns). No playbook fits, or the work is large and cross-cutting → `figure-it-out`, never a blank.
+- `worker prompt` appends the playbook's `## Worker` steps and each cited leaf to the submitted prompt, and pins the name + step ids in `runs/.<name>.playbook` once the prompt has landed; a missing pin means no check. The `## Orchestrator` section is the coordinator's and never reaches the worker.
+- `Context:` is a relay: an upstream unit's report pasted in full is exempt from brief sizing. Only the header block counts — a `Playbook:` line inside pasted text is prose, not this brief's header.
 
 - `Time budget` and `Cost budget` are the two caps; the time one is machine-read (`rules/_all/worker-timebox.md`), the cost one is recorded at acceptance in the project card.
 - Mechanical task (≤2 files, no shared code path)? Skip the `Current design` paragraph and the plan file; Goal + Evidence is the whole contract.

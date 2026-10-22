@@ -18,7 +18,8 @@ use std::sync::Mutex;
 use quaqua::git::Git;
 use quaqua::herdr::Herdr;
 use quaqua::worker::prompt::brief::{
-    brief_header_warnings, compose_prompt_body, prepare_injection, prepare_injection_in_workspace,
+    brief_header_warnings, compose_prompt_body, named_playbook, playbook_header, prepare_injection,
+    prepare_injection_in_workspace, PlaybookHeader,
 };
 use quaqua::worker::prompt::{brief_headers_ok, prompt_worker};
 
@@ -230,14 +231,130 @@ fn prompt_unknown_playbook_is_rejected() {
     assert_eq!(err.0, 1, "unknown playbook keeps the brief-error exit code");
     assert!(err.1.contains("unknown playbook 'nope'"), "{}", err.1);
 
-    // A resolvable index that lacks the name rejects; an unreadable one does
-    // not block the submit (the brief is not at fault).
+    // The explicit-index path reports an absent index as a load failure; the
+    // workspace variant downgrades that to a warning, since the brief is not
+    // at fault (`prompt_missing_index_only_warns` pins that split).
     let missing = prepare_injection(
         &brief_with("Playbook: feature"),
         &sandbox.0.join("absent/playbooks"),
         &sandbox.0.join("absent/principles"),
     );
-    assert!(missing.is_err(), "missing index is not silently accepted");
+    assert!(
+        missing.is_err(),
+        "the explicit path surfaces an absent index"
+    );
+}
+
+// ─── 1b. an absent or incomplete index only warns, never rejects ────────────
+
+#[test]
+fn prompt_missing_index_only_warns() {
+    let _lock = env_lock();
+    let sandbox = TempDir::new("noindex");
+
+    // No index at all: `Playbook: nope` cannot be checked against anything, so
+    // the workspace variant warns and injects nothing instead of failing a
+    // brief the workspace cannot judge.
+    {
+        let _env = EnvGuard::set(&[
+            (
+                "QUAQUA_HOME",
+                sandbox.0.join("absent-ws").display().to_string(),
+            ),
+            (
+                "QUAQUA_PLAYBOOKS_DIR",
+                sandbox.0.join("absent-playbooks").display().to_string(),
+            ),
+            (
+                "QUAQUA_PRINCIPLES_DIR",
+                sandbox.0.join("absent-principles").display().to_string(),
+            ),
+        ]);
+        assert_eq!(
+            prepare_injection_in_workspace(&brief_with("Playbook: nope")),
+            Ok(None)
+        );
+    }
+
+    // Incomplete index (`playbooks/` present, `principles/` absent): nothing
+    // resolves, so the name is left unchecked rather than failing every named
+    // brief in a workspace whose index is incomplete.
+    let partial = TempDir::new("partial");
+    fs::create_dir_all(partial.0.join("playbooks")).unwrap();
+    {
+        let _env = EnvGuard::set(&[
+            (
+                "QUAQUA_PLAYBOOKS_DIR",
+                partial.0.join("playbooks").display().to_string(),
+            ),
+            (
+                "QUAQUA_PRINCIPLES_DIR",
+                partial.0.join("absent-principles").display().to_string(),
+            ),
+        ]);
+        assert_eq!(
+            prepare_injection_in_workspace(&brief_with("Playbook: nope")),
+            Ok(None)
+        );
+    }
+}
+
+// ─── 1c. a playbook the index cannot render is rejected, not ignored ────────
+
+#[test]
+fn prompt_unloadable_playbook_is_rejected_with_the_brief_code() {
+    let sandbox = TempDir::new("broken");
+    let pb_dir = sandbox.sub("playbooks");
+    let pr_dir = sandbox.sub("principles");
+    sandbox.write_file(
+        "playbooks/broken.md",
+        "---\nname: broken\nwhen: Cites a leaf that does not exist.\n---\n\n## Orchestrator\n\n1. Plan.\n\n## Worker\n\n1. Do it, citing principle-absent.\n",
+    );
+
+    let err = prepare_injection(&brief_with("Playbook: broken"), &pb_dir, &pr_dir)
+        .expect_err("a citation that cannot be read is rejected");
+    assert_eq!(err.0, 1, "keeps the brief-error exit code");
+    assert!(err.1.contains("cannot load playbook 'broken'"), "{}", err.1);
+}
+
+// ─── 2b. the header scan stops at the header block ─────────────────────────
+
+#[test]
+fn prompt_header_scan_stops_at_the_header_block() {
+    let sandbox = TempDir::new("relay");
+    let (pb_dir, pr_dir) = fixture_index(&sandbox);
+
+    // A brief with no `Playbook:` of its own that relays an upstream brief
+    // after `Context:` must not adopt the relayed header.
+    let relayed = format!(
+        "{OLD_BRIEF}Context: upstream brief pasted below\n\nPlaybook: feature\nGoal: the upstream unit\n"
+    );
+    assert_eq!(playbook_header(&relayed), PlaybookHeader::Missing);
+    assert_eq!(named_playbook(&relayed), None);
+    assert_eq!(prepare_injection(&relayed, &pb_dir, &pr_dir), Ok(None));
+    let warnings = brief_header_warnings(&relayed);
+    assert!(
+        warnings.iter().any(|w| w.contains("no 'Playbook:'")),
+        "{warnings:?}"
+    );
+
+    // Its own header still counts when it is not the first line, and leading
+    // blank lines do not hide the header block.
+    let own = "\nGoal: x\nPlaybook: feature\nContext: crates/quaqua/src/lib.rs\n";
+    assert_eq!(named_playbook(own).as_deref(), Some("feature"));
+    assert!(brief_header_warnings(own).is_empty(), "{own}");
+
+    // The documented skeleton copied unfilled warns instead of rejecting:
+    // `<name …>` is a placeholder, not a playbook name.
+    let skeleton = brief_with(
+        "Playbook: <name from `quaqua playbook list`, or `none, <reason>` for a trivial one-command unit>\nContext: <files / PR pointers>",
+    );
+    assert_eq!(playbook_header(&skeleton), PlaybookHeader::Placeholder);
+    assert_eq!(prepare_injection(&skeleton, &pb_dir, &pr_dir), Ok(None));
+    let warnings = brief_header_warnings(&skeleton);
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(warnings[0].contains("placeholder"), "{warnings:?}");
+    assert!(warnings[1].contains("placeholder"), "{warnings:?}");
 }
 
 // ─── 6. old brief unchanged ────────────────────────────────────────────────
@@ -329,6 +446,34 @@ fn prompt_check_brief_cli_warns_and_rejects_unknown_playbook() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+
+    // Missing index: a name cannot be checked against anything, so even
+    // `Playbook: nope` only warns (exit 0) — the reading rules/_all/brief.md
+    // states and `prompt_missing_index_only_warns` pins.
+    let absent = (
+        sandbox.0.join("absent/playbooks"),
+        sandbox.0.join("absent/principles"),
+    );
+    let out = run_check_brief(
+        &sandbox,
+        &absent,
+        &brief_with("Playbook: nope\nContext: crates/quaqua/src/lib.rs"),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(stderr.contains("playbook index missing"), "{stderr}");
+    assert!(!stderr.contains("unknown playbook"), "{stderr}");
+
+    // The documented skeleton copied unfilled: the `<…>` placeholders warn and
+    // the check stays at exit 0 instead of reading `<name` as a playbook.
+    let out = run_check_brief(
+        &sandbox,
+        &dirs,
+        &brief_with("Playbook: <name from `quaqua playbook list`>\nContext: <files / PR pointers>"),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(stderr.matches("placeholder").count(), 2, "{stderr}");
 }
 
 // ─── 5. `.playbook` holds name + ids; a follow-up prompt overwrites it ─────
@@ -386,6 +531,36 @@ case "${1:-} ${2:-}" in
     exit 0 ;;
   "agent wait")
     printf '{"result":{"agent":{"agent_status":"working"}}}\n'
+    exit 0 ;;
+esac
+printf '{"result":{}}\n'
+exit 0
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// A stub whose prompt never lands: `agent prompt` accepts the call but stays
+/// `idle`, and the recovery `agent wait` never reaches `working` either, so
+/// `prompt_worker` gives up with exit 3.
+fn stub_herdr_not_landing(dir: &Path) -> PathBuf {
+    let path = dir.join("herdr-stub-noland");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+echo "herdr $*" >> "$CALLS"
+case "${1:-} ${2:-}" in
+  "agent get")
+    printf '{"result":{"agent":{"agent_status":"working","cwd":"%s"}}}\n' "$STUB_CWD"
+    exit 0 ;;
+  "agent prompt")
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+    exit 0 ;;
+  "agent wait")
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
     exit 0 ;;
 esac
 printf '{"result":{}}\n'
@@ -488,6 +663,61 @@ fn prompt_state_pins_name_and_ids_and_followup_overwrites() {
         format!("{OLD_BRIEF}. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/sude-s4state.md (publish it atomically, never a partial file); reply only the path.")
     );
     assert!(!state.exists(), "stale .playbook must not survive");
+}
+
+// ─── 5b. the pin is written only after the prompt lands ────────────────────
+
+#[test]
+fn prompt_state_is_written_only_after_the_prompt_lands() {
+    let _lock = env_lock();
+    let sandbox = TempDir::new("noland");
+    let dirs = fixture_index(&sandbox);
+    let runs = sandbox.sub("runs");
+    let calls = sandbox.0.join("calls");
+    let clock = sandbox.0.join("clock");
+    fs::write(&clock, "1700000000\n").unwrap();
+    let stub = stub_herdr_not_landing(&sandbox.0);
+
+    let _env = EnvGuard::set(&[
+        ("QUAQUA_RUNS_DIR", runs.display().to_string()),
+        ("QUAQUA_HOME", sandbox.0.join("ws").display().to_string()),
+        ("QUAQUA_PLAYBOOKS_DIR", dirs.0.display().to_string()),
+        ("QUAQUA_PRINCIPLES_DIR", dirs.1.display().to_string()),
+        ("GRID_SKIP", "1".to_string()),
+        ("QUAQUA_TEST", "1".to_string()),
+        ("CALLS", calls.display().to_string()),
+        ("STUB_RUNS", runs.display().to_string()),
+        ("STUB_CWD", sandbox.0.display().to_string()),
+        ("HERDR_BIN_PATH", stub.display().to_string()),
+        ("PROMPT_WORKER_CLOCK_FILE", clock.display().to_string()),
+        ("PROMPT_WORKER_MAX_SEC", "600".to_string()),
+        ("PROMPT_WORKER_HEARTBEAT_SEC", "3600".to_string()),
+    ]);
+
+    let herdr = Herdr {
+        bin: stub.display().to_string(),
+    };
+    let git = Git::new();
+    let state = runs.join(".sude-s4noland.playbook");
+
+    // A pin left by an earlier task: a prompt that never lands must not keep it
+    // for S5 to check against the new report.
+    fs::write(&state, "name=feature\nids=1,2,3\n").unwrap();
+
+    let res = prompt_worker(
+        "sude-s4noland",
+        Some(&brief_with("Playbook: feature")),
+        false,
+        None,
+        &git,
+        &herdr,
+    );
+    assert_eq!(
+        res,
+        Err((3, String::new())),
+        "a prompt that never lands exits 3"
+    );
+    assert!(!state.exists(), "no pin may survive a non-landed prompt");
 }
 
 // Keep the workspace resolver honest: a brief without a Playbook header never
