@@ -656,6 +656,7 @@ mod tests {
         )
         .unwrap();
 
+        let _env_lock = crate::test_env::lock_env();
         let _env_guard = EnvGuard::capture(&["QUAQUA_HOME", "QUAQUA_RUNS_DIR"]);
         std::env::set_var("QUAQUA_HOME", &tmp);
         std::env::set_var("QUAQUA_RUNS_DIR", &runs);

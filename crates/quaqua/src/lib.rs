@@ -25,3 +25,8 @@ pub mod engine;
 pub mod status;
 pub mod doctor;
 pub mod playbook;
+
+/// Process-global env is shared by every test in this binary; tests that
+/// mutate it take [`test_env::lock_env`] and restore through its guard.
+#[cfg(test)]
+pub(crate) mod test_env;
