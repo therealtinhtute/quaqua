@@ -183,9 +183,12 @@ pub fn record_verdict_on_acceptance<G: GitOps>(
         return Ok(None);
     }
 
-    // Exclude unparseable reviewer reports from recording verdicts (only accepted reports record)
-    if expect_verdict && crate::pipeline::parse_report_content(report_content).is_err() {
-        return Ok(None);
+    // Exclude unparseable reviewer reports from recording verdicts (warn and skip)
+    if expect_verdict {
+        if let Err(reason) = crate::pipeline::parse_report_content(report_content) {
+            eprintln!("warning: reviewer verdict unparseable ({reason}), skipping verdict record");
+            return Ok(None);
+        }
     }
 
     let kind = name.split('-').next().unwrap_or(name);

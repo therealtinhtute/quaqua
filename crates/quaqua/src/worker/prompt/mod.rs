@@ -962,15 +962,6 @@ pub fn prompt_worker<G: GitOps>(
                 );
                 return Err((6, String::new()));
             }
-            if expect_verdict {
-                if let Err(reason) = crate::pipeline::parse_report_content(&report_content) {
-                    eprintln!(
-                        "WATCHDOG malformed-report | name={name} missing={reason} report={}",
-                        out.display()
-                    );
-                    return Err((6, String::new()));
-                }
-            }
             if let Err(why) = readonly::check(&runs_dir, name) {
                 eprintln!(
                     "WATCHDOG malformed-report | name={name} missing=read-only worktree ({why}) report={}",
@@ -1033,5 +1024,95 @@ pub fn prompt_worker<G: GitOps>(
             Err((6, String::new()))
         }
         other => Err((other, format!("unexpected exit code {other}\n"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    struct TestEnvVarGuard(&'static str, Option<String>);
+    impl TestEnvVarGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self(key, prev)
+        }
+    }
+    impl Drop for TestEnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.1 {
+                std::env::set_var(self.0, prev);
+            } else {
+                std::env::remove_var(self.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_worker_prompt_keeps_exit_code_for_unparseable_reviewer_verdict() {
+        let tmp = std::env::temp_dir().join(format!("quaqua-wp-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _guard_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _guard_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _guard_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let name = "suhuynh-testr1";
+        WorkerMetadata::mark_review(&tmp, name).unwrap();
+
+        let report_file = tmp.join(format!("{name}.md"));
+        fs::write(
+            &report_file,
+            "# Review\nVerdict: not clean\n## Lessons\nnone\n",
+        )
+        .unwrap();
+
+        let stub_herdr = tmp.join("herdr-stub");
+        fs::write(
+            &stub_herdr,
+            r#"#!/bin/sh
+case "$1" in
+  agent)
+    case "$2" in
+      wait) echo '{"result": {"agent": {"agent_status": "idle", "state_change_seq": 1}}}'; exit 0 ;;
+      get) echo '{"result": {"agent": {"name": "'"$3"'", "agent_status": "idle"}}}'; exit 0 ;;
+      *) echo '{"result": {}}'; exit 0 ;;
+    esac ;;
+  *) echo '{"result": {}}'; exit 0 ;;
+esac
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&stub_herdr).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub_herdr, perms).unwrap();
+        let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_herdr.to_str().unwrap());
+
+        let herdr = Herdr {
+            bin: stub_herdr.to_string_lossy().to_string(),
+        };
+        let git = crate::git::Git::new();
+
+        let res = prompt_worker(name, None, true, None, &git, &herdr);
+        assert_eq!(
+            res,
+            Ok(()),
+            "worker prompt must keep exit 0 for unparseable reviewer verdict"
+        );
+
+        let db_path = tmp.join("quaqua.db");
+        if let Ok(journal) = SqliteJournal::open(&db_path) {
+            let records = journal.load_verdicts("quaqua/suhuynh-testr1", "").unwrap();
+            assert!(
+                records.is_empty(),
+                "unparseable report must not record verdict"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

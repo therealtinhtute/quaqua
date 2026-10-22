@@ -1586,29 +1586,6 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 report_is_unfinished(&rep_content).is_none()
                             };
                             if should_record {
-                                let _lock_holder = if std::env::var("QUAQUA_TEST").as_deref()
-                                    == Ok("1")
-                                    && ctx.runs_dir.join("stub_lock_db").is_file()
-                                {
-                                    let db_path = ctx.runs_dir.join("quaqua.db");
-                                    let (tx_locked, rx_locked) = std::sync::mpsc::channel();
-                                    let (tx_release, rx_release) = std::sync::mpsc::channel();
-                                    let h = std::thread::spawn(move || {
-                                        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                                            let _ = conn.execute_batch(
-                                                "BEGIN IMMEDIATE; INSERT OR REPLACE INTO events VALUES ('lock', 0, 0, 'lock', '{}');",
-                                            );
-                                            let _ = tx_locked.send(());
-                                            let _ = rx_release.recv();
-                                            let _ = conn.execute_batch("ROLLBACK;");
-                                        }
-                                    });
-                                    let _ = rx_locked.recv();
-                                    Some((tx_release, h))
-                                } else {
-                                    None
-                                };
-
                                 let _ = crate::state::WorkerMetadata::save_pipeline(
                                     &ctx.runs_dir,
                                     &child_input.name,
@@ -1623,11 +1600,6 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                         ctx.git,
                                         Some(&ctx.repo_path),
                                     );
-
-                                if let Some((tx_release, h)) = _lock_holder {
-                                    let _ = tx_release.send(());
-                                    let _ = h.join();
-                                }
                             }
                         }
 
@@ -4200,6 +4172,10 @@ Implemented plan.
 none
 REPEOF
                 fi
+                if [ -f "$QUAQUA_RUNS_DIR/stub_lock_db" ]; then
+                  mv "$QUAQUA_RUNS_DIR/quaqua.db" "$QUAQUA_RUNS_DIR/quaqua.db.locked"
+                  mkdir "$QUAQUA_RUNS_DIR/quaqua.db"
+                fi
                 ;;
               *FIX*)
                 WT="$(dirname "$QUAQUA_RUNS_DIR")/.wt/$NAME"
@@ -5020,8 +4996,8 @@ esac
         assert_eq!(plan_res, Err((5, String::new())));
 
         // 2. Enable stub_lock_db trigger to lock quaqua.db during build acceptance
-        let _ = std::fs::remove_file(runs_dir.join(format!(".sude-{task}.read")));
         std::fs::write(runs_dir.join("stub_lock_db"), "1").unwrap();
+
         // 3. Resume invocation executes Build with locked DB during acceptance
         let resume_args = vec![
             "--resume".to_string(),
@@ -5042,6 +5018,11 @@ esac
         let state_file = runs_dir.join(format!("pipeline-{task}.state"));
         let state = PipelineState::load(&state_file).unwrap();
         let builder_branch = format!("quaqua/sude-{task}");
+        let locked_bak = runs_dir.join("quaqua.db.locked");
+        if locked_bak.is_file() {
+            let _ = std::fs::remove_dir(runs_dir.join("quaqua.db"));
+            let _ = std::fs::rename(&locked_bak, runs_dir.join("quaqua.db"));
+        }
         let db_path = runs_dir.join("quaqua.db");
         let journal = SqliteJournal::open(&db_path).unwrap();
         let records = journal
