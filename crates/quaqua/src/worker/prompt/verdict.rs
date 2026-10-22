@@ -144,9 +144,6 @@ pub fn resolve_worker_worktree(
 
     // 2. Resolve via repo_dir
     if let Some(repo) = repo_dir {
-        if repo.is_dir() && repo.file_name().and_then(|n| n.to_str()) == Some(name) {
-            return Some(repo.to_path_buf());
-        }
         let wt = resolve_worktree_path(repo, name);
         if wt.is_dir() {
             return Some(wt);
@@ -183,6 +180,11 @@ pub fn record_verdict_on_acceptance<G: GitOps>(
 ) -> Result<Option<VerdictRecord>, String> {
     // Exclude taskforce workers from recording branch review verdicts
     if runs_dir.join(format!("{name}.taskforce")).is_file() {
+        return Ok(None);
+    }
+
+    // Exclude unparseable reviewer reports from recording verdicts (only accepted reports record)
+    if expect_verdict && crate::pipeline::parse_report_content(report_content).is_err() {
         return Ok(None);
     }
 
@@ -364,6 +366,8 @@ mod tests {
     struct MockGit {
         head_sha: String,
         branch: String,
+        wt_dir: Option<PathBuf>,
+        wt_branch: Option<String>,
     }
 
     impl MockGit {
@@ -371,16 +375,36 @@ mod tests {
             Self {
                 head_sha: head_sha.to_string(),
                 branch: branch.to_string(),
+                wt_dir: None,
+                wt_branch: None,
+            }
+        }
+
+        fn with_wt(head_sha: &str, repo_branch: &str, wt_dir: PathBuf, wt_branch: &str) -> Self {
+            Self {
+                head_sha: head_sha.to_string(),
+                branch: repo_branch.to_string(),
+                wt_dir: Some(wt_dir),
+                wt_branch: Some(wt_branch.to_string()),
             }
         }
     }
 
     impl GitOps for MockGit {
         fn run_in(&self, _dir: &Path, args: &[&str]) -> std::io::Result<Output> {
+            let branch_bytes = if let (Some(wt), Some(wt_b)) = (&self.wt_dir, &self.wt_branch) {
+                if _dir == wt {
+                    wt_b.as_bytes().to_vec()
+                } else {
+                    self.branch.as_bytes().to_vec()
+                }
+            } else {
+                self.branch.as_bytes().to_vec()
+            };
             let stdout = if args.contains(&"rev-parse") && args.contains(&"HEAD") {
                 self.head_sha.as_bytes().to_vec()
             } else if args.contains(&"branch") && args.contains(&"--show-current") {
-                self.branch.as_bytes().to_vec()
+                branch_bytes
             } else {
                 Vec::new()
             };
@@ -983,5 +1007,110 @@ mod tests {
             None,
             "taskforce workers must not record branch verdicts"
         );
+    }
+
+    #[test]
+    fn test_finding1_repo_basename_matches_worker_name_resolves_wt_branch() {
+        let tmp = TempDir::new("f1-basename");
+        let runs_dir = tmp.path().join("runs");
+        fs::create_dir_all(&runs_dir).unwrap();
+
+        let name = "sude-task";
+        let repo_dir = tmp.path().join(name);
+        let wt_dir = tmp.path().join(".wt").join(name);
+        fs::create_dir_all(&repo_dir).unwrap();
+        fs::create_dir_all(&wt_dir).unwrap();
+
+        // 1. resolve_worker_worktree must pick the worktree, not repo_dir
+        let wt = resolve_worker_worktree(&runs_dir, name, Some(&repo_dir));
+        assert_eq!(
+            wt,
+            Some(wt_dir.clone()),
+            "must resolve worktree at .wt/<name>, not repo_dir checkout"
+        );
+
+        let git = MockGit::with_wt(
+            "1111111111111111111111111111111111111111",
+            "main",
+            wt_dir.clone(),
+            "quaqua/sude-task",
+        );
+        let report = "# Build\nVerified: unit-test-verified 1111111111111111111111111111111111111111\n## Lessons\nnone\n";
+        let rec =
+            record_verdict_on_acceptance(&runs_dir, name, report, false, &git, Some(&repo_dir))
+                .unwrap()
+                .expect("record returned");
+        assert_eq!(
+            rec.branch, "quaqua/sude-task",
+            "must record on worker branch, not main checkout branch"
+        );
+    }
+
+    #[test]
+    fn test_finding2_unparseable_reviewer_verdict_not_recorded() {
+        let tmp = TempDir::new("f2-verdict");
+        let runs_dir = tmp.path().join("runs");
+        fs::create_dir_all(&runs_dir).unwrap();
+
+        let rev_name = "suhuynh-taskr1";
+        WorkerMetadata::mark_review(&runs_dir, rev_name).unwrap();
+        let wt = tmp.path().join(".wt").join(rev_name);
+        fs::create_dir_all(&wt).unwrap();
+        let sha = "1111111111111111111111111111111111111111";
+        fs::write(
+            readonly::baseline_path(&runs_dir, rev_name),
+            format!("{}\n{sha}\n", wt.display()),
+        )
+        .unwrap();
+
+        let git = MockGit::new(sha, "quaqua/suhuynh-taskr1");
+
+        // 1. Report with unparseable verdict line (e.g. "Verdict: not clean")
+        let bad_report = "# Review\nVerdict: not clean\n## Lessons\nnone\n";
+        let res_bad = record_verdict_on_acceptance(
+            &runs_dir,
+            rev_name,
+            bad_report,
+            true,
+            &git,
+            Some(tmp.path()),
+        );
+        assert!(res_bad.is_ok());
+        assert_eq!(
+            res_bad.unwrap(),
+            None,
+            "unparseable reviewer report must return None and NOT record a verdict"
+        );
+
+        // Ensure database has no records
+        let db_path = runs_dir.join("quaqua.db");
+        if let Ok(journal) = SqliteJournal::open(&db_path) {
+            let records = journal.load_verdicts("quaqua/suhuynh-taskr1", sha).unwrap();
+            assert!(
+                records.is_empty(),
+                "rejected report must not leave an inconclusive verdict in DB"
+            );
+        }
+
+        // 2. Report is corrected to clean -> successfully recorded as ReviewClean
+        let clean_report = "# Review\nVerdict: clean\n## Lessons\nnone\n";
+        let res_clean = record_verdict_on_acceptance(
+            &runs_dir,
+            rev_name,
+            clean_report,
+            true,
+            &git,
+            Some(tmp.path()),
+        );
+        assert!(res_clean.is_ok());
+        let rec = res_clean.unwrap().expect("must record clean verdict");
+        assert_eq!(rec.level, VerdictLevel::ReviewClean);
+
+        let journal = SqliteJournal::open(&db_path).unwrap();
+        let strongest = journal
+            .strongest_verdict("quaqua/suhuynh-taskr1", sha)
+            .unwrap()
+            .unwrap();
+        assert_eq!(strongest.level, VerdictLevel::ReviewClean);
     }
 }

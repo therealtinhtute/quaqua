@@ -1574,35 +1574,61 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                             || kind == ChildKind::Build
                             || matches!(kind, ChildKind::Fix(_))
                         {
-                            let rep_content = if child_report_path.is_file() {
-                                std::fs::read_to_string(&child_report_path).unwrap_or_default()
+                            let rep_content = resolve_child_report_content(
+                                &ctx.runs_dir,
+                                &child_report_path,
+                                &child_input.name,
+                                kind,
+                            );
+                            let should_record = if is_reviewer {
+                                crate::pipeline::parse_report_content(&rep_content).is_ok()
                             } else {
-                                let build_md =
-                                    ctx.runs_dir.join(format!("{}.build.md", child_input.name));
-                                let fix_md = ctx
-                                    .runs_dir
-                                    .join(format!("{}.fix{}.md", child_input.name, state.round));
-                                if build_md.is_file() {
-                                    std::fs::read_to_string(&build_md).unwrap_or_default()
-                                } else if fix_md.is_file() {
-                                    std::fs::read_to_string(&fix_md).unwrap_or_default()
-                                } else {
-                                    String::new()
-                                }
+                                report_is_unfinished(&rep_content).is_none()
                             };
-                            let _ = crate::state::WorkerMetadata::save_pipeline(
-                                &ctx.runs_dir,
-                                &child_input.name,
-                                &ctx.task,
-                            );
-                            let _ = crate::worker::prompt::verdict::record_verdict_on_acceptance(
-                                &ctx.runs_dir,
-                                &child_input.name,
-                                &rep_content,
-                                is_reviewer,
-                                ctx.git,
-                                Some(&ctx.repo_path),
-                            );
+                            if should_record {
+                                let _lock_holder = if std::env::var("QUAQUA_TEST").as_deref()
+                                    == Ok("1")
+                                    && ctx.runs_dir.join("stub_lock_db").is_file()
+                                {
+                                    let db_path = ctx.runs_dir.join("quaqua.db");
+                                    let (tx_locked, rx_locked) = std::sync::mpsc::channel();
+                                    let (tx_release, rx_release) = std::sync::mpsc::channel();
+                                    let h = std::thread::spawn(move || {
+                                        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                                            let _ = conn.execute_batch(
+                                                "BEGIN IMMEDIATE; INSERT OR REPLACE INTO events VALUES ('lock', 0, 0, 'lock', '{}');",
+                                            );
+                                            let _ = tx_locked.send(());
+                                            let _ = rx_release.recv();
+                                            let _ = conn.execute_batch("ROLLBACK;");
+                                        }
+                                    });
+                                    let _ = rx_locked.recv();
+                                    Some((tx_release, h))
+                                } else {
+                                    None
+                                };
+
+                                let _ = crate::state::WorkerMetadata::save_pipeline(
+                                    &ctx.runs_dir,
+                                    &child_input.name,
+                                    &ctx.task,
+                                );
+                                let _ =
+                                    crate::worker::prompt::verdict::record_verdict_on_acceptance(
+                                        &ctx.runs_dir,
+                                        &child_input.name,
+                                        &rep_content,
+                                        is_reviewer,
+                                        ctx.git,
+                                        Some(&ctx.repo_path),
+                                    );
+
+                                if let Some((tx_release, h)) = _lock_holder {
+                                    let _ = tx_release.send(());
+                                    let _ = h.join();
+                                }
+                            }
                         }
 
                         let _ = std::fs::write(
@@ -2734,8 +2760,38 @@ pub(crate) fn parse_verdict_str(verdict_line: &str) -> Result<(u32, bool), Strin
         "unparseable verdict line: '{verdict_line}'; expected 'Verdict: clean' or 'Verdict: <N> findings'"
     ))
 }
+fn resolve_child_report_content(
+    runs_dir: &Path,
+    child_report_path: &Path,
+    worker_name: &str,
+    kind: ChildKind,
+) -> String {
+    if child_report_path.is_file() {
+        std::fs::read_to_string(child_report_path).unwrap_or_default()
+    } else {
+        match kind {
+            ChildKind::Fix(r) => {
+                let fix_md = runs_dir.join(format!("{worker_name}.fix{r}.md"));
+                if fix_md.is_file() {
+                    std::fs::read_to_string(&fix_md).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+            ChildKind::Build => {
+                let build_md = runs_dir.join(format!("{worker_name}.build.md"));
+                if build_md.is_file() {
+                    std::fs::read_to_string(&build_md).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        }
+    }
+}
 
-fn parse_report_content(content: &str) -> Result<(u32, bool), String> {
+pub(crate) fn parse_report_content(content: &str) -> Result<(u32, bool), String> {
     if content
         .lines()
         .any(|l| l.trim().starts_with("## Challenge"))
@@ -4144,9 +4200,6 @@ Implemented plan.
 none
 REPEOF
                 fi
-                if [ -f "$QUAQUA_RUNS_DIR/stub_lock_db" ]; then
-                  (python3 -c "import sqlite3, time; c = sqlite3.connect('$QUAQUA_RUNS_DIR/quaqua.db', timeout=0); c.execute('BEGIN EXCLUSIVE'); time.sleep(0.3); c.rollback()" 2>/dev/null || true) &
-                fi
                 ;;
               *FIX*)
                 WT="$(dirname "$QUAQUA_RUNS_DIR")/.wt/$NAME"
@@ -4249,6 +4302,34 @@ esac
         assert!(parse_verdict_str("Verdict: see above").is_err());
         assert!(parse_verdict_str("Verdict: unknown").is_err());
         assert!(parse_verdict_str("Verdict: ").is_err());
+    }
+
+    #[test]
+    fn test_finding5_fix_report_fallback_prefers_fix_file() {
+        let runs_dir = std::env::temp_dir().join(format!("quaqua-f5-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runs_dir);
+        std::fs::create_dir_all(&runs_dir).unwrap();
+
+        let name = "sude-task";
+        let build_md = runs_dir.join(format!("{name}.build.md"));
+        let fix_md = runs_dir.join(format!("{name}.fix1.md"));
+        let missing_report = runs_dir.join(format!("{name}.md"));
+
+        std::fs::write(&build_md, "# Build\nVerified: unit-test-verified sha1\n").unwrap();
+        std::fs::write(&fix_md, "# Fix\nVerified: cargo-test-verified sha2\n").unwrap();
+
+        // When resolving a Fix(1) child whose report was renamed, it MUST prefer .fix1.md over .build.md
+        let resolved =
+            resolve_child_report_content(&runs_dir, &missing_report, name, ChildKind::Fix(1));
+        assert!(
+            resolved.contains("cargo-test-verified sha2"),
+            "fix fallback must read .fix1.md, not .build.md, got: {resolved}"
+        );
+        assert!(
+            !resolved.contains("unit-test-verified sha1"),
+            "fix fallback must not read .build.md"
+        );
+        let _ = std::fs::remove_dir_all(&runs_dir);
     }
 
     #[test]
@@ -4397,6 +4478,20 @@ esac
         assert_eq!(
             review_starts, 2,
             "journal must record 2 child_started attempts for review child"
+        );
+
+        // 7. Verify verdict on clean completion is ReviewClean, not blocked by the earlier unparseable report
+        let state_file = runs_dir.join(format!("pipeline-{task}.state"));
+        let state = PipelineState::load(&state_file).unwrap();
+        let builder_branch = format!("quaqua/sude-{task}");
+        let verdict = journal
+            .strongest_verdict(&builder_branch, &state.head_sha)
+            .unwrap()
+            .expect("must record verdict on clean completion");
+        assert_eq!(
+            verdict.level,
+            crate::engine::journal_sqlite::VerdictLevel::ReviewClean,
+            "corrected review report must record review-clean, not inconclusive"
         );
 
         let _ = std::fs::remove_dir_all(&base_dir);
@@ -4759,6 +4854,38 @@ esac
         assert_eq!(verdict.branch, builder_branch);
         assert_eq!(verdict.sha, state.head_sha);
 
+        // Pin finding 4: r1 VerifierFailed must be recorded at build SHA (HEAD~1), not final fix SHA
+        let wt_dir = base_dir.join(".wt").join(format!("sude-{task}"));
+        let build_sha = String::from_utf8(
+            std::process::Command::new("git")
+                .args(&["rev-parse", "HEAD~1"])
+                .current_dir(&wt_dir)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_ne!(
+            build_sha, state.head_sha,
+            "build sha must differ from fix sha"
+        );
+
+        let r1_verdicts = journal.load_verdicts(&builder_branch, &build_sha).unwrap();
+        let r1_verifier = r1_verdicts
+            .iter()
+            .find(|v| v.source == VerdictSource::Verifier)
+            .expect("must have verifier verdict at build sha");
+        assert_eq!(r1_verifier.level, VerdictLevel::VerifierFailed);
+        assert_eq!(r1_verifier.sha, build_sha);
+        assert_eq!(r1_verifier.verifier, format!("suhuynh-{task}r1"));
+
+        let r1_strongest = journal
+            .strongest_verdict(&builder_branch, &build_sha)
+            .unwrap()
+            .expect("must have strongest verdict at build sha");
+        assert_eq!(r1_strongest.level, VerdictLevel::VerifierFailed);
         let _ = std::fs::remove_dir_all(&base_dir);
     }
     #[test]
@@ -4893,8 +5020,8 @@ esac
         assert_eq!(plan_res, Err((5, String::new())));
 
         // 2. Enable stub_lock_db trigger to lock quaqua.db during build acceptance
+        let _ = std::fs::remove_file(runs_dir.join(format!(".sude-{task}.read")));
         std::fs::write(runs_dir.join("stub_lock_db"), "1").unwrap();
-
         // 3. Resume invocation executes Build with locked DB during acceptance
         let resume_args = vec![
             "--resume".to_string(),
@@ -4910,6 +5037,20 @@ esac
         assert!(
             pfile_content.contains("- status: clean"),
             "pipeline must still achieve clean status despite locked db"
+        );
+
+        let state_file = runs_dir.join(format!("pipeline-{task}.state"));
+        let state = PipelineState::load(&state_file).unwrap();
+        let builder_branch = format!("quaqua/sude-{task}");
+        let db_path = runs_dir.join("quaqua.db");
+        let journal = SqliteJournal::open(&db_path).unwrap();
+        let records = journal
+            .load_verdicts(&builder_branch, &state.head_sha)
+            .unwrap();
+        assert!(
+            records.is_empty(),
+            "locked db must cause verdict write to fail, but found: {:?}",
+            records
         );
 
         let _ = std::fs::remove_dir_all(&base_dir);

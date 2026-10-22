@@ -962,6 +962,15 @@ pub fn prompt_worker<G: GitOps>(
                 );
                 return Err((6, String::new()));
             }
+            if expect_verdict {
+                if let Err(reason) = crate::pipeline::parse_report_content(&report_content) {
+                    eprintln!(
+                        "WATCHDOG malformed-report | name={name} missing={reason} report={}",
+                        out.display()
+                    );
+                    return Err((6, String::new()));
+                }
+            }
             if let Err(why) = readonly::check(&runs_dir, name) {
                 eprintln!(
                     "WATCHDOG malformed-report | name={name} missing=read-only worktree ({why}) report={}",
