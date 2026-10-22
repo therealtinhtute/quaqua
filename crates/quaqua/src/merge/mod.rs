@@ -74,6 +74,55 @@ pub fn parse_merge_args(args: &[String]) -> Result<MergeOptions, (i32, String)> 
     })
 }
 
+/// Parses project slug and repo paths from a `projects/INDEX.md` file (§ S2 fix).
+pub fn parse_project_index_rows(index: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(content) = std::fs::read_to_string(index) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('|') {
+            let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
+            if parts.len() >= 3 && parts[1] != "slug" && parts[2] != "repo" && !parts[1].is_empty()
+            {
+                let slug = parts[1].to_string();
+                let r = parts[2];
+                let p = if let Some(stripped) = r.strip_prefix("~/") {
+                    format!("{}/{}", home, stripped)
+                } else if r == "~" {
+                    home.clone()
+                } else {
+                    r.to_string()
+                };
+                rows.push((slug, PathBuf::from(p)));
+            }
+        }
+    }
+    rows
+}
+
+/// Resolves all valid project repository paths from a workspace root (§ S2 fix).
+pub fn resolve_project_repos_from_workspace(ws_root: &Path) -> Vec<PathBuf> {
+    let index = ws_root.join("projects/INDEX.md");
+    let mut repos = Vec::new();
+    for (_slug, pb) in parse_project_index_rows(&index) {
+        if pb.is_dir() && !repos.contains(&pb) {
+            repos.push(pb);
+        }
+    }
+    repos
+}
+
+/// Resolves all valid project repository paths from `projects/INDEX.md` (§ S2 fix).
+pub fn resolve_project_repos_from_index() -> Vec<PathBuf> {
+    if let Ok(root) = workspace_root_checked() {
+        return resolve_project_repos_from_workspace(&root);
+    }
+    Vec::new()
+}
+
 fn resolve_project_repo(
     slug: &str,
     explicit_repo: Option<&Path>,
@@ -94,48 +143,34 @@ fn resolve_project_repo(
 
     let root = workspace_root_checked()?;
     let index = root.join("projects/INDEX.md");
-    if let Ok(content) = std::fs::read_to_string(&index) {
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('|') {
-                let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
-                if parts.len() >= 3 && parts[1] == slug && parts[2] != "repo" {
-                    let r = parts[2];
-                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                    let p = if let Some(stripped) = r.strip_prefix("~/") {
-                        format!("{}/{}", home, stripped)
-                    } else if r == "~" {
-                        home
-                    } else {
-                        r.to_string()
-                    };
-                    let pb = PathBuf::from(&p);
-                    if pb.is_dir() {
-                        return Ok(pb);
-                    } else {
-                        return Err((
-                            1,
-                            format!(
-                                "project repo '{}' for slug '{slug}' does not exist\n",
-                                pb.display()
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
+    if !index.is_file() {
         return Err((
             1,
-            format!(
-                "unknown project slug '{slug}' — no row in {}\n",
-                index.display()
-            ),
+            format!("cannot resolve project repo for slug '{slug}'\n"),
         ));
     }
-
+    let rows = parse_project_index_rows(&index);
+    for (s, pb) in rows {
+        if s == slug {
+            if pb.is_dir() {
+                return Ok(pb);
+            } else {
+                return Err((
+                    1,
+                    format!(
+                        "project repo '{}' for slug '{slug}' does not exist\n",
+                        pb.display()
+                    ),
+                ));
+            }
+        }
+    }
     Err((
         1,
-        format!("cannot resolve project repo for slug '{slug}'\n"),
+        format!(
+            "unknown project slug '{slug}' — no row in {}\n",
+            index.display()
+        ),
     ))
 }
 
@@ -166,6 +201,17 @@ pub fn check_branch_verdict<G: GitOps>(
     branch: &str,
     git: &G,
 ) -> Option<VerdictRecord> {
+    check_branch_verdict_with_sink(db_path, target, branch, git, &mut std::io::stderr())
+}
+
+/// Inspects the strongest verdict for `branch` at its head SHA, writing warnings to `warn_sink` (§ S2 fix).
+pub fn check_branch_verdict_with_sink<G: GitOps, W: std::io::Write>(
+    db_path: &Path,
+    target: &Path,
+    branch: &str,
+    git: &G,
+    warn_sink: &mut W,
+) -> Option<VerdictRecord> {
     let branch_head = git
         .run_in(target, &["rev-parse", "--verify", "--quiet", branch])
         .ok()
@@ -181,20 +227,33 @@ pub fn check_branch_verdict<G: GitOps>(
         .unwrap_or_default();
 
     if branch_head.is_empty() {
-        eprintln!("warning: no verdict for branch '{branch}' (unresolvable head)");
+        let _ = writeln!(
+            warn_sink,
+            "warning: no verdict for branch '{branch}' (unresolvable head)"
+        );
         return None;
     }
 
     if !db_path.exists() {
-        eprintln!("warning: no verdict matches head SHA {branch_head} for branch '{branch}'");
+        let _ = writeln!(
+            warn_sink,
+            "warning: no verdict matches head SHA {branch_head} for branch '{branch}'"
+        );
         return None;
     }
 
     let journal = match SqliteJournal::open(db_path) {
         Ok(j) => j,
         Err(e) => {
-            eprintln!("warning: cannot open journal {}: {e}", db_path.display());
-            eprintln!("warning: no verdict matches head SHA {branch_head} for branch '{branch}'");
+            let _ = writeln!(
+                warn_sink,
+                "warning: cannot open journal {}: {e}",
+                db_path.display()
+            );
+            let _ = writeln!(
+                warn_sink,
+                "warning: no verdict matches head SHA {branch_head} for branch '{branch}'"
+            );
             return None;
         }
     };
@@ -222,7 +281,10 @@ pub fn check_branch_verdict<G: GitOps>(
             println!("verdict for '{branch}' at {branch_head}: {}", v.level);
         }
         None => {
-            eprintln!("warning: no verdict matches head SHA {branch_head} for branch '{branch}'");
+            let _ = writeln!(
+                warn_sink,
+                "warning: no verdict matches head SHA {branch_head} for branch '{branch}'"
+            );
         }
     }
 
@@ -284,6 +346,14 @@ fn run_check(repo: &Path, check_cmd: Option<&str>) -> bool {
 }
 
 pub fn handle_merge(args: &[String], git: &Git) -> Result<(), (i32, String)> {
+    handle_merge_with_sink(args, git, &mut std::io::stderr())
+}
+
+pub fn handle_merge_with_sink<W: std::io::Write>(
+    args: &[String],
+    git: &Git,
+    warn_sink: &mut W,
+) -> Result<(), (i32, String)> {
     let opts = parse_merge_args(args)?;
     let cfg = load_team_config()?;
     let repo = resolve_project_repo(&opts.slug, opts.repo.as_deref())?;
@@ -400,7 +470,10 @@ pub fn handle_merge(args: &[String], git: &Git) -> Result<(), (i32, String)> {
         && std::env::var("QUAQUA_CHECK_CMD").is_err()
         && std::env::var("MERGE_CHECK_CMD").is_err()
     {
-        eprintln!("warning: no check command configured; merging without checks");
+        let _ = writeln!(
+            warn_sink,
+            "warning: no check command configured; merging without checks"
+        );
     }
     let db_path = if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
         PathBuf::from(dir).join("quaqua.db")
@@ -411,7 +484,7 @@ pub fn handle_merge(args: &[String], git: &Git) -> Result<(), (i32, String)> {
     };
 
     for branch in &opts.branches {
-        check_branch_verdict(&db_path, target, branch, git);
+        check_branch_verdict_with_sink(&db_path, target, branch, git, warn_sink);
 
         // 1. Note the integ commit
         let rev_out = git
@@ -583,9 +656,9 @@ mod tests {
         )
         .unwrap();
 
+        let _env_guard = EnvGuard::capture(&["QUAQUA_HOME", "QUAQUA_RUNS_DIR"]);
         std::env::set_var("QUAQUA_HOME", &tmp);
         std::env::set_var("QUAQUA_RUNS_DIR", &runs);
-
         let args = vec![
             "--check".to_string(),
             "true".to_string(),
@@ -594,11 +667,39 @@ mod tests {
             "proj".to_string(),
             "branch-unverified".to_string(),
         ];
-        let res = handle_merge(&args, &git);
+        let mut warn_buf = Vec::new();
+        let res = handle_merge_with_sink(&args, &git, &mut warn_buf);
         assert!(
             res.is_ok(),
             "merge of unverified branch must succeed (warn only, exit code unchanged): {:?}",
             res.err()
         );
+        let warn_str = String::from_utf8_lossy(&warn_buf);
+        assert!(
+            warn_str.contains("warning: no verdict matches head SHA"),
+            "warning must be emitted to sink on unverified head, got: {warn_str}"
+        );
+    }
+    struct EnvGuard {
+        vars: Vec<(String, Option<String>)>,
+    }
+    impl EnvGuard {
+        fn capture(keys: &[&str]) -> Self {
+            let vars = keys
+                .iter()
+                .map(|k| (k.to_string(), std::env::var(k).ok()))
+                .collect();
+            Self { vars }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.vars {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 }

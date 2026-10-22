@@ -78,6 +78,7 @@ pub struct BranchVerdictRow {
     pub level: VerdictLevel,
     pub is_verified: bool,
     pub stale: bool,
+    pub unresolved: bool,
     pub same_harness: bool,
 }
 
@@ -142,6 +143,74 @@ fn resolve_branch_head<G: GitOps>(git: &G, repo: &Path, branch: &str) -> Option<
     None
 }
 
+fn resolve_candidate_repos(repo: &Path) -> Vec<PathBuf> {
+    let mut repos = crate::merge::resolve_project_repos_from_index();
+    if repo.join("projects/INDEX.md").is_file() {
+        for r in crate::merge::resolve_project_repos_from_workspace(repo) {
+            if !repos.contains(&r) {
+                repos.push(r);
+            }
+        }
+    }
+    if repo.is_dir() && !repos.contains(&repo.to_path_buf()) {
+        repos.push(repo.to_path_buf());
+    }
+    repos
+}
+
+fn resolve_branch_head_in_repos<G: GitOps>(
+    git: &G,
+    repos: &[PathBuf],
+    branch: &str,
+) -> Option<String> {
+    for r in repos {
+        if let Some(sha) = resolve_branch_head(git, r, branch) {
+            return Some(sha);
+        }
+    }
+    None
+}
+
+fn strongest_verdict_from_slice<'a>(records: &[&'a VerdictRecord]) -> Option<&'a VerdictRecord> {
+    if records.is_empty() {
+        return None;
+    }
+
+    let verifier_verdicts: Vec<&'a VerdictRecord> = records
+        .iter()
+        .copied()
+        .filter(|v| v.source == VerdictSource::Verifier)
+        .collect();
+
+    if !verifier_verdicts.is_empty() {
+        if let Some(v) = verifier_verdicts
+            .iter()
+            .find(|v| v.level == VerdictLevel::VerifierFailed)
+        {
+            return Some(*v);
+        }
+        if let Some(v) = verifier_verdicts
+            .iter()
+            .find(|v| v.level == VerdictLevel::VerifierBlocked)
+        {
+            return Some(*v);
+        }
+        if let Some(v) = verifier_verdicts
+            .iter()
+            .find(|v| v.level == VerdictLevel::Inconclusive)
+        {
+            return Some(*v);
+        }
+        let best = verifier_verdicts
+            .into_iter()
+            .max_by_key(|v| v.strength())
+            .unwrap();
+        return Some(best);
+    }
+
+    records.last().copied()
+}
+
 /// Query branch verdict rows from the journal and repository (§ S2).
 pub fn query_branch_verdicts<G: GitOps>(
     db_path: &Path,
@@ -164,79 +233,97 @@ pub fn query_branch_verdicts<G: GitOps>(
     }
 
     let team_cfg = load_team_config().ok();
+    let candidate_repos = resolve_candidate_repos(repo);
 
-    let mut branches_seen = BTreeSet::new();
-    let mut branch_list = Vec::new();
+    let mut branch_records: BTreeMap<String, Vec<&VerdictRecord>> = BTreeMap::new();
     for v in &all_verdicts {
-        if branches_seen.insert(v.branch.clone()) {
-            branch_list.push(v.branch.clone());
-        }
+        branch_records.entry(v.branch.clone()).or_default().push(v);
     }
-    branch_list.sort();
 
     let mut rows = Vec::new();
-    for branch in branch_list {
-        let records_for_branch: Vec<&VerdictRecord> =
-            all_verdicts.iter().filter(|v| v.branch == branch).collect();
-        if records_for_branch.is_empty() {
-            continue;
-        }
-
-        let head_sha_opt = resolve_branch_head(git, repo, &branch);
+    for (branch, records) in branch_records {
+        let head_sha_opt = resolve_branch_head_in_repos(git, &candidate_repos, &branch);
 
         match head_sha_opt {
             Some(head_sha) => {
-                let verdict_at_head = journal
-                    .strongest_verdict(&branch, &head_sha)
-                    .map_err(|e| format!("db error: {e}"))?;
+                let records_at_head: Vec<&VerdictRecord> = records
+                    .iter()
+                    .copied()
+                    .filter(|v| v.sha == head_sha)
+                    .collect();
+                let verdict_at_head = strongest_verdict_from_slice(&records_at_head);
 
                 if let Some(v) = verdict_at_head {
-                    let same_harness = is_same_harness(&v, team_cfg.as_ref());
+                    let same_harness = is_same_harness(v, team_cfg.as_ref());
+                    let effective_level = if v.source == VerdictSource::SelfReport {
+                        VerdictLevel::Inconclusive
+                    } else {
+                        v.level
+                    };
                     rows.push(BranchVerdictRow {
-                        branch: branch.clone(),
-                        head_sha: head_sha.clone(),
+                        branch,
+                        head_sha,
                         verdict_sha: v.sha.clone(),
-                        level: v.level,
+                        level: effective_level,
                         is_verified: v.is_verified(),
                         stale: false,
+                        unresolved: false,
                         same_harness,
                     });
                 } else {
-                    let last_record = records_for_branch.last().unwrap();
-                    let strongest_old = journal
-                        .strongest_verdict(&branch, &last_record.sha)
-                        .map_err(|e| format!("db error: {e}"))?;
+                    let last_record = records.last().unwrap();
+                    let records_at_last_sha: Vec<&VerdictRecord> = records
+                        .iter()
+                        .copied()
+                        .filter(|v| v.sha == last_record.sha)
+                        .collect();
+                    let strongest_old = strongest_verdict_from_slice(&records_at_last_sha);
 
                     if let Some(v) = strongest_old {
-                        let same_harness = is_same_harness(&v, team_cfg.as_ref());
+                        let same_harness = is_same_harness(v, team_cfg.as_ref());
                         let stale = head_sha != v.sha;
+                        let effective_level = if v.source == VerdictSource::SelfReport {
+                            VerdictLevel::Inconclusive
+                        } else {
+                            v.level
+                        };
                         rows.push(BranchVerdictRow {
-                            branch: branch.clone(),
-                            head_sha: head_sha.clone(),
+                            branch,
+                            head_sha,
                             verdict_sha: v.sha.clone(),
-                            level: v.level,
-                            is_verified: v.is_verified(),
+                            level: effective_level,
+                            is_verified: false,
                             stale,
+                            unresolved: false,
                             same_harness,
                         });
                     }
                 }
             }
             None => {
-                let last_record = records_for_branch.last().unwrap();
-                let strongest = journal
-                    .strongest_verdict(&branch, &last_record.sha)
-                    .map_err(|e| format!("db error: {e}"))?;
+                let last_record = records.last().unwrap();
+                let records_at_last_sha: Vec<&VerdictRecord> = records
+                    .iter()
+                    .copied()
+                    .filter(|v| v.sha == last_record.sha)
+                    .collect();
+                let strongest = strongest_verdict_from_slice(&records_at_last_sha);
 
                 if let Some(v) = strongest {
-                    let same_harness = is_same_harness(&v, team_cfg.as_ref());
+                    let same_harness = is_same_harness(v, team_cfg.as_ref());
+                    let effective_level = if v.source == VerdictSource::SelfReport {
+                        VerdictLevel::Inconclusive
+                    } else {
+                        v.level
+                    };
                     rows.push(BranchVerdictRow {
-                        branch: branch.clone(),
-                        head_sha: v.sha.clone(),
+                        branch,
+                        head_sha: String::new(),
                         verdict_sha: v.sha.clone(),
-                        level: v.level,
-                        is_verified: v.is_verified(),
+                        level: effective_level,
+                        is_verified: false,
                         stale: false,
+                        unresolved: true,
                         same_harness,
                     });
                 }
@@ -672,6 +759,9 @@ pub fn format_status_report(
             ));
             for r in v_rows {
                 let mut flags = Vec::new();
+                if r.unresolved {
+                    flags.push("unresolved");
+                }
                 if r.stale {
                     flags.push("stale");
                 }
@@ -1950,6 +2040,123 @@ mod tests {
         assert!(report.contains("review-clean"));
         assert!(report.contains("stale"));
     }
+    #[test]
+    fn test_render_status_with_git_resolves_repo_from_index_and_flags_stale_or_unresolved() {
+        let ws = temp_test_dir("ws-render-status");
+        let _cleaner_ws = TempDirCleaner(ws.clone());
+        let proj_repo = temp_test_dir("proj-repo");
+        let _cleaner_repo = TempDirCleaner(proj_repo.clone());
+
+        fs::create_dir_all(&proj_repo).unwrap();
+        let git = Git::new();
+        let _ = git.run_in(&proj_repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&proj_repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git
+            .run_in(&proj_repo, &["config", "user.name", "test"])
+            .unwrap();
+        let _ = git
+            .run_in(&proj_repo, &["commit", "--allow-empty", "-qm", "initial"])
+            .unwrap();
+
+        // Branch quaqua/feat-moved in proj_repo
+        let _ = git
+            .run_in(&proj_repo, &["checkout", "-qb", "quaqua/feat-moved"])
+            .unwrap();
+        let _ = git
+            .run_in(&proj_repo, &["commit", "--allow-empty", "-qm", "commit 1"])
+            .unwrap();
+        let sha1 = String::from_utf8_lossy(
+            &git.run_in(&proj_repo, &["rev-parse", "HEAD"])
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+
+        // Setup workspace (NOT a git repository)
+        let projects_dir = ws.join("projects");
+        fs::create_dir_all(&projects_dir).unwrap();
+        fs::write(
+            projects_dir.join("INDEX.md"),
+            format!(
+                "# Projects\n\n| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| myproj | {} | cos | active | test |\n",
+                proj_repo.display()
+            ),
+        )
+        .unwrap();
+
+        let runs_dir = ws.join("runs");
+        fs::create_dir_all(&runs_dir).unwrap();
+        let db_path = runs_dir.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+
+        let v_stale = VerdictRecord {
+            branch: "quaqua/feat-moved".to_string(),
+            sha: sha1.clone(),
+            level: VerdictLevel::ReviewClean,
+            evidence: "evidence".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "pi".to_string(),
+        };
+        journal.record_verdict("wf-1", &v_stale).unwrap();
+
+        let v_unresolved = VerdictRecord {
+            branch: "quaqua/feat-missing".to_string(),
+            sha: "999999999999".to_string(),
+            level: VerdictLevel::UnitTestVerified,
+            evidence: "evidence".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "pi".to_string(),
+        };
+        journal.record_verdict("wf-2", &v_unresolved).unwrap();
+
+        // Advance quaqua/feat-moved in proj_repo
+        let _ = git
+            .run_in(&proj_repo, &["commit", "--allow-empty", "-qm", "commit 2"])
+            .unwrap();
+        let sha2 = String::from_utf8_lossy(
+            &git.run_in(&proj_repo, &["rev-parse", "HEAD"])
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        assert_ne!(sha1, sha2);
+
+        let mock = MockHerdr::new(r#"{"result":{"agents":[]}}"#);
+        let out = render_status_with_git(&db_path, &runs_dir, &mock, &git)
+            .expect("render status with git");
+
+        let stale_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("quaqua/feat-moved"))
+            .collect();
+        assert_eq!(stale_lines.len(), 1);
+        assert!(
+            stale_lines[0].contains("stale"),
+            "moved branch must be flagged stale when resolved from INDEX.md, got: {}",
+            stale_lines[0]
+        );
+
+        let unres_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("quaqua/feat-missing"))
+            .collect();
+        assert_eq!(unres_lines.len(), 1);
+        assert!(
+            unres_lines[0].contains("unresolved"),
+            "unresolvable branch must be flagged unresolved, got: {}",
+            unres_lines[0]
+        );
+    }
 
     #[test]
     fn test_status_verdict_strongest_per_branch_and_sha() {
@@ -2055,6 +2262,29 @@ mod tests {
         let repo = tmp.join("repo");
         fs::create_dir_all(&repo).unwrap();
 
+        // Pin QUAQUA_TEAM_TOML to a fixture config where builder and verifier differ on exactly one side (§ S2 fix)
+        let fixture_path = tmp.join("fixture_team.toml");
+        fs::write(
+            &fixture_path,
+            r#"schema_version = 1
+
+[kinds.k-builder]
+harness = "omp"
+model = "m1"
+
+[kinds.k-verifier-same]
+harness = "omp"
+model = "m2"
+
+[kinds.k-verifier-diff]
+harness = "pi"
+model = "m3"
+"#,
+        )
+        .unwrap();
+
+        let _env_guard = EnvGuard::capture(&["QUAQUA_TEAM_TOML"]);
+        std::env::set_var("QUAQUA_TEAM_TOML", &fixture_path);
         let git = Git::new();
         let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
         let _ = git
@@ -2099,9 +2329,9 @@ mod tests {
             evidence: "clean".to_string(),
             verifier: "detu-rev".to_string(),
             source: VerdictSource::Verifier,
-            builder_kind: Some("sude".to_string()),
-            verifier_kind: Some("detu".to_string()),
-            harness: "omp".to_string(), // detu is omp, sude is omp
+            builder_kind: Some("k-builder".to_string()),
+            verifier_kind: Some("k-verifier-same".to_string()),
+            harness: "omp".to_string(),
         };
         journal.record_verdict("wf-same", &v_same).unwrap();
 
@@ -2112,9 +2342,9 @@ mod tests {
             evidence: "clean".to_string(),
             verifier: "suhuynh-rev".to_string(),
             source: VerdictSource::Verifier,
-            builder_kind: Some("sude".to_string()),
-            verifier_kind: Some("suhuynh".to_string()),
-            harness: "pi".to_string(), // suhuynh is pi, sude is omp
+            builder_kind: Some("k-builder".to_string()),
+            verifier_kind: Some("k-verifier-diff".to_string()),
+            harness: "pi".to_string(),
         };
         journal.record_verdict("wf-diff", &v_diff).unwrap();
 
@@ -2144,6 +2374,147 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("same-harness"));
+    }
+    #[test]
+    fn test_status_verdicts_grouped_in_one_pass() {
+        let tmp = temp_test_dir("group-one-pass");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let repo = tmp.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let git = Git::new();
+        let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git.run_in(&repo, &["config", "user.name", "test"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "initial"])
+            .unwrap();
+
+        // 3 branches:
+        // b1: clean verdict at head
+        // b2: stale verdict (head moved)
+        // b3: unresolved (not in repo)
+        let _ = git.run_in(&repo, &["checkout", "-qb", "b1"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "b1 commit"])
+            .unwrap();
+        let sha_b1 =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let _ = git.run_in(&repo, &["checkout", "-qb", "b2"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "b2 commit 1"])
+            .unwrap();
+        let sha_b2_old =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "b2 commit 2"])
+            .unwrap();
+        let sha_b2_head =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let db_path = tmp.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+
+        journal
+            .record_verdict(
+                "wf-1",
+                &VerdictRecord {
+                    branch: "b1".to_string(),
+                    sha: sha_b1.clone(),
+                    level: VerdictLevel::ReviewClean,
+                    evidence: "clean".to_string(),
+                    verifier: "suhuynh-rev".to_string(),
+                    source: VerdictSource::Verifier,
+                    builder_kind: Some("sude".to_string()),
+                    verifier_kind: Some("suhuynh".to_string()),
+                    harness: "pi".to_string(),
+                },
+            )
+            .unwrap();
+
+        journal
+            .record_verdict(
+                "wf-2",
+                &VerdictRecord {
+                    branch: "b2".to_string(),
+                    sha: sha_b2_old.clone(),
+                    level: VerdictLevel::UnitTestVerified,
+                    evidence: "unit verified".to_string(),
+                    verifier: "suhuynh-rev".to_string(),
+                    source: VerdictSource::Verifier,
+                    builder_kind: Some("sude".to_string()),
+                    verifier_kind: Some("suhuynh".to_string()),
+                    harness: "pi".to_string(),
+                },
+            )
+            .unwrap();
+
+        journal
+            .record_verdict(
+                "wf-3",
+                &VerdictRecord {
+                    branch: "b3".to_string(),
+                    sha: "000000000000".to_string(),
+                    level: VerdictLevel::UnitTestVerified,
+                    evidence: "integ verified".to_string(),
+                    verifier: "suhuynh-rev".to_string(),
+                    source: VerdictSource::Verifier,
+                    builder_kind: Some("sude".to_string()),
+                    verifier_kind: Some("suhuynh".to_string()),
+                    harness: "pi".to_string(),
+                },
+            )
+            .unwrap();
+
+        let rows = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts");
+        assert_eq!(rows.len(), 3);
+
+        let r1 = rows.iter().find(|r| r.branch == "b1").unwrap();
+        assert_eq!(r1.head_sha, sha_b1);
+        assert!(!r1.stale);
+        assert!(!r1.unresolved);
+
+        let r2 = rows.iter().find(|r| r.branch == "b2").unwrap();
+        assert_eq!(r2.head_sha, sha_b2_head);
+        assert_eq!(r2.verdict_sha, sha_b2_old);
+        assert!(r2.stale);
+        assert!(!r2.unresolved);
+
+        let r3 = rows.iter().find(|r| r.branch == "b3").unwrap();
+        assert!(r3.head_sha.is_empty());
+        assert!(!r3.stale);
+        assert!(r3.unresolved);
+    }
+    struct EnvGuard {
+        vars: Vec<(String, Option<String>)>,
+    }
+    impl EnvGuard {
+        fn capture(keys: &[&str]) -> Self {
+            let vars = keys
+                .iter()
+                .map(|k| (k.to_string(), std::env::var(k).ok()))
+                .collect();
+            Self { vars }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.vars {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 }
 
