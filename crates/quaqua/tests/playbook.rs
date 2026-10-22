@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use quaqua::playbook::{
-    extract_principle_citations, load_playbooks, parse_playbook, read_principle,
-    resolve_principle_path, run_list, run_show, PlaybookError,
+    extract_principle_citations, load_playbook, load_playbooks, parse_playbook, read_principle,
+    resolve_principle_path, run_list, run_show, Playbook, PlaybookError,
 };
 
 /// Helper RAII temporary directory for test isolation.
@@ -516,32 +516,10 @@ fn s6_acceptance_3_every_worker_ends_with_verified_step() {
     let principles_dir = repo_root.join("templates/workspace/principles");
 
     let playbooks = load_playbooks(&playbooks_dir, &principles_dir)
-        .expect("all 3 playbooks must load and validate");
+        .expect("all playbooks must load and validate");
 
     for pb in &playbooks {
-        if pb.steps.is_empty() {
-            // Orchestrator-only playbooks (e.g. multi-phase-plan) have empty worker steps per § P2
-            continue;
-        }
-        let last_step = pb.steps.last().unwrap();
-        assert!(
-            last_step
-                .text
-                .contains("Check every Evidence line, then write `Verified: <level> <sha>`")
-                || last_step
-                    .text
-                    .contains("check every Evidence line, then write `Verified: <level> <sha>`"),
-            "playbook '{}' last step text does not end with required Verified step text: '{}'",
-            pb.name,
-            last_step.text
-        );
-        assert!(
-            last_step
-                .cited_principles
-                .contains(&"principle-prove-it-works".to_string()),
-            "playbook '{}' last step must cite principle-prove-it-works",
-            pb.name
-        );
+        assert_worker_contract(pb);
     }
 }
 
@@ -907,4 +885,131 @@ when: Testing orchestrator principle typo.
         }
         other => panic!("expected UnknownPrinciple, got: {other:?}"),
     }
+}
+
+/// Allowlist of playbooks permitted to be orchestrator-only per plan § P2.
+const ALLOWED_ORCHESTRATOR_ONLY: &[&str] = &["multi-phase-plan", "session-pickup", "pause-safely"];
+
+/// Helper validating that a playbook conforms to the worker contract (§ S6 / § P2).
+/// Narrows empty steps skip to explicit allowlist AND empty worker_text per finding 3.
+fn assert_worker_contract(pb: &Playbook) {
+    if pb.steps.is_empty() {
+        assert!(
+            ALLOWED_ORCHESTRATOR_ONLY.contains(&pb.name.as_str()),
+            "playbook '{}' has empty worker steps but is not in orchestrator-only allowlist",
+            pb.name
+        );
+        assert!(
+            pb.worker_text.is_empty(),
+            "orchestrator-only playbook '{}' must have empty worker_text, but has: '{}'",
+            pb.name,
+            pb.worker_text
+        );
+        return;
+    }
+    let last_step = pb.steps.last().unwrap();
+    assert!(
+        last_step
+            .text
+            .contains("Check every Evidence line, then write `Verified: <level> <sha>`")
+            || last_step
+                .text
+                .contains("check every Evidence line, then write `Verified: <level> <sha>`"),
+        "playbook '{}' last step text does not end with required Verified step text: '{}'",
+        pb.name,
+        last_step.text
+    );
+    assert!(
+        last_step
+            .cited_principles
+            .contains(&"principle-prove-it-works".to_string()),
+        "playbook '{}' last step must cite principle-prove-it-works",
+        pb.name
+    );
+}
+
+#[test]
+fn finding_1_multi_phase_plan_orchestrator_skeleton_intact() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+
+    let output = run_show("multi-phase-plan", &playbooks_dir, &principles_dir)
+        .expect("run_show multi-phase-plan should succeed");
+    assert!(
+        output.contains("## How to read this"),
+        "multi-phase-plan Orchestrator output must contain '## How to read this'"
+    );
+    assert!(
+        output.contains("## Program checklist"),
+        "multi-phase-plan Orchestrator output must contain '## Program checklist'"
+    );
+    assert!(
+        output.ends_with("```\n") || output.ends_with("```"),
+        "multi-phase-plan Orchestrator output must end with closing code fence"
+    );
+}
+
+#[test]
+fn finding_2_perf_issue_steps_have_no_duplicate_ids() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+
+    let pb = load_playbook(&playbooks_dir.join("perf-issue.md"), &principles_dir)
+        .expect("perf-issue should parse");
+    assert_eq!(
+        pb.step_ids(),
+        vec![1, 2, 3, 4, 5],
+        "perf-issue step_ids must be exactly [1, 2, 3, 4, 5] without duplicate ids from mantras"
+    );
+    assert_eq!(pb.steps.len(), 5, "perf-issue must have exactly 5 steps");
+}
+
+#[test]
+#[should_panic(expected = "not in orchestrator-only allowlist")]
+fn finding_3_unallowlisted_empty_worker_rejected() {
+    let sandbox = TempDir::new("f3-allowlist");
+    let pr_dir = sandbox.sub("principles");
+    sandbox.write_file("principles/prove-it-works.md", "# Prove it works\n");
+
+    let content = r#"---
+name: unknown-empty
+when: Testing unknown empty worker.
+---
+
+## Orchestrator
+
+1. Plan.
+
+## Worker
+"#;
+    let pb = parse_playbook(content, &pr_dir).expect("should parse");
+    assert_worker_contract(&pb);
+}
+
+#[test]
+#[should_panic(expected = "must have empty worker_text")]
+fn finding_3_prose_worker_rejected() {
+    let sandbox = TempDir::new("f3-prose");
+    let pr_dir = sandbox.sub("principles");
+    sandbox.write_file("principles/prove-it-works.md", "# Prove it works\n");
+
+    let content = r#"---
+name: multi-phase-plan
+when: Testing prose worker.
+---
+
+## Orchestrator
+
+1. Plan.
+
+## Worker
+
+Prose without numbered steps.
+"#;
+    let pb = parse_playbook(content, &pr_dir).expect("should parse");
+    assert_worker_contract(&pb);
 }

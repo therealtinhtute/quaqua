@@ -13,7 +13,7 @@ You own the plan, not the code. The plan is a checklist an owner runs box by box
 4. Copy the skeleton below into the plan file and fill every placeholder. Unless a path is named, write the file under `docs/plans/active/{slug}.md`. Keep every heading and every sub-block in the order shown. One section per unit or PR. One unit is one change with its own evidence, structured per principle-sequence-verifiable-units.
 5. Write with short declarative sentences, concise and audience-aware. The body is a how-to checklist. Appendices hold explanation and reference. Each heading states the task or the finding. No long dashes. No mid-sentence colons.
 6. Validate the plan structure per principle-encode-lessons-in-structure, ensuring every checklist box has concrete, verifiable evidence and explicit dependencies.
-7. Verification rule: tests alone are not sufficient verification. A unit is verified only when its unit, live, and perf criteria are all checked per principle-prove-it-works. That sentence is the verification rule; every verification block opens with it.
+7. Verification rule: tests alone are not sufficient verification. A unit is verified only when its unit, live, and perf criteria are all checked per principle-prove-it-works. That sentence is the verification rule; every verification block opens with it. The live block is mandatory: drive the real surface through matching surface tests (CLI/TUI/API/Web). If base lacks the feature, record that fact and gate the behavior the diff adds plus the end state the user waits for instead of inventing a base result. The perf gate is dual-sided: base and head must both produce the named metric. If base lacks the feature, isolate the work the diff adds and set an absolute budget for that work plus the end-to-end state instead of claiming an invalid ratio.
 8. Hand back: post the plan path and summary, then stop. Execution starts on explicit confirmation under the coordinator or project Lead (`<slug>-lead`).
 
 ```markdown
@@ -33,7 +33,7 @@ Tests alone are not sufficient verification. A unit is verified only when its un
 
 - [ ] State the protocol and this plan to the coordinator, then stop. Start execution only on explicit go.
 - [ ] Read referenced specifications and playbooks from the repository at program start. Re-read them at every milestone.
-- [ ] Maintain the audit cadence. Audit the operation against the plan and fix drift in each cycle. Probe every active worker and judge progress by side effects only. Stand down a stuck worker and dispatch its replacement. Then report a short status message only when the audit found a tracked change that no earlier status reported.
+- [ ] Maintain the audit cadence. Audit the operation against the plan and fix drift in each cycle. Probe every active worker and judge progress by side effects only. Stand down a stuck worker and dispatch its replacement. Then report a short status message only when the audit found a tracked change that no earlier status reported. Either way, log this tick's row in the decision trail, recording the items reported, or none.
 - [ ] On a hold or stand-down order, send every worker a stop order at once.
 
 ### Spawn owners
@@ -79,18 +79,17 @@ Tests alone are not sufficient verification. A unit is verified only when its un
 
 - [ ] <Test file and the case it gains.> Run `<command>`.
 
-**Verify, live.** Tests alone are not sufficient verification. A unit is verified only when its unit, live, and perf boxes are all checked.
+**Verify, live.** Tests alone are not sufficient verification. A unit is verified only when its unit, live, and perf boxes are all checked. The live block is mandatory; drive the real surface through matching surface tests (CLI/TUI/API/Web).
 
-- [ ] Lane 1. Regression check against base. Run <load-bearing scenario> at base and head. Pass when <predicate>.
-- [ ] Lane 2. <Scenario.> Pass when <predicate>.
+- [ ] Lane 1. Regression check against base. Run <load-bearing scenario> at base and head on matching surface. If base lacks the feature, record that fact and gate the behavior the diff adds plus the end state the user waits for instead of inventing a base result. Pass when <predicate>.
+- [ ] Lane 2. <Scenario on matching surface (CLI/TUI/API/Web).> Pass when <predicate>.
 
-**Verify, perf.** Tests alone are not sufficient verification. A unit is verified only when its unit, live, and perf boxes are all checked.
+**Verify, perf.** Tests alone are not sufficient verification. A unit is verified only when its unit, live, and perf boxes are all checked. The perf gate is dual-sided: base and head must both produce the named metric.
 
-- [ ] Metric. <What is measured at both base and head.>
-- [ ] Probe. <The command or procedure run at base and head.>
+- [ ] Metric. <What is measured at both base and head. If base lacks the feature, name the diff-added work and the end-to-end state the user waits for.>
+- [ ] Probe. <The command or procedure run at base and head, interleaved. Both sides must produce the metric.>
 - [ ] Baseline. Record base value first.
-- [ ] Rule. <Head against base, with the threshold that fails.>
-
+- [ ] Rule. <Head against base, with the threshold that fails. If base lacks the feature, isolate the work the diff adds and set an absolute budget for that work plus the end-to-end state instead of claiming an invalid ratio.>
 **Review gate.**
 
 - [ ] Independent reviewer verdict recorded at head SHA.
@@ -118,7 +117,11 @@ Tests alone are not sufficient verification. A unit is verified only when its un
 
 <Each risk with the unit it lands in and what the owner watches.>
 
-## Appendix D. Links and reading list
+## Appendix D. Decision trail
+
+<Log of each audit cadence tick: items reported, stuck workers stood down, or none.>
+
+## Appendix E. Links and reading list
 
 <Specifications and references to read before editing.>
 ```

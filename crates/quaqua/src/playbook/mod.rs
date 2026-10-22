@@ -269,10 +269,14 @@ pub fn parse_playbook(content: &str, principles_dir: &Path) -> Result<Playbook, 
     let mut worker_lines: Vec<String> = Vec::new();
     let mut seen_orchestrator = false;
     let mut seen_worker = false;
+    let mut in_fence = false;
 
     for line in lines {
         let trimmed = line.trim();
-        if trimmed.starts_with("## ") {
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+        }
+        if !in_fence && trimmed.starts_with("## ") {
             let heading = trimmed[3..].trim();
             if heading.eq_ignore_ascii_case("orchestrator") {
                 current_section = Section::Orchestrator;
