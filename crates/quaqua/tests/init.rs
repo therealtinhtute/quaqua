@@ -1194,3 +1194,91 @@ fn f1_fresh_init_has_no_fixture() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn s6b_acceptance_1_fresh_init_has_poteto_mode_skill() {
+    let root = std::env::temp_dir().join(format!("quaqua-init-s6b-skill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let ws = root.join("ws");
+
+    let nobin = root.join("nobin");
+    std::fs::create_dir_all(&nobin).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.env("PATH", &nobin)
+        .env("HERDR_BIN_PATH", nobin.join("herdr"))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_TEMPLATE_DIR")
+        .current_dir(&root);
+
+    let out = cmd
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let skill_path = ws.join(".claude/skills/poteto-mode/SKILL.md");
+    assert!(
+        skill_path.is_file(),
+        "fresh quaqua init workspace must have .claude/skills/poteto-mode/SKILL.md"
+    );
+
+    let content = std::fs::read_to_string(&skill_path).expect("read poteto-mode/SKILL.md");
+    assert!(
+        content.contains("name: poteto-mode"),
+        "skill must be named poteto-mode"
+    );
+    assert!(
+        content.contains("Never invent a playbook name"),
+        "skill must require never inventing a playbook name"
+    );
+    assert!(
+        content.contains("Never route inside a worker"),
+        "skill must forbid routing inside a worker"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn s6b_acceptance_2_agents_route_line_names_poteto_mode() {
+    let root = std::env::temp_dir().join(format!("quaqua-init-s6b-agents-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let ws = root.join("ws");
+
+    let nobin = root.join("nobin");
+    std::fs::create_dir_all(&nobin).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.env("PATH", &nobin)
+        .env("HERDR_BIN_PATH", nobin.join("herdr"))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_TEMPLATE_DIR")
+        .current_dir(&root);
+
+    let out = cmd
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let agents_md = std::fs::read_to_string(ws.join("AGENTS.md")).expect("read AGENTS.md");
+    assert!(
+        agents_md.contains("Before every brief, route through `/poteto-mode`."),
+        "AGENTS.md must carry the route line: Before every brief, route through `/poteto-mode`."
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
