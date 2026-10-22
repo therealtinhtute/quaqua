@@ -902,7 +902,8 @@ pub struct PlaybookGapTally {
 /// Verdicts, `playbook_gap` and watchdog exits come from `runs/quaqua.db` read
 /// only. G1 (merges with no verdict at the incoming head) cannot come from the
 /// journal alone: the engine records no merge event, so merge commits are listed
-/// from git on `main` and `*-integ` and matched against the recorded verdicts.
+/// from git on the upstream `main` (or local `main`) and every integration
+/// branch, windowed by merge commit date, and matched against the whole journal.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JournalMetrics {
     /// Verdict events inside the `--since` window, one entry per level.
@@ -913,13 +914,26 @@ pub struct JournalMetrics {
     pub playbook_gap_events: usize,
     pub playbook_gap_missing: usize,
     pub playbook_gap_unreasoned: usize,
-    /// G1: incoming merge heads checked against the whole journal.
+    /// G1: merge commits scanned inside the window (the S0 baseline's unit).
+    #[serde(default)]
+    pub merges: usize,
+    /// G1: incoming merge heads inside the window, checked against the whole journal.
     pub merges_checked: usize,
+    /// Heads whose strongest verdict is not a verifier pass (G1 numerator).
     pub merges_without_verdict: usize,
+    /// Split of `merges_without_verdict`: no journal record at all, versus a
+    /// record whose strongest verdict is failed, blocked or inconclusive.
+    #[serde(default)]
+    pub merges_no_verdict: usize,
+    #[serde(default)]
+    pub merges_not_pass: usize,
     /// Up to five `target@sha` of the merges counted in `merges_without_verdict`.
     #[serde(default)]
     pub merges_missing_samples: Vec<String>,
     pub merge_repos: usize,
+    /// G1 per repository and ref, so a number can be traced to its source.
+    #[serde(default)]
+    pub merges_per_repo: Vec<MergeRepoStat>,
     /// G2: watchdog exits inside the window.
     pub accepted_reports: usize,
     pub exit6: usize,
@@ -935,6 +949,31 @@ pub struct MetricsTotal {
     #[serde(default)]
     pub claude_unpriced: usize,
     pub wall_sec: u64,
+}
+
+/// G1 counts for one repository: the refs it was read from and what they held.
+///
+/// A merge reachable from several refs of the same repo is counted once, under
+/// the first ref: sums here match the totals.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeRepoStat {
+    pub repo: String,
+    /// Refs that contributed at least one merge, in scan order.
+    #[serde(default)]
+    pub refs: Vec<MergeRefStat>,
+    /// Merge commits counted for this repo (the S0 baseline's unit).
+    #[serde(default)]
+    pub merges: usize,
+    /// Incoming heads checked (one per ordinary merge).
+    pub checked: usize,
+    pub without_verdict: usize,
+}
+
+/// One ref a repo's G1 count was read from, with the merges it contributed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeRefStat {
+    pub target: String,
+    pub merges: usize,
 }
 
 pub fn parse_since_cutoff(since: &str, now_ms: u64) -> Result<u64, String> {
@@ -1062,6 +1101,7 @@ const MERGE_SCAN_LIMIT: usize = 500;
 /// One merge commit and the heads it brought in (every parent after the first).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MergeCommit {
+    pub repo: PathBuf,
     pub target: String,
     pub sha: String,
     pub incoming: Vec<String>,
@@ -1081,6 +1121,31 @@ pub(crate) fn metric_repos(runs_dir: &Path) -> Vec<PathBuf> {
     repos
 }
 
+/// True when `branch` is an integration branch G1 counts merges into.
+///
+/// The plan names `<slug>-integ`; this programme's own branches are
+/// `quaqua/pstack-int` and `quaqua/pstack-int2`, so the suffix test covers
+/// `-integ` and `-int[<digits>]`.
+pub(crate) fn is_integration_branch(branch: &str) -> bool {
+    let short = branch.rsplit('/').next().unwrap_or(branch);
+    if short.ends_with("-integ") {
+        return true;
+    }
+    short
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .ends_with("-int")
+}
+
+/// Ref G1 reads `main` from: the upstream tracking ref when it exists, else the
+/// local branch. `origin/main` is what the S0 baseline measured, and it sees PR
+/// merges that a local `main` does not.
+fn main_target<G: GitOps>(repo: &Path, git: &G, local_heads: &[String]) -> Option<String> {
+    if git.rev_parse_commit(repo, "refs/remotes/origin/main") {
+        return Some("origin/main".to_string());
+    }
+    local_heads.iter().find(|b| b.as_str() == "main").cloned()
+}
+
 fn merge_targets<G: GitOps>(repo: &Path, git: &G) -> Vec<String> {
     let Ok(out) = git.run_in(
         repo,
@@ -1091,29 +1156,43 @@ fn merge_targets<G: GitOps>(repo: &Path, git: &G) -> Vec<String> {
     if !out.status.success() {
         return Vec::new();
     }
-    let mut targets: Vec<String> = String::from_utf8_lossy(&out.stdout)
+    let heads: Vec<String> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(str::trim)
-        .filter(|b| !b.is_empty() && (*b == "main" || b.ends_with("-integ")))
+        .filter(|b| !b.is_empty())
         .map(str::to_string)
         .collect();
+    let mut targets: Vec<String> = Vec::new();
+    if let Some(main) = main_target(repo, git, &heads) {
+        targets.push(main);
+    }
+    targets.extend(heads.iter().filter(|b| is_integration_branch(b)).cloned());
     targets.sort();
     targets.dedup();
     targets
 }
 
-/// Lists merge commits reachable from `main` or any `*-integ` branch, newest
-/// first and capped at [`MERGE_SCAN_LIMIT`] per target. Deduplicated by SHA.
-fn collect_merge_commits<G: GitOps>(repos: &[PathBuf], git: &G) -> Vec<MergeCommit> {
+/// Lists merge commits reachable from each G1 target, newest first, windowed by
+/// committer date and capped at [`MERGE_SCAN_LIMIT`] per target. Deduplicated by
+/// SHA across targets, so a merge reachable from `main` and from an integration
+/// branch is counted once.
+fn collect_merge_commits<G: GitOps>(
+    repos: &[PathBuf],
+    git: &G,
+    cutoff_ms: u64,
+) -> Vec<MergeCommit> {
     let limit = MERGE_SCAN_LIMIT.to_string();
+    let since = format!("--since=@{}", cutoff_ms / 1000);
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut commits = Vec::new();
     for repo in repos {
         for target in merge_targets(repo, git) {
-            let Ok(out) = git.run_in(
-                repo,
-                &["log", "--merges", "-n", &limit, "--format=%H %P", &target],
-            ) else {
+            let mut args = vec!["log", "--merges", "-n", limit.as_str(), "--format=%H %P"];
+            if cutoff_ms > 0 {
+                args.push(since.as_str());
+            }
+            args.push(target.as_str());
+            let Ok(out) = git.run_in(repo, &args) else {
                 continue;
             };
             if !out.status.success() {
@@ -1130,6 +1209,7 @@ fn collect_merge_commits<G: GitOps>(repos: &[PathBuf], git: &G) -> Vec<MergeComm
                     continue;
                 }
                 commits.push(MergeCommit {
+                    repo: repo.clone(),
                     target: target.clone(),
                     sha: sha.to_string(),
                     incoming: parents[1..].iter().map(|p| p.to_string()).collect(),
@@ -1144,37 +1224,111 @@ fn sha_matches(a: &str, b: &str) -> bool {
     !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
 }
 
-/// G1: counts incoming merge heads, and how many carry no verdict at all.
+/// A repo path as printed: `~/...` under `$HOME`, absolute otherwise.
+fn display_repo(repo: &Path) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if let Ok(rest) = repo.strip_prefix(&home) {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", rest.display());
+        }
+    }
+    repo.display().to_string()
+}
+
+/// G1 counts over the scanned merge commits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MergeTally {
+    pub merges: usize,
+    pub checked: usize,
+    pub without_verdict: usize,
+    pub no_verdict: usize,
+    pub not_pass: usize,
+    pub samples: Vec<String>,
+    pub repos: Vec<MergeRepoStat>,
+}
+
+/// G1: counts incoming merge heads and how many lack a verifier pass.
 ///
-/// "Has a verdict" is decided by [`strongest_verdict_from_slice`] over the
-/// journal records for that SHA, so the S1 selection rule stays the only one.
-///
-/// Returns `(incoming heads checked, heads without a verdict, up to five
-/// `target@sha` samples of the offenders)`.
-pub(crate) fn count_merges_without_verdict(
+/// Coverage is [`strongest_verdict_from_slice`] (the single S1 selection rule)
+/// plus [`VerdictRecord::is_verified`]: the strongest verdict for the head must
+/// be an independent verifier pass. A head with no record, only a self-report,
+/// or a failed/blocked/inconclusive verifier verdict is not covered.
+pub(crate) fn count_merges_without_pass(
     commits: &[MergeCommit],
     verdicts: &[VerdictRecord],
-) -> (usize, usize, Vec<String>) {
-    let mut checked = 0usize;
-    let mut without = 0usize;
-    let mut samples: Vec<String> = Vec::new();
+) -> MergeTally {
+    let mut tally = MergeTally::default();
+    let mut per_repo: BTreeMap<String, MergeRepoStat> = BTreeMap::new();
     for commit in commits {
+        let repo = display_repo(&commit.repo);
+        tally.merges += 1;
+        let entry = per_repo
+            .entry(repo.clone())
+            .or_insert_with(|| MergeRepoStat {
+                repo,
+                ..MergeRepoStat::default()
+            });
+        match entry.refs.iter_mut().find(|r| r.target == commit.target) {
+            Some(r) => r.merges += 1,
+            None => entry.refs.push(MergeRefStat {
+                target: commit.target.clone(),
+                merges: 1,
+            }),
+        }
+        entry.merges += 1;
         for head in &commit.incoming {
-            checked += 1;
+            tally.checked += 1;
+            entry.checked += 1;
             let matching: Vec<&VerdictRecord> = verdicts
                 .iter()
                 .filter(|v| sha_matches(&v.sha, head))
                 .collect();
-            if strongest_verdict_from_slice(&matching).is_none() {
-                without += 1;
-                if samples.len() < 5 {
+            let strongest = strongest_verdict_from_slice(&matching);
+            if !strongest.as_ref().is_some_and(|v| v.is_verified()) {
+                tally.without_verdict += 1;
+                entry.without_verdict += 1;
+                if strongest.is_some() {
+                    tally.not_pass += 1;
+                } else {
+                    tally.no_verdict += 1;
+                }
+                if tally.samples.len() < 5 {
                     let short: String = head.chars().take(7).collect();
-                    samples.push(format!("{}@{short}", commit.target));
+                    tally.samples.push(format!("{}@{short}", commit.target));
                 }
             }
         }
     }
-    (checked, without, samples)
+    tally.repos = per_repo.into_values().collect();
+    tally
+}
+
+/// Fills the G1 fields of `metrics`: merges come from git, coverage from the
+/// whole journal (a verdict older than the window still covers its merge).
+fn fill_merge_metrics<G: GitOps>(
+    metrics: &mut JournalMetrics,
+    repos: &[PathBuf],
+    git: &G,
+    cutoff_ms: u64,
+    verdicts: &[VerdictRecord],
+) {
+    let commits = collect_merge_commits(repos, git, cutoff_ms);
+    let tally = count_merges_without_pass(&commits, verdicts);
+    metrics.merges = tally.merges;
+    metrics.merges_checked = tally.checked;
+    metrics.merges_without_verdict = tally.without_verdict;
+    metrics.merges_no_verdict = tally.no_verdict;
+    metrics.merges_not_pass = tally.not_pass;
+    metrics.merges_missing_samples = tally.samples;
+    metrics.merge_repos = tally
+        .repos
+        .iter()
+        .map(|s| s.repo.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    metrics.merges_per_repo = tally.repos;
 }
 
 /// Splits `worker:<name>#<n>` into its base and session number.
@@ -1217,13 +1371,14 @@ fn load_journal_metrics<G: GitOps>(
         )
         .map_err(|e| format!("db error: checking events table: {e}"))?;
     if !has_events {
-        return Ok(JournalMetrics::default());
+        // G1 comes from git alone: a journal without verdicts must still report
+        // the merges it cannot cover, not `0 checked`.
+        let mut metrics = JournalMetrics::default();
+        fill_merge_metrics(&mut metrics, repos, git, cutoff_ms, &[]);
+        return Ok(metrics);
     }
 
-    let mut metrics = JournalMetrics {
-        merge_repos: repos.len(),
-        ..JournalMetrics::default()
-    };
+    let mut metrics = JournalMetrics::default();
 
     // Verdicts: level counts inside the window, and every record for the G1
     // check (an old verdict still covers a merge inside the window).
@@ -1357,11 +1512,7 @@ fn load_journal_metrics<G: GitOps>(
     }
 
     // G1: merges are not journaled, so list them from git.
-    let commits = collect_merge_commits(repos, git);
-    let (checked, without, samples) = count_merges_without_verdict(&commits, &all_verdicts);
-    metrics.merges_checked = checked;
-    metrics.merges_without_verdict = without;
-    metrics.merges_missing_samples = samples;
+    fill_merge_metrics(&mut metrics, repos, git, cutoff_ms, &all_verdicts);
 
     Ok(metrics)
 }
@@ -1544,9 +1695,30 @@ pub fn render_metrics_text(report: &MetricsReport) -> String {
                 format!(" - {}", j.merges_missing_samples.join(", "))
             };
             out.push_str(&format!(
-                "merges: {} checked, {} without a verdict at the incoming head (G1) - {} repo(s), from git (no merge event is journaled){}\n",
-                j.merges_checked, j.merges_without_verdict, j.merge_repos, samples
+                "merges: {} merge(s) ({} incoming heads), {} without a verifier pass at the head (G1) - {} with no verdict, {} failed/blocked/inconclusive - {} repo(s), from git (no merge event is journaled), since {}{}\n",
+                j.merges,
+                j.merges_checked,
+                j.merges_without_verdict,
+                j.merges_no_verdict,
+                j.merges_not_pass,
+                j.merge_repos,
+                report.since,
+                samples
             ));
+            for stat in &j.merges_per_repo {
+                out.push_str(&format!(
+                    "  merges {}: {} merge(s), {} head(s), {} without - refs {}\n",
+                    stat.repo,
+                    stat.merges,
+                    stat.checked,
+                    stat.without_verdict,
+                    stat.refs
+                        .iter()
+                        .map(|r| format!("{}={}", r.target, r.merges))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
             let rate = if j.accepted_reports == 0 {
                 "n/a".to_string()
             } else {
@@ -2958,6 +3130,7 @@ model = "m3"
 pub(crate) mod metrics {
     use super::*;
     use crate::engine::journal::Journal;
+    use std::os::unix::process::ExitStatusExt;
 
     #[test]
     fn test_status_metrics_rendering_and_json_roundtrip() {
@@ -3387,56 +3560,401 @@ pub(crate) mod metrics {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    fn verdict_record(sha: &str, source: VerdictSource, level: VerdictLevel) -> VerdictRecord {
+        VerdictRecord {
+            branch: "quaqua/s7".to_string(),
+            sha: sha.to_string(),
+            level,
+            evidence: "cargo test".to_string(),
+            verifier: "suhuynh-s7rev".to_string(),
+            source,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "omp".to_string(),
+        }
+    }
+
+    fn merge_commit(repo: &str, target: &str, sha: &str, incoming: &[&str]) -> MergeCommit {
+        MergeCommit {
+            repo: PathBuf::from(repo),
+            target: target.to_string(),
+            sha: sha.to_string(),
+            incoming: incoming.iter().map(|h| h.to_string()).collect(),
+        }
+    }
+
     #[test]
-    fn test_metrics_merge_without_verdict() {
-        let commits = vec![
-            MergeCommit {
-                target: "main".to_string(),
-                sha: "m1".to_string(),
-                incoming: vec![
-                    "aaaa111122223333".to_string(),
-                    "bbbb222233334444".to_string(),
-                ],
-            },
-            MergeCommit {
-                target: "quaqua/s7-integ".to_string(),
-                sha: "m2".to_string(),
-                incoming: vec!["cccc333344445555".to_string()],
-            },
-        ];
+    fn test_metrics_merge_without_pass_requires_verifier_pass() {
+        let commits = vec![merge_commit(
+            "/repo/a",
+            "origin/main",
+            "m1",
+            &[
+                "aaaa111122223333", // verifier pass: covered
+                "bbbb222233334444", // self-report only: not covered (F6)
+                "cccc333344445555", // verifier failed
+                "dddd444455556666", // verifier blocked
+                "eeee555566667777", // verifier inconclusive
+                "ffff666677778888", // no journal record at all
+            ],
+        )];
         let verdicts = vec![
-            VerdictRecord {
-                branch: "quaqua/s7".to_string(),
-                sha: "aaaa111122223333".to_string(),
-                level: VerdictLevel::UnitTestVerified,
-                evidence: "cargo test".to_string(),
-                verifier: "suhuynh-s7rev".to_string(),
-                source: VerdictSource::Verifier,
-                builder_kind: Some("sude".to_string()),
-                verifier_kind: Some("suhuynh".to_string()),
-                harness: "omp".to_string(),
-            },
-            VerdictRecord {
-                branch: "quaqua/s7b".to_string(),
-                sha: "cccc3333".to_string(),
-                level: VerdictLevel::ReviewClean,
-                evidence: "review".to_string(),
-                verifier: "suhuynh-s7rev".to_string(),
-                source: VerdictSource::Verifier,
-                builder_kind: Some("sude".to_string()),
-                verifier_kind: Some("suhuynh".to_string()),
-                harness: "omp".to_string(),
-            },
+            verdict_record(
+                "aaaa111122223333",
+                VerdictSource::Verifier,
+                VerdictLevel::UnitTestVerified,
+            ),
+            verdict_record(
+                "bbbb222233334444",
+                VerdictSource::SelfReport,
+                VerdictLevel::UnitTestVerified,
+            ),
+            verdict_record(
+                "cccc333344445555",
+                VerdictSource::Verifier,
+                VerdictLevel::VerifierFailed,
+            ),
+            verdict_record(
+                "dddd444455556666",
+                VerdictSource::Verifier,
+                VerdictLevel::VerifierBlocked,
+            ),
+            verdict_record(
+                "eeee555566667777",
+                VerdictSource::Verifier,
+                VerdictLevel::Inconclusive,
+            ),
         ];
 
-        let (checked, without, samples) = count_merges_without_verdict(&commits, &verdicts);
-        assert_eq!(checked, 3);
-        assert_eq!(without, 1);
-        assert_eq!(samples, vec!["main@bbbb222".to_string()]);
+        let tally = count_merges_without_pass(&commits, &verdicts);
+        assert_eq!(tally.merges, 1);
+        assert_eq!(tally.checked, 6);
+        assert_eq!(tally.without_verdict, 5);
+        assert_eq!(tally.no_verdict, 1);
+        assert_eq!(tally.not_pass, 4);
+        assert_eq!(tally.samples.first().unwrap(), "origin/main@bbbb222");
+        assert_eq!(
+            tally.repos,
+            vec![MergeRepoStat {
+                repo: "/repo/a".to_string(),
+                refs: vec![MergeRefStat {
+                    target: "origin/main".to_string(),
+                    merges: 1,
+                }],
+                merges: 1,
+                checked: 6,
+                without_verdict: 5,
+            }]
+        );
 
         // No verdict records at all: every incoming head is unverified.
-        let (checked, without, _) = count_merges_without_verdict(&commits, &[]);
-        assert_eq!((checked, without), (3, 3));
+        let tally = count_merges_without_pass(&commits, &[]);
+        assert_eq!(
+            (
+                tally.checked,
+                tally.without_verdict,
+                tally.no_verdict,
+                tally.not_pass
+            ),
+            (6, 6, 6, 0)
+        );
+    }
+
+    fn fake_output(ok: bool, stdout: &str) -> std::process::Output {
+        std::process::Output {
+            status: ExitStatusExt::from_raw(if ok { 0 } else { 1 }),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    struct MergeGit {
+        heads: Vec<String>,
+        origin_main: bool,
+        logs: std::collections::BTreeMap<String, String>,
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl MergeGit {
+        fn new(heads: &[&str], origin_main: bool) -> Self {
+            Self {
+                heads: heads.iter().map(|h| h.to_string()).collect(),
+                origin_main,
+                logs: std::collections::BTreeMap::new(),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn with_log(self, target: &str, lines: &[&str]) -> Self {
+            let mut s = self;
+            s.logs.insert(target.to_string(), lines.join("\n"));
+            s
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl GitOps for MergeGit {
+        fn run_in(&self, _dir: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            if args.contains(&"for-each-ref") {
+                Ok(fake_output(true, &self.heads.join("\n")))
+            } else if args.contains(&"rev-parse") {
+                Ok(fake_output(self.origin_main, ""))
+            } else if args.contains(&"log") {
+                let target = args.last().copied().unwrap_or("");
+                let out = self.logs.get(target).cloned().unwrap_or_default();
+                Ok(fake_output(true, &out))
+            } else {
+                Ok(fake_output(true, ""))
+            }
+        }
+
+        fn run(&self, _args: &[&str]) -> std::io::Result<std::process::Output> {
+            Ok(fake_output(true, ""))
+        }
+
+        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool {
+            self.origin_main
+        }
+
+        fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn worktree_add(
+            &self,
+            _repo: &Path,
+            _branch: &str,
+            _wt: &Path,
+            _base: Option<&str>,
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+
+        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
+            false
+        }
+
+        fn worktree_add_existing(
+            &self,
+            _repo: &Path,
+            _branch: &str,
+            _wt: &Path,
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+
+        fn worktree_remove(
+            &self,
+            _repo: &Path,
+            _wt: &Path,
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+
+        fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn is_core_bare(&self, _repo: &Path) -> bool {
+            false
+        }
+
+        fn has_core_worktree(&self, _repo: &Path) -> bool {
+            false
+        }
+
+        fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+
+        fn set_worktree_pushurl_blocked(&self, _wt: &Path, _remote: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn is_git_dir(&self, _cwd: &Path) -> bool {
+            true
+        }
+
+        fn diff_and_status(&self, _cwd: &Path) -> (String, String) {
+            (String::new(), "clean".to_string())
+        }
+    }
+
+    #[test]
+    fn test_metrics_merge_targets_prefer_upstream_and_cover_integ_branches() {
+        let repo = Path::new("/repo/a");
+        let heads = [
+            "main",
+            "quaqua/pstack-int2",
+            "quaqua/pstack-int",
+            "quaqua/s7-integ",
+            "quaqua/s7",
+            "develop",
+        ];
+        assert_eq!(
+            merge_targets(repo, &MergeGit::new(&heads, true)),
+            vec![
+                "origin/main",
+                "quaqua/pstack-int",
+                "quaqua/pstack-int2",
+                "quaqua/s7-integ"
+            ]
+        );
+        // No upstream ref: fall back to the local branch.
+        assert_eq!(
+            merge_targets(repo, &MergeGit::new(&heads, false)),
+            vec![
+                "main",
+                "quaqua/pstack-int",
+                "quaqua/pstack-int2",
+                "quaqua/s7-integ"
+            ]
+        );
+
+        assert!(is_integration_branch("quaqua/pstack-int2"));
+        assert!(is_integration_branch("quaqua/s7-integ"));
+        assert!(!is_integration_branch("quaqua/s7"));
+        assert!(!is_integration_branch("main"));
+        assert!(!is_integration_branch("quaqua/integration"));
+    }
+
+    #[test]
+    fn test_metrics_collect_merge_commits_window_parents_and_dedup() {
+        let repo = PathBuf::from("/repo/a");
+        let git = MergeGit::new(&["main", "quaqua/pstack-int2"], true)
+            .with_log(
+                "origin/main",
+                &[
+                    "m1 aaa bbb",
+                    "m1 aaa bbb", // same merge reached twice: counted once
+                    "m2 ccc",     // one parent: not a merge
+                    "m3 ddd eee fff",
+                ],
+            )
+            .with_log("quaqua/pstack-int2", &["m3 ddd eee fff"]);
+
+        let commits = collect_merge_commits(&[repo.clone()], &git, 1_700_000_000_000);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].repo, repo);
+        assert_eq!(commits[0].target, "origin/main");
+        assert_eq!(commits[0].sha, "m1");
+        // Incoming heads are every parent after the first.
+        assert_eq!(commits[0].incoming, vec!["bbb".to_string()]);
+        assert_eq!(commits[1].sha, "m3");
+        assert_eq!(
+            commits[1].incoming,
+            vec!["eee".to_string(), "fff".to_string()]
+        );
+
+        // F1: the window reaches git as a committer-date cutoff (seconds).
+        let log_calls: Vec<Vec<String>> = git
+            .calls()
+            .into_iter()
+            .filter(|c| c.iter().any(|a| a == "log"))
+            .collect();
+        assert!(!log_calls.is_empty());
+        for call in &log_calls {
+            assert!(call.iter().any(|a| a == "--since=@1700000000"));
+            assert!(call.iter().any(|a| a == "-n"));
+            assert!(call.iter().any(|a| a == "500"));
+        }
+
+        // Cutoff 0 means all history: no `--since` argument at all.
+        let git = MergeGit::new(&["main"], true).with_log("origin/main", &["m1 aaa bbb"]);
+        let _ = collect_merge_commits(&[repo], &git, 0);
+        assert!(git
+            .calls()
+            .iter()
+            .filter(|c| c.iter().any(|a| a == "log"))
+            .all(|c| !c.iter().any(|a| a.starts_with("--since="))));
+    }
+
+    #[test]
+    fn test_metrics_g1_wiring_reads_git_and_counts_without_events_table() {
+        let tmp = temp_runs_dir("metrics-g1wiring");
+        let runs_dir = tmp.join("runs");
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = MergeGit::new(&["main", "quaqua/pstack-int2"], true)
+            .with_log("origin/main", &["m1 aaaa1111 bbbb2222"])
+            .with_log("quaqua/pstack-int2", &["m2 cccc3333 dddd4444"]);
+
+        let db = runs_dir.join("quaqua.db");
+        let now_ms = crate::util::now_sec() * 1000;
+        append_event(
+            &db,
+            "worker:suke#1",
+            now_ms,
+            "verdict",
+            &verdict_payload(VerdictLevel::UnitTestVerified, "bbbb2222"),
+        );
+        let metrics = load_journal_metrics(&db, 0, &[repo.clone()], &git).unwrap();
+        assert_eq!(metrics.merges, 2);
+        assert_eq!(metrics.merges_checked, 2);
+        assert_eq!(metrics.merges_without_verdict, 1);
+        assert_eq!(metrics.merges_no_verdict, 1);
+        assert_eq!(metrics.merges_not_pass, 0);
+        assert_eq!(metrics.merge_repos, 1);
+        assert_eq!(
+            metrics.merges_per_repo,
+            vec![MergeRepoStat {
+                repo: repo.display().to_string(),
+                refs: vec![
+                    MergeRefStat {
+                        target: "origin/main".to_string(),
+                        merges: 1,
+                    },
+                    MergeRefStat {
+                        target: "quaqua/pstack-int2".to_string(),
+                        merges: 1,
+                    },
+                ],
+                merges: 2,
+                checked: 2,
+                without_verdict: 1,
+            }]
+        );
+
+        let report = MetricsReport {
+            since: "7d".to_string(),
+            workers: Vec::new(),
+            pipelines: Vec::new(),
+            total: MetricsTotal {
+                workers: 0,
+                usd: 0.0,
+                unpriced: 0,
+                claude_unpriced: 0,
+                wall_sec: 0,
+            },
+            journal: metrics,
+            journal_error: None,
+        };
+        let text = render_metrics_text(&report);
+        assert!(text.contains(
+            "merges: 2 merge(s) (2 incoming heads), 1 without a verifier pass at the head (G1) - 1 with no verdict, 0 failed/blocked/inconclusive - 1 repo(s), from git (no merge event is journaled), since 7d - quaqua/pstack-int2@dddd444\n"
+        ));
+        assert!(text.contains(&format!(
+            "  merges {}: 2 merge(s), 2 head(s), 1 without - refs origin/main=1, quaqua/pstack-int2=1\n",
+            repo.display()
+        )));
+
+        // A journal without an events table cannot zero G1: git still counts.
+        let empty = runs_dir.join("empty.db");
+        rusqlite::Connection::open(&empty)
+            .unwrap()
+            .execute_batch("CREATE TABLE other (x INTEGER);")
+            .unwrap();
+        let metrics = load_journal_metrics(&empty, 0, &[repo], &git).unwrap();
+        assert_eq!(metrics.merges_checked, 2);
+        assert_eq!(metrics.merges_without_verdict, 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
