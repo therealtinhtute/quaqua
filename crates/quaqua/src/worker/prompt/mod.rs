@@ -5,6 +5,7 @@ pub mod observer;
 pub mod readonly;
 pub mod watchdog;
 pub mod workflow;
+pub mod verdict;
 
 pub use crate::util::now_sec;
 pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
@@ -475,7 +476,7 @@ pub fn prompt_worker<G: GitOps>(
     task: Option<&str>,
     resume: bool,
     extend: Option<u64>,
-    _git: &G,
+    git: &G,
     herdr: &Herdr,
 ) -> Result<(), (i32, String)> {
     validate_env_budget()?;
@@ -856,7 +857,7 @@ pub fn prompt_worker<G: GitOps>(
     );
 
     let start_sec = now_sec();
-    let sys_acts = SystemActivities::with_repo_dir(repo_dir);
+    let sys_acts = SystemActivities::with_repo_dir(&repo_dir);
     let prompt_acts = PromptActivities {
         inner: sys_acts,
         runs_dir: runs_dir.clone(),
@@ -968,6 +969,14 @@ pub fn prompt_worker<G: GitOps>(
                 );
                 return Err((6, String::new()));
             }
+            let _ = verdict::record_verdict_on_acceptance(
+                &runs_dir,
+                name,
+                &report_content,
+                expect_verdict,
+                git,
+                Some(&repo_dir),
+            );
 
             let read_marker = runs_dir.join(format!(".{name}.read"));
             let _ = std::fs::write(&read_marker, format!("{}\n", now_sec()));

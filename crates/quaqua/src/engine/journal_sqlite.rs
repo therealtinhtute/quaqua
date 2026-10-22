@@ -4,9 +4,135 @@
 //! using SQLite WAL mode and busy timeout.
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
+
 use crate::engine::journal::{EventRecord, Journal, JournalError, SnapshotRecord};
+
+/// Verification rigor level for a verdict event (§ S1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerdictLevel {
+    UnitTestVerified,
+    TypeCheckOnly,
+    ReviewClean,
+    VerifierBlocked,
+    VerifierFailed,
+    #[serde(other)]
+    Inconclusive,
+}
+
+impl VerdictLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UnitTestVerified => "unit-test-verified",
+            Self::TypeCheckOnly => "type-check-only",
+            Self::ReviewClean => "review-clean",
+            Self::VerifierBlocked => "verifier-blocked",
+            Self::VerifierFailed => "verifier-failed",
+            Self::Inconclusive => "inconclusive",
+        }
+    }
+}
+
+impl std::fmt::Display for VerdictLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for VerdictLevel {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "unit-test-verified" => Ok(Self::UnitTestVerified),
+            "type-check-only" => Ok(Self::TypeCheckOnly),
+            "review-clean" => Ok(Self::ReviewClean),
+            "verifier-blocked" => Ok(Self::VerifierBlocked),
+            "verifier-failed" => Ok(Self::VerifierFailed),
+            _ => Ok(Self::Inconclusive),
+        }
+    }
+}
+
+/// Source of a verdict event (self-report by builder or independent verifier).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VerdictSource {
+    #[serde(rename = "self")]
+    SelfReport,
+    #[serde(rename = "verifier")]
+    Verifier,
+}
+
+impl VerdictSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SelfReport => "self",
+            Self::Verifier => "verifier",
+        }
+    }
+}
+
+impl std::fmt::Display for VerdictSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for VerdictSource {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "self" => Ok(Self::SelfReport),
+            "verifier" => Ok(Self::Verifier),
+            other => Err(format!("unknown verdict source '{other}'")),
+        }
+    }
+}
+
+/// A verdict payload recorded under `kind = "verdict"` in the journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerdictRecord {
+    pub branch: String,
+    pub sha: String,
+    pub level: VerdictLevel,
+    #[serde(default)]
+    pub evidence: String,
+    pub verifier: String,
+    pub source: VerdictSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_kind: Option<String>,
+    #[serde(default)]
+    pub harness: String,
+}
+
+impl VerdictRecord {
+    /// Relative strength score for ordering verdicts on the same branch + SHA.
+    ///
+    /// Verifier verdicts always score >= 100 so that an independent verification
+    /// overrides any self-report.
+    pub fn strength(&self) -> u32 {
+        let level_score = match self.level {
+            VerdictLevel::ReviewClean => 6,
+            VerdictLevel::UnitTestVerified => 5,
+            VerdictLevel::TypeCheckOnly => 4,
+            VerdictLevel::Inconclusive => 3,
+            VerdictLevel::VerifierBlocked => 2,
+            VerdictLevel::VerifierFailed => 1,
+        };
+        let source_score = match self.source {
+            VerdictSource::Verifier => 100,
+            VerdictSource::SelfReport => 0,
+        };
+        source_score + level_score
+    }
+}
 
 /// SQLite-backed persistent journal implementing [`Journal`].
 pub struct SqliteJournal {
@@ -80,6 +206,189 @@ impl SqliteJournal {
     /// Returns the database path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Records a verdict event in the journal, deduplicated by `(branch, sha, source, verifier)`.
+    ///
+    /// Returns `Ok(true)` if inserted, or `Ok(false)` if skipped as duplicate.
+    pub fn record_verdict(
+        &mut self,
+        workflow_id: &str,
+        verdict: &VerdictRecord,
+    ) -> Result<bool, JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+
+        conn.execute_batch("BEGIN IMMEDIATE;")
+            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+
+        // 1. Check deduplication by (branch, sha, source, verifier)
+        let is_duplicate = {
+            let mut stmt =
+                match conn.prepare("SELECT payload_json FROM events WHERE kind = 'verdict';") {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        return Err(JournalError::StorageError(e.to_string()));
+                    }
+                };
+            let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(JournalError::StorageError(e.to_string()));
+                }
+            };
+            let mut dup = false;
+            for row in rows {
+                if let Ok(payload) = row {
+                    if let Ok(v) = serde_json::from_str::<VerdictRecord>(&payload) {
+                        if v.branch == verdict.branch
+                            && v.sha == verdict.sha
+                            && v.source == verdict.source
+                            && v.verifier == verdict.verifier
+                        {
+                            dup = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            dup
+        };
+
+        if is_duplicate {
+            let _ = conn.execute_batch("COMMIT;");
+            return Ok(false);
+        }
+
+        // 2. Assign next seq for this workflow_id
+        let current_max: u64 = match conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM events WHERE workflow_id = ?1;",
+            rusqlite::params![workflow_id],
+            |row| {
+                let v: i64 = row.get(0)?;
+                Ok(v as u64)
+            },
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(JournalError::StorageError(e.to_string()));
+            }
+        };
+
+        let next_seq = current_max + 1;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let payload_json = match serde_json::to_string(verdict) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(JournalError::SerializationError(e.to_string()));
+            }
+        };
+
+        let insert_res = conn.execute(
+            "INSERT INTO events (workflow_id, seq, ts_ms, kind, payload_json) VALUES (?1, ?2, ?3, 'verdict', ?4);",
+            rusqlite::params![
+                workflow_id,
+                next_seq as i64,
+                now_ms as i64,
+                &payload_json,
+            ],
+        );
+
+        match insert_res {
+            Ok(_) => {
+                if let Err(e) = conn.execute_batch("COMMIT;") {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(JournalError::StorageError(e.to_string()));
+                }
+                Ok(true)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(JournalError::StorageError(e.to_string()))
+            }
+        }
+    }
+
+    /// Loads all verdict records matching the specified branch and SHA.
+    pub fn load_verdicts(
+        &self,
+        branch: &str,
+        sha: &str,
+    ) -> Result<Vec<VerdictRecord>, JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+
+        let mut stmt = conn
+            .prepare("SELECT seq, ts_ms, payload_json FROM events WHERE kind = 'verdict' ORDER BY seq ASC;")
+            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let seq: i64 = row.get(0)?;
+                let ts_ms: i64 = row.get(1)?;
+                let payload: String = row.get(2)?;
+                Ok((seq as u64, ts_ms as u64, payload))
+            })
+            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+
+        let mut list = Vec::new();
+        for row in rows {
+            let (_seq, _ts_ms, payload) =
+                row.map_err(|e| JournalError::StorageError(e.to_string()))?;
+            if let Ok(v) = serde_json::from_str::<VerdictRecord>(&payload) {
+                if v.branch == branch && v.sha == sha {
+                    list.push(v);
+                }
+            }
+        }
+        Ok(list)
+    }
+
+    /// Returns the strongest verdict for the specified branch and SHA, if any.
+    pub fn strongest_verdict(
+        &self,
+        branch: &str,
+        sha: &str,
+    ) -> Result<Option<VerdictRecord>, JournalError> {
+        let list = self.load_verdicts(branch, sha)?;
+        Ok(list.into_iter().max_by_key(|v| v.strength()))
+    }
+
+    /// Loads all verdict records across all workflows.
+    pub fn load_all_verdicts(&self) -> Result<Vec<VerdictRecord>, JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+
+        let mut stmt = conn
+            .prepare("SELECT seq, ts_ms, payload_json FROM events WHERE kind = 'verdict' ORDER BY seq ASC;")
+            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(2))
+            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+
+        let mut list = Vec::new();
+        for row in rows {
+            let payload = row.map_err(|e| JournalError::StorageError(e.to_string()))?;
+            if let Ok(v) = serde_json::from_str::<VerdictRecord>(&payload) {
+                list.push(v);
+            }
+        }
+        Ok(list)
     }
 }
 
@@ -556,5 +865,86 @@ mod tests {
             .join("runs")
             .join("quaqua.db");
         assert_eq!(SqliteJournal::default_path(), expected);
+    }
+
+    #[test]
+    fn test_verdict_journal_record_and_deduplicate() {
+        let path = temp_db_path("verdict-dedup");
+        let _cleaner = TempDbCleaner(path.clone());
+        let mut journal = SqliteJournal::open(&path).expect("open journal");
+
+        let verdict = VerdictRecord {
+            branch: "quaqua/feat-1".to_string(),
+            sha: "abc123456789".to_string(),
+            level: VerdictLevel::UnitTestVerified,
+            evidence: "tests passed".to_string(),
+            verifier: "builder-1".to_string(),
+            source: VerdictSource::SelfReport,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: None,
+            harness: "omp".to_string(),
+        };
+
+        // First record -> true
+        let inserted = journal.record_verdict("wf-1", &verdict).expect("record 1");
+        assert!(inserted, "first insert should succeed");
+
+        // Second record with same key -> false (deduplicated)
+        let inserted2 = journal.record_verdict("wf-1", &verdict).expect("record 2");
+        assert!(!inserted2, "duplicate insert should be skipped");
+
+        // Query
+        let verdicts = journal
+            .load_verdicts("quaqua/feat-1", "abc123456789")
+            .expect("load");
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(verdicts[0], verdict);
+    }
+
+    #[test]
+    fn test_verdict_journal_strongest_precedence() {
+        let path = temp_db_path("verdict-strongest");
+        let _cleaner = TempDbCleaner(path.clone());
+        let mut journal = SqliteJournal::open(&path).expect("open journal");
+
+        let branch = "quaqua/feat-2";
+        let sha = "def987654321";
+
+        let v_builder = VerdictRecord {
+            branch: branch.to_string(),
+            sha: sha.to_string(),
+            level: VerdictLevel::UnitTestVerified,
+            evidence: "all 10 tests passed".to_string(),
+            verifier: "sude-worker".to_string(),
+            source: VerdictSource::SelfReport,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: None,
+            harness: "omp".to_string(),
+        };
+        journal.record_verdict("wf-builder", &v_builder).unwrap();
+
+        // Builder self-report is currently strongest
+        let cur = journal.strongest_verdict(branch, sha).unwrap().unwrap();
+        assert_eq!(cur.source, VerdictSource::SelfReport);
+        assert_eq!(cur.level, VerdictLevel::UnitTestVerified);
+
+        // Reviewer clean arrives -> overrides self-report
+        let v_rev_clean = VerdictRecord {
+            branch: branch.to_string(),
+            sha: sha.to_string(),
+            level: VerdictLevel::ReviewClean,
+            evidence: "clean".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "opencode".to_string(),
+        };
+        journal.record_verdict("wf-rev", &v_rev_clean).unwrap();
+
+        let strongest = journal.strongest_verdict(branch, sha).unwrap().unwrap();
+        assert_eq!(strongest.source, VerdictSource::Verifier);
+        assert_eq!(strongest.level, VerdictLevel::ReviewClean);
+        assert_eq!(strongest.verifier, "suhuynh-rev");
     }
 }
