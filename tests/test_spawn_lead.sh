@@ -104,10 +104,10 @@ grep -q 'agent get coucou-island-lead' "$T/calls" \
   || fail "happy: no duplicate check: $(cat "$T/calls")"
 grep -qF "workspace create --label coucou-island --no-focus --cwd $T --env QUAQUA_OWNER=coucou-island-lead" "$T/calls" \
   || fail "happy: Lead not in its own <slug> workspace at the repo root: $(cat "$T/calls")"
-grep -q 'agent start coucou-island-lead --kind opencode --pane %7 --timeout 60000 -- --standalone --auto' "$T/calls" \
+grep -qF "agent start coucou-island-lead --kind omp --pane %7 --timeout 60000 -- --model opencode-go/deepseek-v4.1-flash --thinking high --auto-approve --append-system-prompt $T/runs/coucou-island-lead.rules.md" "$T/calls" \
   || fail "happy: bad agent start: $(cat "$T/calls")"
-grep -qF "OPENCODE_CONFIG_CONTENT={\"model\":{\"providerID\":\"opencode-go\",\"model\":\"deepseek-v4.1-flash\",\"variant\":\"max\"},\"instructions\":[\"$T/runs/coucou-island-lead.rules.md\"]}" "$T/calls" \
-  || fail "happy: opencode config content missing from workspace create: $(cat "$T/calls")"
+! grep -qF 'OPENCODE_CONFIG_CONTENT' "$T/calls" \
+  || fail "happy: opencode pane env leaked into an omp Lead"
 grep -q 'r1 stay in the project' "$T/runs/coucou-island-lead.rules.md" \
   || fail "happy: rules file missing rules/_all content"
 grep -q 'agent prompt coucou-island-lead' "$T/calls" \

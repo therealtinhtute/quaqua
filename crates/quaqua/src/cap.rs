@@ -6,8 +6,8 @@ use crate::util::is_pid_alive;
 use serde_json::Value;
 use std::path::Path;
 
-const WORKER_KINDS: [&str; 6] = [
-    "tieude", "detu", "sude", "ni", "suhuynh", "truonglao",
+const WORKER_KINDS: [&str; 5] = [
+    "tieude", "sude", "ni", "suhuynh", "truonglao",
 ];
 
 /// Check if a worker name matches `<kind>-...` and does not end with `-lead`.

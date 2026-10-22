@@ -50,7 +50,7 @@ fn config_repo_kinds_carry_model_and_effort() {
     let out = run(&["config", "validate", "--file", &repo_team()]);
     assert!(out.status.success(), "validate failed: {}", stderr(&out));
     let effort = run(&["config", "get", "kinds.tieude.effort", "--file", &repo_team()]);
-    assert_eq!(stdout(&effort).trim(), "max");
+    assert_eq!(stdout(&effort).trim(), "high");
     let fallback = run(&["config", "get", "kinds.sude.fallback", "--file", &repo_team()]);
     assert_eq!(stdout(&fallback).trim(), "suhuynh");
 }

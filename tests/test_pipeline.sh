@@ -172,9 +172,9 @@ reject "missing --brief"      'brief.*required' -- isl "$T/repo"
 reject "missing brief file"   'brief.*required' -- isl "$T/repo" --brief "$T/nope.md"
 printf 'just prose\n' > "$T/nobrief.md"
 reject "brief lacks headers"  'Goal.*Hard constraints.*Current design' -- isl "$T/repo" --brief "$T/nobrief.md"
-reject "same harness"         'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder tieude --reviewer suhuynh
+reject "same harness"         'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder tieude --reviewer sude
 reject "same kind"            'different harnesses' -- isl "$T/repo" --brief "$T/brief.md" --builder suhuynh --reviewer suhuynh
-reject "non-reviewer kind"    'can_review = false in team.toml' -- isl "$T/repo" --brief "$T/brief.md" --builder ni --reviewer detu
+reject "non-reviewer kind"    'can_review = false in team.toml' -- isl "$T/repo" --brief "$T/brief.md" --builder ni --reviewer tieude
 reject "bad --review"         'auto|always|skip' -- isl "$T/repo" --brief "$T/brief.md" --review maybe
 reject "--rounds 0"           'integer >= 1' -- isl "$T/repo" --brief "$T/brief.md" --rounds 0
 reject "builder name >20"     'exceeds 20 chars' -- abcdefghijklmnopq "$T/repo" --brief "$T/brief.md"
@@ -213,8 +213,8 @@ grep -q 'worktree add -b quaqua/suhuynh-islr1 .* c0ffee1deadbeef' "$T/calls" \
   || fail "isl resume: reviewer not based on the gated head sha: $(cat "$T/calls")"
 grep -q 'commit c0ffee1' "$runsdir/pipeline-isl.md" \
   || fail "isl resume: committed head sha not recorded in the report"
-grep -qF 'agent start suhuynh-islr1 --kind opencode' "$T/calls" \
-  || fail "isl resume: reviewer not spawned as opencode: $(cat "$T/calls")"
+grep -qF 'agent start suhuynh-islr1 --kind claude' "$T/calls" \
+  || fail "isl resume: reviewer not spawned as claude: $(cat "$T/calls")"
 ! grep -q 'agent start sude-isl' "$T/calls" || fail "isl resume: builder respawned"
 grep -q 'pane close' "$T/calls" || fail "isl resume: reviewer pane not closed"
 grep -q 'worktree remove' "$T/calls" || fail "isl resume: reviewer worktree kept"
@@ -740,8 +740,11 @@ run_rg FAKE_BUILD_MD=$'checked\nOutcome: no changes\n\n## Lessons\n- none\n' -- 
 grep -q 'status=clean' "$T/out" || fail "rgp: declared no-op not clean: $(cat "$T/out")"
 echo "ok: real git — declared no-op finishes clean, no reviewer spawned"
 
-# F4: agent-start failure keeps the worktree; --resume finishes the startup
-run_rg FAKE_FAIL_START=sude-rsf -- rsf "$T/rg/repo" --brief "$T/brief.md"
+# F4: agent-start failure keeps the worktree; --resume finishes the startup.
+# The fallback kind (suhuynh) is claude, whose start is confirmed by an idle
+# wait even when `agent start` reports a failure — so the wait fails too, and
+# the spawn as a whole fails. The resume retries the primary and succeeds.
+run_rg FAKE_FAIL_START=sude-rsf FAKE_FAIL_WAIT=sude-rsf -- rsf "$T/rg/repo" --brief "$T/brief.md"
 [[ $rc -eq 3 ]] || fail "rsf: exit $rc, want 3 (spawn failure): $(cat "$T/err")"
 [[ -d $T/rg/.wt/sude-rsf ]] || fail "rsf: worktree should survive the failed start"
 run_rg -- --resume rsf "$T/rg/repo"

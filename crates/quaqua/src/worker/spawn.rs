@@ -32,7 +32,7 @@ const CREDENTIAL_ENV_VARS: &[&str] = &[
 ];
 
 pub const USAGE: &str = "\
-# Usage: quaqua worker spawn [--base <ref>] [--review] [--approve-kind <kind>] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
+# Usage: quaqua worker spawn [--base <ref>] [--review] [--approve-kind <kind>] <name> <kind: tieude|sude|ni|suhuynh|truonglao> <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — quaqua lead spawn <slug>)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD

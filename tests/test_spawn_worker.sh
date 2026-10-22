@@ -212,23 +212,26 @@ mkdir -p "$T/clean-cwd"
   || fail "spawn wrote into the caller's cwd: $(find "$T/clean-cwd")"
 echo "ok: unresolvable hooks dir -> nothing written under the caller's cwd"
 
-# ── tieude: opencode with deepseek-v4.1-flash at effort max in the env ──
-# (team.toml) — the interactive TUI has no --model, so model+effort travel as
-# `provider/model#variant` in OPENCODE_CONFIG_CONTENT; no omp/gemini
+# ── tieude: omp with deepseek-v4.1-flash at thinking high on the command line ─
+# (team.toml) — omp takes the model and the thinking level as flags, not in
+# pane env; no opencode variant, no gemini
 spawn "tieude-model" "tieude"
 [[ $rc -eq 0 ]] || fail "tieude: exit $rc, want 0: $(cat "$T/err")"
-grep -qF -- '--kind opencode' "$T/calls" \
-  || fail "tieude: not an opencode start: $(cat "$T/calls")"
-grep -qF -- 'OPENCODE_CONFIG_CONTENT={"model":{"providerID":"opencode-go","model":"deepseek-v4.1-flash","variant":"max"},"instructions":' "$T/calls" \
-  || fail "tieude: model+effort not in OPENCODE_CONFIG_CONTENT: $(cat "$T/calls")"
-! grep -q -- '--kind omp' "$T/calls" || fail "tieude: still spawned as omp: $(cat "$T/calls")"
+grep -qF -- '--kind omp' "$T/calls" \
+  || fail "tieude: not an omp start: $(cat "$T/calls")"
+grep -qF -- '--model opencode-go/deepseek-v4.1-flash' "$T/calls" \
+  || fail "tieude: model not opencode-go/deepseek-v4.1-flash: $(cat "$T/calls")"
+grep -qF -- '--thinking high' "$T/calls" \
+  || fail "tieude: thinking level not high: $(cat "$T/calls")"
+! grep -q 'OPENCODE_CONFIG_CONTENT' "$T/calls" \
+  || fail "tieude: opencode pane env leaked into an omp start: $(cat "$T/calls")"
 ! grep -q 'gemini' "$T/calls" || fail "tieude: gemini flag leaked: $(cat "$T/calls")"
-echo "ok: tieude -> --kind opencode, model opencode-go/deepseek-v4.1-flash#max"
+echo "ok: tieude -> --kind omp, opencode-go/deepseek-v4.1-flash high"
 
-# ── sude/detu: omp with antigravity gemini-3.8-flash high, worker rules appended ──
+# ── sude: omp with antigravity gemini-3.8-flash high, worker rules appended ───
 # (team.toml) — omp takes the model, the thinking level and the rules file on
 # the command line (--append-system-prompt reads a file path), not in pane env
-for k in sude detu; do
+for k in sude; do
   spawn "$k-impl" "$k"
   [[ $rc -eq 0 ]] || fail "$k: exit $rc, want 0: $(cat "$T/err")"
   grep -qF -- '--kind omp' "$T/calls" || fail "$k: not an omp start: $(cat "$T/calls")"
@@ -246,26 +249,26 @@ for k in sude detu; do
 done
 
 # ── fallback: a failed agent start takes one hop to the kind's fallback ───────
-# detu (omp) falls back to tieude (opencode); the worker name keeps the detu prefix,
+# sude (omp) falls back to suhuynh (claude); the worker name keeps the sude prefix,
 # only the harness/model/effort change, and the fallback is a WARN + run metadata.
-spawn detu-fb detu START_FAIL_KIND=omp
+spawn sude-fb sude START_FAIL_KIND=omp
 [[ $rc -eq 0 ]] || fail "fallback: exit $rc, want 0: $(cat "$T/err")"
 grep -qF -- '--kind omp' "$T/calls" || fail "fallback: primary omp not tried: $(cat "$T/calls")"
-grep -qF -- '--kind opencode' "$T/calls" || fail "fallback: fallback opencode not tried: $(cat "$T/calls")"
+grep -qF -- '--kind claude' "$T/calls" || fail "fallback: fallback claude not tried: $(cat "$T/calls")"
 [[ $(grep -c 'herdr agent start' "$T/calls") -eq 2 ]] \
   || fail "fallback: expected exactly 2 starts: $(cat "$T/calls")"
-grep -qF 'WARN: fallback: detu→tieude (agent_not_ready)' "$T/err" \
+grep -qF 'WARN: fallback: sude→suhuynh (agent_not_ready)' "$T/err" \
   || fail "fallback: no WARN with reason: $(cat "$T/err")"
-grep -q "worker=detu-fb" "$T/out" || fail "fallback: no success line"
-echo "ok: fallback -> omp failed, opencode (tieude) started, WARN recorded"
+grep -q "worker=sude-fb" "$T/out" || fail "fallback: no success line"
+echo "ok: fallback -> omp failed, claude (suhuynh) started, WARN recorded"
 
-# one hop max: tieude (opencode) falls back to detu (omp); when both attempts
+# one hop max: tieude (omp) falls back to sude (omp); when both attempts
 # fail -> hard error after exactly two attempts, never a third hop
 spawn tieude-fb2 tieude START_FAIL=1
 [[ $rc -ne 0 ]] || fail "one-hop: exit $rc, want non-zero: $(cat "$T/err")"
 [[ $(grep -c 'herdr agent start' "$T/calls") -eq 2 ]] \
   || fail "one-hop: expected exactly 2 attempts: $(cat "$T/calls")"
-grep -qF 'WARN: fallback: tieude→detu (agent_not_ready)' "$T/err" \
+grep -qF 'WARN: fallback: tieude→sude (agent_not_ready)' "$T/err" \
   || fail "one-hop: no fallback WARN: $(cat "$T/err")"
 echo "ok: one-hop -> fallback start failure errors, no third attempt"
 
@@ -350,11 +353,23 @@ grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
 echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid checked"
 
 # ── opencode + project MCP config: no startup dialog wait needed ─────────────
-spawn tieude-mcp tieude MKMCP=1
+# No template kind is opencode any more; the code path stays for a workspace
+# that adds one, so this case carries its own config.
+cp "$root/templates/workspace/team.toml" "$T/oc-team.toml"
+cat >> "$T/oc-team.toml" <<'EOF'
+
+[kinds.ocuser]
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+effort = "max"
+can_review = false
+EOF
+spawn ocuser-mcp ocuser MKMCP=1 QUAQUA_TEAM_TOML="$T/oc-team.toml"
 [[ $rc -eq 0 ]] || fail "mcp: exit $rc, want 0: $(cat "$T/err")"
 ! grep -q 'wait-output' "$T/calls" || fail "mcp: dialog wait ran"
 echo "ok: opencode with project MCP config -> no dialog wait"
-spawn tieude-nomcp tieude
+spawn ocuser-nomcp ocuser QUAQUA_TEAM_TOML="$T/oc-team.toml"
+[[ $rc -eq 0 ]] || fail "no-mcp: exit $rc, want 0: $(cat "$T/err")"
 ! grep -q 'wait-output' "$T/calls" || fail "no .mcp.json: dialog wait ran"
 echo "ok: opencode without project MCP config -> no dialog wait"
 
@@ -386,7 +401,7 @@ echo "ok: pane tokens -> grid_owner reflects QUAQUA_OWNER, lead owner -> <slug>-
 
 
 
-# --review on an opencode/omp kind: refused before any git/herdr call
+# --review on an omp kind with can_review = false: refused before any git/herdr call
 expect_reject_review() {  # expect_reject_review <name> <kind> <label>
   spawn_args=(--review)
   spawn "$1" "$2"
@@ -399,7 +414,6 @@ expect_reject_review() {  # expect_reject_review <name> <kind> <label>
   echo "ok: $3 -> exit 1, no git/herdr"
 }
 expect_reject_review tieude-revbad tieude "--review on tieude"
-expect_reject_review detu-revbad detu "--review on detu"
 
 # ── --review claude kinds: repo read-only, $HOME/quaqua/runs writable ────────
 # claude has no filesystem sandbox, so the reviewer is held read-only by
@@ -412,8 +426,8 @@ expect_reject_review detu-revbad detu "--review on detu"
 # evidence commands; mutating Bash is denied except two narrow allows the
 # reviewer needs to finish a review: `cargo test` (its suite) and the
 # runs/.<name>.tmp -> runs/<name>.md atomic report `mv`.
-for k in ni truonglao; do
-  case $k in ni) eff=low ;; truonglao) eff=high ;; esac
+for k in ni suhuynh truonglao; do
+  case $k in ni) eff=low ;; suhuynh) eff=medium ;; truonglao) eff=high ;; esac
   spawn_args=(--review)
   spawn "$k-revread" "$k"
   unset spawn_args
@@ -438,20 +452,11 @@ for k in ni truonglao; do
   grep -qF -- "--effort $eff" "$T/calls" || fail "--review $k: effort not $eff: $(cat "$T/calls")"
   ! grep -qF -- '--approve-for-me' "$T/calls" || fail "--review $k: approval flag leaked: $(cat "$T/calls")"
   ! grep -qF -- 'default_permissions' "$T/calls" || fail "--review $k: foreign profile leaked: $(cat "$T/calls")"
+  [[ -e "$T/home/quaqua/runs/$k-revread.review" ]] \
+    || fail "--review $k: review marker missing"
   grep -qF "worker=$k-revread" "$T/out" || fail "--review $k: no success line"
   echo "ok: --review $k -> dontAsk + Edit() rules (runs writable, worktree denied) + narrow Bash allows (cargo test, atomic mv), model/effort unchanged"
 done
-
-# --review on suhuynh (opencode kind with can_review = true)
-spawn_args=(--review)
-spawn "suhuynh-revread" "suhuynh"
-unset spawn_args
-[[ $rc -eq 0 ]] || fail "--review suhuynh: exit $rc, want 0: $(cat "$T/err")"
-grep -qF -- '--kind opencode' "$T/calls" || fail "--review suhuynh: not an opencode start: $(cat "$T/calls")"
-[[ -e "$T/home/quaqua/runs/suhuynh-revread.review" ]] \
-  || fail "--review suhuynh: review marker missing"
-grep -q "worker=suhuynh-revread" "$T/out" || fail "--review suhuynh: no success line"
-echo "ok: --review suhuynh -> opencode start, review marker recorded"
 
 # the review Bash allows are review-only: a plain claude spawn keeps ambient settings
 spawn ni-plain ni

@@ -43,7 +43,7 @@ pub fn resolve_cost_budget(task: &str) -> Option<f64> {
 /// True when this worker reported spend through omp session transcripts.
 fn is_omp_worker(harness: &str, name: &str) -> bool {
     harness == "omp"
-        || (harness.is_empty() && (name.starts_with("sude-") || name.starts_with("detu-")))
+        || (harness.is_empty() && (name.starts_with("sude-") || name.starts_with("tieude-")))
 }
 
 /// omp's session directory name for a worktree path: `$HOME` is stripped, then
@@ -160,7 +160,7 @@ pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) 
         return read_omp_cost(cwd);
     }
 
-    if harness != "opencode" && !name.starts_with("tieude-") {
+    if harness != "opencode" {
         return None;
     }
 

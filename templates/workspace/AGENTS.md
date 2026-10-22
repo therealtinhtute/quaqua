@@ -45,7 +45,7 @@ Authority, not persona; brief shape: `rules/_all/brief.md`.
 - Kill criteria: same error ≥3 iterations → kill the worker, then start a fresh one with a sharper brief (a looping session is not resumed; an interrupted one is — see above).
 
 ## Workers
-Roster (tieude · detu · sude · ni · suhuynh · truonglao) + routing: `models.md`. Default `tieude`. Kind, model and effort exactly per `models.md`; never change them on your own.
+Roster (tieude · sude · ni · suhuynh · truonglao) + routing: `models.md`. Default `tieude`. Kind, model and effort exactly per `models.md`; never change them on your own.
 Two classes:
 - **Task worker** `<kind>-<task>`: one task, own worktree, cleaned after the outcome. Counts toward the cap.
 - **Project orchestrator (Lead)** `<slug>-lead`: long-lived session owning one project's card and its task workers. Spawned by the CoS. Not a task worker; does not count toward the cap.

@@ -4,11 +4,10 @@ Pick by task shape. Name = kind passed to `quaqua worker spawn`. Update "Seen" a
 
 | name | harness · model · effort | Use for | Avoid | Seen |
 |------|--------------------------|---------|-------|------|
-| tieude | opencode · opencode-go/deepseek-v4.1-flash · max | **default**: every task unless anh iu names another; cheap well-specced impl, QA passes | ambiguous design | ci, gatefix, gridfix, mainsync, promptfix, slowtests (+10) |
-| detu | omp · google-antigravity/gemini-3.8-flash · high | quick lookup, research, read-only scan | implementation | cleanexport |
+| tieude | omp · opencode-go/deepseek-v4.1-flash · high | **default**: every task unless anh iu names another; cheap well-specced impl, QA passes, read-only scans | ambiguous design | ci, gatefix, gridfix, mainsync, promptfix, slowtests (+10) |
 | sude | omp · google-antigravity/gemini-3.8-flash · high | hard multi-file impl, audits (on request) | – | bpdeps, bpdocs, bpga |
 | ni | claude · opus-5.5 · low | small Claude edits, quick answers | design, long work | – |
-| suhuynh | opencode · opencode-go/deepseek-v4.1-flash · max | refactor, review of intent | long mechanical edits | r0r1, pbslim, dashstyle |
+| suhuynh | claude · opus-5.5 · medium | refactor, review of intent | long mechanical edits | r0r1, pbslim, dashstyle |
 | truonglao | claude · opus-5.5 · high | design, architecture, hard trade-offs | anything a cheaper tier can do | gridplan, bpaudit, pbglobal |
 
 ## Naming
@@ -20,12 +19,12 @@ Pick by task shape. Name = kind passed to `quaqua worker spawn`. Update "Seen" a
 ## Rules
 - No name given → `tieude` (anh iu, 2026-10-15).
 - Implementer and reviewer must be different harnesses (e.g. sude builds → suhuynh reviews).
-- Read-only question → `detu`; design unclear → `truonglao` before any builder.
+- Read-only question → `tieude`; design unclear → `truonglao` before any builder.
 - Unsure between two → cheaper tier first (tieude < sude < ni < suhuynh < truonglao); escalate only on a failed run.
 
 ## Claude out — ACTIVE since 2026-10-17 (only when anh iu says Claude tokens are out)
 - CoS: anh iu opens opencode in `~/quaqua` (reads AGENTS.md); persona and rules unchanged.
-- suhuynh → opencode · opencode-go/deepseek-v4.1-flash · max (anh iu, 2026-10-19; alt: claude · opus-5.5 · medium); ni still paused.
+- suhuynh → claude · opus-5.5 · medium (was opencode · deepseek-v4.1-flash · max); ni still paused.
 - truonglao back (anh iu, 2026-10-19): only for super-hard questions that need advising. Spawn mode lives in team.toml (`auto` = CoS/Lead call it when needed, current; `approve` = ask anh iu first).
 - Builder in this mode = `sude` (omp), so the reviewer stays on a different harness.
 - Back to the table above when anh iu says Claude is back.
