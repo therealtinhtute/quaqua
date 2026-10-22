@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use quaqua::playbook::{
-    extract_principle_citations, load_playbook, parse_playbook, run_list, run_show, PlaybookError,
+    extract_principle_citations, load_playbooks, parse_playbook, read_principle,
+    resolve_principle_path, run_list, run_show, PlaybookError,
 };
 
 /// Helper RAII temporary directory for test isolation.
@@ -393,7 +394,7 @@ when: Testing 4 leaves + prove-it-works fails.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn workspace_fixture_playbook_and_leaf_exist_and_validate() {
+fn s6_acceptance_1_fixture_test_loads_all_3_playbooks_and_6_leaves() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
     let playbooks_dir = repo_root.join("templates/workspace/playbooks");
@@ -408,36 +409,136 @@ fn workspace_fixture_playbook_and_leaf_exist_and_validate() {
         "templates/workspace/principles must exist"
     );
 
-    let fixture_pb_path = playbooks_dir.join("fixture.md");
-    let fixture_pr_path = principles_dir.join("fixture.md");
-
     assert!(
-        fixture_pb_path.is_file(),
-        "templates/workspace/playbooks/fixture.md must exist"
+        !playbooks_dir.join("fixture.md").exists(),
+        "fixture.md must be removed from templates/workspace/playbooks"
     );
     assert!(
-        fixture_pr_path.is_file(),
-        "templates/workspace/principles/fixture.md must exist"
+        !principles_dir.join("fixture.md").exists(),
+        "fixture.md must be removed from templates/workspace/principles"
     );
 
-    let pb = load_playbook(&fixture_pb_path, &principles_dir)
-        .expect("fixture playbook must load and validate");
-    assert_eq!(pb.name, "fixture");
-    assert_eq!(pb.when, "Used for engine tests and verification.");
-    assert_eq!(pb.step_ids(), vec![1, 2]);
-    assert_eq!(pb.cited_principles, vec!["principle-fixture"]);
+    let expected_leaves = [
+        "attack-the-premise",
+        "fix-root-causes",
+        "make-operations-idempotent",
+        "prove-it-works",
+        "sequence-verifiable-units",
+        "test-behavior-not-implementation",
+    ];
+    for leaf in expected_leaves {
+        let leaf_path = principles_dir.join(format!("{leaf}.md"));
+        assert!(leaf_path.is_file(), "missing principle leaf: {leaf}.md");
+        let content = read_principle(leaf, &principles_dir)
+            .unwrap_or_else(|e| panic!("failed to read principle {leaf}: {e}"));
+        assert!(!content.is_empty(), "principle {leaf} content is empty");
+    }
 
-    let list_out =
-        run_list(&playbooks_dir, &principles_dir).expect("run_list on template fixtures");
-    assert!(
-        list_out.contains("fixture — Used for engine tests and verification."),
-        "list output must contain fixture entry"
-    );
+    let playbooks = load_playbooks(&playbooks_dir, &principles_dir)
+        .expect("all 3 playbooks must load and validate against principles");
+    assert_eq!(playbooks.len(), 3, "must load exactly 3 playbooks");
+    let names: Vec<&str> = playbooks.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["bug-fix", "feature", "figure-it-out"]);
+}
 
-    let show_out =
-        run_show("fixture", &playbooks_dir, &principles_dir).expect("run_show on fixture");
-    assert!(show_out.contains("## Orchestrator"));
-    assert!(!show_out.contains("## Worker"));
+#[test]
+fn s6_acceptance_2_every_cited_leaf_resolves_none_over_cap() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+
+    let playbooks = load_playbooks(&playbooks_dir, &principles_dir)
+        .expect("all 3 playbooks must load and validate");
+
+    for pb in &playbooks {
+        for citation in &pb.cited_principles {
+            let path = resolve_principle_path(citation, &principles_dir);
+            assert!(
+                path.is_file(),
+                "cited principle '{citation}' in playbook '{}' does not resolve at {}",
+                pb.name,
+                path.display()
+            );
+        }
+        let non_exempt: Vec<&String> = pb
+            .cited_principles
+            .iter()
+            .filter(|c| c.as_str() != "principle-prove-it-works")
+            .collect();
+        assert!(
+            non_exempt.len() <= 3,
+            "playbook '{}' cites {} non-exempt leaves (max 3): {:?}",
+            pb.name,
+            non_exempt.len(),
+            non_exempt
+        );
+    }
+}
+
+#[test]
+fn s6_acceptance_3_every_worker_ends_with_verified_step() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+
+    let playbooks = load_playbooks(&playbooks_dir, &principles_dir)
+        .expect("all 3 playbooks must load and validate");
+
+    for pb in &playbooks {
+        assert!(
+            !pb.steps.is_empty(),
+            "playbook '{}' has no worker steps",
+            pb.name
+        );
+        let last_step = pb.steps.last().unwrap();
+        assert!(
+            last_step
+                .text
+                .contains("Check every Evidence line, then write `Verified: <level> <sha>`")
+                || last_step
+                    .text
+                    .contains("check every Evidence line, then write `Verified: <level> <sha>`"),
+            "playbook '{}' last step text does not end with required Verified step text: '{}'",
+            pb.name,
+            last_step.text
+        );
+        assert!(
+            last_step
+                .cited_principles
+                .contains(&"principle-prove-it-works".to_string()),
+            "playbook '{}' last step must cite principle-prove-it-works",
+            pb.name
+        );
+    }
+}
+
+#[test]
+fn s6_acceptance_4_forbidden_terms_grep_clean() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+
+    let forbidden = ["cursor", "task tool", "/loop", "brainstorm", "to-plan"];
+
+    for dir in [&playbooks_dir, &principles_dir] {
+        for entry in fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                let content = fs::read_to_string(&path).unwrap();
+                let lower = content.to_lowercase();
+                for term in &forbidden {
+                    assert!(
+                        !lower.contains(term),
+                        "forbidden term '{term}' found in {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -465,15 +566,29 @@ fn cli_playbook_list_and_show() {
     ]);
     assert_eq!(code, 0, "playbook list failed: {stderr}");
     assert!(
-        stdout.contains("fixture — Used for engine tests and verification."),
-        "cli stdout: {stdout}"
+        stdout.contains(
+            "bug-fix — A reported defect to reproduce, root-cause, and fix with runtime evidence."
+        ),
+        "cli stdout missing bug-fix: {stdout}"
+    );
+    assert!(
+        stdout.contains("feature — New or changed behavior, built from a named data shape."),
+        "cli stdout missing feature: {stdout}"
+    );
+    assert!(
+        stdout.contains("figure-it-out — Large migrations, multi-part changes, or work when no narrower playbook fits."),
+        "cli stdout missing figure-it-out: {stdout}"
+    );
+    assert!(
+        !stdout.contains("fixture"),
+        "cli stdout must NOT contain fixture: {stdout}"
     );
 
-    // 2. Test quaqua playbook show fixture
+    // 2. Test quaqua playbook show bug-fix
     let (code, stdout, stderr) = run_cli(&[
         "playbook",
         "show",
-        "fixture",
+        "bug-fix",
         "--dir",
         &pb_str,
         "--principles-dir",
@@ -482,19 +597,11 @@ fn cli_playbook_list_and_show() {
     assert_eq!(code, 0, "playbook show failed: {stderr}");
     assert!(
         stdout.contains("## Orchestrator"),
-        "must print Orchestrator section"
-    );
-    assert!(
-        stdout.contains("1. Plan the fixture task."),
-        "must print orchestrator step"
+        "must print Orchestrator section: {stdout}"
     );
     assert!(
         !stdout.contains("## Worker"),
-        "must NOT print Worker section"
-    );
-    assert!(
-        !stdout.contains("Execute fixture step"),
-        "must NOT print Worker steps"
+        "must NOT print Worker section: {stdout}"
     );
 
     // 3. Test quaqua playbook show nonexistent -> exit 1

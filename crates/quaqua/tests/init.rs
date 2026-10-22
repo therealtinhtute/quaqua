@@ -1073,3 +1073,81 @@ fn pre_push_hook_rejects_workers_only() {
     );
     assert!(run(None).success(), "principal push must pass");
 }
+
+#[test]
+fn s6_acceptance_5_fresh_init_has_agents_coordinator_lines_and_playbooks() {
+    let root = std::env::temp_dir().join(format!("quaqua-init-s6-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let ws = root.join("ws");
+
+    let nobin = root.join("nobin");
+    std::fs::create_dir_all(&nobin).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.env("PATH", &nobin)
+        .env("HERDR_BIN_PATH", nobin.join("herdr"))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_TEMPLATE_DIR")
+        .current_dir(&root);
+
+    let out = cmd
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let agents_md = std::fs::read_to_string(ws.join("AGENTS.md")).expect("read AGENTS.md");
+    assert!(
+        agents_md.contains("## Coordinator Rules"),
+        "missing Coordinator Rules section in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Route (binds CoS and Lead)"),
+        "missing Route rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Never edit code or config (binds CoS and Lead)"),
+        "missing Never edit code rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Attack the premise (binds CoS and Lead)"),
+        "missing Attack the premise rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Background wait and drain points (binds CoS and Lead)"),
+        "missing Background wait rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Budget (binds CoS and Lead)"),
+        "missing Budget rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Pilot and liveness (binds CoS and Lead)"),
+        "missing Pilot and liveness rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("rules/_all/worker-timebox.md"),
+        "missing link to worker-timebox.md in AGENTS.md"
+    );
+
+    // Also assert playbooks and principles in fresh init
+    assert!(ws.join("playbooks/bug-fix.md").is_file());
+    assert!(ws.join("playbooks/feature.md").is_file());
+    assert!(ws.join("playbooks/figure-it-out.md").is_file());
+    assert!(
+        !ws.join("playbooks/fixture.md").exists(),
+        "fixture.md must not be installed in playbooks/"
+    );
+    assert!(
+        !ws.join("principles/fixture.md").exists(),
+        "fixture.md must not be installed in principles/"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
