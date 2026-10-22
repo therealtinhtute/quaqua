@@ -102,6 +102,11 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Playbook operations: list, show.
+    Playbook {
+        #[command(subcommand)]
+        cmd: PlaybookCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -164,6 +169,30 @@ struct ConfigArgs {
     /// Validate the config as seen by this project (applies its override).
     #[arg(long)]
     project: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum PlaybookCmd {
+    /// List available playbooks (<name> — <when>).
+    List {
+        /// Optional path to playbooks directory.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Optional path to principles directory.
+        #[arg(long)]
+        principles_dir: Option<PathBuf>,
+    },
+    /// Show a playbook's Orchestrator section.
+    Show {
+        /// Playbook name.
+        name: String,
+        /// Optional path to playbooks directory.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Optional path to principles directory.
+        #[arg(long)]
+        principles_dir: Option<PathBuf>,
+    },
 }
 
 /// Grid config source: the explicit `--team-file`, else the same resolution
@@ -567,6 +596,43 @@ fn main() {
                     eprintln!("{e}");
                 }
                 1
+            }
+        },
+        Some(Command::Playbook { cmd }) => match cmd {
+            PlaybookCmd::List {
+                dir,
+                principles_dir,
+            } => {
+                let pb_dir = quaqua::playbook::resolve_playbooks_dir(dir.as_deref());
+                let pr_dir = quaqua::playbook::resolve_principles_dir(principles_dir.as_deref());
+                match quaqua::playbook::run_list(&pb_dir, &pr_dir) {
+                    Ok(out) => {
+                        print!("{out}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
+                }
+            }
+            PlaybookCmd::Show {
+                name,
+                dir,
+                principles_dir,
+            } => {
+                let pb_dir = quaqua::playbook::resolve_playbooks_dir(dir.as_deref());
+                let pr_dir = quaqua::playbook::resolve_principles_dir(principles_dir.as_deref());
+                match quaqua::playbook::run_show(&name, &pb_dir, &pr_dir) {
+                    Ok(out) => {
+                        print!("{out}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
+                }
             }
         },
         None => 0,

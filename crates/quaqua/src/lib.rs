@@ -24,3 +24,4 @@ pub mod auditor;
 pub mod engine;
 pub mod status;
 pub mod doctor;
+pub mod playbook;
