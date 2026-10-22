@@ -855,6 +855,57 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_cap_count_ignores_process_env_team_toml() {
+    // Repro: another test in this binary points QUAQUA_TEAM_TOML at a config
+    // whose kinds are not the default set. Slot counting must not let that
+    // env decide who is a task worker, and a failed load must not silently
+    // demote every worker to a non-worker (which skips the pipeline reserve).
+    let _env_lock = lock_env();
+    let temp_dir =
+        std::env::temp_dir().join(format!("quaqua-cap-envfree-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let owner = "cos";
+
+    std::fs::write(temp_dir.join("sude-blockedfix.owner"), "cos\n").unwrap();
+    std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!(
+            "task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+
+    let mock = MockActivitiesHerdr::with_agent_list(
+        r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#,
+    );
+
+    // A valid config that only knows kind `ni`, plus an override that cannot
+    // be loaded at all. Neither may change the count: 1 live standalone
+    // worker + the 2-slot pipeline reserve.
+    let foreign = temp_dir.join("foreign-team.toml");
+    std::fs::write(
+        &foreign,
+        "schema_version = 2\n\n[kinds.ni]\nharness = \"claude\"\nmodel = \"m\"\neffort = \"low\"\n",
+    )
+    .unwrap();
+
+    for override_path in [foreign.as_path(), Path::new("/nonexistent/quaqua-team.toml")] {
+        std::env::set_var("QUAQUA_TEAM_TOML", override_path);
+        assert_eq!(
+            count_owner_slots(&temp_dir, owner, None, &mock),
+            3,
+            "QUAQUA_TEAM_TOML={} must not change the slot count",
+            override_path.display()
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
 #[test]
 fn test_cap_pipeline_double_count_repro() {
     // Repro for Cause (c): pipeline gridown2 has a live builder tieude-gridown2
