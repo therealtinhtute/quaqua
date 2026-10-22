@@ -1074,28 +1074,15 @@ pub fn prompt_worker<G: GitOps>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::{lock_env, TestEnvVarGuard};
     use std::fs;
-
-    struct TestEnvVarGuard(&'static str, Option<String>);
-    impl TestEnvVarGuard {
-        fn set(key: &'static str, val: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, val);
-            Self(key, prev)
-        }
-    }
-    impl Drop for TestEnvVarGuard {
-        fn drop(&mut self) {
-            if let Some(prev) = &self.1 {
-                std::env::set_var(self.0, prev);
-            } else {
-                std::env::remove_var(self.0);
-            }
-        }
-    }
 
     #[test]
     fn test_worker_prompt_keeps_exit_code_for_unparseable_reviewer_verdict() {
+        // `prompt_worker` resolves these from the process env; a test that
+        // writes the same vars must not interleave with this run.
+        let _env_lock = lock_env();
+
         let tmp = std::env::temp_dir().join(format!("quaqua-wp-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();

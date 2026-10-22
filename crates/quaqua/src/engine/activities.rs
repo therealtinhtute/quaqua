@@ -918,6 +918,7 @@ esac
     });
 
     fn with_herdr_stub<F: FnOnce(&SystemActivities, &Path)>(f: F) {
+        let _env_lock = crate::test_env::lock_env();
         let _lock = HERDR_TEST_MUTEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1836,6 +1837,7 @@ spawn = "auto"
         }
 
         // Hermetic isolation: empty PATH (proves no external CLI invocation), isolated HOME, isolated RUNS_DIR, and point QUAQUA_COST_DB_PATH
+        let _env_lock = crate::test_env::lock_env();
         let _guard_path = EnvVarGuard::set("PATH", empty_path_dir.to_str().unwrap());
         let _guard_home = EnvVarGuard::set("HOME", home_dir.to_str().unwrap());
         let _guard_runs = EnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());

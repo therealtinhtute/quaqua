@@ -1407,11 +1407,15 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        std::env::set_var("QUAQUA_RUNS_DIR", &runs);
-        std::env::set_var("QUAQUA_COST_DB_PATH", &db);
-        let spend = read_worker_spend("tieude-x", "s1", cwd, "pi", None);
-        std::env::remove_var("QUAQUA_RUNS_DIR");
-        std::env::remove_var("QUAQUA_COST_DB_PATH");
+        // Process-global: hold the env lock while `read_worker_spend` reads
+        // these, and restore the previous values instead of removing them.
+        let spend = {
+            use crate::test_env::{lock_env, TestEnvVarGuard};
+            let _env_lock = lock_env();
+            let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs);
+            let _guard_db = TestEnvVarGuard::set("QUAQUA_COST_DB_PATH", &db);
+            read_worker_spend("tieude-x", "s1", cwd, "pi", None)
+        };
         let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(spend.spend_src, "pi-session");
         let usd = spend.usd.expect("pi cost");
