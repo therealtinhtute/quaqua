@@ -3227,9 +3227,12 @@ pub(crate) mod metrics {
         std::fs::create_dir_all(&runs_dir).unwrap();
         let tele_path = runs_dir.join("telemetry.jsonl");
 
+        let now_sec = crate::util::now_sec();
+        let now_ms = now_sec * 1000;
+
         // 1. Round-trip WorkerTelemetryRow with repo ~/quaqua and unpriced non-claude worker
         let row = WorkerTelemetryRow {
-            ts: "2026-10-21T12:00:00+07:00".to_string(),
+            ts: crate::usage::format_iso_vn(now_ms as i64),
             rec: "worker".to_string(),
             name: "sude-rt".to_string(),
             kind: Some("sude".to_string()),
@@ -3253,7 +3256,7 @@ pub(crate) mod metrics {
         let mut lines = vec![row_json];
         for i in 1..=10 {
             let p = PipelineTelemetryItem {
-                ts: format!("2026-10-21T12:{:02}:00+07:00", i),
+                ts: crate::usage::format_iso_vn((now_ms + (i as u64) * 1000) as i64),
                 rec: "pipeline".to_string(),
                 task: format!("task-{i}"),
                 repo: "~/quaqua".to_string(),
@@ -3294,8 +3297,6 @@ pub(crate) mod metrics {
         assert!(!rendered.contains("task-2 clean"));
 
         // 3. Test --since cutoff
-        let now_sec = crate::util::now_sec();
-        let now_ms = now_sec * 1000;
         let c_24h = parse_since_cutoff("24h", now_ms).unwrap();
         let c_7d = parse_since_cutoff("7d", now_ms).unwrap();
         assert!(c_24h > c_7d);
@@ -3317,7 +3318,7 @@ pub(crate) mod metrics {
 
         // Nit 14: long names expand name_width
         let long_worker = WorkerTelemetryRow {
-            ts: "2026-10-21T12:00:00+07:00".to_string(),
+            ts: crate::usage::format_iso_vn(now_ms as i64),
             rec: "worker".to_string(),
             name: "suhuynh-metricsrev".to_string(),
             kind: Some("suhuynh".to_string()),
