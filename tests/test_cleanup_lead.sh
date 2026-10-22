@@ -15,6 +15,12 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+root="$(cd "$here/.." && pwd)"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+[[ -x "$bin" ]] || fail "no quaqua binary at $bin"
+export QUAQUA_BIN="$bin"
+
 mkdir -p "$T/bin" "$T/projects" "$T/runs"
 cat > "$T/INDEX.orig" <<'EOF'
 | slug | repo | owner | status | one-line goal |
@@ -47,7 +53,12 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 STUB
-chmod +x "$T/bin/herdr"
+cat > "$T/bin/quaqua" <<'STUB'
+#!/usr/bin/env bash
+echo "FAIL: stale PATH quaqua invoked: $*" >&2
+exit 99
+STUB
+chmod +x "$T/bin/herdr" "$T/bin/quaqua"
 export HERDR_BIN_PATH="$T/bin/herdr"
 export HERDR_SOCKET_PATH="$T/herdr.sock"
 export PATH="$T/bin:$PATH"
@@ -59,7 +70,7 @@ run() {  # run <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   printf '# rules\n' > "$T/runs/baro-lead.rules.md"
   rc=0
   CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1 QUAQUA_ROOT="$T" env "$@" \
-    "${QUAQUA_BIN:-quaqua}" lead cleanup "$slug" >"$T/out" 2>"$T/err" || rc=$?
+    "$QUAQUA_BIN" lead cleanup "$slug" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── team workspace: closed, owner -> cos, rules dump removed ────────────────
@@ -148,8 +159,8 @@ rm -f "$T/runs/sude-live.owner"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
 ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" HERDR_PANE_ID=w9:p13 LEAD_PANE=w7:p1 QUAQUA_ROOT="$T"
     HERDR_LIVE="baro-lead baro-web-lead")
-env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead cleanup baro >"$T/out1" 2>"$T/err1" & p1=$!
-env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead cleanup baro-web >"$T/out2" 2>"$T/err2" & p2=$!
+env "${ce[@]}" "$QUAQUA_BIN" lead cleanup baro >"$T/out1" 2>"$T/err1" & p1=$!
+env "${ce[@]}" "$QUAQUA_BIN" lead cleanup baro-web >"$T/out2" 2>"$T/err2" & p2=$!
 rc1=0 rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?
 [[ $rc1 -eq 0 && $rc2 -eq 0 ]] || fail "concurrent: exits $rc1/$rc2: $(cat "$T/err1" "$T/err2")"
 grep -qE '^\| baro \| ~/Lab/baro \| cos \|' "$T/projects/INDEX.md" \

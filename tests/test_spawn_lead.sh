@@ -18,6 +18,12 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 unset HERDR_PANE_ID
 
+root="$(cd "$here/.." && pwd)"
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+[[ -x "$bin" ]] || fail "no quaqua binary at $bin"
+export QUAQUA_BIN="$bin"
+
 # ── sandbox: temp quaqua root (script copy under scripts/) + stub herdr/git ─
 mkdir -p "$T/bin" "$T/projects" "$T/rules/_all"
 
@@ -86,7 +92,7 @@ spawn() {  # spawn <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   : > "$T/calls"
   rc=0
   CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T" env "$@" \
-    "${QUAQUA_BIN:-quaqua}" lead spawn "$slug" >"$T/out" 2>"$T/err" || rc=$?
+    "$QUAQUA_BIN" lead spawn "$slug" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 ln() { grep -n "$1" "$T/calls" | head -1 | cut -d: -f1; }  # first matching call line
@@ -109,10 +115,12 @@ grep -q 'agent get coucou-island-lead' "$T/calls" \
   || fail "happy: no duplicate check: $(cat "$T/calls")"
 grep -qF "workspace create --label coucou-island --no-focus --cwd $T --env QUAQUA_OWNER=coucou-island-lead" "$T/calls" \
   || fail "happy: Lead not in its own <slug> workspace at the repo root: $(cat "$T/calls")"
-grep -q 'agent start coucou-island-lead --kind opencode --pane %7 --timeout 60000 -- --standalone --auto' "$T/calls" \
+grep -q 'agent start coucou-island-lead --kind pi --pane %7 --timeout 60000' "$T/calls" \
   || fail "happy: bad agent start: $(cat "$T/calls")"
-grep -qF "OPENCODE_CONFIG_CONTENT={\"model\":{\"providerID\":\"opencode-go\",\"model\":\"deepseek-v4.1-flash\",\"variant\":\"max\"},\"instructions\":[\"$T/runs/coucou-island-lead.rules.md\"]}" "$T/calls" \
-  || fail "happy: opencode config content missing from workspace create: $(cat "$T/calls")"
+grep -q -- '--model opencode-go/deepseek-v4.1-flash --thinking max' "$T/calls" \
+  || fail "happy: pi model/thinking args missing: $(cat "$T/calls")"
+grep -qF -- "--append-system-prompt $T/runs/coucou-island-lead.rules.md" "$T/calls" \
+  || fail "happy: pi rules arg missing: $(cat "$T/calls")"
 grep -q 'r1 stay in the project' "$T/runs/coucou-island-lead.rules.md" \
   || fail "happy: rules file missing rules/_all content"
 grep -q 'agent prompt coucou-island-lead' "$T/calls" \
@@ -272,9 +280,9 @@ echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corrup
 mkdir -p "$T/runs"; : > "$T/calls"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
 ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T")
-env "${ce[@]}" "${QUAQUA_BIN:-quaqua}" lead spawn coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
+env "${ce[@]}" "$QUAQUA_BIN" lead spawn coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!
 env "${ce[@]}" HERDR_LIVE=mono-desk-lead HERDR_PANE_ID=w9:p13 \
-  "${QUAQUA_BIN:-quaqua}" lead cleanup mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
+  "$QUAQUA_BIN" lead cleanup mono-desk >"$T/out.c" 2>"$T/err.c" & p2=$!
 rc1=0 rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?
 [[ $rc1 -eq 0 && $rc2 -eq 0 ]] || fail "concurrent: exits $rc1/$rc2: $(cat "$T/err.s" "$T/err.c")"
 grep -qE '^\| coucou-island \| ~/Lab/coucou-island \| coucou-island-lead \|' "$T/projects/INDEX.md" \

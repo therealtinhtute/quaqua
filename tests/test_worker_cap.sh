@@ -19,6 +19,11 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
+[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+[[ -x "$bin" ]] || fail "no quaqua binary at $bin"
+export QUAQUA_BIN="$bin"
+
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs" "$T/home/quaqua/rules/_all"
 printf '# rule\n- test rule\n' > "$T/home/quaqua/rules/_all/test.md"
 
@@ -63,7 +68,12 @@ case "\${1:-} \${2:-}" in
 esac
 exit 0
 STUB
-chmod +x "$T/bin/herdr"
+cat > "$T/bin/quaqua" <<'STUB'
+#!/usr/bin/env bash
+echo "FAIL: stale PATH quaqua invoked: $*" >&2
+exit 99
+STUB
+chmod +x "$T/bin/herdr" "$T/bin/quaqua"
 export HERDR_BIN_PATH="$T/bin/herdr"
 export HERDR_SOCKET_PATH="$T/herdr.sock"
 export PATH="$T/bin:$PATH"
@@ -72,7 +82,7 @@ spawn() {
   local name=$1 kind=$2; shift 2
   rc=0
   HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_TEST=1 GRID_SKIP=1 \
-    env -u QUAQUA_OWNER "$@" "${QUAQUA_BIN:-quaqua}" worker spawn "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
+    env -u QUAQUA_OWNER "$@" "$QUAQUA_BIN" worker spawn "$name" "$kind" "$T/repo" >"$T/out" 2>"$T/err" || rc=$?
 }
 
 # ── 1. Cap refusal: 8 live workers for cos -> 9th refused ───────────────────
@@ -201,7 +211,7 @@ Current design: test
 EOF
 prc=0
 HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" GRID_SKIP=1 QUAQUA_OWNER=cos \
-  "${QUAQUA_BIN:-quaqua}" pipeline pipetest "$T/repo" --brief "$brief" >"$T/out" 2>"$T/err" || prc=$?
+  "$QUAQUA_BIN" pipeline pipetest "$T/repo" --brief "$brief" >"$T/out" 2>"$T/err" || prc=$?
 [[ $prc -eq 2 ]] || fail "pipeline cap refusal: exit $prc, want 2: $(cat "$T/err")"
 grep -q 'worker cap exceeded' "$T/err" || fail "pipeline cap refusal: missing error message: $(cat "$T/err")"
 echo "ok: pipeline counts as 2 -> owner with 7 workers cannot start pipeline (needs 2, cap is 8)"
