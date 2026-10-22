@@ -34,7 +34,7 @@ reports_to = "owner"
 
 [strategy]
 default_kind = "tieude"                   # anh iu, 2026-10-15
-lead_kind = "tieude"
+lead_kind = "ni"                        # anh iu: Lead runs on claude · opus-5.5 · low
 default_reviewer = ["suhuynh"]           # first available wins (anh iu, 2026-10-16)
 builder_reviewer_differ = "kind"
 
