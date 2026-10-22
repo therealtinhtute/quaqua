@@ -144,6 +144,9 @@ pub fn resolve_worker_worktree(
 
     // 2. Resolve via repo_dir
     if let Some(repo) = repo_dir {
+        if repo.is_dir() && repo.file_name().and_then(|n| n.to_str()) == Some(name) {
+            return Some(repo.to_path_buf());
+        }
         let wt = resolve_worktree_path(repo, name);
         if wt.is_dir() {
             return Some(wt);
