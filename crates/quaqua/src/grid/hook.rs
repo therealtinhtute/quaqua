@@ -3,7 +3,7 @@ use super::reconcile::filter_ops_for_check;
 use super::plan::{is_candidate_worker, plan_with_deferred};
 use super::types::{Op, Snapshot};
 use std::collections::{HashMap, HashSet};
-use std::fs::{create_dir, create_dir_all, remove_dir, remove_file, OpenOptions};
+use std::fs::{create_dir_all, remove_file, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
@@ -45,50 +45,12 @@ pub fn is_shadow_mode(state_dir: &Path) -> bool {
 
 pub use crate::util::is_pid_alive;
 
-pub struct LockGuard {
-    pub lock_dir: PathBuf,
-    pub pid_file: PathBuf,
-}
-
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        let _ = remove_file(&self.pid_file);
-        let _ = remove_dir(&self.lock_dir);
-    }
-}
+/// The hook's guard is the shared grid apply lock: same directory, same
+/// reentrancy bookkeeping as `grid::lock` (see there for why the lock exists).
+pub use super::lock::ApplyLock as LockGuard;
 
 pub fn acquire_lock(lock_dir: &Path, pid_file: &Path) -> Result<LockGuard, String> {
-    let mut attempts = 0;
-    let my_pid = std::process::id().to_string();
-
-    while attempts < 100 {
-        if create_dir(lock_dir).is_ok() {
-            let _ = std::fs::write(pid_file, &my_pid);
-            return Ok(LockGuard {
-                lock_dir: lock_dir.to_path_buf(),
-                pid_file: pid_file.to_path_buf(),
-            });
-        }
-
-        if pid_file.is_file() {
-            let holder_pid = std::fs::read_to_string(pid_file).unwrap_or_default();
-            if !holder_pid.trim().is_empty() && !is_pid_alive(&holder_pid) {
-                // Dead PID reclaim
-                let _ = remove_file(pid_file);
-                let _ = remove_dir(lock_dir);
-                continue;
-            }
-        } else if attempts > 5 {
-            let _ = remove_file(pid_file);
-            let _ = remove_dir(lock_dir);
-            continue;
-        }
-
-        sleep(Duration::from_millis(50));
-        attempts += 1;
-    }
-
-    Err("[herdr-quaqua] could not acquire lock after timeout".to_string())
+    super::lock::acquire_paths(lock_dir, pid_file)
 }
 
 /// Early exit check on pane.agent_status_changed events that change nothing

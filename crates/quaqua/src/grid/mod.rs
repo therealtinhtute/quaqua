@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod hook;
+pub mod lock;
 pub mod plan;
 pub mod reconcile;
 pub mod types;

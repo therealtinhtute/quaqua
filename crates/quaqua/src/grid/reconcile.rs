@@ -131,6 +131,11 @@ pub fn filter_ops_for_check<'a>(
             // `is_group_tab` made the check vacuous whenever GRID_TAB differed
             // from the group token (group `quaqua`, tab `quaqua-rs-workers`):
             // every op was dropped, so `--check` returned Ok on any layout.
+            //
+            // The chunk filter must bound both chunks, not only the overflow:
+            // with `--tab quaqua-workers` every pane of the group passes
+            // `accepts_workers_tab`, so an unfiltered chunk-1 op moved panes in
+            // `quaqua-workers-2` while the caller checked `quaqua-workers`.
             if let Some(tab) = tab_filter {
                 if !tab.is_empty() {
                     if !accepts_workers_tab(pgroup, pgtab, Some(tab)) {
@@ -139,6 +144,10 @@ pub fn filter_ops_for_check<'a>(
                     let base = pgtab.unwrap_or(pgroup);
                     let is_chunk_1_filter = tab == super::plan::chunk_tab_label(base, 1)
                         || tab == format!("{pgroup}-workers-2");
+                    let chunk_1_labels = [
+                        super::plan::chunk_tab_label(base, 1),
+                        format!("{pgroup}-workers-2"),
+                    ];
                     if is_chunk_1_filter {
                         let op_matches = match &op.target {
                             Target::NewTab { label } => label == tab,
@@ -155,6 +164,33 @@ pub fn filter_ops_for_check<'a>(
                             }
                         };
                         if !op_matches {
+                            return false;
+                        }
+                    } else {
+                        // Reciprocal of the chunk-1 filter: a check scoped to
+                        // the base tab must not apply an op that targets the
+                        // overflow tab. Without this, `--tab quaqua-workers`
+                        // accepted every pane of the group and moved panes in
+                        // `quaqua-workers-2` while checking `quaqua-workers`.
+                        let target_is_chunk_1 = match &op.target {
+                            Target::NewTab { label } => chunk_1_labels.iter().any(|l| l == label),
+                            Target::Split {
+                                tab: target_tab, ..
+                            } => {
+                                if target_tab == "@workers-2" || target_tab == "@workers" {
+                                    target_tab == "@workers-2"
+                                } else {
+                                    snapshot.tabs.iter().any(|t| {
+                                        t.tab_id == *target_tab
+                                            && t.label
+                                                .as_deref()
+                                                .map(|l| chunk_1_labels.iter().any(|c| c == l))
+                                                .unwrap_or(false)
+                                    })
+                                }
+                            }
+                        };
+                        if target_is_chunk_1 {
                             return false;
                         }
                     }
@@ -324,7 +360,7 @@ pub fn grid_scope(
     GridScope { owner, workspace }
 }
 
-pub fn run_reconcile<D: HerdrDriver>(
+pub fn run_reconcile<D: HerdrDriver + 'static>(
     driver: &mut D,
     opts: &ReconcileOptions,
     default_tab: &str,
@@ -333,7 +369,15 @@ pub fn run_reconcile<D: HerdrDriver>(
     reconcile_core(driver, opts, default_tab, deferred_statuses).map(|_| ())
 }
 
-pub fn reconcile_core<D: HerdrDriver>(
+/// True only for the driver that applies to a running herdr daemon from this
+/// process (`CliHerdrDriver`). That driver races the plugin hook over the same
+/// tabs, so it takes the shared apply lock; an in-process driver (every test
+/// double) cannot race another process and must not touch the live state dir.
+fn driver_is_live<D: 'static>() -> bool {
+    std::any::TypeId::of::<D>() == std::any::TypeId::of::<CliHerdrDriver>()
+}
+
+pub fn reconcile_core<D: HerdrDriver + 'static>(
     driver: &mut D,
     opts: &ReconcileOptions,
     default_tab: &str,
@@ -352,6 +396,7 @@ pub fn reconcile_core<D: HerdrDriver>(
 
         let start_ts = now_sec();
         let poll = poll_interval();
+        let mut lock_noted = false;
 
         loop {
             // Finding 7: Retry snapshot failure until timeout
@@ -449,7 +494,36 @@ pub fn reconcile_core<D: HerdrDriver>(
             // moving it. An apply error is a pane that went busy between the
             // plan and the move; the next poll re-plans it as deferred, while a
             // persistent one leaves the ops pending for the timeout report.
-            if let Err(e) = apply_ops(driver, &runnable, Some(&snap)) {
+            //
+            // The live driver shares the tabs with the plugin hook. The hook
+            // holds the shared apply lock while it parks/splits; a poll that
+            // finds it held skips its apply and retries on the next poll (the
+            // deadline still bounds the wait) instead of blocking `worker
+            // prompt` on another process.
+            let apply_result = if driver_is_live::<D>() {
+                match super::lock::try_acquire() {
+                    Ok(Some(_guard)) => Some(apply_ops(driver, &runnable, Some(&snap))),
+                    Ok(None) => {
+                        if !lock_noted {
+                            eprintln!(
+                                "grid check: apply skipped, the hook holds the grid apply lock; retrying"
+                            );
+                            lock_noted = true;
+                        }
+                        None
+                    }
+                    Err(e) => {
+                        if !lock_noted {
+                            eprintln!("grid check: apply lock unavailable: {e}");
+                            lock_noted = true;
+                        }
+                        None
+                    }
+                }
+            } else {
+                Some(apply_ops(driver, &runnable, Some(&snap)))
+            };
+            if let Some(Err(e)) = apply_result {
                 eprintln!("grid check: apply skipped: {e}");
             }
 
@@ -457,7 +531,10 @@ pub fn reconcile_core<D: HerdrDriver>(
         }
     }
 
-    // Repair / apply mode
+    // Repair / apply mode. The live driver shares the daemon with the plugin
+    // hook, whose live mode applies ops on every status event. Both park panes
+    // in a scratch tab before an in-tab split, so the apply itself takes the
+    // same lock the hook holds; a hook apply is short, the lock waits ~5s.
     let snap = driver.snapshot()?;
     let scope = grid_scope(&snap, opts.owner.as_deref(), Some(tab));
 
@@ -916,6 +993,11 @@ pub fn reconcile_core<D: HerdrDriver>(
     }
 
     let moves_applied = repair_ops.iter().any(|op| !op.deferred);
+    let _lock = if moves_applied && driver_is_live::<D>() {
+        Some(super::lock::acquire()?)
+    } else {
+        None
+    };
     let pane_map = apply_ops(driver, &repair_ops, Some(&snap))?;
 
     // A working pane is never moved; say so instead of exiting 0 silently.
@@ -1846,6 +1928,337 @@ mod tests {
             !driver.move_calls.iter().any(|(p, _)| p == "w1:t3:p9"),
             "the working pane must never be moved: {:?}",
             driver.move_calls
+        );
+    }
+
+    /// Six workers of one group: p1-p4 idly stacked (wrong shape) in the base
+    /// tab, p5/p6 not placed yet — the overflow chunk.
+    fn base_tab_with_overflow_snapshot() -> Snapshot {
+        let rect = |x, y, width, height| {
+            Some(Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        Snapshot {
+            tabs: vec![Tab {
+                tab_id: "w1:t3".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                label: Some("quaqua-workers".to_string()),
+                pane_count: Some(4),
+            }],
+            layouts: vec![Layout {
+                tab_id: "w1:t3".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                area: Some(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 100,
+                }),
+                panes: vec![
+                    PaneLayout {
+                        pane_id: "w1:t3:p1".to_string(),
+                        rect: rect(0, 0, 200, 25),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:p2".to_string(),
+                        rect: rect(0, 25, 200, 25),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:p3".to_string(),
+                        rect: rect(0, 50, 200, 25),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:p4".to_string(),
+                        rect: rect(0, 75, 200, 25),
+                    },
+                ],
+                zoomed: Some(false),
+            }],
+            panes: vec![
+                make_worker("w1:t3:p1", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:p2", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:p3", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:p4", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:p5", "quaqua", None, Some("idle")),
+                make_worker("w1:t3:p6", "quaqua", None, Some("idle")),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn is_overflow_target(target: &Target) -> bool {
+        match target {
+            Target::NewTab { label } => label.ends_with("-workers-2"),
+            Target::Split { tab, .. } => tab == "@workers-2" || tab.ends_with("-workers-2"),
+        }
+    }
+
+    #[test]
+    fn test_check_scoped_to_the_base_tab_never_applies_overflow_ops() {
+        // `grid reconcile --check --tab quaqua-workers --only p2` heals p2's
+        // runnable prerequisites inside the base tab. p5/p6 belong to
+        // `quaqua-workers-2`; the old filter dropped chunk-1 ops only when the
+        // *requested* tab was the overflow one, so the scoped ops moved p5/p6
+        // into the overflow tab while checking the base tab.
+        let mut driver = MockHerdrDriver {
+            snapshot: base_tab_with_overflow_snapshot(),
+            ..Default::default()
+        };
+        let opts = super::ReconcileOptions {
+            check: true,
+            repair: false,
+            tab: Some("quaqua-workers".to_string()),
+            only: Some("w1:t3:p2".to_string()),
+            owner: Some("cos".to_string()),
+            dry_run: false,
+            timeout_sec: Some(2),
+        };
+
+        let res = run_reconcile(&mut driver, &opts, "quaqua-workers", None);
+
+        let overflow: Vec<&(String, Target)> = driver
+            .move_calls
+            .iter()
+            .filter(|(_, t)| is_overflow_target(t))
+            .collect();
+        assert!(
+            overflow.is_empty(),
+            "a check scoped to quaqua-workers must not apply overflow ops: {:?}",
+            driver.move_calls
+        );
+        assert!(
+            driver.move_calls.iter().any(|(p, _)| p == "w1:t3:p2"),
+            "the scoped worker's prerequisite must still move: {:?}",
+            driver.move_calls
+        );
+        res.expect("the check must converge inside the base tab");
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            EnvGuard { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn lockcase_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "quaqua-grid-lockcase-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Two idle workers stacked in the wrong shape: one runnable split.
+    fn two_stacked_workers_snapshot() -> Snapshot {
+        Snapshot {
+            tabs: vec![Tab {
+                tab_id: "w1:t1".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                label: Some("quaqua-workers".to_string()),
+                pane_count: Some(2),
+            }],
+            layouts: vec![Layout {
+                tab_id: "w1:t1".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                area: Some(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 100,
+                }),
+                panes: vec![
+                    PaneLayout {
+                        pane_id: "w1:t1:p1".to_string(),
+                        rect: Some(Rect {
+                            x: 0,
+                            y: 0,
+                            width: 200,
+                            height: 50,
+                        }),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t1:p2".to_string(),
+                        rect: Some(Rect {
+                            x: 0,
+                            y: 50,
+                            width: 200,
+                            height: 50,
+                        }),
+                    },
+                ],
+                zoomed: Some(false),
+            }],
+            panes: vec![
+                make_worker("w1:t1:p1", "quaqua", Some("w1:t1"), Some("idle")),
+                make_worker("w1:t1:p2", "quaqua", Some("w1:t1"), Some("idle")),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// Stub `herdr` for the live driver type: answers `api snapshot` from
+    /// `snap` and records every `pane move` into `calls` (one line per move).
+    fn stub_herdr(
+        dir: &std::path::Path,
+        snap: &Snapshot,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let snap_file = dir.join("snapshot.json");
+        let calls_file = dir.join("moves");
+        std::fs::write(&snap_file, serde_json::to_string(snap).unwrap()).unwrap();
+        let stub = dir.join("herdr");
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$1 $2" = "api snapshot" ]; then
+  cat "{snap}"
+  exit 0
+fi
+if [ "$1 $2" = "pane move" ]; then
+  printf '%s\n' "$3" >> "{calls}"
+  printf '{{"result":{{"move_result":{{"changed":true,"reason":"ok","pane":{{"pane_id":"%s","tab_id":"tab:moved"}}}}}}}}\n' "$3"
+  exit 0
+fi
+exit 0
+"#,
+            snap = snap_file.display(),
+            calls = calls_file.display()
+        );
+        std::fs::write(&stub, script).unwrap();
+        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&stub, perms).unwrap();
+        (stub, calls_file)
+    }
+
+    /// Another process takes the hook's lock directory and holds it: a live
+    /// `sleep` owns the pid in the lock file, exactly like a running hook.
+    fn hold_lock_in_child(state_dir: &std::path::Path, hold_secs: u64) -> std::process::Child {
+        let child = std::process::Command::new("sleep")
+            .arg(hold_secs.to_string())
+            .spawn()
+            .expect("spawn lock holder");
+        std::fs::create_dir_all(state_dir.join("lock")).expect("create lock dir");
+        std::fs::write(state_dir.join("lock/pid"), child.id().to_string())
+            .expect("write holder pid");
+        child
+    }
+
+    fn recorded_moves(calls: &std::path::Path) -> String {
+        std::fs::read_to_string(calls).unwrap_or_default()
+    }
+
+    #[test]
+    fn test_check_does_not_apply_while_the_hook_holds_the_lock() {
+        let _serial = crate::grid::lock::test_serial();
+        let dir = lockcase_dir("check-held");
+        let state = dir.join("state");
+        let (stub, calls) = stub_herdr(&dir, &two_stacked_workers_snapshot());
+        let _env = EnvGuard::set("HERDR_PLUGIN_STATE_DIR", state.to_str().unwrap());
+
+        let mut holder = hold_lock_in_child(&state, 2);
+
+        let mut driver = crate::herdr::Herdr {
+            bin: stub.to_string_lossy().to_string(),
+        };
+        let opts = super::ReconcileOptions {
+            check: true,
+            repair: false,
+            tab: Some("quaqua-workers".to_string()),
+            only: None,
+            owner: Some("cos".to_string()),
+            dry_run: false,
+            timeout_sec: Some(1),
+        };
+        let res = run_reconcile(&mut driver, &opts, "quaqua-workers", None);
+
+        assert!(
+            recorded_moves(&calls).is_empty(),
+            "the check applied ops while another process held the lock: {}",
+            recorded_moves(&calls)
+        );
+        assert!(
+            res.is_err(),
+            "a check that could not apply must report the pending op, not converge"
+        );
+
+        holder.wait().expect("lock holder exits");
+        let opts = super::ReconcileOptions {
+            timeout_sec: Some(3),
+            ..opts
+        };
+        // The second pass applies; it may still time out on the stub's static
+        // layout, so only the applied move is asserted.
+        let _ = run_reconcile(&mut driver, &opts, "quaqua-workers", None);
+        assert!(
+            !recorded_moves(&calls).is_empty(),
+            "the check must apply once the lock is free (res={res:?}, calls={:?})",
+            recorded_moves(&calls)
+        );
+    }
+
+    #[test]
+    fn test_repair_waits_for_the_hook_lock_instead_of_racing() {
+        let _serial = crate::grid::lock::test_serial();
+        let dir = lockcase_dir("repair-held");
+        let state = dir.join("state");
+        let (stub, calls) = stub_herdr(&dir, &two_stacked_workers_snapshot());
+        let _env = EnvGuard::set("HERDR_PLUGIN_STATE_DIR", state.to_str().unwrap());
+
+        let mut holder = hold_lock_in_child(&state, 1);
+
+        let bin = stub.to_string_lossy().to_string();
+        let calls_for_thread = calls.clone();
+        let repair = std::thread::spawn(move || {
+            let mut driver = crate::herdr::Herdr { bin };
+            let opts = super::ReconcileOptions {
+                check: false,
+                repair: true,
+                tab: Some("quaqua-workers".to_string()),
+                only: None,
+                owner: Some("cos".to_string()),
+                dry_run: false,
+                timeout_sec: None,
+            };
+            run_reconcile(&mut driver, &opts, "quaqua-workers", None)
+        });
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            recorded_moves(&calls_for_thread).is_empty(),
+            "the repair applied ops while another process held the lock: {}",
+            recorded_moves(&calls_for_thread)
+        );
+
+        holder.wait().expect("lock holder exits");
+        repair
+            .join()
+            .expect("repair thread")
+            .expect("the repair must wait for the lock, then apply");
+        assert!(
+            !recorded_moves(&calls).is_empty(),
+            "the repair must apply after the holder releases the lock"
         );
     }
 
