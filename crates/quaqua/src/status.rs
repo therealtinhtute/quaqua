@@ -934,6 +934,9 @@ pub struct JournalMetrics {
     /// G1 per repository and ref, so a number can be traced to its source.
     #[serde(default)]
     pub merges_per_repo: Vec<MergeRepoStat>,
+    /// G1: whether any contributing ref scan hit the 500-merge cap.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not", alias = "merges_truncated")]
+    pub truncated: bool,
     /// G2: watchdog exits inside the window.
     pub accepted_reports: usize,
     pub exit6: usize,
@@ -1110,6 +1113,42 @@ pub(crate) struct MergeCommit {
     pub target_truncated: bool,
 }
 
+/// One integration target scanned for merge commits and whether its scan was capped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergeRefScan {
+    pub repo: PathBuf,
+    pub target: String,
+    pub truncated: bool,
+}
+
+/// The result of scanning integration targets for merge commits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MergeScan {
+    pub commits: Vec<MergeCommit>,
+    pub scans: Vec<MergeRefScan>,
+}
+
+impl MergeScan {
+    pub fn is_truncated(&self) -> bool {
+        self.scans.iter().any(|s| s.truncated)
+    }
+
+    pub fn from_commits(commits: Vec<MergeCommit>) -> Self {
+        Self {
+            commits,
+            scans: Vec::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for MergeScan {
+    type Target = [MergeCommit];
+
+    fn deref(&self) -> &Self::Target {
+        &self.commits
+    }
+}
+
 /// Repos whose integration branches G1 looks at: every `projects/INDEX.md` row
 /// plus the workspace root itself when it is a checkout.
 pub(crate) fn metric_repos(runs_dir: &Path) -> Vec<PathBuf> {
@@ -1183,11 +1222,12 @@ fn collect_merge_commits<G: GitOps>(
     repos: &[PathBuf],
     git: &G,
     cutoff_ms: u64,
-) -> Vec<MergeCommit> {
+) -> MergeScan {
     let fetch_limit = (MERGE_SCAN_LIMIT + 1).to_string();
     let since = format!("--since=@{}", cutoff_ms / 1000);
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut commits = Vec::new();
+    let mut scans = Vec::new();
     for repo in repos {
         for target in merge_targets(repo, git) {
             let mut args = vec![
@@ -1224,6 +1264,11 @@ fn collect_merge_commits<G: GitOps>(
                 ));
             }
             let is_truncated = target_commits.len() > MERGE_SCAN_LIMIT;
+            scans.push(MergeRefScan {
+                repo: repo.clone(),
+                target: target.clone(),
+                truncated: is_truncated,
+            });
             target_commits.truncate(MERGE_SCAN_LIMIT);
             for (sha, incoming) in target_commits {
                 if !seen.insert(sha.clone()) {
@@ -1239,7 +1284,7 @@ fn collect_merge_commits<G: GitOps>(
             }
         }
     }
-    commits
+    MergeScan { commits, scans }
 }
 
 fn sha_matches(a: &str, b: &str) -> bool {
@@ -1269,6 +1314,7 @@ pub(crate) struct MergeTally {
     pub not_pass: usize,
     pub samples: Vec<String>,
     pub repos: Vec<MergeRepoStat>,
+    pub truncated: bool,
 }
 
 /// G1: counts incoming merge heads and how many lack a verifier pass.
@@ -1278,12 +1324,15 @@ pub(crate) struct MergeTally {
 /// be an independent verifier pass. A head with no record, only a self-report,
 /// or a failed/blocked/inconclusive verifier verdict is not covered.
 pub(crate) fn count_merges_without_pass(
-    commits: &[MergeCommit],
+    scan: &MergeScan,
     verdicts: &[VerdictRecord],
 ) -> MergeTally {
-    let mut tally = MergeTally::default();
+    let mut tally = MergeTally {
+        truncated: scan.is_truncated(),
+        ..MergeTally::default()
+    };
     let mut per_repo: BTreeMap<String, MergeRepoStat> = BTreeMap::new();
-    for commit in commits {
+    for commit in &scan.commits {
         let repo = display_repo(&commit.repo);
         tally.merges += 1;
         let entry = per_repo
@@ -1327,6 +1376,41 @@ pub(crate) fn count_merges_without_pass(
             }
         }
     }
+    for ref_scan in &scan.scans {
+        if ref_scan.truncated {
+            tally.truncated = true;
+            let repo = display_repo(&ref_scan.repo);
+            let entry = per_repo
+                .entry(repo.clone())
+                .or_insert_with(|| MergeRepoStat {
+                    repo,
+                    ..MergeRepoStat::default()
+                });
+            match entry.refs.iter_mut().find(|r| r.target == ref_scan.target) {
+                Some(r) => {
+                    r.truncated = true;
+                }
+                None => {
+                    entry.refs.push(MergeRefStat {
+                        target: ref_scan.target.clone(),
+                        merges: 0,
+                        truncated: true,
+                    });
+                }
+            }
+        }
+    }
+    if !tally.truncated {
+        tally.truncated = scan.commits.iter().any(|c| c.target_truncated);
+    }
+    for (repo_name, entry) in &mut per_repo {
+        entry.refs.sort_by_key(|r| {
+            scan.scans
+                .iter()
+                .position(|s| display_repo(&s.repo) == *repo_name && s.target == r.target)
+                .unwrap_or(usize::MAX)
+        });
+    }
     tally.repos = per_repo.into_values().collect();
     tally
 }
@@ -1340,8 +1424,8 @@ fn fill_merge_metrics<G: GitOps>(
     cutoff_ms: u64,
     verdicts: &[VerdictRecord],
 ) {
-    let commits = collect_merge_commits(repos, git, cutoff_ms);
-    let tally = count_merges_without_pass(&commits, verdicts);
+    let scan = collect_merge_commits(repos, git, cutoff_ms);
+    let tally = count_merges_without_pass(&scan, verdicts);
     metrics.merges = tally.merges;
     metrics.merges_checked = tally.checked;
     metrics.merges_without_verdict = tally.without_verdict;
@@ -1355,6 +1439,7 @@ fn fill_merge_metrics<G: GitOps>(
         .collect::<BTreeSet<_>>()
         .len();
     metrics.merges_per_repo = tally.repos;
+    metrics.truncated = tally.truncated;
 }
 
 /// Splits `worker:<name>#<n>` into its base and session number.
@@ -1720,9 +1805,15 @@ pub fn render_metrics_text(report: &MetricsReport) -> String {
             } else {
                 format!(" - {}", j.merges_missing_samples.join(", "))
             };
+            let is_capped = j.truncated
+                || j.merges_per_repo
+                    .iter()
+                    .any(|repo| repo.refs.iter().any(|r| r.truncated));
+            let capped_notice = if is_capped { " (capped)" } else { "" };
             out.push_str(&format!(
-                "merges: {} merge(s) ({} incoming heads), {} without a verifier pass at the head (G1) - {} with no verdict, {} failed/blocked/inconclusive - {} repo(s), from git (no merge event is journaled), since {}{}\n",
+                "merges: {} merge(s){} ({} incoming heads), {} without a verifier pass at the head (G1) - {} with no verdict, {} failed/blocked/inconclusive - {} repo(s), from git (no merge event is journaled), since {}{}\n",
                 j.merges,
+                capped_notice,
                 j.merges_checked,
                 j.merges_without_verdict,
                 j.merges_no_verdict,
@@ -3620,7 +3711,7 @@ pub(crate) mod metrics {
 
     #[test]
     fn test_metrics_merge_without_pass_requires_verifier_pass() {
-        let commits = vec![merge_commit(
+        let commits = MergeScan::from_commits(vec![merge_commit(
             "/repo/a",
             "origin/main",
             "m1",
@@ -3632,7 +3723,7 @@ pub(crate) mod metrics {
                 "eeee555566667777", // verifier inconclusive
                 "ffff666677778888", // no journal record at all
             ],
-        )];
+        )]);
         let verdicts = vec![
             verdict_record(
                 "aaaa111122223333",
@@ -4046,6 +4137,7 @@ pub(crate) mod metrics {
                 merges_missing_samples: tally.samples,
                 merge_repos: 1,
                 merges_per_repo: tally.repos,
+                truncated: tally.truncated,
                 ..Default::default()
             },
             journal_error: None,
@@ -4054,13 +4146,15 @@ pub(crate) mod metrics {
         // Text output surfaces the truncation notice on that ref's line
         let text = render_metrics_text(&report);
         assert!(text.contains("refs origin/main=500 (capped)"));
-
-        // JSON output surfaces truncated: true
+        assert!(text.contains("merges: 500 merge(s) (capped)"));
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         assert!(json_str.contains("\"truncated\": true"));
+        let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_val["journal"]["truncated"], true);
 
         let deserialized: MetricsReport = serde_json::from_str(&json_str).unwrap();
         assert!(deserialized.journal.merges_per_repo[0].refs[0].truncated);
+        assert!(deserialized.journal.truncated);
 
         // When exactly at or below cap (e.g. 500 merges): truncated must be false
         let log_500_refs = &log_501_refs[..500];
@@ -4077,6 +4171,7 @@ pub(crate) mod metrics {
         let report_500 = MetricsReport {
             journal: JournalMetrics {
                 merges_per_repo: tally_500.repos,
+                truncated: tally_500.truncated,
                 ..Default::default()
             },
             ..report.clone()
@@ -4088,6 +4183,108 @@ pub(crate) mod metrics {
         let json_500 = serde_json::to_string_pretty(&report_500).unwrap();
         assert!(!json_500.contains("\"truncated\""));
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_metrics_g1_ref_stays_capped_when_all_commits_deduped() {
+        let tmp = std::env::temp_dir().join(format!("quaqua-test-metrics-dedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let projects = tmp.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let repo = tmp.join("repo-dedup");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        std::fs::write(
+            projects.join("INDEX.md"),
+            format!(
+                "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| p1 | {} | user | active | g |\n",
+                repo.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            projects.join("p1.md"),
+            "# p1\nIntegration branch: `quaqua/pstack-int2`\n",
+        )
+        .unwrap();
+
+        let prev = std::env::var("QUAQUA_WORKSPACE_ROOT").ok();
+        std::env::set_var("QUAQUA_WORKSPACE_ROOT", &tmp);
+
+        let mut log_main = Vec::new();
+        for i in 0..500 {
+            log_main.push(format!("m{i:04} p{i:04}_1 p{i:04}_2"));
+        }
+        let log_main_refs: Vec<&str> = log_main.iter().map(|s| s.as_str()).collect();
+
+        let mut log_integ = Vec::new();
+        for i in 0..500 {
+            log_integ.push(format!("m{i:04} p{i:04}_1 p{i:04}_2"));
+        }
+        log_integ.push("m0500 extra1 extra2".to_string());
+        let log_integ_refs: Vec<&str> = log_integ.iter().map(|s| s.as_str()).collect();
+
+        let git = MergeGit::new(&["main", "quaqua/pstack-int2"], true)
+            .with_log("origin/main", &log_main_refs)
+            .with_log("quaqua/pstack-int2", &log_integ_refs);
+
+        let commits = collect_merge_commits(&[repo.clone()], &git, 0);
+        let tally = count_merges_without_pass(&commits, &[]);
+
+        let repo_stat = &tally.repos[0];
+        let integ_ref = repo_stat
+            .refs
+            .iter()
+            .find(|r| r.target == "quaqua/pstack-int2")
+            .expect("capped ref should remain present even if all kept commits are deduped");
+        assert_eq!(integ_ref.merges, 0);
+        assert!(integ_ref.truncated);
+
+        let report = MetricsReport {
+            since: "7d".to_string(),
+            workers: Vec::new(),
+            pipelines: Vec::new(),
+            total: MetricsTotal::default(),
+            journal: JournalMetrics {
+                merges: tally.merges,
+                merges_checked: tally.checked,
+                merges_without_verdict: tally.without_verdict,
+                merges_no_verdict: tally.no_verdict,
+                merges_not_pass: tally.not_pass,
+                merges_missing_samples: tally.samples,
+                merge_repos: 1,
+                merges_per_repo: tally.repos,
+                truncated: tally.truncated,
+                ..Default::default()
+            },
+            journal_error: None,
+        };
+
+        let text = render_metrics_text(&report);
+        assert!(text.contains("quaqua/pstack-int2=0 (capped)"));
+        assert!(text.contains("merges: 500 merge(s) (capped)"));
+
+        let json_str = serde_json::to_string_pretty(&report).unwrap();
+        let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_val["journal"]["truncated"], true);
+
+        let deserialized: MetricsReport = serde_json::from_str(&json_str).unwrap();
+        assert!(deserialized.journal.truncated);
+        assert_eq!(
+            deserialized.journal.merges_per_repo[0]
+                .refs
+                .iter()
+                .find(|r| r.target == "quaqua/pstack-int2")
+                .unwrap()
+                .truncated,
+            true
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("QUAQUA_WORKSPACE_ROOT", v),
+            None => std::env::remove_var("QUAQUA_WORKSPACE_ROOT"),
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
