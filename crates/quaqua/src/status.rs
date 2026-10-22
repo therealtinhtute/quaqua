@@ -4,14 +4,17 @@
 //! scans active workers from `herdr.agent_list()` and `runs/*.owner`,
 //! and flags coordination anomalies like `WAITER-LOST` (issue #47).
 
+use crate::worker::cleanup::WorkerTelemetryRow;
+use crate::worker::prompt::cost::Tokens;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
-use crate::worker::cleanup::WorkerTelemetryRow;
-use crate::worker::prompt::cost::Tokens;
 
 use crate::cap::is_task_worker_name;
+use crate::config::{load_team_config, Config};
+use crate::engine::journal_sqlite::{SqliteJournal, VerdictLevel, VerdictRecord, VerdictSource};
+use crate::git::{Git, GitOps};
 use crate::herdr::HerdrOps;
 use crate::state::WorkerMetadata;
 
@@ -64,6 +67,184 @@ pub struct OrchestrationRow {
     pub phase: String,
     pub wait_time: String,
     pub flags: Vec<WarningFlag>,
+}
+
+/// A branch verdict row showing the strongest verdict and freshness flags (§ S2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchVerdictRow {
+    pub branch: String,
+    pub head_sha: String,
+    pub verdict_sha: String,
+    pub level: VerdictLevel,
+    pub is_verified: bool,
+    pub stale: bool,
+    pub same_harness: bool,
+}
+
+/// Returns true if the verifier's harness matches the builder kind's harness in team.toml (§ S2).
+pub fn is_same_harness(verdict: &VerdictRecord, cfg: Option<&Config>) -> bool {
+    if verdict.source != VerdictSource::Verifier {
+        return false;
+    }
+
+    let verifier_harness = if !verdict.harness.is_empty() {
+        verdict.harness.clone()
+    } else if let Some(vk) = &verdict.verifier_kind {
+        cfg.and_then(|c| c.kinds.get(vk))
+            .map(|k| k.harness.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let builder_harness = if let Some(bk) = &verdict.builder_kind {
+        cfg.and_then(|c| c.kinds.get(bk))
+            .map(|k| k.harness.clone())
+            .unwrap_or_default()
+    } else {
+        let b_part = verdict
+            .branch
+            .strip_prefix("quaqua/")
+            .unwrap_or(&verdict.branch);
+        let inferred_kind = b_part.split('-').next().unwrap_or(b_part);
+        cfg.and_then(|c| c.kinds.get(inferred_kind))
+            .map(|k| k.harness.clone())
+            .unwrap_or_default()
+    };
+
+    !verifier_harness.is_empty()
+        && !builder_harness.is_empty()
+        && verifier_harness == builder_harness
+}
+
+fn resolve_branch_head<G: GitOps>(git: &G, repo: &Path, branch: &str) -> Option<String> {
+    let ref_name = if branch.starts_with("refs/") {
+        branch.to_string()
+    } else {
+        format!("refs/heads/{branch}")
+    };
+    if let Ok(out) = git.run_in(repo, &["rev-parse", "--verify", "--quiet", &ref_name]) {
+        if out.status.success() {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !sha.is_empty() {
+                return Some(sha);
+            }
+        }
+    }
+    if let Ok(out) = git.run_in(repo, &["rev-parse", "--verify", "--quiet", branch]) {
+        if out.status.success() {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !sha.is_empty() {
+                return Some(sha);
+            }
+        }
+    }
+    None
+}
+
+/// Query branch verdict rows from the journal and repository (§ S2).
+pub fn query_branch_verdicts<G: GitOps>(
+    db_path: &Path,
+    repo: &Path,
+    git: &G,
+) -> Result<Vec<BranchVerdictRow>, String> {
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let journal = SqliteJournal::open(db_path)
+        .map_err(|e| format!("db error: cannot open {}: {e}", db_path.display()))?;
+
+    let all_verdicts = journal
+        .load_all_verdicts()
+        .map_err(|e| format!("db error: loading verdicts: {e}"))?;
+
+    if all_verdicts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let team_cfg = load_team_config().ok();
+
+    let mut branches_seen = BTreeSet::new();
+    let mut branch_list = Vec::new();
+    for v in &all_verdicts {
+        if branches_seen.insert(v.branch.clone()) {
+            branch_list.push(v.branch.clone());
+        }
+    }
+    branch_list.sort();
+
+    let mut rows = Vec::new();
+    for branch in branch_list {
+        let records_for_branch: Vec<&VerdictRecord> =
+            all_verdicts.iter().filter(|v| v.branch == branch).collect();
+        if records_for_branch.is_empty() {
+            continue;
+        }
+
+        let head_sha_opt = resolve_branch_head(git, repo, &branch);
+
+        match head_sha_opt {
+            Some(head_sha) => {
+                let verdict_at_head = journal
+                    .strongest_verdict(&branch, &head_sha)
+                    .map_err(|e| format!("db error: {e}"))?;
+
+                if let Some(v) = verdict_at_head {
+                    let same_harness = is_same_harness(&v, team_cfg.as_ref());
+                    rows.push(BranchVerdictRow {
+                        branch: branch.clone(),
+                        head_sha: head_sha.clone(),
+                        verdict_sha: v.sha.clone(),
+                        level: v.level,
+                        is_verified: v.is_verified(),
+                        stale: false,
+                        same_harness,
+                    });
+                } else {
+                    let last_record = records_for_branch.last().unwrap();
+                    let strongest_old = journal
+                        .strongest_verdict(&branch, &last_record.sha)
+                        .map_err(|e| format!("db error: {e}"))?;
+
+                    if let Some(v) = strongest_old {
+                        let same_harness = is_same_harness(&v, team_cfg.as_ref());
+                        let stale = head_sha != v.sha;
+                        rows.push(BranchVerdictRow {
+                            branch: branch.clone(),
+                            head_sha: head_sha.clone(),
+                            verdict_sha: v.sha.clone(),
+                            level: v.level,
+                            is_verified: v.is_verified(),
+                            stale,
+                            same_harness,
+                        });
+                    }
+                }
+            }
+            None => {
+                let last_record = records_for_branch.last().unwrap();
+                let strongest = journal
+                    .strongest_verdict(&branch, &last_record.sha)
+                    .map_err(|e| format!("db error: {e}"))?;
+
+                if let Some(v) = strongest {
+                    let same_harness = is_same_harness(&v, team_cfg.as_ref());
+                    rows.push(BranchVerdictRow {
+                        branch: branch.clone(),
+                        head_sha: v.sha.clone(),
+                        verdict_sha: v.sha.clone(),
+                        level: v.level,
+                        is_verified: v.is_verified(),
+                        stale: false,
+                        same_harness,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(rows)
 }
 
 /// Query workflow rows from `<workspace_root>/runs/quaqua.db`.
@@ -403,6 +584,7 @@ pub fn scan_orchestration<H: HerdrOps>(
 pub fn format_status_report(
     workflows: Result<&[WorkflowStatusRow], &str>,
     orchestration: Result<&[OrchestrationRow], &str>,
+    verdicts: Result<&[BranchVerdictRow], &str>,
 ) -> String {
     let mut out = String::new();
 
@@ -478,6 +660,50 @@ pub fn format_status_report(
         }
     }
 
+    out.push_str("\n=== Verdicts ===\n");
+    match verdicts {
+        Ok(v_rows) if v_rows.is_empty() => {
+            out.push_str("no verdicts\n");
+        }
+        Ok(v_rows) => {
+            out.push_str(&format!(
+                "{:<24} {:<12} {:<20} {}\n",
+                "BRANCH", "HEAD", "VERDICT", "FLAGS"
+            ));
+            for r in v_rows {
+                let mut flags = Vec::new();
+                if r.stale {
+                    flags.push("stale");
+                }
+                if r.same_harness {
+                    flags.push("same-harness");
+                }
+                let flags_str = if flags.is_empty() {
+                    "-".to_string()
+                } else {
+                    flags.join(", ")
+                };
+                let head_str = if r.head_sha.len() >= 7 {
+                    &r.head_sha[..7]
+                } else if r.head_sha.is_empty() {
+                    "-"
+                } else {
+                    &r.head_sha
+                };
+                out.push_str(&format!(
+                    "{:<24} {:<12} {:<20} {}\n",
+                    r.branch,
+                    head_str,
+                    r.level.as_str(),
+                    flags_str
+                ));
+            }
+        }
+        Err(err) => {
+            out.push_str(&format!("{err}\n"));
+        }
+    }
+
     out
 }
 
@@ -487,17 +713,34 @@ pub fn render_status<H: HerdrOps>(
     runs_dir: &Path,
     herdr: &H,
 ) -> Result<String, String> {
+    let git = Git::new();
+    render_status_with_git(db_path, runs_dir, herdr, &git)
+}
+
+/// Render status with explicit Git implementation.
+pub fn render_status_with_git<H: HerdrOps, G: GitOps>(
+    db_path: &Path,
+    runs_dir: &Path,
+    herdr: &H,
+    git: &G,
+) -> Result<String, String> {
     let wf_res = query_workflows(db_path);
     let orch_res = scan_orchestration(runs_dir, herdr);
+    let repo = runs_dir.parent().unwrap_or_else(|| Path::new("."));
+    let verdicts_res = query_branch_verdicts(db_path, repo, git);
     Ok(format_status_report(
         wf_res.as_deref().map_err(|e| e.as_str()),
         orch_res.as_deref().map_err(|e| e.as_str()),
+        verdicts_res.as_deref().map_err(|e| e.as_str()),
     ))
 }
 
 /// CLI entrypoint for `quaqua status`.
 pub fn handle_status<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, String> {
-    if args.iter().any(|a| a == "--metrics" || a.starts_with("--metrics=")) {
+    if args
+        .iter()
+        .any(|a| a == "--metrics" || a.starts_with("--metrics="))
+    {
         let metrics_args = parse_metrics_args(args)?;
         let runs_dir = if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
             PathBuf::from(dir)
@@ -509,10 +752,12 @@ pub fn handle_status<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, Str
         return Ok(0);
     }
 
-    let db_path = crate::workspace::workspace_root()
-        .join("runs")
-        .join("quaqua.db");
-    let runs_dir = crate::workspace::workspace_root().join("runs");
+    let runs_dir = if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
+        PathBuf::from(dir)
+    } else {
+        crate::workspace::workspace_root().join("runs")
+    };
+    let db_path = runs_dir.join("quaqua.db");
     let report = render_status(&db_path, &runs_dir, herdr)?;
     print!("{report}");
     Ok(0)
@@ -697,7 +942,9 @@ pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
             total_usd += usd;
         } else {
             unpriced += 1;
-            if w.harness.as_deref().and_then(crate::harness::Harness::parse)
+            if w.harness
+                .as_deref()
+                .and_then(crate::harness::Harness::parse)
                 == Some(crate::harness::Harness::Claude)
                 || w.spend_src == "claude-tokens"
             {
@@ -1005,7 +1252,7 @@ mod tests {
         let workflows = res.unwrap();
         assert!(workflows.is_empty(), "expected empty workflows");
 
-        let report = format_status_report(Ok(&workflows), Ok(&[]));
+        let report = format_status_report(Ok(&workflows), Ok(&[]), Ok(&[]));
         assert!(
             report.contains("no workflows"),
             "must contain 'no workflows'"
@@ -1047,7 +1294,7 @@ mod tests {
         let workflows = res.unwrap();
         assert!(workflows.is_empty(), "expected 0 workflows in empty db");
 
-        let report = format_status_report(Ok(&workflows), Ok(&[]));
+        let report = format_status_report(Ok(&workflows), Ok(&[]), Ok(&[]));
         assert!(report.contains("no workflows"));
     }
 
@@ -1420,7 +1667,7 @@ mod tests {
             "error message must start with 'db error:' but got: {err_msg}"
         );
 
-        let report = format_status_report(Err(&err_msg), Ok(&[]));
+        let report = format_status_report(Err(&err_msg), Ok(&[]), Ok(&[]));
         assert!(
             report.contains("db error:"),
             "rendered report must show db error"
@@ -1492,7 +1739,7 @@ mod tests {
             "error must start with 'herdr error:' but got: {err_msg}"
         );
 
-        let report = format_status_report(Ok(&[]), Err(&err_msg));
+        let report = format_status_report(Ok(&[]), Err(&err_msg), Ok(&[]));
         assert!(
             report.contains("herdr error:"),
             "report must show herdr error"
@@ -1520,7 +1767,7 @@ mod tests {
             "error must identify invalid json, got: {err_msg}"
         );
 
-        let report = format_status_report(Ok(&[]), Err(&err_msg));
+        let report = format_status_report(Ok(&[]), Err(&err_msg), Ok(&[]));
         assert!(report.contains("herdr error: invalid agent list JSON"));
     }
 
@@ -1617,6 +1864,287 @@ mod tests {
         assert!(out.contains("sude-w1"));
         assert!(out.contains("WAIT"));
     }
+
+    #[test]
+    fn test_status_verdict_stale_on_new_commit() {
+        let tmp = temp_test_dir("stale-commit");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let repo = tmp.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        // Init git repo
+        let git = Git::new();
+        let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git.run_in(&repo, &["config", "user.name", "test"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "initial commit"])
+            .unwrap();
+
+        // Create branch quaqua/feat-stale at commit 1
+        let _ = git
+            .run_in(&repo, &["checkout", "-qb", "quaqua/feat-stale"])
+            .unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "commit 1"])
+            .unwrap();
+        let sha1 =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        // Record verdict in journal at sha1
+        let db_path = tmp.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+        let v1 = VerdictRecord {
+            branch: "quaqua/feat-stale".to_string(),
+            sha: sha1.clone(),
+            level: VerdictLevel::ReviewClean,
+            evidence: "verdict evidence".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "pi".to_string(),
+        };
+        journal
+            .record_verdict("wf-stale", &v1)
+            .expect("record verdict");
+
+        // Before new commit: head == verdict SHA -> not stale
+        let rows_before = query_branch_verdicts(&db_path, &repo, &git).expect("query before");
+        assert_eq!(rows_before.len(), 1);
+        assert_eq!(rows_before[0].branch, "quaqua/feat-stale");
+        assert_eq!(rows_before[0].head_sha, sha1);
+        assert_eq!(rows_before[0].verdict_sha, sha1);
+        assert_eq!(rows_before[0].level, VerdictLevel::ReviewClean);
+        assert!(!rows_before[0].stale);
+
+        // Make new commit on the branch
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "commit 2 (new)"])
+            .unwrap();
+        let sha2 =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+        assert_ne!(sha1, sha2, "new commit must produce different SHA");
+
+        // Query branch verdicts after new commit
+        let rows_after = query_branch_verdicts(&db_path, &repo, &git).expect("query after");
+        assert_eq!(rows_after.len(), 1);
+        assert_eq!(rows_after[0].branch, "quaqua/feat-stale");
+        assert_eq!(rows_after[0].head_sha, sha2);
+        assert_eq!(rows_after[0].verdict_sha, sha1);
+        assert_eq!(rows_after[0].level, VerdictLevel::ReviewClean);
+        assert!(
+            rows_after[0].stale,
+            "verdict must be marked stale on new commit"
+        );
+
+        // Check format_status_report output contains stale flag
+        let report = format_status_report(Ok(&[]), Ok(&[]), Ok(&rows_after));
+        assert!(report.contains("quaqua/feat-stale"));
+        assert!(report.contains("review-clean"));
+        assert!(report.contains("stale"));
+    }
+
+    #[test]
+    fn test_status_verdict_strongest_per_branch_and_sha() {
+        let tmp = temp_test_dir("strongest-sha");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let repo = tmp.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let git = Git::new();
+        let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git.run_in(&repo, &["config", "user.name", "test"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "initial"])
+            .unwrap();
+
+        let _ = git
+            .run_in(&repo, &["checkout", "-qb", "quaqua/feat-strong"])
+            .unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "work"])
+            .unwrap();
+        let sha =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let db_path = tmp.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+
+        // 1. Builder self-report
+        let v_builder = VerdictRecord {
+            branch: "quaqua/feat-strong".to_string(),
+            sha: sha.clone(),
+            level: VerdictLevel::UnitTestVerified,
+            evidence: "builder unit tests pass".to_string(),
+            verifier: "sude-build".to_string(),
+            source: VerdictSource::SelfReport,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: None,
+            harness: "omp".to_string(),
+        };
+        journal.record_verdict("wf-builder", &v_builder).unwrap();
+
+        // 2. Verifier verdict (review-clean overrides self-report)
+        let v_rev_clean = VerdictRecord {
+            branch: "quaqua/feat-strong".to_string(),
+            sha: sha.clone(),
+            level: VerdictLevel::ReviewClean,
+            evidence: "Verdict: clean".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "pi".to_string(),
+        };
+        journal
+            .record_verdict("wf-rev-clean", &v_rev_clean)
+            .unwrap();
+
+        let rows = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].branch, "quaqua/feat-strong");
+        assert_eq!(rows[0].level, VerdictLevel::ReviewClean);
+        assert!(rows[0].is_verified);
+
+        // 3. Negative dominates: second verifier records verifier-failed
+        let v_rev_failed = VerdictRecord {
+            branch: "quaqua/feat-strong".to_string(),
+            sha: sha.clone(),
+            level: VerdictLevel::VerifierFailed,
+            evidence: "Verdict: 1 findings".to_string(),
+            verifier: "truonglao-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("truonglao".to_string()),
+            harness: "claude".to_string(),
+        };
+        journal
+            .record_verdict("wf-rev-fail", &v_rev_failed)
+            .unwrap();
+
+        let rows2 = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts 2");
+        assert_eq!(rows2.len(), 1);
+        assert_eq!(
+            rows2[0].level,
+            VerdictLevel::VerifierFailed,
+            "verifier-failed must dominate over review-clean"
+        );
+        assert!(!rows2[0].is_verified);
+
+        let report = format_status_report(Ok(&[]), Ok(&[]), Ok(&rows2));
+        assert!(report.contains("quaqua/feat-strong"));
+        assert!(report.contains("verifier-failed"));
+    }
+
+    #[test]
+    fn test_status_verdict_same_harness_shown() {
+        let tmp = temp_test_dir("same-harness");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let repo = tmp.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let git = Git::new();
+        let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git.run_in(&repo, &["config", "user.name", "test"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "initial"])
+            .unwrap();
+
+        // Branch 1: detu (verifier, omp) verifying sude (builder, omp) -> same-harness
+        let _ = git
+            .run_in(&repo, &["checkout", "-qb", "quaqua/feat-same"])
+            .unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "work same"])
+            .unwrap();
+        let sha_same =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        // Branch 2: suhuynh (verifier, pi) verifying sude (builder, omp) -> diff harness
+        let _ = git
+            .run_in(&repo, &["checkout", "-qb", "quaqua/feat-diff"])
+            .unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "work diff"])
+            .unwrap();
+        let sha_diff =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let db_path = tmp.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+
+        let v_same = VerdictRecord {
+            branch: "quaqua/feat-same".to_string(),
+            sha: sha_same,
+            level: VerdictLevel::ReviewClean,
+            evidence: "clean".to_string(),
+            verifier: "detu-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("detu".to_string()),
+            harness: "omp".to_string(), // detu is omp, sude is omp
+        };
+        journal.record_verdict("wf-same", &v_same).unwrap();
+
+        let v_diff = VerdictRecord {
+            branch: "quaqua/feat-diff".to_string(),
+            sha: sha_diff,
+            level: VerdictLevel::ReviewClean,
+            evidence: "clean".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "pi".to_string(), // suhuynh is pi, sude is omp
+        };
+        journal.record_verdict("wf-diff", &v_diff).unwrap();
+
+        let rows = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts");
+        assert_eq!(rows.len(), 2);
+
+        let row_diff = rows
+            .iter()
+            .find(|r| r.branch == "quaqua/feat-diff")
+            .unwrap();
+        assert!(!row_diff.same_harness);
+
+        let row_same = rows
+            .iter()
+            .find(|r| r.branch == "quaqua/feat-same")
+            .unwrap();
+        assert!(
+            row_same.same_harness,
+            "must show same-harness when harnesses match"
+        );
+
+        let report = format_status_report(Ok(&[]), Ok(&[]), Ok(&rows));
+        assert!(report.contains("same-harness"));
+        let lines: Vec<&str> = report
+            .lines()
+            .filter(|l| l.contains("quaqua/feat-same"))
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("same-harness"));
+    }
 }
 
 #[cfg(test)]
@@ -1659,7 +2187,9 @@ pub(crate) mod metrics {
         };
 
         let rendered = render_metrics(&runs_dir, &args).unwrap();
-        assert!(rendered.contains("=== Metrics (runs/telemetry.jsonl, since 2026-10-21T00:00:00Z) ==="));
+        assert!(
+            rendered.contains("=== Metrics (runs/telemetry.jsonl, since 2026-10-21T00:00:00Z) ===")
+        );
         assert!(rendered.contains("tieude-p74lock"));
         assert!(rendered.contains("detu-claudediff"));
         assert!(rendered.contains("truonglao-metrics"));
@@ -1794,8 +2324,15 @@ pub(crate) mod metrics {
         assert_eq!(c_overflow, 0);
 
         // Nit 11: invalid --since value is rejected with Err
-        assert!(parse_metrics_args(&["--metrics".to_string(), "--since".to_string(), "1w".to_string()]).is_err());
-        assert!(parse_metrics_args(&["--metrics".to_string(), "--since=invalid".to_string()]).is_err());
+        assert!(parse_metrics_args(&[
+            "--metrics".to_string(),
+            "--since".to_string(),
+            "1w".to_string()
+        ])
+        .is_err());
+        assert!(
+            parse_metrics_args(&["--metrics".to_string(), "--since=invalid".to_string()]).is_err()
+        );
 
         // Nit 14: long names expand name_width
         let long_worker = WorkerTelemetryRow {
