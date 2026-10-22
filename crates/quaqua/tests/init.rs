@@ -1151,3 +1151,46 @@ fn s6_acceptance_5_fresh_init_has_agents_coordinator_lines_and_playbooks() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn f1_fresh_init_has_no_fixture() {
+    let root = std::env::temp_dir().join(format!("quaqua-init-f1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let ws = root.join("ws");
+
+    let nobin = root.join("nobin");
+    std::fs::create_dir_all(&nobin).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.env("PATH", &nobin)
+        .env("HERDR_BIN_PATH", nobin.join("herdr"))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_TEMPLATE_DIR")
+        .current_dir(&root);
+
+    let out = cmd
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !ws.join("playbooks/fixture.md").exists(),
+        "fixture.md must not be installed in playbooks/"
+    );
+    assert!(
+        !ws.join("principles/fixture.md").exists(),
+        "fixture.md must not be installed in principles/"
+    );
+    assert!(ws.join("playbooks/bug-fix.md").is_file());
+    assert!(ws.join("playbooks/feature.md").is_file());
+    assert!(ws.join("playbooks/figure-it-out.md").is_file());
+
+    let _ = std::fs::remove_dir_all(&root);
+}

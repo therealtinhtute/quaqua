@@ -76,6 +76,11 @@ pub enum PlaybookError {
     },
     NotFound(String),
     ParseError(String),
+    DirectoryNotFound {
+        kind: &'static str,
+        path: PathBuf,
+    },
+    WorkspaceError(String),
 }
 
 impl fmt::Display for PlaybookError {
@@ -103,6 +108,10 @@ impl fmt::Display for PlaybookError {
             }
             Self::NotFound(name) => write!(f, "playbook '{name}' not found"),
             Self::ParseError(msg) => write!(f, "playbook parse error: {msg}"),
+            Self::DirectoryNotFound { kind, path } => {
+                write!(f, "{kind} directory not found: '{}'", path.display())
+            }
+            Self::WorkspaceError(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -300,6 +309,23 @@ pub fn parse_playbook(content: &str, principles_dir: &Path) -> Result<Playbook, 
         format!("## Orchestrator\n\n{orchestrator_body}")
     };
 
+    // Validate principle citations in ## Orchestrator against principles_dir
+    let orch_citations = extract_principle_citations(&orchestrator_body);
+    for citation in &orch_citations {
+        let leaf_name = citation
+            .strip_prefix("principle-")
+            .unwrap_or(citation.as_str());
+        let leaf_path = principles_dir.join(format!("{leaf_name}.md"));
+        if !leaf_path.is_file() {
+            return Err(PlaybookError::UnknownPrinciple {
+                principle: citation.clone(),
+                path: leaf_path,
+            });
+        }
+    }
+
+    let worker_text = worker_lines.join("\n").trim().to_string();
+
     // 3. Parse worker steps
     let mut steps: Vec<Step> = Vec::new();
     let mut current_id: Option<u32> = None;
@@ -334,22 +360,22 @@ pub fn parse_playbook(content: &str, principles_dir: &Path) -> Result<Playbook, 
     }
 
     // 4. Validate principles resolution against principles_dir
+    // 4. Validate principles resolution against principles_dir across entire Worker section
+    let worker_citations = extract_principle_citations(&worker_text);
     let mut all_cited_principles: Vec<String> = Vec::new();
-    for step in &steps {
-        for citation in &step.cited_principles {
-            if !all_cited_principles.contains(citation) {
-                all_cited_principles.push(citation.clone());
-            }
-            let leaf_name = citation
-                .strip_prefix("principle-")
-                .unwrap_or(citation.as_str());
-            let leaf_path = principles_dir.join(format!("{leaf_name}.md"));
-            if !leaf_path.is_file() {
-                return Err(PlaybookError::UnknownPrinciple {
-                    principle: citation.clone(),
-                    path: leaf_path,
-                });
-            }
+    for citation in &worker_citations {
+        if !all_cited_principles.contains(citation) {
+            all_cited_principles.push(citation.clone());
+        }
+        let leaf_name = citation
+            .strip_prefix("principle-")
+            .unwrap_or(citation.as_str());
+        let leaf_path = principles_dir.join(format!("{leaf_name}.md"));
+        if !leaf_path.is_file() {
+            return Err(PlaybookError::UnknownPrinciple {
+                principle: citation.clone(),
+                path: leaf_path,
+            });
         }
     }
 
@@ -374,8 +400,7 @@ pub fn parse_playbook(content: &str, principles_dir: &Path) -> Result<Playbook, 
             leaves: non_exempt_leaves,
         });
     }
-
-    let worker_text = worker_lines.join("\n").trim().to_string();
+    // worker_text is already extracted above
 
     Ok(Playbook {
         name,
@@ -402,7 +427,16 @@ pub fn load_playbooks(
     principles_dir: &Path,
 ) -> Result<Vec<Playbook>, PlaybookError> {
     if !playbooks_dir.is_dir() {
-        return Ok(Vec::new());
+        return Err(PlaybookError::DirectoryNotFound {
+            kind: "playbooks",
+            path: playbooks_dir.to_path_buf(),
+        });
+    }
+    if !principles_dir.is_dir() {
+        return Err(PlaybookError::DirectoryNotFound {
+            kind: "principles",
+            path: principles_dir.to_path_buf(),
+        });
     }
     let mut entries: Vec<PathBuf> = fs::read_dir(playbooks_dir)?
         .filter_map(|e| e.ok())
@@ -434,6 +468,18 @@ pub fn find_playbook(
     playbooks_dir: &Path,
     principles_dir: &Path,
 ) -> Result<Playbook, PlaybookError> {
+    if !playbooks_dir.is_dir() {
+        return Err(PlaybookError::DirectoryNotFound {
+            kind: "playbooks",
+            path: playbooks_dir.to_path_buf(),
+        });
+    }
+    if !principles_dir.is_dir() {
+        return Err(PlaybookError::DirectoryNotFound {
+            kind: "principles",
+            path: principles_dir.to_path_buf(),
+        });
+    }
     let direct_path = playbooks_dir.join(format!("{name}.md"));
     if direct_path.is_file() {
         let pb = load_playbook(&direct_path, principles_dir)?;
@@ -478,20 +524,11 @@ pub fn resolve_playbooks_dir(explicit: Option<&Path>) -> PathBuf {
             return PathBuf::from(val);
         }
     }
-    let ws_playbooks = crate::workspace::workspace_root().join("playbooks");
-    if ws_playbooks.is_dir() {
-        return ws_playbooks;
-    }
-    let tpl_playbooks = Path::new("templates/workspace/playbooks");
-    if tpl_playbooks.is_dir() {
-        return tpl_playbooks.to_path_buf();
-    }
-    let manifest_tpl =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates/workspace/playbooks");
-    if manifest_tpl.is_dir() {
-        return manifest_tpl;
-    }
-    ws_playbooks
+    let ws_root = match crate::workspace::workspace_root_checked() {
+        Ok(root) => root,
+        Err(_) => crate::workspace::workspace_root(),
+    };
+    ws_root.join("playbooks")
 }
 
 /// Resolve the principles directory from CLI flags, env vars, or workspace defaults.
@@ -504,20 +541,11 @@ pub fn resolve_principles_dir(explicit: Option<&Path>) -> PathBuf {
             return PathBuf::from(val);
         }
     }
-    let ws_principles = crate::workspace::workspace_root().join("principles");
-    if ws_principles.is_dir() {
-        return ws_principles;
-    }
-    let tpl_principles = Path::new("templates/workspace/principles");
-    if tpl_principles.is_dir() {
-        return tpl_principles.to_path_buf();
-    }
-    let manifest_tpl =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates/workspace/principles");
-    if manifest_tpl.is_dir() {
-        return manifest_tpl;
-    }
-    ws_principles
+    let ws_root = match crate::workspace::workspace_root_checked() {
+        Ok(root) => root,
+        Err(_) => crate::workspace::workspace_root(),
+    };
+    ws_root.join("principles")
 }
 
 /// Execute `quaqua playbook list`: format `<name> — <when>` per file.

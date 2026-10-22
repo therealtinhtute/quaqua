@@ -473,6 +473,17 @@ fn s6_acceptance_2_every_cited_leaf_resolves_none_over_cap() {
             non_exempt.len(),
             non_exempt
         );
+        // Orchestrator citations must also resolve against principles_dir
+        let orch_citations = extract_principle_citations(&pb.orchestrator);
+        for citation in &orch_citations {
+            let path = resolve_principle_path(citation, &principles_dir);
+            assert!(
+                path.is_file(),
+                "cited principle '{citation}' in playbook '{}' Orchestrator does not resolve at {}",
+                pb.name,
+                path.display()
+            );
+        }
     }
 }
 
@@ -663,4 +674,125 @@ when: Resume an in-flight session from previous artifacts.
     assert_eq!(pb.name, "session-pickup");
     assert!(pb.steps.is_empty());
     assert_eq!(pb.step_ids(), Vec::<u32>::new());
+}
+
+#[test]
+fn f2_default_path_with_no_workspace_dir_errors() {
+    let sandbox = TempDir::new("no-ws");
+    let empty_home = sandbox.sub("empty-home");
+
+    let bin = env!("CARGO_BIN_EXE_quaqua");
+    let out = Command::new(bin)
+        .args(&["playbook", "list"])
+        .env("QUAQUA_HOME", &empty_home)
+        .env_remove("QUAQUA_ROOT")
+        .env_remove("QUAQUA_PLAYBOOKS_DIR")
+        .env_remove("QUAQUA_PRINCIPLES_DIR")
+        .output()
+        .expect("failed to execute quaqua binary");
+
+    let code = out.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(code, 1, "default path with no workspace must exit 1");
+    assert!(
+        stderr.contains("playbooks directory not found"),
+        "stderr should state playbooks directory not found: {stderr}"
+    );
+}
+
+#[test]
+fn f3_preamble_principle_typo_fails() {
+    let sandbox = TempDir::new("f3-typo");
+    let pr_dir = sandbox.sub("principles");
+    sandbox.write_file("principles/prove-it-works.md", "# Prove it works\n");
+
+    let content = r#"---
+name: preamble-typo
+when: Testing preamble principle typo.
+---
+
+## Orchestrator
+
+1. Plan.
+
+## Worker
+
+Read principle-typo before beginning.
+
+1. Step one citing principle-prove-it-works.
+"#;
+
+    let err = parse_playbook(content, &pr_dir).expect_err("preamble typo must fail parser");
+    match err {
+        PlaybookError::UnknownPrinciple { principle, .. } => {
+            assert_eq!(principle, "principle-typo");
+        }
+        other => panic!("expected UnknownPrinciple, got: {other:?}"),
+    }
+}
+
+#[test]
+fn f3_preamble_four_leaves_fail() {
+    let sandbox = TempDir::new("f3-four-leaves");
+    let pr_dir = sandbox.sub("principles");
+    sandbox.write_file("principles/leaf-a.md", "# Leaf A\n");
+    sandbox.write_file("principles/leaf-b.md", "# Leaf B\n");
+    sandbox.write_file("principles/leaf-c.md", "# Leaf C\n");
+    sandbox.write_file("principles/leaf-d.md", "# Leaf D\n");
+    sandbox.write_file("principles/prove-it-works.md", "# Prove it works\n");
+
+    let content = r#"---
+name: preamble-four-leaves
+when: Testing 4 leaves in preamble fails cap.
+---
+
+## Orchestrator
+
+1. Plan.
+
+## Worker
+
+Read principle-leaf-a, principle-leaf-b, principle-leaf-c, and principle-leaf-d.
+
+1. Step one citing principle-prove-it-works.
+"#;
+
+    let err = parse_playbook(content, &pr_dir)
+        .expect_err("preamble with 4 non-exempt leaves must fail cap");
+    match err {
+        PlaybookError::LeafCapExceeded { count, max, .. } => {
+            assert_eq!(count, 4);
+            assert_eq!(max, 3);
+        }
+        other => panic!("expected LeafCapExceeded, got: {other:?}"),
+    }
+}
+
+#[test]
+fn orchestrator_principle_typo_fails() {
+    let sandbox = TempDir::new("orch-typo");
+    let pr_dir = sandbox.sub("principles");
+    sandbox.write_file("principles/prove-it-works.md", "# Prove it works\n");
+
+    let content = r#"---
+name: orch-typo
+when: Testing orchestrator principle typo.
+---
+
+## Orchestrator
+
+1. Step citing principle-orch-typo.
+
+## Worker
+
+1. Step one citing principle-prove-it-works.
+"#;
+
+    let err = parse_playbook(content, &pr_dir).expect_err("orchestrator typo must fail parser");
+    match err {
+        PlaybookError::UnknownPrinciple { principle, .. } => {
+            assert_eq!(principle, "principle-orch-typo");
+        }
+        other => panic!("expected UnknownPrinciple, got: {other:?}"),
+    }
 }
