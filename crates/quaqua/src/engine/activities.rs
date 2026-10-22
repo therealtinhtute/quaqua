@@ -762,8 +762,22 @@ mod tests {
     use std::process::Command;
     use std::sync::LazyLock;
     use std::sync::Mutex;
+    use std::sync::MutexGuard;
 
     static HERDR_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// One lock order for the whole test binary: [`crate::test_env::lock_env`]
+    /// first, then [`HERDR_TEST_MUTEX`]. A test that takes the herdr mutex and
+    /// then waits for the env lock deadlocks against every herdr test that
+    /// already holds the env lock (`--lib`, 16 threads: the cost fixture test
+    /// against `with_herdr_stub`).
+    fn lock_herdr_test() -> (MutexGuard<'static, ()>, MutexGuard<'static, ()>) {
+        let env = crate::test_env::lock_env();
+        let herdr = HERDR_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (env, herdr)
+    }
 
     struct EnvVarGuard {
         key: &'static str,
@@ -918,10 +932,7 @@ esac
     });
 
     fn with_herdr_stub<F: FnOnce(&SystemActivities, &Path)>(f: F) {
-        let _env_lock = crate::test_env::lock_env();
-        let _lock = HERDR_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _locks = lock_herdr_test();
 
         let stub_bin = &*STUB_BIN;
         let pid = std::process::id();
@@ -1133,9 +1144,7 @@ esac
 
     #[test]
     fn test_herdr_bin_path_env_var_resolution() {
-        let _lock = HERDR_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _locks = lock_herdr_test();
 
         let stub_bin = &*STUB_BIN;
         let pid = std::process::id();
@@ -1244,9 +1253,7 @@ esac
 
     #[test]
     fn test_git_operations() {
-        let _lock = HERDR_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _locks = lock_herdr_test();
 
         let pid = std::process::id();
         let temp_dir = std::env::temp_dir().join(format!("quaqua-act-git-{}", pid));
@@ -1403,9 +1410,7 @@ esac
     }
     #[test]
     fn test_git_diff_hash() {
-        let _lock = HERDR_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _locks = lock_herdr_test();
 
         let pid = std::process::id();
         let temp_dir = std::env::temp_dir().join(format!("quaqua-act-diffhash-{}", pid));
@@ -1802,9 +1807,7 @@ spawn = "auto"
 
     #[test]
     fn test_cost_query_spend_fixture_db() {
-        let _lock = HERDR_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _locks = lock_herdr_test();
 
         let pid = std::process::id();
         let temp_dir = std::env::temp_dir().join(format!("quaqua-act-cost-db-{}", pid));
@@ -1837,7 +1840,6 @@ spawn = "auto"
         }
 
         // Hermetic isolation: empty PATH (proves no external CLI invocation), isolated HOME, isolated RUNS_DIR, and point QUAQUA_COST_DB_PATH
-        let _env_lock = crate::test_env::lock_env();
         let _guard_path = EnvVarGuard::set("PATH", empty_path_dir.to_str().unwrap());
         let _guard_home = EnvVarGuard::set("HOME", home_dir.to_str().unwrap());
         let _guard_runs = EnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
@@ -1886,9 +1888,7 @@ spawn = "auto"
     }
     #[test]
     fn test_all_activity_arms_live_no_deferrals() {
-        let _lock = HERDR_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _locks = lock_herdr_test();
 
         let pid = std::process::id();
         let temp_dir = std::env::temp_dir().join(format!("quaqua-act-nodef-{}", pid));

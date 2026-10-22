@@ -2891,6 +2891,7 @@ model = "m3"
         )
         .unwrap();
 
+        let _env_lock = crate::test_env::lock_env();
         let _env_guard = EnvGuard::capture(&["QUAQUA_TEAM_TOML"]);
         std::env::set_var("QUAQUA_TEAM_TOML", &fixture_path);
         let git = Git::new();

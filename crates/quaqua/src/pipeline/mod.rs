@@ -4047,7 +4047,19 @@ mod tests {
                 }
             }
         }
-        let out = cmd.env(MARK, "1").output().unwrap();
+        let child = {
+            // The child inherits the process env at spawn. On platforms without
+            // /proc/self/environ (macOS) that copy is the live env, so hold the
+            // env lock until the child exists: another test's temp QUAQUA_* or
+            // PATH must not leak into the isolated run.
+            let _env_lock = crate::test_env::lock_env();
+            cmd.env(MARK, "1")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let out = child.wait_with_output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
             out.status.success() && stdout.contains("1 passed"),
@@ -4315,6 +4327,7 @@ esac
         ) {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("f2-bad");
@@ -4480,6 +4493,7 @@ esac
         ) {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let task = "h4-ro";
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
@@ -4681,6 +4695,7 @@ esac
         ) {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("f5-e2e");
@@ -4763,6 +4778,7 @@ esac
         ) {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("s1b-rev");
@@ -4871,6 +4887,7 @@ esac
         ) {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("s1b-bld");
@@ -4961,6 +4978,7 @@ esac
         ) {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("s1b-lock");
@@ -5044,6 +5062,7 @@ esac
         ) {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("s1b-dup");
@@ -6058,6 +6077,7 @@ esac
         if !in_isolated_driver_process("pipeline::tests::test_design_test_7_child_watchdog_exit_4_opens_attempt_2_no_second_prompt") {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("d7-wd");
