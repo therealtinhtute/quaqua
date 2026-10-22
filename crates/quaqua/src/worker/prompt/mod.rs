@@ -589,7 +589,11 @@ pub fn prompt_worker<G: GitOps>(
         }
     }
 
-    let fallback_kind = name.split('-').next().unwrap_or("tieude").to_string();
+    let fallback_kind = crate::config::load_team_config()
+        .ok()
+        .and_then(|cfg| crate::config::kind_of_worker(&cfg, name).map(|s| s.to_string()))
+        .or_else(|| crate::config::load_team_config().ok().map(|c| c.strategy.default_kind))
+        .unwrap_or_default();
 
     let fallback_repo = {
         let (_ok, get_info) = herdr.agent_get(name).unwrap_or((false, String::new()));

@@ -96,7 +96,7 @@ pub struct BuildFacts {
     pub review_lines: usize,
 
     // Context facts read by the existing code (mod.rs:1511-1514) for the Blocked error message:
-    /// Builder worker name (e.g. "sude").
+    /// Builder worker name (e.g. "builder").
     pub builder: String,
     /// Task slug/identifier.
     pub task: String,

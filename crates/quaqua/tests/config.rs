@@ -182,7 +182,7 @@ fn config_invalid_fixtures_are_rejected() {
         ("bad-effort.toml", "does not take effort 'banana'"),
         ("bad-opencode-variant.toml", "does not take effort 'medium'"),
         ("bad-opencode-openrouter-variant.toml", "does not take effort 'medium'"),
-        ("unknown-opencode-model.toml", "is not in allowlist (fix: add model and variants to config.rs model_effort_allowed)"),
+        ("unknown-opencode-model.toml", "is not in allowlist (fix: add model and variants to team.toml [opencode_models])"),
         ("fallback-missing.toml", "fallback 'ghost' is not a kind"),
         ("fallback-self.toml", "fallback names itself"),
         ("fallback-cannot-review.toml", "cannot review"),
@@ -214,4 +214,18 @@ fn config_invalid_fixtures_are_rejected() {
             "{name}: stderr {err:?} does not contain {needle:?}"
         );
     }
+}
+
+#[test]
+fn config_get_purposes() {
+    let out = run(&["config", "get", "purposes.review", "--file", &repo_team()]);
+    assert!(out.status.success(), "get failed: {}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "suhuynh");
+}
+
+#[test]
+fn config_get_opencode_models() {
+    let out = run(&["config", "get", "opencode_models.deepseek-v4.1-flash", "--file", &repo_team()]);
+    assert!(out.status.success(), "get failed: {}", stderr(&out));
+    assert!(stdout(&out).contains("max"));
 }

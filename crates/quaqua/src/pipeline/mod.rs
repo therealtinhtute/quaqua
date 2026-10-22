@@ -414,7 +414,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         repo_path = state_repo;
     } else {
         // Fresh start
-        let mut builder = "sude".to_string();
+        let mut builder_opt: Option<String> = None;
         let mut reviewer_opt: Option<String> = None;
         let mut review = "auto".to_string();
         let mut rounds = 2u32;
@@ -439,10 +439,10 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 if i + 1 >= args.len() {
                     return Err((1, format!("{}\n", USAGE)));
                 }
-                builder = args[i + 1].clone();
+                builder_opt = Some(args[i + 1].clone());
                 i += 2;
             } else if let Some(v) = arg.strip_prefix("--builder=") {
-                builder = v.to_string();
+                builder_opt = Some(v.to_string());
                 i += 1;
             } else if arg == "--reviewer" {
                 if i + 1 >= args.len() {
@@ -559,6 +559,9 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         } else {
             base_cfg
         };
+        let builder = builder_opt
+            .or_else(|| cfg.purposes.get("build").cloned())
+            .unwrap_or_else(|| cfg.strategy.default_kind.clone());
         let bh = harness_of_kind(&builder, &cfg)
             .ok_or_else(|| (1, format!("unknown builder kind: {builder}\n")))?;
 
