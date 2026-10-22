@@ -18,6 +18,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+use quaqua::engine::journal::Journal;
+use quaqua::engine::journal_sqlite::SqliteJournal;
+
 struct Fixture {
     root: PathBuf,
     home: PathBuf,
@@ -29,6 +32,11 @@ struct Fixture {
     calls: PathBuf,
     fail: PathBuf,
     fail_after_dispatch: PathBuf,
+    /// Playbook index for briefs that carry a `Playbook:` header.
+    playbooks: PathBuf,
+    principles: PathBuf,
+    /// When present the fake herdr copies it over the child's report.
+    report_template: PathBuf,
 }
 
 impl Fixture {
@@ -48,9 +56,19 @@ impl Fixture {
             calls: root.join("calls"),
             fail: root.join("fail-prompt"),
             fail_after_dispatch: root.join("fail-after-dispatch"),
+            playbooks: root.join("playbooks"),
+            principles: root.join("principles"),
+            report_template: root.join("report-template.md"),
             root,
         };
-        for dir in [&f.runs, &f.repo, &f.scripts, &f.bin] {
+        for dir in [
+            &f.runs,
+            &f.repo,
+            &f.scripts,
+            &f.bin,
+            &f.playbooks,
+            &f.principles,
+        ] {
             fs::create_dir_all(dir).unwrap();
         }
         fs::write(
@@ -71,6 +89,66 @@ impl Fixture {
             .unwrap()
             .to_string_lossy()
             .to_string()
+    }
+
+    /// A brief that names a playbook, plus the index entry it resolves in.
+    fn write_playbook_brief(&self) {
+        fs::write(
+            &self.brief,
+            "Playbook: fixture\n\
+             Context: tests/pipeline_prompt.rs\n\
+             Goal: exercise the pipeline prompt step\n\
+             Hard constraints: none\n\
+             Current design (open to challenge): fixture\n\
+             Unknowns: none\n\
+             Evidence: this file\n",
+        )
+        .unwrap();
+        fs::write(
+            self.playbooks.join("fixture.md"),
+            "---\nname: fixture\nwhen: A fixture playbook.\n---\n\n## Worker\n\n1. Reproduce the failure before fixing.\n2. Fix the root cause.\n",
+        )
+        .unwrap();
+    }
+
+    /// A git worktree the build gate can inspect (clean, one commit).
+    /// Returns the commit sha the worktree sits at.
+    fn init_wt(&self, task: &str) -> String {
+        let wt = self.root.join(format!(".wt/sude-{task}"));
+        fs::create_dir_all(&wt).unwrap();
+        let _ = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&wt)
+            .status();
+        let _ = Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "init",
+                "--allow-empty",
+            ])
+            .current_dir(&wt)
+            .status();
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The spawn base the build gate compares HEAD against.
+    fn set_base_sha(&self, task: &str, sha: &str) {
+        let path = self.runs.join(format!("pipeline-{task}.state"));
+        let content = fs::read_to_string(&path).unwrap().replace(
+            "base_sha=\n",
+            &format!("base_sha={sha}\n"),
+        );
+        fs::write(&path, content).unwrap();
     }
 
     /// A resumable `build`-phase state: the builder exists, and this phase's
@@ -160,6 +238,7 @@ impl Fixture {
         let fail = self.fail.display();
         let fail_after = self.fail_after_dispatch.display();
         let runs = self.runs.display();
+        let report_template = self.report_template.display();
         let snapshot_json = format!(
             r#"{{"snapshot":{{"workspaces":[{{"workspace_id":"ws1","label":"q"}}],
  "tabs":[{{"tab_id":"t1","workspace_id":"ws1","label":"lead-tab","pane_count":3}}],
@@ -206,7 +285,12 @@ if [[ "$cmd" == "agent prompt" ]]; then
     *'Pipeline phase: FIX'*) phase="FIX" ;;
   esac
   printf '%s\n' "$worker fresh $phase" >> "{calls}"
+  printf '%s' "$4" > "{runs}/prompt-$worker.txt"
   if [[ -e "{fail_after}" ]]; then
+    exit 0
+  fi
+  if [[ -e "{report_template}" ]]; then
+    cp "{report_template}" "{runs}/$worker.md"
     exit 0
   fi
   if [[ "$phase" == "PLAN" ]]; then
@@ -294,6 +378,8 @@ exit 0
             .env("HOME", &self.home)
             .env("QUAQUA_HOME", self.home.join("quaqua"))
             .env("QUAQUA_RUNS_DIR", &self.runs)
+            .env("QUAQUA_PLAYBOOKS_DIR", &self.playbooks)
+            .env("QUAQUA_PRINCIPLES_DIR", &self.principles)
             .env("PROMPT_WORKER_AGENT_GONE_SEC", "0")
             .env("PROMPT_WORKER_POLL_SEC", "1")
             .env("GRID_CHECK_TIMEOUT_SEC", "0");
@@ -658,4 +744,93 @@ fn pipeline_per_phase_budget_reset_grants_fresh_allowance() {
         stderr.contains("budget 2700s"),
         "child input must receive fresh phase budget (2700s), got: {stderr}"
     );
+}
+
+/// § S4 parity: a pipeline-spawned builder gets the same playbook path as
+/// `worker prompt` — the pinned steps reach the prompt it is sent, and
+/// `runs/.<name>.playbook` records what that worker actually received.
+#[test]
+fn pipeline_builder_prompt_injects_and_pins_the_brief_playbook() {
+    let f = Fixture::new("pbpin");
+    let task = "pbpin";
+    f.write_playbook_brief();
+    f.write_state(task);
+    f.fake_prompt_worker();
+
+    let out = f.resume(task, false);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the playbook path must not change the pipeline exit: {} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let body = fs::read_to_string(f.runs.join(format!("prompt-sude-{task}.txt")))
+        .expect("the fake herdr must have received the prompt body");
+    assert!(
+        body.contains("## Worker (playbook: fixture)"),
+        "the builder must be sent the steps of the playbook its brief names: {body}"
+    );
+    assert!(
+        body.contains("1. Reproduce the failure before fixing."),
+        "prompt: {body}"
+    );
+
+    assert_eq!(
+        fs::read_to_string(f.runs.join(format!(".sude-{task}.playbook")))
+            .ok()
+            .as_deref(),
+        Some("name=fixture\nids=1,2\n"),
+        "the pipeline builder must pin the playbook it was given",
+    );
+}
+
+/// § S5 parity: an accepted pipeline builder report that does not account for
+/// the pinned steps journals one `playbook_gap` — warn only, the pipeline
+/// still finishes clean.
+#[test]
+fn pipeline_builder_gap_is_warned_on_acceptance() {
+    let f = Fixture::new("pbgap");
+    let task = "pbgap";
+    f.write_playbook_brief();
+    f.write_state(task);
+    let base = f.init_wt(task);
+    f.set_base_sha(task, &base);
+    fs::write(
+        &f.report_template,
+        "# Build\n\nOutcome: no changes\n\n## Changes\n\nnothing to change\n\n## Lessons\nnone\n",
+    )
+    .unwrap();
+    fs::write(
+        f.runs.join(format!("pipeline-{task}.md")),
+        format!("# pipeline {task}\n"),
+    )
+    .unwrap();
+    f.fake_prompt_worker();
+
+    let out = f.resume(task, false);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a playbook gap must not change the pipeline exit: {} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let journal = SqliteJournal::open(&f.runs.join("quaqua.db")).expect("pipeline journal");
+    let gaps: Vec<serde_json::Value> = journal
+        .load_events(&format!("worker:sude-{task}"), 1)
+        .expect("events")
+        .into_iter()
+        .filter(|e| e.kind == "playbook_gap")
+        .map(|e| serde_json::from_str(&e.payload_json).expect("gap payload"))
+        .collect();
+    assert_eq!(
+        gaps.len(),
+        1,
+        "the accepted builder report's gap must be journaled: {gaps:?}"
+    );
+    assert_eq!(gaps[0]["name"], "fixture");
+    assert_eq!(gaps[0]["missing"], serde_json::json!([1, 2]));
 }
