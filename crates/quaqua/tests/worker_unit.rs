@@ -1016,10 +1016,10 @@ fn test_team_toml_harness_routing() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates/workspace/team.toml");
     let cfg = config::load(&team_path).expect("valid team.toml");
 
-    // tieude is pi at effort max (H3a)
+    // tieude is pi at effort high (anh iu 2026-10-22: light, well-specced tasks only)
     assert_eq!(cfg.kinds["tieude"].harness, "pi");
     assert_eq!(cfg.kinds["tieude"].model, "opencode-go/deepseek-v4.1-flash");
-    assert_eq!(cfg.kinds["tieude"].effort.as_deref(), Some("max"));
+    assert_eq!(cfg.kinds["tieude"].effort.as_deref(), Some("high"));
     assert!(!cfg.kinds["tieude"].can_review);
     // detu is omp at effort high (anh iu 2026-10-16, 03ed0a7)
     assert_eq!(cfg.kinds["detu"].harness, "omp");
@@ -1086,7 +1086,7 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     assert_eq!(kind, "tieude");
     assert_eq!(launch.harness, "pi");
     assert_eq!(launch.model, "opencode-go/deepseek-v4.1-flash");
-    assert_eq!(launch.effort, "max");
+    assert_eq!(launch.effort, "high");
 
     let cmd = build_launch_cmd(
         &launch,
@@ -1098,7 +1098,7 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     )
     .unwrap();
     assert!(cmd.split_envs.is_empty());
-    assert!(cmd.agent_args.join(" ").contains("--thinking max --append-system-prompt /runs/test.rules.md"));
+    assert!(cmd.agent_args.join(" ").contains("--thinking high --append-system-prompt /runs/test.rules.md"));
 
     // 2. LEAD_KIND env override switches lead to detu (omp)
     let (kind_detu, launch_detu) =

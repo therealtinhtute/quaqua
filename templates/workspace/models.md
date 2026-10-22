@@ -4,7 +4,7 @@ Pick by task shape. Name = kind passed to `quaqua worker spawn`. Update "Seen" a
 
 | name | harness · model · effort | Use for | Avoid | Seen |
 |------|--------------------------|---------|-------|------|
-| tieude | opencode · opencode-go/deepseek-v4.1-flash · max | **default**: every task unless anh iu names another; cheap well-specced impl, QA passes | ambiguous design | ci, gatefix, gridfix, mainsync, promptfix, slowtests (+10) |
+| tieude | pi · opencode-go/deepseek-v4.1-flash · high | **default**: every task unless anh iu names another; cheap well-specced impl, QA passes | ambiguous design | ci, gatefix, gridfix, mainsync, promptfix, slowtests (+10) |
 | detu | omp · google-antigravity/gemini-3.8-flash · high | quick lookup, research, read-only scan | implementation | cleanexport |
 | sude | omp · google-antigravity/gemini-3.8-flash · high | hard multi-file impl, audits (on request) | – | bpdeps, bpdocs, bpga |
 | ni | claude · opus-5.5 · low | small Claude edits, quick answers | design, long work | – |
