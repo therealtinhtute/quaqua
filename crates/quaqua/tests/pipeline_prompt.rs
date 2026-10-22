@@ -165,6 +165,18 @@ impl Fixture {
         );
         fs::write(self.runs.join(format!("pipeline-{task}.state")), state).unwrap();
     }
+
+    /// The same resumable state in phase `plan`: the plan prompt has not been
+    /// sent yet.
+    fn write_plan_state(&self, task: &str) {
+        self.write_state(task);
+        let path = self.runs.join(format!("pipeline-{task}.state"));
+        let content = fs::read_to_string(&path)
+            .unwrap()
+            .replace("phase=build\n", "phase=plan\n");
+        fs::write(&path, content).unwrap();
+    }
+
     fn write_spawn_state(&self, task: &str, lead: &str) {
         let state = format!(
             "repo={}\nbrief={}\nbuilder=sude\nreviewer=suhuynh\nreview=always\nrounds=2\n\
@@ -832,4 +844,49 @@ fn pipeline_builder_gap_is_warned_on_acceptance() {
     );
     assert_eq!(gaps[0]["name"], "fixture");
     assert_eq!(gaps[0]["missing"], serde_json::json!([1, 2]));
+}
+
+/// § S4/S5 plan side: a plan worker writes only the plan, so its prompt carries
+/// no `## Worker (playbook: …)` steps and nothing is pinned for it — the same
+/// skip reviewers get. The build phase still gets both.
+#[test]
+fn pipeline_plan_prompt_carries_no_worker_steps_and_no_pin() {
+    let f = Fixture::new("pbplan");
+    let task = "pbplan";
+    f.write_playbook_brief();
+    f.write_plan_state(task);
+    f.fake_prompt_worker();
+
+    let out = f.resume(task, false);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "the plan must still pause at plan-ready: {} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_eq!(
+        f.state_field(task, "phase"),
+        "build",
+        "plan-ready must hand over to the build phase",
+    );
+
+    let body = fs::read_to_string(f.runs.join(format!("prompt-sude-{task}.txt")))
+        .expect("the fake herdr must have received the plan prompt body");
+    assert!(
+        body.contains("Pipeline phase: PLAN"),
+        "the prompt under test must be the plan prompt: {body}"
+    );
+    assert!(
+        !body.contains("## Worker (playbook: fixture)"),
+        "a plan prompt must not carry the worker steps: {body}"
+    );
+    assert!(
+        !body.contains("1. Reproduce the failure before fixing."),
+        "plan prompt: {body}"
+    );
+    assert!(
+        !f.runs.join(format!(".sude-{task}.playbook")).exists(),
+        "a plan worker must not be pinned a playbook: S5 would then demand steps it never got",
+    );
 }
