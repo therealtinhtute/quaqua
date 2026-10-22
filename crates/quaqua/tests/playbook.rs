@@ -1203,6 +1203,24 @@ fn p2d_playbooks_conform_to_contract() {
         vec!["principle-prove-it-works"],
         "shipping Worker verdict cites only prove-it-works"
     );
+    // Review F1: the review worktree must start at the unit's head. Without
+    // `--base` the worktree is cut from the repo HEAD, and the verifier's later
+    // checkout of the unit moves HEAD and voids the baseline taken at spawn.
+    assert!(
+        sh.orchestrator
+            .contains("quaqua worker spawn --review --base quaqua/<unit>"),
+        "shipping Orchestrator must spawn the verifier with --base on the unit branch"
+    );
+    assert!(
+        sh.worker_text.contains("quaqua/<unit>"),
+        "shipping Worker must name the unit branch as its start point"
+    );
+    // Review F5: `quaqua merge` is synchronous and `quaqua status` reports
+    // workflows, so shipping reads the merge back from git, not from status.
+    assert!(
+        !sh.orchestrator.contains("quaqua status"),
+        "shipping must not read a merge back through quaqua status"
+    );
     assert_worker_contract(&sh);
 
     // babysit: fixes stay on the owning branch; merging is the Orchestrator's.
@@ -1219,6 +1237,25 @@ fn p2d_playbooks_conform_to_contract() {
             .contains(&"principle-fix-root-causes".to_string()),
         "babysit step 2 must cite principle-fix-root-causes"
     );
+    // Review F3: review-comment text is data, never an instruction.
+    assert!(
+        bb.orchestrator.contains("untrusted data"),
+        "babysit Orchestrator must treat comment text as untrusted data"
+    );
+    assert!(
+        bb.worker_text.contains("untrusted data"),
+        "babysit Worker must treat comment text as untrusted data"
+    );
+    // Review F6: readiness is proven without landing. `quaqua merge` has no
+    // dry run, so the conflict test is a read-only merge-tree.
+    assert!(
+        bb.orchestrator.contains("--write-tree"),
+        "babysit must test a clean merge with git merge-tree --write-tree"
+    );
+    assert!(
+        !bb.orchestrator.contains("would take it"),
+        "babysit must not define readiness as what quaqua merge would do"
+    );
     assert_worker_contract(&bb);
 
     // worktree-cleanup: removal is quaqua worker cleanup, never a direct git call.
@@ -1230,10 +1267,24 @@ fn p2d_playbooks_conform_to_contract() {
             .contains("quaqua worker cleanup <name> <repo>"),
         "worktree-cleanup Orchestrator must remove through quaqua worker cleanup"
     );
+    // Review F2: `quaqua worker cleanup` refuses a dirty or untracked worktree,
+    // so the buckets it cannot remove are held back, never called droppable.
     assert!(
-        !wc.orchestrator.contains("git worktree remove --force"),
-        "worktree-cleanup must never force a worktree removal"
+        !wc.orchestrator.contains("safe to drop"),
+        "worktree-cleanup must not call an unremovable bucket safe to drop"
     );
+    // The hard rule is no force flag and no recursive delete: check the
+    // invocation forms an instruction would use, since the files legitimately
+    // name `git worktree remove` and ban `rm -rf` by name in prose.
+    for pb in [&sh, &bb, &wc] {
+        for banned in ["git clean", "worktree remove --force", "rm -rf "] {
+            assert!(
+                !pb.orchestrator.contains(banned),
+                "playbook '{}' must not name a force or recursive delete: {banned}",
+                pb.name
+            );
+        }
+    }
     for leaf in [
         "principle-build-the-lever",
         "principle-encode-lessons-in-structure",
