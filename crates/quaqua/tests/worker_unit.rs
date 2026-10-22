@@ -1192,7 +1192,7 @@ fn test_spawn_args_parsing() {
     assert_eq!(opts.base.as_deref(), Some("main"));
     assert!(opts.review);
     assert_eq!(opts.name, "suhuynh-rev1");
-    assert_eq!(opts.kind, "suhuynh");
+    assert_eq!(opts.kind.as_deref(), Some("suhuynh"));
 
     // Trailing base without value
     let bad = vec![
@@ -1214,7 +1214,8 @@ fn test_spawn_args_parsing_with_purpose() {
     ];
     let opts = parse_spawn_args(&args).expect("valid args with purpose");
     assert_eq!(opts.name, "suhuynh-rev1");
-    assert_eq!(opts.kind, "purpose:review");
+    assert_eq!(opts.purpose.as_deref(), Some("review"));
+    assert_eq!(opts.kind, None);
     assert_eq!(opts.repo_path, PathBuf::from("/repo"));
 
     // --purpose= syntax with 3 positional args
@@ -1226,7 +1227,8 @@ fn test_spawn_args_parsing_with_purpose() {
     ];
     let opts2 = parse_spawn_args(&args2).expect("valid args with purpose=");
     assert_eq!(opts2.name, "sude-build1");
-    assert_eq!(opts2.kind, "purpose:build");
+    assert_eq!(opts2.purpose.as_deref(), Some("build"));
+    assert_eq!(opts2.kind.as_deref(), Some("sude"));
 }
 
 
@@ -1517,7 +1519,7 @@ fn test_claude_review_mode_verification() {
     ];
     let opts = parse_spawn_args(&args).unwrap();
     assert!(opts.review);
-    assert_eq!(opts.kind, "suhuynh");
+    assert_eq!(opts.kind.as_deref(), Some("suhuynh"));
 }
 
 fn kind(harness: &str, model: &str, effort: Option<&str>) -> config::Kind {
@@ -2052,7 +2054,8 @@ fn test_spawn_worker_resolving_purpose() {
         repo_dir.to_str().unwrap().to_string(),
     ])
     .unwrap();
-    assert_eq!(opts.kind, "purpose:review");
+    assert_eq!(opts.purpose.as_deref(), Some("review"));
+    assert_eq!(opts.kind, None);
     let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
     assert!(res.is_ok(), "spawn should resolve purpose and succeed: {:?}", res.err());
 
@@ -2060,6 +2063,164 @@ fn test_spawn_worker_resolving_purpose() {
     assert_eq!(starts.len(), 1);
     assert_eq!(starts[0].0, "suhuynh-purptest");
     assert_eq!(starts[0].1, "claude");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_spawn_worker_purpose_with_matching_positional_kind() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-match-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = test_cfg_with_fallback();
+    cfg.kinds.insert(
+        "suhuynh".to_string(),
+        config::Kind {
+            harness: "claude".to_string(),
+            model: "opus".to_string(),
+            effort: Some("low".to_string()),
+            fallback: None,
+            can_review: true,
+            spawn: config::SPAWN_AUTO.to_string(),
+        },
+    );
+    cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
+
+    let git = SpawnTestGit;
+    let mut mock = MockActivities::new();
+    mock.register(
+        "herdr.pane_split",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+        name: String::new(),
+    }));
+    let herdr = MockActivitiesHerdr::new(mock);
+
+    let opts = parse_spawn_args(&[
+        "--purpose".to_string(),
+        "review".to_string(),
+        "suhuynh-purpmatch".to_string(),
+        "suhuynh".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+    assert!(res.is_ok(), "spawn with matching kind should succeed: {:?}", res.err());
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_spawn_worker_purpose_with_mismatched_positional_kind_fails() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-mismatch-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = test_cfg_with_fallback();
+    cfg.kinds.insert(
+        "suhuynh".to_string(),
+        config::Kind {
+            harness: "claude".to_string(),
+            model: "opus".to_string(),
+            effort: Some("low".to_string()),
+            fallback: None,
+            can_review: true,
+            spawn: config::SPAWN_AUTO.to_string(),
+        },
+    );
+    cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
+
+    let git = SpawnTestGit;
+    let herdr = MockActivitiesHerdr::new(MockActivities::new());
+
+    let opts = parse_spawn_args(&[
+        "--purpose".to_string(),
+        "review".to_string(),
+        "suhuynh-purpmismatch".to_string(),
+        "sude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+    assert!(res.is_err(), "spawn with mismatched kind should fail");
+    let (code, msg) = res.unwrap_err();
+    assert_eq!(code, 1);
+    assert!(
+        msg.contains("suhuynh") && msg.contains("sude"),
+        "error message should name both resolved kind 'suhuynh' and positional kind 'sude', got: {msg}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_spawn_worker_purpose_with_colon_resolves_correctly() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-colon-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = test_cfg_with_fallback();
+    cfg.kinds.insert(
+        "sude".to_string(),
+        config::Kind {
+            harness: "omp".to_string(),
+            model: "gemini".to_string(),
+            effort: Some("high".to_string()),
+            fallback: None,
+            can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
+        },
+    );
+    cfg.purposes.insert("fix:ui".to_string(), "sude".to_string());
+
+    let git = SpawnTestGit;
+    let mut mock = MockActivities::new();
+    mock.register(
+        "herdr.pane_split",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+        name: String::new(),
+    }));
+    let herdr = MockActivitiesHerdr::new(mock);
+
+    let opts = parse_spawn_args(&[
+        "--purpose".to_string(),
+        "fix:ui".to_string(),
+        "sude-colontest".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+    assert!(res.is_ok(), "spawn with colon in purpose should resolve correctly: {:?}", res.err());
+
+    let starts = herdr.agent_starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].0, "sude-colontest");
 
     let _ = std::fs::remove_dir_all(&temp);
 }

@@ -23,6 +23,10 @@ Pick by task shape. Name = kind passed to `quaqua worker spawn`. Update "Seen" a
 - Read-only question → `detu`; design unclear → `truonglao` before any builder.
 - Unsure between two → cheaper tier first (tieude < sude < ni < suhuynh < truonglao); escalate only on a failed run.
 
+## Purpose routing and model allowlists
+- `[purposes]`: maps task shapes to kinds in `team.toml` (e.g. `build = "sude"`, `review = "suhuynh"`). `quaqua worker spawn --purpose <p> <name> [<kind>] <repo>` resolves the kind from this table; if a positional kind is also given, it must match the resolved kind or spawn fails.
+- `[opencode_models]`: lists allowed models and effort variants for harness opencode only. Custom tables merge over the built-in defaults (`deepseek-v4.1-flash` with `low`/`high`/`max`) rather than replacing them; specifying a built-in model overrides its variants.
+
 ## Claude out — ACTIVE since 2026-10-17 (only when anh iu says Claude tokens are out)
 - CoS: anh iu opens opencode in `~/quaqua` (reads AGENTS.md); persona and rules unchanged.
 - suhuynh → opencode · opencode-go/deepseek-v4.1-flash · max (anh iu, 2026-10-19; alt: claude · opus-5.5 · medium); ni still paused.

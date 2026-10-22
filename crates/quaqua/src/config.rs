@@ -40,7 +40,10 @@ pub struct Config {
     pub kinds: BTreeMap<String, Kind>,
     #[serde(default)]
     pub purposes: BTreeMap<String, String>,
-    #[serde(default = "default_opencode_models")]
+    #[serde(
+        default = "default_opencode_models",
+        deserialize_with = "deserialize_opencode_models"
+    )]
     pub opencode_models: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub taskforce: BTreeMap<String, Taskforce>,
@@ -218,6 +221,18 @@ fn default_opencode_models() -> BTreeMap<String, Vec<String>> {
         vec!["low".to_string(), "high".to_string(), "max".to_string()],
     );
     m
+}
+
+fn deserialize_opencode_models<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let user_models = BTreeMap::<String, Vec<String>>::deserialize(deserializer)?;
+    let mut models = default_opencode_models();
+    models.extend(user_models);
+    Ok(models)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -978,6 +993,35 @@ workers_tab = "workers"
         assert!(
             err.contains("purpose 'design': unknown kind 'ghost-kind'"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn test_opencode_models_deserialization_merges_defaults() {
+        let toml_str = r#"
+schema_version = 2
+[opencode_models]
+"custom-model" = ["low", "high"]
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse config with custom opencode_models");
+        assert_eq!(
+            cfg.opencode_models.get("deepseek-v4.1-flash"),
+            Some(&vec!["low".to_string(), "high".to_string(), "max".to_string()])
+        );
+        assert_eq!(
+            cfg.opencode_models.get("custom-model"),
+            Some(&vec!["low".to_string(), "high".to_string()])
+        );
+
+        let override_str = r#"
+schema_version = 2
+[opencode_models]
+"deepseek-v4.1-flash" = ["max"]
+"#;
+        let cfg2: Config = toml::from_str(override_str).expect("parse config overriding default model");
+        assert_eq!(
+            cfg2.opencode_models.get("deepseek-v4.1-flash"),
+            Some(&vec!["max".to_string()])
         );
     }
 }
