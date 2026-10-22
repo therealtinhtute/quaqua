@@ -765,9 +765,10 @@ pub fn render_status_with_git<H: HerdrOps, G: GitOps>(
     herdr: &H,
     git: &G,
 ) -> Result<String, String> {
-    let cfg = load_team_config().map_err(|(_, msg)| msg.trim_end().to_string())?;
     let wf_res = query_workflows(db_path);
-    let orch_res = scan_orchestration(runs_dir, herdr, &cfg);
+    let orch_res = load_team_config()
+        .map_err(|(_, msg)| msg.trim_end().to_string())
+        .and_then(|cfg| scan_orchestration(runs_dir, herdr, &cfg));
     let repo = runs_dir.parent().unwrap_or_else(|| Path::new("."));
     let verdicts_res = query_branch_verdicts(db_path, repo, git);
     Ok(format_status_report(
