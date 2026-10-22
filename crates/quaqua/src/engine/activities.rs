@@ -312,7 +312,8 @@ impl SystemActivities {
                     base: None,
                     review: false,
                     name: name.clone(),
-                    kind: kind.clone(),
+                    kind: Some(kind.clone()),
+                    purpose: None,
                     repo_path: PathBuf::from(repo),
                     approve_kinds: approve_kinds.clone(),
                 };

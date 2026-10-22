@@ -1134,7 +1134,7 @@ fn test_spawn_args_parsing() {
     assert_eq!(opts.base.as_deref(), Some("main"));
     assert!(opts.review);
     assert_eq!(opts.name, "suhuynh-rev1");
-    assert_eq!(opts.kind, "suhuynh");
+    assert_eq!(opts.kind.as_deref(), Some("suhuynh"));
 
     // Trailing base without value
     let bad = vec![
@@ -1156,7 +1156,8 @@ fn test_spawn_args_parsing_with_purpose() {
     ];
     let opts = parse_spawn_args(&args).expect("valid args with purpose");
     assert_eq!(opts.name, "suhuynh-rev1");
-    assert_eq!(opts.kind, "purpose:review");
+    assert_eq!(opts.purpose.as_deref(), Some("review"));
+    assert_eq!(opts.kind, None);
     assert_eq!(opts.repo_path, PathBuf::from("/repo"));
 
     // --purpose= syntax with 3 positional args
@@ -1168,7 +1169,8 @@ fn test_spawn_args_parsing_with_purpose() {
     ];
     let opts2 = parse_spawn_args(&args2).expect("valid args with purpose=");
     assert_eq!(opts2.name, "sude-build1");
-    assert_eq!(opts2.kind, "purpose:build:sude");
+    assert_eq!(opts2.purpose.as_deref(), Some("build"));
+    assert_eq!(opts2.kind.as_deref(), Some("sude"));
 }
 
 
@@ -1436,7 +1438,7 @@ fn test_claude_review_mode_verification() {
     ];
     let opts = parse_spawn_args(&args).unwrap();
     assert!(opts.review);
-    assert_eq!(opts.kind, "suhuynh");
+    assert_eq!(opts.kind.as_deref(), Some("suhuynh"));
 }
 
 fn kind(harness: &str, model: &str, effort: Option<&str>) -> config::Kind {
@@ -1971,7 +1973,8 @@ fn test_spawn_worker_resolving_purpose() {
         repo_dir.to_str().unwrap().to_string(),
     ])
     .unwrap();
-    assert_eq!(opts.kind, "purpose:review");
+    assert_eq!(opts.purpose.as_deref(), Some("review"));
+    assert_eq!(opts.kind, None);
     let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
     assert!(res.is_ok(), "spawn should resolve purpose and succeed: {:?}", res.err());
 

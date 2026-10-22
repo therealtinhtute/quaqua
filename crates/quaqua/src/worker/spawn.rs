@@ -44,7 +44,8 @@ pub struct SpawnOptions {
     pub base: Option<String>,
     pub review: bool,
     pub name: String,
-    pub kind: String,
+    pub kind: Option<String>,
+    pub purpose: Option<String>,
     pub repo_path: PathBuf,
     /// Kinds the Principal approved with `--approve-kind`.
     pub approve_kinds: Vec<String>,
@@ -119,15 +120,9 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
     }
 
     let (name, kind, repo_path) = if pos.len() == 2 && purpose.is_some() {
-        let p = purpose.as_ref().unwrap();
-        (pos[0].clone(), format!("purpose:{p}"), PathBuf::from(&pos[1]))
+        (pos[0].clone(), None, PathBuf::from(&pos[1]))
     } else if pos.len() >= 3 {
-        let k = if let Some(p) = &purpose {
-            format!("purpose:{p}:{}", pos[1])
-        } else {
-            pos[1].clone()
-        };
-        (pos[0].clone(), k, PathBuf::from(&pos[2]))
+        (pos[0].clone(), Some(pos[1].clone()), PathBuf::from(&pos[2]))
     } else {
         return Err((1, format!("{}\n", USAGE)));
     };
@@ -137,6 +132,7 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
         review,
         name,
         kind,
+        purpose,
         repo_path,
         approve_kinds,
     })
@@ -291,54 +287,65 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     herdr: &H,
 ) -> Result<(), (i32, String)> {
     let mut opts = opts;
-    if let Some(rest) = opts.kind.strip_prefix("purpose:") {
-        let (purpose, positional) = match rest.split_once(':') {
-            Some((p, pos)) => (p, Some(pos)),
-            None => (rest, None),
-        };
-        let resolved = crate::config::resolve_purpose(cfg, purpose)
-            .map_err(|e| (1, format!("error: {e}\n")))?;
-        if let Some(pos) = positional {
+    let resolved_kind = match (&opts.purpose, &opts.kind) {
+        (Some(p), Some(pos)) => {
+            let resolved = crate::config::resolve_purpose(cfg, p)
+                .map_err(|e| (1, format!("error: {e}\n")))?;
             if pos != resolved {
                 return Err((
                     1,
                     format!(
-                        "error: --purpose '{purpose}' resolves to kind '{resolved}', but positional kind is '{pos}'\n"
+                        "error: --purpose '{p}' resolves to kind '{resolved}', but positional kind is '{pos}'\n"
                     ),
                 ));
             }
+            resolved.to_string()
         }
-        opts.kind = resolved.to_string();
-    } else if !cfg.kinds.contains_key(&opts.kind) {
-        if let Ok(resolved) = crate::config::resolve_purpose(cfg, &opts.kind) {
-            opts.kind = resolved.to_string();
+        (Some(p), None) => {
+            crate::config::resolve_purpose(cfg, p)
+                .map_err(|e| (1, format!("error: {e}\n")))?
+                .to_string()
         }
-    }
+        (None, Some(k)) => {
+            if cfg.kinds.contains_key(k) {
+                k.clone()
+            } else if let Ok(resolved) = crate::config::resolve_purpose(cfg, k) {
+                resolved.to_string()
+            } else {
+                k.clone()
+            }
+        }
+        (None, None) => {
+            return Err((1, format!("{}\n", USAGE)));
+        }
+    };
+    opts.kind = Some(resolved_kind.clone());
+    let kind = resolved_kind;
 
-    let kind_info = cfg.kinds.get(&opts.kind).ok_or_else(|| {
+    let kind_info = cfg.kinds.get(&kind).ok_or_else(|| {
         let line2 = USAGE.lines().next().unwrap_or(USAGE);
         (1, format!("{line2}\n"))
     })?;
-    if !is_valid_name(&opts.name, &opts.kind) {
+    if !is_valid_name(&opts.name, &kind) {
         let lines: Vec<&str> = USAGE.lines().take(2).collect();
         return Err((1, format!("{}\n", lines.join("\n"))));
     }
 
     // One spawn-policy gate for every spawn path: a kind with
     // `spawn = "approve"` needs its own --approve-kind from the Principal.
-    crate::config::check_spawn_policy(&opts.kind, kind_info, &opts.approve_kinds)?;
+    crate::config::check_spawn_policy(&kind, kind_info, &opts.approve_kinds)?;
 
     if opts.review && !kind_info.can_review {
         eprintln!(
             "error: --review requires a kind with can_review = true in team.toml, not {}",
-            opts.kind
+            kind
         );
         return Err((1, format!("{}\n", USAGE)));
     }
 
     // team.toml is the only source of harness/model/effort: reject a kind that
     // cannot launch before any worktree or pane exists.
-    let primary_launch = resolve_launch(kind_info, &opts.kind, cfg)?;
+    let primary_launch = resolve_launch(kind_info, &kind, cfg)?;
     let primary_fallback = kind_info.fallback.clone();
 
     let repo = canonicalize_repo_path(&opts.repo_path);
@@ -569,7 +576,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         // attempt, only when a fallback is configured) take one hop to it.
         let _ = herdr.pane_close(&pane);
         if idx == 0 {
-            if let Some((fb, fb_kind)) = fallback_kind(cfg, kind_info, &opts.kind)? {
+            if let Some((fb, fb_kind)) = fallback_kind(cfg, kind_info, &kind)? {
                 if opts.review && !fb_kind.can_review {
                     eprintln!(
                         "error: fallback '{fb}' cannot review; refusing fallback for review spawn of '{}'",
@@ -579,7 +586,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
                 }
                 crate::config::check_spawn_policy(fb, fb_kind, &opts.approve_kinds)?;
                 let fb_launch = resolve_launch(fb_kind, fb, cfg)?;
-                eprintln!("WARN: fallback: {}→{fb} ({reason})", opts.kind);
+                eprintln!("WARN: fallback: {}→{fb} ({reason})", kind);
                 attempts.push(fb_launch);
                 idx += 1;
                 continue;
@@ -599,7 +606,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     println!(
         "worker={} kind={} pane={} worktree={}",
         opts.name,
-        opts.kind,
+        kind,
         pane_id,
         wt.display()
     );

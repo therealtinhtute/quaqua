@@ -168,7 +168,8 @@ fn run_advisor(
         base: args.base.clone(),
         review: true,
         name: worker_name.clone(),
-        kind: kind.to_string(),
+        kind: Some(kind.to_string()),
+        purpose: None,
         repo_path: args.repo.clone(),
         approve_kinds: args.approve_kinds.clone(),
     };
@@ -253,7 +254,8 @@ fn run_dual_lens(
         base: args.base.clone(),
         review: true,
         name: w1.clone(),
-        kind: kind1.to_string(),
+        kind: Some(kind1.to_string()),
+        purpose: None,
         repo_path: args.repo.clone(),
         approve_kinds: args.approve_kinds.clone(),
     };
@@ -262,7 +264,8 @@ fn run_dual_lens(
         base: args.base.clone(),
         review: true,
         name: w2.clone(),
-        kind: kind2.to_string(),
+        kind: Some(kind2.to_string()),
+        purpose: None,
         repo_path: args.repo.clone(),
         approve_kinds: args.approve_kinds.clone(),
     };
