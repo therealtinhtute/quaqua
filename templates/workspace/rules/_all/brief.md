@@ -1,16 +1,22 @@
 # Worker briefs
 
-Every worker brief has these five parts, in this order (the first three are machine-checked by `quaqua worker prompt --check-brief`):
+Every worker brief has these two headers and five parts, in this order (the three `Goal:`/`Hard constraints:`/`Current design` lines are machine-checked by `quaqua worker prompt --check-brief`):
 
 ```
+Playbook: <name from `quaqua playbook list`, or `none, <reason>` for a trivial one-command unit>
+Context: <files / PR pointers; when this unit depends on another, that unit's report pasted in full>
 Goal: <what must be true at the end>
-Hard constraints: <non-negotiables: what not to touch, hard limits; targeted tests only (`<cmd> <filter>`), foreground, no `pgrep -f` wait loops, `--slow` is the Lead's gate>
+Hard constraints: <non-negotiables: owned and forbidden paths, hard limits; targeted tests only (`<cmd> <filter>`), foreground, no `pgrep -f` wait loops, `--slow` is the Lead's gate>
 Current design (open to challenge): <the approach as it stands>
 Unknowns: <what is not known yet + how to verify it>
-Evidence: <what to return: command + result, files, decisions>
+Evidence: <checkable lines: the exact verify command (one filter per run) and its real output, files, decisions>
 Time budget: <N> min
 Cost budget: $<x>
 ```
+
+- `Playbook:` and `Context:` warn when missing, or on a `none` without a reason; an unknown playbook name is rejected. No playbook fits, or the work is large and cross-cutting → `figure-it-out`, never a blank.
+- `worker prompt` appends the playbook's `## Worker` steps and each cited leaf to the submitted prompt, and pins the name + step ids in `runs/.<name>.playbook`. The `## Orchestrator` section is the coordinator's and never reaches the worker.
+- `Context:` is a relay: an upstream unit's report pasted in full is exempt from brief sizing.
 
 - `Time budget` and `Cost budget` are the two caps; the time one is machine-read (`rules/_all/worker-timebox.md`), the cost one is recorded at acceptance in the project card.
 - Mechanical task (≤2 files, no shared code path)? Skip the `Current design` paragraph and the plan file; Goal + Evidence is the whole contract.
@@ -47,6 +53,7 @@ none
 - `## Blockers` body: write `none` when there are none. Any other non-empty line is read as an unfinished-work blocker and the pipeline stops.
 - `## Lessons` may be numbered (`## 5. Lessons` passes) but must be an `##` heading (`###` fails). The watchdog checks that the heading exists, not where it sits; keep it last so the machine-read tail stays one block.
 - Pipeline reviewers end with exactly one `Verdict: clean` or `Verdict: <N> findings` line instead of `## Lessons`.
+- Brief names a playbook? The submitted prompt ends with a pre-filled `## Playbook` block — copy it into the report and mark every step id `1: done` or `1: skip: <reason>`.
 - Put any extra section before `## Blockers`, never after `## Lessons`, so the machine-read tail stays one block.
 
 `runs/<name>.md` ends with `## Lessons` — ≤2 lines of durable lessons worth a `rules/` entry, or `none`. CoS promotes 0–1 at cleanup.

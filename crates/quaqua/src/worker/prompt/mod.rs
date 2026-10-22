@@ -1,5 +1,6 @@
 //! Worker prompt & watchdog logic (`quaqua worker prompt <name> <task>`).
 
+pub mod brief;
 pub mod cost;
 pub mod observer;
 pub mod readonly;
@@ -159,6 +160,9 @@ pub fn do_check_brief(task: &str) -> Result<(), (i32, String)> {
             "error: task must be a brief with 'Goal:', 'Hard constraints:', 'Current design (open to challenge):' (rules/_all/brief.md)\n".to_string(),
         ));
     }
+    brief::warn_brief_headers(task);
+    // An unknown playbook name is the one rejection here; a missing index only warns.
+    brief::prepare_injection_in_workspace(task)?;
     let (budget, src) = resolve_budget_sec(task);
     println!("budget={budget}s source={src}");
     Ok(())
@@ -654,10 +658,17 @@ pub fn prompt_worker<G: GitOps>(
             }
         }
 
+        // § S4: warn on a brief that names no playbook or no context, then
+        // append the named playbook's Worker steps + cited leaves to the prompt.
+        brief::warn_brief_headers(task_str);
+        let injection = brief::prepare_injection_in_workspace(task_str)?;
+
         // Synchronous land check: herdr's own "the prompt reached the turn"
         // signal. A stalled submission gets exactly one enter + re-wait.
-        let prompt_body = format!(
-            "{task_str}. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/{name}.md (publish it atomically, never a partial file); reply only the path."
+        let prompt_body = brief::compose_prompt_body(
+            name,
+            task_str,
+            injection.as_ref().map(|i| i.text.as_str()),
         );
         let landed = match herdr.agent_prompt_wait(
             name,
@@ -698,6 +709,21 @@ pub fn prompt_worker<G: GitOps>(
             if !recovered {
                 eprintln!("WATCHDOG exit=3 prompt not landed | name={name}");
                 return Err((3, String::new()));
+            }
+        }
+
+        // The worker only got the steps if the prompt landed, so the pin
+        // (`runs/.<name>.playbook`) is written after the land check. A brief
+        // without a playbook drops any stale pin from an earlier task.
+        let playbook_state = runs_dir.join(format!(".{name}.playbook"));
+        match &injection {
+            Some(injection) => {
+                if let Err(e) = std::fs::write(&playbook_state, injection.state_content()) {
+                    eprintln!("warning: cannot write {}: {e}", playbook_state.display());
+                }
+            }
+            None => {
+                let _ = std::fs::remove_file(&playbook_state);
             }
         }
 
