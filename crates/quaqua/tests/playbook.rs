@@ -1171,3 +1171,40 @@ fn p2c_playbooks_conform_to_contract() {
     );
     assert_worker_contract(&ev);
 }
+
+#[test]
+fn p2c_review_findings_leaf_reading_path_and_no_worker_spawn() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let playbooks_dir = repo_root.join("templates/workspace/playbooks");
+    let principles_dir = repo_root.join("templates/workspace/principles");
+    let skill_path = repo_root.join("templates/workspace/.claude/skills/poteto-mode/SKILL.md");
+
+    // Finding 1: SKILL.md must name principles/<name>.md and instruct reading the leaf
+    let skill_content = fs::read_to_string(&skill_path).expect("read poteto-mode/SKILL.md");
+    assert!(
+        skill_content.contains("principles/<name>.md"),
+        "SKILL.md must name principles/<name>.md path for leaves"
+    );
+    assert!(
+        skill_content.contains("Read the leaf in full for any principle you cite."),
+        "SKILL.md must instruct reading the leaf in full"
+    );
+
+    // Finding 4: no playbook's Worker section may ask worker to spawn
+    let playbooks = load_playbooks(&playbooks_dir, &principles_dir)
+        .expect("all playbooks must load and validate");
+    for pb in &playbooks {
+        for step in &pb.steps {
+            let has_spawn = step
+                .text
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|w| w.eq_ignore_ascii_case("spawn"));
+            assert!(
+                !has_spawn,
+                "playbook '{}' worker step {} must not ask worker to spawn: {}",
+                pb.name, step.id, step.text
+            );
+        }
+    }
+}

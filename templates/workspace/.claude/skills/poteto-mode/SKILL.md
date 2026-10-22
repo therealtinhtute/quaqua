@@ -45,20 +45,20 @@ MVP triggers:
 - Diagnosing a runtime symptom (leak, idle-CPU spin, glitch) from live instrumentation: routes to `runtime-forensics` (active in P2c).
 - Diagnosing a captured profiling artifact (cpuprofile, trace, spindump, heap snapshot): routes to `trace-forensics` (active in P2c).
 - Pixel-exact UI equivalence or migrating a styling system: routes to `visual-parity` (active in P2c), running headless only per `rules/_all/no-gui-driving.md`.
-- Testing how a skill, structure, or prompt change affects agent behavior before promoting it, or evaluating playbook spread and telemetry across runs: routes to `eval` (active in P2c).
+- Testing how a skill, structure, or prompt change affects agent behavior before promoting it, evaluating playbook spread and telemetry across runs, or running bakeoffs / competitive designs with N workers of different kinds + judge: routes to `eval` (active in P2c; maps pstack `arena`).
 
 Deferred routes with quaqua mappings (P2):
 
 - Nontrivial change, contested architecture decision, or technical fork (P2): routes to taskforce advisor (`quaqua taskforce advisor`).
 - Code crossing a function boundary (P2): routes to taskforce `dual-lens` (`quaqua taskforce dual-lens`) for parallel design exploration before implementing (maps pstack `architect`).
-- Parallel fan-out (P2): routes to worker fan-out per `models.md` kinds and grid layout (maps pstack `swarm`). For bakeoffs or competitive designs, routes to N workers of different kinds + judge (maps pstack `arena`; active in P2c under `eval`).
+- Parallel fan-out (P2): routes to worker fan-out per `models.md` kinds and grid layout (maps pstack `swarm`).
 - Contested design (P2): routes to cross-harness reviewer on a different model (maps pstack `interrogate`).
 - Docs, RFCs, readmes, PR descriptions, or commit messages (P2): deferred to P2 documentation skill (maps pstack `technical-writing`).
 - Running a benchmark or reporting measured numbers (P2): follow **Explain the Number** (`principle-explain-the-number`, active in P2a); deferred to P2 benchmark checklist (maps pstack `benchmark-checklist`).
 
 ## Principles
 
-In the MVP, S6 shipped 6 leaves; P2a brought the library to 17 leaves; P2b brought the library to 20 leaves; P2c activates 4 playbooks (runtime-forensics, trace-forensics, visual-parity, eval) reusing existing leaves (4 remaining in P2).
+Read the leaf in full for any principle you cite. Each leaf lives under `principles/<name>.md`. In the MVP, S6 shipped 6 leaves; P2a brought the library to 17 leaves; P2b brought the library to 20 leaves; P2c activates 4 playbooks (runtime-forensics, trace-forensics, visual-parity, eval) reusing existing leaves (4 leaves remaining in P2).
 
 **Core**
 
