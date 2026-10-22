@@ -1073,3 +1073,359 @@ fn pre_push_hook_rejects_workers_only() {
     );
     assert!(run(None).success(), "principal push must pass");
 }
+
+#[test]
+fn s6_acceptance_5_fresh_init_has_agents_coordinator_lines_and_playbooks() {
+    let root = std::env::temp_dir().join(format!("quaqua-init-s6-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let ws = root.join("ws");
+
+    let nobin = root.join("nobin");
+    std::fs::create_dir_all(&nobin).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.env("PATH", &nobin)
+        .env("HERDR_BIN_PATH", nobin.join("herdr"))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_TEMPLATE_DIR")
+        .current_dir(&root);
+
+    let out = cmd
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let agents_md = std::fs::read_to_string(ws.join("AGENTS.md")).expect("read AGENTS.md");
+    assert!(
+        agents_md.contains("## Coordinator Rules"),
+        "missing Coordinator Rules section in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Route (binds CoS and Lead)"),
+        "missing Route rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Never edit code or config (binds CoS and Lead)"),
+        "missing Never edit code rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Attack the premise (binds CoS and Lead)"),
+        "missing Attack the premise rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Background wait and drain points (binds CoS and Lead)"),
+        "missing Background wait rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Budget (binds CoS and Lead)"),
+        "missing Budget rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("Pilot and liveness (binds CoS and Lead)"),
+        "missing Pilot and liveness rule in AGENTS.md"
+    );
+    assert!(
+        agents_md.contains("rules/_all/worker-timebox.md"),
+        "missing link to worker-timebox.md in AGENTS.md"
+    );
+
+    // Also assert playbooks and principles in fresh init
+    assert!(ws.join("playbooks/bug-fix.md").is_file());
+    assert!(ws.join("playbooks/feature.md").is_file());
+    assert!(ws.join("playbooks/figure-it-out.md").is_file());
+    assert!(ws.join("playbooks/runtime-forensics.md").is_file());
+    assert!(ws.join("playbooks/trace-forensics.md").is_file());
+    assert!(ws.join("playbooks/visual-parity.md").is_file());
+    assert!(ws.join("playbooks/eval.md").is_file());
+    assert!(
+        !ws.join("playbooks/fixture.md").exists(),
+        "fixture.md must not be installed in playbooks/"
+    );
+    assert!(
+        !ws.join("principles/fixture.md").exists(),
+        "fixture.md must not be installed in principles/"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn f1_fresh_init_has_no_fixture() {
+    let root = std::env::temp_dir().join(format!("quaqua-init-f1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let ws = root.join("ws");
+
+    let nobin = root.join("nobin");
+    std::fs::create_dir_all(&nobin).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.env("PATH", &nobin)
+        .env("HERDR_BIN_PATH", nobin.join("herdr"))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_TEMPLATE_DIR")
+        .current_dir(&root);
+
+    let out = cmd
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !ws.join("playbooks/fixture.md").exists(),
+        "fixture.md must not be installed in playbooks/"
+    );
+    assert!(
+        !ws.join("principles/fixture.md").exists(),
+        "fixture.md must not be installed in principles/"
+    );
+    assert!(ws.join("playbooks/bug-fix.md").is_file());
+    assert!(ws.join("playbooks/feature.md").is_file());
+    assert!(ws.join("playbooks/figure-it-out.md").is_file());
+    assert!(ws.join("playbooks/runtime-forensics.md").is_file());
+    assert!(ws.join("playbooks/trace-forensics.md").is_file());
+    assert!(ws.join("playbooks/visual-parity.md").is_file());
+    assert!(ws.join("playbooks/eval.md").is_file());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn s6b_acceptance_1_fresh_init_has_poteto_mode_skill() {
+    let root = std::env::temp_dir().join(format!("quaqua-init-s6b-skill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let ws = root.join("ws");
+
+    let nobin = root.join("nobin");
+    std::fs::create_dir_all(&nobin).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.env("PATH", &nobin)
+        .env("HERDR_BIN_PATH", nobin.join("herdr"))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_TEMPLATE_DIR")
+        .current_dir(&root);
+
+    let out = cmd
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let skill_path = ws.join(".claude/skills/poteto-mode/SKILL.md");
+    assert!(
+        skill_path.is_file(),
+        "fresh quaqua init workspace must have .claude/skills/poteto-mode/SKILL.md"
+    );
+
+    let content = std::fs::read_to_string(&skill_path).expect("read poteto-mode/SKILL.md");
+    assert!(
+        content.contains("name: poteto-mode"),
+        "skill must be named poteto-mode"
+    );
+    assert!(
+        content.contains("Never invent a playbook name"),
+        "skill must require never inventing a playbook name"
+    );
+    assert!(
+        content.contains("Never route inside a worker"),
+        "skill must forbid routing inside a worker"
+    );
+    assert!(
+        content.contains("routes to `feature`"),
+        "code route must route to feature"
+    );
+    assert!(
+        content.contains("routes to `figure-it-out` in the MVP (routes to Babysit once P2 lands)"),
+        "F2: Babysit route must use figure-it-out until P2 lands"
+    );
+    assert!(
+        content.contains("routes to `figure-it-out` in the MVP (routes to Shipping once P2 lands)"),
+        "F2: Shipping route must use figure-it-out until P2 lands"
+    );
+    assert!(
+        content.contains("routes to `multi-phase-plan`"),
+        "multi-phase-plan route must route to multi-phase-plan"
+    );
+    assert!(
+        content.contains("Deferred routes with quaqua mappings (P2):"),
+        "F5: deferred routes with quaqua mappings must be present"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn s6b_acceptance_2_agents_route_line_names_poteto_mode() {
+    let root = std::env::temp_dir().join(format!("quaqua-init-s6b-agents-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let ws = root.join("ws");
+
+    let nobin = root.join("nobin");
+    std::fs::create_dir_all(&nobin).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.env("PATH", &nobin)
+        .env("HERDR_BIN_PATH", nobin.join("herdr"))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_TEMPLATE_DIR")
+        .current_dir(&root);
+
+    let out = cmd
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let agents_md = std::fs::read_to_string(ws.join("AGENTS.md")).expect("read AGENTS.md");
+    assert!(
+        agents_md.contains("Before every brief, route through `/poteto-mode`."),
+        "AGENTS.md must carry the route line: Before every brief, route through `/poteto-mode`."
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn s6b_f3_skill_carries_agents_approval_list() {
+    let root = std::env::temp_dir().join(format!("quaqua-init-s6b-f3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let ws = root.join("ws");
+
+    let nobin = root.join("nobin");
+    std::fs::create_dir_all(&nobin).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.env("PATH", &nobin)
+        .env("HERDR_BIN_PATH", nobin.join("herdr"))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_TEMPLATE_DIR")
+        .current_dir(&root);
+
+    let out = cmd
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let skill_path = ws.join(".claude/skills/poteto-mode/SKILL.md");
+    let content = std::fs::read_to_string(&skill_path).expect("read poteto-mode/SKILL.md");
+
+    assert!(
+        content
+            .contains("Never approve on anh iu's behalf without explicit approval (`AGENTS.md`):"),
+        "skill must cite AGENTS.md approval rule"
+    );
+    assert!(
+        content.contains("Deleting data"),
+        "skill must require approval for deleting data"
+    );
+    assert!(
+        content.contains("Push or force-push"),
+        "skill must require approval for push or force-push"
+    );
+    assert!(
+        content.contains("Branch delete or merge to main"),
+        "skill must require approval for branch delete or merge to main"
+    );
+    assert!(
+        content.contains("Deploy"),
+        "skill must require approval for deploy"
+    );
+    assert!(
+        content.contains("Spending money"),
+        "skill must require approval for spending money"
+    );
+    assert!(
+        content.contains("Sending or publishing anything outward"),
+        "skill must require approval for outward publishing/sending"
+    );
+    assert!(
+        content.contains("never bypass anh iu's approval for the irreversible actions above"),
+        "session overrides must never bypass approval for irreversible actions"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn s6b_f4_skill_carries_agents_resume_first_rule() {
+    let root = std::env::temp_dir().join(format!("quaqua-init-s6b-f4-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let ws = root.join("ws");
+
+    let nobin = root.join("nobin");
+    std::fs::create_dir_all(&nobin).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.env("PATH", &nobin)
+        .env("HERDR_BIN_PATH", nobin.join("herdr"))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_TEMPLATE_DIR")
+        .current_dir(&root);
+
+    let out = cmd
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let skill_path = ws.join(".claude/skills/poteto-mode/SKILL.md");
+    let content = std::fs::read_to_string(&skill_path).expect("read poteto-mode/SKILL.md");
+
+    assert!(
+        content.contains("Resume vs fresh:"),
+        "skill must carry Resume vs fresh header"
+    );
+    assert!(
+        content.contains("Resume is the default for existing work"),
+        "skill must set resume as default for existing work"
+    );
+    assert!(
+        content.contains("A half-done, stalled or killed worker resumes the same session (`quaqua worker prompt --resume`)"),
+        "skill must state half-done/stalled/killed workers resume"
+    );
+    assert!(
+        content.contains("fresh spawn only when the goal changed or the worktree is unrecoverable"),
+        "skill must restrict fresh spawn per AGENTS.md:43"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
