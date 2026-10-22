@@ -1144,6 +1144,9 @@ fn s6_acceptance_5_fresh_init_has_agents_coordinator_lines_and_playbooks() {
     assert!(ws.join("playbooks/trace-forensics.md").is_file());
     assert!(ws.join("playbooks/visual-parity.md").is_file());
     assert!(ws.join("playbooks/eval.md").is_file());
+    assert!(ws.join("playbooks/shipping.md").is_file());
+    assert!(ws.join("playbooks/babysit.md").is_file());
+    assert!(ws.join("playbooks/worktree-cleanup.md").is_file());
     assert!(
         !ws.join("playbooks/fixture.md").exists(),
         "fixture.md must not be installed in playbooks/"
@@ -1199,6 +1202,9 @@ fn f1_fresh_init_has_no_fixture() {
     assert!(ws.join("playbooks/trace-forensics.md").is_file());
     assert!(ws.join("playbooks/visual-parity.md").is_file());
     assert!(ws.join("playbooks/eval.md").is_file());
+    assert!(ws.join("playbooks/shipping.md").is_file());
+    assert!(ws.join("playbooks/babysit.md").is_file());
+    assert!(ws.join("playbooks/worktree-cleanup.md").is_file());
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1255,12 +1261,16 @@ fn s6b_acceptance_1_fresh_init_has_poteto_mode_skill() {
         "code route must route to feature"
     );
     assert!(
-        content.contains("routes to `figure-it-out` in the MVP (routes to Babysit once P2 lands)"),
-        "F2: Babysit route must use figure-it-out until P2 lands"
+        content.contains("routes to `babysit`"),
+        "F2: PR-status route must be babysit now that P2d landed"
     );
     assert!(
-        content.contains("routes to `figure-it-out` in the MVP (routes to Shipping once P2 lands)"),
-        "F2: Shipping route must use figure-it-out until P2 lands"
+        content.contains("routes to `shipping`"),
+        "F2: land-or-ship route must be shipping now that P2d landed"
+    );
+    assert!(
+        content.contains("routes to `worktree-cleanup`"),
+        "F2: disk-reclaim route must be worktree-cleanup"
     );
     assert!(
         content.contains("routes to `multi-phase-plan`"),

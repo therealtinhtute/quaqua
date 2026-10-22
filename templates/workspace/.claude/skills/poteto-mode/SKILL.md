@@ -29,23 +29,24 @@ Before writing any worker brief, route through `/poteto-mode`:
 
 The Principles section below grounds every trigger. In your reply, name each principle that shaped a decision and the specific choice it changed. Cite only principles whose leaf you read this session.
 
-MVP triggers:
+Active triggers:
 
-- About to ask a question on a "which approach", "how should I", or "what should this do" fork: classify it before asking. If the answer is an observable fact (behavior, timing, layout, output, perf), it is not the human's to answer. Settle it by running an experiment, reproduction, or prototype (routes to `prototype`, active in P2b) and let the result decide. If the task is a read-only investigation whose deliverable is a cited answer (how does X work, why was Y built this way, or "are we sure?"), answer from evidence (routes to `investigation`, active in P2b; maps pstack `how`). Reserve questions for genuine product or preference calls no experiment can settle. Under a full-autonomy grant, decide calls covered by the grant, act, and report. Irreversible writes in Autonomy always pause.
-- Any code: name the data shape first and choose its organizing structure per **principle-model-the-domain** (active in P2a); routes to `feature`.
-- Behavior-preserving change to structure or shape (rename, extract, inline, dedupe, move): routes to `refactoring` (active in P2a).
-- Running a benchmark, measuring perf, or reporting measured numbers: routes to `perf-issue` and follow **Explain the Number** (`principle-explain-the-number`, active in P2a). For sustained, scientific improvement of one metric against a target across multiple hypotheses, routes to `hillclimb` (active in P2b).
+- About to ask a question on a "which approach", "how should I", or "what should this do" fork: classify it before asking. If the answer is an observable fact (behavior, timing, layout, output, perf), it is not the human's to answer. Settle it by running an experiment, reproduction, or prototype (routes to `prototype`) and let the result decide. If the task is a read-only investigation whose deliverable is a cited answer (how does X work, why was Y built this way, or "are we sure?"), answer from evidence (routes to `investigation`; maps pstack `how`). Reserve questions for genuine product or preference calls no experiment can settle. Under a full-autonomy grant, decide calls covered by the grant, act, and report. Irreversible writes in Autonomy always pause.
+- Any code: name the data shape first and choose its organizing structure per **principle-model-the-domain**; routes to `feature`.
+- Behavior-preserving change to structure or shape (rename, extract, inline, dedupe, move): routes to `refactoring`.
+- Running a benchmark, measuring perf, or reporting measured numbers: routes to `perf-issue` and follow **Explain the Number** (`principle-explain-the-number`). For sustained, scientific improvement of one metric against a target across multiple hypotheses, routes to `hillclimb`.
 - Nontrivial multi-step: establish the throughput checkpoint across blocking first steps, independent workstreams, shared mutable state, and smallest safe decomposition.
-- Any PR-status request ("babysit this", "get it green"): routes to `figure-it-out` in the MVP (routes to Babysit once P2 lands).
-- Asked to land or ship a green stack: routes to `figure-it-out` in the MVP (routes to Shipping once P2 lands). Green is not safe; require independent verification per unit.
+- Any PR-status request ("babysit this", "get it green", "address the review comments", "check on PR X"): routes to `babysit`. Declare its mode before polling.
+- Asked to land or ship a green stack: routes to `shipping`. Green is not safe; require independent verification per unit, and landing on main stays anh iu's approval.
+- Reclaiming local disk by pruning merged or abandoned worktrees ("clean up worktrees", "what's using my disk"): routes to `worktree-cleanup`. Removal goes through `quaqua worker cleanup`.
 - Broken skill mid-task: fix it in its own unit. Do not block. Do not silently work around it.
-- Long, autonomous, or multi-phase work, or work the operator steps away from to review later: routes to `multi-phase-plan` (active in P2a; maps pstack `show-me-your-work`), maintaining an auditable decision trail.
-- Resuming or taking over prior in-flight work from the report, branch, or journal: routes to `session-pickup` (active in P2b).
-- Suspending in-flight work cleanly on explicit pause or before coordinator compaction: routes to `pause-safely` (active in P2b).
-- Diagnosing a runtime symptom (leak, idle-CPU spin, glitch) from live instrumentation: routes to `runtime-forensics` (active in P2c).
-- Diagnosing a captured profiling artifact (cpuprofile, trace, spindump, heap snapshot): routes to `trace-forensics` (active in P2c).
-- Pixel-exact UI equivalence or migrating a styling system: routes to `visual-parity` (active in P2c), running headless only per `rules/_all/no-gui-driving.md`.
-- Testing how a skill, structure, or prompt change affects agent behavior before promoting it, evaluating playbook spread and telemetry across runs, or running bakeoffs / competitive designs with N workers of different kinds + judge: routes to `eval` (active in P2c; maps pstack `arena`).
+- Long, autonomous, or multi-phase work, or work the operator steps away from to review later: routes to `multi-phase-plan` (maps pstack `show-me-your-work`), maintaining an auditable decision trail.
+- Resuming or taking over prior in-flight work from the report, branch, or journal: routes to `session-pickup`.
+- Suspending in-flight work cleanly on explicit pause or before coordinator compaction: routes to `pause-safely`.
+- Diagnosing a runtime symptom (leak, idle-CPU spin, glitch) from live instrumentation: routes to `runtime-forensics`.
+- Diagnosing a captured profiling artifact (cpuprofile, trace, spindump, heap snapshot): routes to `trace-forensics`.
+- Pixel-exact UI equivalence or migrating a styling system: routes to `visual-parity`, running headless only per `rules/_all/no-gui-driving.md`.
+- Testing how a skill, structure, or prompt change affects agent behavior before promoting it, evaluating playbook spread and telemetry across runs, or running bakeoffs / competitive designs with N workers of different kinds + judge: routes to `eval` (maps pstack `arena`).
 
 Deferred routes with quaqua mappings (P2):
 
@@ -54,11 +55,11 @@ Deferred routes with quaqua mappings (P2):
 - Parallel fan-out (P2): routes to worker fan-out per `models.md` kinds and grid layout (maps pstack `swarm`).
 - Contested design (P2): routes to cross-harness reviewer on a different model (maps pstack `interrogate`).
 - Docs, RFCs, readmes, PR descriptions, or commit messages (P2): deferred to P2 documentation skill (maps pstack `technical-writing`).
-- Running a benchmark or reporting measured numbers (P2): follow **Explain the Number** (`principle-explain-the-number`, active in P2a); deferred to P2 benchmark checklist (maps pstack `benchmark-checklist`).
+- Running a benchmark or reporting measured numbers (P2): follow **Explain the Number** (`principle-explain-the-number`); deferred to P2 benchmark checklist (maps pstack `benchmark-checklist`).
 
 ## Principles
 
-Read the leaf in full for any principle you cite. Each leaf lives under `principles/<name>.md`. In the MVP, S6 shipped 6 leaves; P2a brought the library to 17 leaves; P2b brought the library to 20 leaves; P2c activates 4 playbooks (runtime-forensics, trace-forensics, visual-parity, eval) reusing existing leaves (4 leaves remaining in P2).
+Read the leaf in full for any principle you cite. Each leaf lives under `principles/<name>.md`. S6 shipped 6 leaves; P2a brought the library to 17 leaves; P2b brought the library to 20 leaves; P2c added 4 playbooks reusing existing leaves; P2d completes the library at 24 leaves and 18 playbooks. No leaf gap remains.
 
 **Core**
 
@@ -144,7 +145,7 @@ Keep comments clean as you go. Keep a comment only for a non-obvious *why* the c
 
 Instead of maintaining a static file index that can drift, the router queries `quaqua playbook list` dynamically.
 
-S6 shipped the initial 3 playbooks (bug-fix, feature, figure-it-out); P2 expands the library to 18 playbooks (15 active in P2c).
+S6 shipped the initial 3 playbooks (bug-fix, feature, figure-it-out); P2 completes the library at 18 playbooks, all active.
 
 - **Figure-it-out fallback:** A large or cross-cutting effort (a migration across many call sites, an ambitious multi-part change), or work the user steps away from to trust later, routes to `figure-it-out` even when a narrower playbook like Feature fits. Use `figure-it-out` whenever no bundled playbook fits. It designs a bespoke, rigorous workflow for the task.
 - **Orchestration:** A standing project-scale program routes to a project Lead (`<slug>-lead`).
