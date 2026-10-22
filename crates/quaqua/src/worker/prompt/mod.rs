@@ -1,10 +1,13 @@
 //! Worker prompt & watchdog logic (`quaqua worker prompt <name> <task>`).
 
+pub mod brief;
 pub mod cost;
 pub mod observer;
+pub mod playbook_check;
 pub mod readonly;
 pub mod watchdog;
 pub mod workflow;
+pub mod verdict;
 
 pub use crate::util::now_sec;
 pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
@@ -158,6 +161,10 @@ pub fn do_check_brief(task: &str) -> Result<(), (i32, String)> {
             "error: task must be a brief with 'Goal:', 'Hard constraints:', 'Current design (open to challenge):' (rules/_all/brief.md)\n".to_string(),
         ));
     }
+    brief::warn_brief_headers(task);
+    // A name the present index cannot resolve or render is the one rejection
+    // here; a missing or incomplete index only warns.
+    brief::prepare_injection_in_workspace(task)?;
     let (budget, src) = resolve_budget_sec(task);
     println!("budget={budget}s source={src}");
     Ok(())
@@ -475,7 +482,7 @@ pub fn prompt_worker<G: GitOps>(
     task: Option<&str>,
     resume: bool,
     extend: Option<u64>,
-    _git: &G,
+    git: &G,
     herdr: &Herdr,
 ) -> Result<(), (i32, String)> {
     validate_env_budget()?;
@@ -582,7 +589,11 @@ pub fn prompt_worker<G: GitOps>(
         }
     }
 
-    let fallback_kind = name.split('-').next().unwrap_or("tieude").to_string();
+    let fallback_kind = crate::config::load_team_config()
+        .ok()
+        .and_then(|cfg| crate::config::kind_of_worker(&cfg, name).map(|s| s.to_string()))
+        .or_else(|| crate::config::load_team_config().ok().map(|c| c.strategy.default_kind))
+        .unwrap_or_default();
 
     let fallback_repo = {
         let (_ok, get_info) = herdr.agent_get(name).unwrap_or((false, String::new()));
@@ -633,6 +644,12 @@ pub fn prompt_worker<G: GitOps>(
         }
         let _ = std::fs::remove_file(WorkerMetadata::provider_retry_path(&runs_dir, name));
 
+        // § S4: a new task starts with no playbook pin. Dropping it before the
+        // prompt means a submission that never lands (or a pin write that
+        // fails) leaves no file for S5 to check against this task's report.
+        let playbook_state = runs_dir.join(format!(".{name}.playbook"));
+        let _ = std::fs::remove_file(&playbook_state);
+
         // Pre-prompt grid check
         if std::env::var("GRID_SKIP").as_deref() != Ok("1")
             || (std::env::var("PIPELINE_TASK").is_err()
@@ -653,10 +670,17 @@ pub fn prompt_worker<G: GitOps>(
             }
         }
 
+        // § S4: warn on a brief that names no playbook or no context, then
+        // append the named playbook's Worker steps + cited leaves to the prompt.
+        brief::warn_brief_headers(task_str);
+        let injection = brief::prepare_injection_in_workspace(task_str)?;
+
         // Synchronous land check: herdr's own "the prompt reached the turn"
         // signal. A stalled submission gets exactly one enter + re-wait.
-        let prompt_body = format!(
-            "{task_str}. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/{name}.md (publish it atomically, never a partial file); reply only the path."
+        let prompt_body = brief::compose_prompt_body(
+            name,
+            task_str,
+            injection.as_ref().map(|i| i.text.as_str()),
         );
         let landed = match herdr.agent_prompt_wait(
             name,
@@ -697,6 +721,19 @@ pub fn prompt_worker<G: GitOps>(
             if !recovered {
                 eprintln!("WATCHDOG exit=3 prompt not landed | name={name}");
                 return Err((3, String::new()));
+            }
+        }
+
+        // The worker only got the steps if the prompt landed, so the pin
+        // (`runs/.<name>.playbook`) is written here, after the land check, via
+        // a temp file + rename: a failed write must never leave a partial pin.
+        if let Some(injection) = &injection {
+            let tmp = runs_dir.join(format!(".{name}.playbook.tmp"));
+            let written = std::fs::write(&tmp, injection.state_content())
+                .and_then(|()| std::fs::rename(&tmp, &playbook_state));
+            if let Err(e) = written {
+                let _ = std::fs::remove_file(&tmp);
+                eprintln!("warning: cannot write {}: {e}", playbook_state.display());
             }
         }
 
@@ -856,7 +893,7 @@ pub fn prompt_worker<G: GitOps>(
     );
 
     let start_sec = now_sec();
-    let sys_acts = SystemActivities::with_repo_dir(repo_dir);
+    let sys_acts = SystemActivities::with_repo_dir(&repo_dir);
     let prompt_acts = PromptActivities {
         inner: sys_acts,
         runs_dir: runs_dir.clone(),
@@ -968,6 +1005,26 @@ pub fn prompt_worker<G: GitOps>(
                 );
                 return Err((6, String::new()));
             }
+            let _ = verdict::record_verdict_on_acceptance(
+                &runs_dir,
+                name,
+                &report_content,
+                expect_verdict,
+                git,
+                Some(&repo_dir),
+            );
+
+            // § S5: warn-only. A builder report that does not account for the
+            // steps pinned in `runs/.<name>.playbook` prints a warning and
+            // journals a `playbook_gap`; the acceptance exit stays 0. This block
+            // is shared by a fresh run and by `--resume`, so both paths check.
+            playbook_check::warn_playbook_gaps(
+                &mut journal,
+                &runs_dir,
+                name,
+                &report_content,
+                expect_verdict,
+            );
 
             let read_marker = runs_dir.join(format!(".{name}.read"));
             let _ = std::fs::write(&read_marker, format!("{}\n", now_sec()));
@@ -1015,5 +1072,82 @@ pub fn prompt_worker<G: GitOps>(
             Err((6, String::new()))
         }
         other => Err((other, format!("unexpected exit code {other}\n"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_env::{lock_env, TestEnvVarGuard};
+    use std::fs;
+
+    #[test]
+    fn test_worker_prompt_keeps_exit_code_for_unparseable_reviewer_verdict() {
+        // `prompt_worker` resolves these from the process env; a test that
+        // writes the same vars must not interleave with this run.
+        let _env_lock = lock_env();
+
+        let tmp = std::env::temp_dir().join(format!("quaqua-wp-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _guard_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _guard_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _guard_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let name = "suhuynh-testr1";
+        WorkerMetadata::mark_review(&tmp, name).unwrap();
+
+        let report_file = tmp.join(format!("{name}.md"));
+        fs::write(
+            &report_file,
+            "# Review\nVerdict: not clean\n## Lessons\nnone\n",
+        )
+        .unwrap();
+
+        let stub_herdr = tmp.join("herdr-stub");
+        fs::write(
+            &stub_herdr,
+            r#"#!/bin/sh
+case "$1" in
+  agent)
+    case "$2" in
+      wait) echo '{"result": {"agent": {"agent_status": "idle", "state_change_seq": 1}}}'; exit 0 ;;
+      get) echo '{"result": {"agent": {"name": "'"$3"'", "agent_status": "idle"}}}'; exit 0 ;;
+      *) echo '{"result": {}}'; exit 0 ;;
+    esac ;;
+  *) echo '{"result": {}}'; exit 0 ;;
+esac
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&stub_herdr).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub_herdr, perms).unwrap();
+        let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_herdr.to_str().unwrap());
+
+        let herdr = Herdr {
+            bin: stub_herdr.to_string_lossy().to_string(),
+        };
+        let git = crate::git::Git::new();
+
+        let res = prompt_worker(name, None, true, None, &git, &herdr);
+        assert_eq!(
+            res,
+            Ok(()),
+            "worker prompt must keep exit 0 for unparseable reviewer verdict"
+        );
+
+        let db_path = tmp.join("quaqua.db");
+        if let Ok(journal) = SqliteJournal::open(&db_path) {
+            let records = journal.load_verdicts("quaqua/suhuynh-testr1", "").unwrap();
+            assert!(
+                records.is_empty(),
+                "unparseable report must not record verdict"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

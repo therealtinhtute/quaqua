@@ -66,6 +66,23 @@ pub fn record(runs_dir: &Path, name: &str, wt: &Path) -> Result<(), String> {
 
 const UNRECORDED: &str = "UNRECORDED";
 
+/// Returns the baseline worktree path and HEAD SHA recorded at spawn, if valid.
+pub fn baseline_info(runs_dir: &Path, name: &str) -> Option<(PathBuf, String)> {
+    let saved = std::fs::read_to_string(baseline_path(runs_dir, name)).ok()?;
+    let (wt, before) = saved.split_once('\n')?;
+    if before.starts_with(UNRECORDED) {
+        return None;
+    }
+    let head_line = before.lines().next()?;
+    let sha = head_line.strip_prefix("HEAD ")?.trim().to_string();
+    Some((PathBuf::from(wt), sha))
+}
+
+/// Returns the baseline HEAD SHA recorded at spawn, if valid.
+pub fn baseline_sha(runs_dir: &Path, name: &str) -> Option<String> {
+    baseline_info(runs_dir, name).map(|(_, sha)| sha)
+}
+
 /// Compare the worktree with its recorded baseline. No baseline → `Ok` (not a
 /// review worker, or spawned before H4). A worktree that cannot be read is a
 /// failure: fail closed.

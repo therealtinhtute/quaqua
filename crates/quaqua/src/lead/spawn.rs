@@ -34,7 +34,7 @@ pub const USAGE: &str = "\
 use crate::workspace::workspace_root_checked;
 
 /// Resolve the lead kind and launch settings from config and optional LEAD_KIND override.
-/// On missing or unknown lead_kind, defaults to "tieude".
+/// On missing or unknown lead_kind, defaults to config strategy default_kind.
 pub fn resolve_lead_launch(
     cfg: &crate::config::Config,
     env_override: Option<&str>,
@@ -43,19 +43,19 @@ pub fn resolve_lead_launch(
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string())
         .or_else(|| cfg.strategy.lead_kind.clone())
-        .unwrap_or_else(|| "tieude".to_string());
+        .unwrap_or_else(|| cfg.strategy.default_kind.clone());
 
     let kind_name = if cfg.kinds.contains_key(&candidate) {
         candidate
     } else {
-        "tieude".to_string()
+        cfg.strategy.default_kind.clone()
     };
 
     let kind_info = cfg.kinds.get(&kind_name).ok_or_else(|| {
         (1, format!("error: default lead kind '{kind_name}' not found in team.toml\n"))
     })?;
 
-    let launch = crate::launch::resolve_launch(kind_info, &kind_name)?;
+    let launch = crate::launch::resolve_launch(kind_info, &kind_name, cfg)?;
     Ok((kind_name, launch))
 }
 pub fn spawn_lead<G: GitOps, H: HerdrOps>(

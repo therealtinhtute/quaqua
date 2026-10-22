@@ -32,18 +32,20 @@ const CREDENTIAL_ENV_VARS: &[&str] = &[
 ];
 
 pub const USAGE: &str = "\
-# Usage: quaqua worker spawn [--base <ref>] [--review] [--approve-kind <kind>] <name> <kind: tieude|detu|sude|ni|suhuynh|truonglao> <repo-path>
+# Usage: quaqua worker spawn [--base <ref>] [--review] [--approve-kind <kind>] [--purpose <purpose>] <name> [<kind>] <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — quaqua lead spawn <slug>)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
 #   --review      any kind with can_review = true: repo read-only, $HOME/quaqua/runs writable
+#   --purpose <p> resolve kind from [purposes] in team.toml
 #   --approve-kind <kind>  approve a spawn when kinds.<kind>.spawn = \"approve\" (repeatable)";
 
 pub struct SpawnOptions {
     pub base: Option<String>,
     pub review: bool,
     pub name: String,
-    pub kind: String,
+    pub kind: Option<String>,
+    pub purpose: Option<String>,
     pub repo_path: PathBuf,
     /// Kinds the Principal approved with `--approve-kind`.
     pub approve_kinds: Vec<String>,
@@ -52,9 +54,9 @@ pub struct SpawnOptions {
 pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> {
     let mut base: Option<String> = None;
     let mut review = false;
+    let mut purpose: Option<String> = None;
     let mut approve_kinds: Vec<String> = Vec::new();
     let mut pos = Vec::new();
-
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -93,6 +95,22 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
             }
             base = Some(val.to_string());
             i += 1;
+        } else if arg == "--purpose" {
+            if i + 1 >= args.len() {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            let val = &args[i + 1];
+            if val.is_empty() || val.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            purpose = Some(val.clone());
+            i += 2;
+        } else if let Some(val) = arg.strip_prefix("--purpose=") {
+            if val.is_empty() || val.starts_with('-') {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            purpose = Some(val.to_string());
+            i += 1;
         } else if arg.starts_with('-') {
             return Err((1, format!("{}\n", USAGE)));
         } else {
@@ -101,16 +119,21 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
         }
     }
 
-    if pos.len() < 3 {
+    let (name, kind, repo_path) = if pos.len() == 2 && purpose.is_some() {
+        (pos[0].clone(), None, PathBuf::from(&pos[1]))
+    } else if pos.len() >= 3 {
+        (pos[0].clone(), Some(pos[1].clone()), PathBuf::from(&pos[2]))
+    } else {
         return Err((1, format!("{}\n", USAGE)));
-    }
+    };
 
     Ok(SpawnOptions {
         base,
         review,
-        name: pos[0].clone(),
-        kind: pos[1].clone(),
-        repo_path: PathBuf::from(&pos[2]),
+        name,
+        kind,
+        purpose,
+        repo_path,
         approve_kinds,
     })
 }
@@ -263,31 +286,66 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     git: &G,
     herdr: &H,
 ) -> Result<(), (i32, String)> {
-    let kind_info = cfg.kinds.get(&opts.kind).ok_or_else(|| {
+    let mut opts = opts;
+    let resolved_kind = match (&opts.purpose, &opts.kind) {
+        (Some(p), Some(pos)) => {
+            let resolved = crate::config::resolve_purpose(cfg, p)
+                .map_err(|e| (1, format!("error: {e}\n")))?;
+            if pos != resolved {
+                return Err((
+                    1,
+                    format!(
+                        "error: --purpose '{p}' resolves to kind '{resolved}', but positional kind is '{pos}'\n"
+                    ),
+                ));
+            }
+            resolved.to_string()
+        }
+        (Some(p), None) => {
+            crate::config::resolve_purpose(cfg, p)
+                .map_err(|e| (1, format!("error: {e}\n")))?
+                .to_string()
+        }
+        (None, Some(k)) => {
+            if cfg.kinds.contains_key(k) {
+                k.clone()
+            } else if let Ok(resolved) = crate::config::resolve_purpose(cfg, k) {
+                resolved.to_string()
+            } else {
+                k.clone()
+            }
+        }
+        (None, None) => {
+            return Err((1, format!("{}\n", USAGE)));
+        }
+    };
+    opts.kind = Some(resolved_kind.clone());
+    let kind = resolved_kind;
+
+    let kind_info = cfg.kinds.get(&kind).ok_or_else(|| {
         let line2 = USAGE.lines().next().unwrap_or(USAGE);
         (1, format!("{line2}\n"))
     })?;
-
-    if !is_valid_name(&opts.name, &opts.kind) {
+    if !is_valid_name(&opts.name, &kind) {
         let lines: Vec<&str> = USAGE.lines().take(2).collect();
         return Err((1, format!("{}\n", lines.join("\n"))));
     }
 
     // One spawn-policy gate for every spawn path: a kind with
     // `spawn = "approve"` needs its own --approve-kind from the Principal.
-    crate::config::check_spawn_policy(&opts.kind, kind_info, &opts.approve_kinds)?;
+    crate::config::check_spawn_policy(&kind, kind_info, &opts.approve_kinds)?;
 
     if opts.review && !kind_info.can_review {
         eprintln!(
-            "error: --review requires a kind with can_review = true in team.toml (ni, suhuynh, truonglao), not {}",
-            opts.kind
+            "error: --review requires a kind with can_review = true in team.toml, not {}",
+            kind
         );
         return Err((1, format!("{}\n", USAGE)));
     }
 
     // team.toml is the only source of harness/model/effort: reject a kind that
     // cannot launch before any worktree or pane exists.
-    let primary_launch = resolve_launch(kind_info, &opts.kind)?;
+    let primary_launch = resolve_launch(kind_info, &kind, cfg)?;
     let primary_fallback = kind_info.fallback.clone();
 
     let repo = canonicalize_repo_path(&opts.repo_path);
@@ -302,7 +360,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let _ = std::fs::create_dir_all(&runs_dir);
 
     if std::env::var("PIPELINE_TASK").is_err() {
-        let slots_used = count_owner_slots(&runs_dir, &owner, Some(&opts.name), herdr);
+        let slots_used = count_owner_slots(&runs_dir, &owner, Some(&opts.name), herdr, cfg);
         let max_workers = cfg.limits.max_workers_per_orchestrator;
         if slots_used >= max_workers {
             return Err((
@@ -368,6 +426,14 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let _ = WorkerMetadata::save_grid(&runs_dir, &opts.name, &grid_tab);
     if let Ok(pt) = std::env::var("PIPELINE_TASK") {
         let _ = WorkerMetadata::save_pipeline(&runs_dir, &opts.name, &pt);
+    }
+    if let Some(base_ref) = &opts.base {
+        let _ = crate::state::atomic_write(
+            &runs_dir.join(format!("{}.base", opts.name)),
+            format!("{base_ref}\n"),
+        );
+    } else {
+        let _ = std::fs::remove_file(runs_dir.join(format!("{}.base", opts.name)));
     }
 
     let rf_str = rf.to_string_lossy().to_string();
@@ -510,7 +576,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         // attempt, only when a fallback is configured) take one hop to it.
         let _ = herdr.pane_close(&pane);
         if idx == 0 {
-            if let Some((fb, fb_kind)) = fallback_kind(cfg, kind_info, &opts.kind)? {
+            if let Some((fb, fb_kind)) = fallback_kind(cfg, kind_info, &kind)? {
                 if opts.review && !fb_kind.can_review {
                     eprintln!(
                         "error: fallback '{fb}' cannot review; refusing fallback for review spawn of '{}'",
@@ -519,8 +585,8 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
                     return Err((1, String::new()));
                 }
                 crate::config::check_spawn_policy(fb, fb_kind, &opts.approve_kinds)?;
-                let fb_launch = resolve_launch(fb_kind, fb)?;
-                eprintln!("WARN: fallback: {}→{fb} ({reason})", opts.kind);
+                let fb_launch = resolve_launch(fb_kind, fb, cfg)?;
+                eprintln!("WARN: fallback: {}→{fb} ({reason})", kind);
                 attempts.push(fb_launch);
                 idx += 1;
                 continue;
@@ -540,7 +606,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     println!(
         "worker={} kind={} pane={} worktree={}",
         opts.name,
-        opts.kind,
+        kind,
         pane_id,
         wt.display()
     );

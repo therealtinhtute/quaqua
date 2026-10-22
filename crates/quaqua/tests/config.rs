@@ -50,7 +50,7 @@ fn config_repo_kinds_carry_model_and_effort() {
     let out = run(&["config", "validate", "--file", &repo_team()]);
     assert!(out.status.success(), "validate failed: {}", stderr(&out));
     let effort = run(&["config", "get", "kinds.tieude.effort", "--file", &repo_team()]);
-    assert_eq!(stdout(&effort).trim(), "max");
+    assert_eq!(stdout(&effort).trim(), "high");
     let fallback = run(&["config", "get", "kinds.sude.fallback", "--file", &repo_team()]);
     assert_eq!(stdout(&fallback).trim(), "suhuynh");
 }
@@ -182,7 +182,7 @@ fn config_invalid_fixtures_are_rejected() {
         ("bad-effort.toml", "does not take effort 'banana'"),
         ("bad-opencode-variant.toml", "does not take effort 'medium'"),
         ("bad-opencode-openrouter-variant.toml", "does not take effort 'medium'"),
-        ("unknown-opencode-model.toml", "is not in allowlist (fix: add model and variants to config.rs model_effort_allowed)"),
+        ("unknown-opencode-model.toml", "is not in allowlist (fix: add model and variants to team.toml [opencode_models])"),
         ("fallback-missing.toml", "fallback 'ghost' is not a kind"),
         ("fallback-self.toml", "fallback names itself"),
         ("fallback-cannot-review.toml", "cannot review"),
@@ -214,4 +214,39 @@ fn config_invalid_fixtures_are_rejected() {
             "{name}: stderr {err:?} does not contain {needle:?}"
         );
     }
+}
+
+#[test]
+fn config_get_purposes() {
+    let out = run(&["config", "get", "purposes.review", "--file", &repo_team()]);
+    assert!(out.status.success(), "get failed: {}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "suhuynh");
+}
+
+#[test]
+fn config_get_opencode_models() {
+    let out = run(&["config", "get", "opencode_models.deepseek-v4.1-flash", "--file", &repo_team()]);
+    assert!(out.status.success(), "get failed: {}", stderr(&out));
+    assert!(stdout(&out).contains("max"));
+}
+
+#[test]
+fn config_opencode_models_table_merges_over_defaults() {
+    let temp = std::env::temp_dir().join(format!("quaqua-test-models-merge-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp);
+    let toml_path = temp.join("team.toml");
+    let content = r#"schema_version = 2
+[opencode_models]
+"custom-model" = ["low"]
+"#;
+    std::fs::write(&toml_path, content).unwrap();
+    let out = run(&["config", "get", "opencode_models.deepseek-v4.1-flash", "--file", toml_path.to_str().unwrap()]);
+    assert!(out.status.success(), "get deepseek failed: {}", stderr(&out));
+    assert!(stdout(&out).contains("max"));
+
+    let out2 = run(&["config", "get", "opencode_models.custom-model", "--file", toml_path.to_str().unwrap()]);
+    assert!(out2.status.success(), "get custom failed: {}", stderr(&out2));
+    assert!(stdout(&out2).contains("low"));
+
+    let _ = std::fs::remove_dir_all(&temp);
 }

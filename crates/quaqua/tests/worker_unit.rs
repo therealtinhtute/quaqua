@@ -4,7 +4,7 @@ use quaqua::engine::activity::{ActivityRequest, ActivityResult, HerdrRequest, He
 use quaqua::engine::testkit::MockActivities;
 use quaqua::git::GitOps;
 use quaqua::herdr::HerdrOps;
-use quaqua::launch::{build_launch_cmd, resolve_launch, Launch};
+use quaqua::launch::{build_launch_cmd, Launch};
 use quaqua::lead::spawn::{update_index_content, update_project_index_owner};
 use quaqua::worker::cleanup::{resolve_default_runs_dir, resolve_home_quaqua_runs};
 use quaqua::worker::prompt::{brief_budget_sec, brief_headers_ok, validate_env_budget_val};
@@ -16,19 +16,20 @@ use std::sync::Mutex;
 
 #[test]
 fn test_task_worker_name_validation() {
-    assert!(is_task_worker_name("tieude-task1"));
-    assert!(is_task_worker_name("sude-hardimpl"));
-    assert!(is_task_worker_name("suhuynh-review2"));
-    assert!(is_task_worker_name("ni-quickfix"));
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
+    assert!(is_task_worker_name("tieude-task1", &cfg));
+    assert!(is_task_worker_name("sude-hardimpl", &cfg));
+    assert!(is_task_worker_name("suhuynh-review2", &cfg));
+    assert!(is_task_worker_name("ni-quickfix", &cfg));
 
     // Leads do not count as task workers
-    assert!(!is_task_worker_name("coucou-lead"));
-    assert!(!is_task_worker_name("sude-lead"));
-    assert!(!is_task_worker_name("quaqua-rs-lead"));
+    assert!(!is_task_worker_name("coucou-lead", &cfg));
+    assert!(!is_task_worker_name("sude-lead", &cfg));
+    assert!(!is_task_worker_name("quaqua-rs-lead", &cfg));
 
     // Unknown kinds
-    assert!(!is_task_worker_name("random-worker"));
-    assert!(!is_task_worker_name("unknown-task"));
+    assert!(!is_task_worker_name("random-worker", &cfg));
+    assert!(!is_task_worker_name("unknown-task", &cfg));
 }
 
 #[test]
@@ -724,6 +725,7 @@ fn test_unsupported_effort_rejected_before_split() {
 fn test_cap_pipeline_slot_reservation_mock() {
     let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
 
     // Write owner files: 1 live worker tieude-prompt (not a reviewer!)
     std::fs::write(temp_dir.join("tieude-prompt.owner"), "cos\n").unwrap();
@@ -746,7 +748,7 @@ fn test_cap_pipeline_slot_reservation_mock() {
     // Pipeline 'feature' has 1 active worker (sude-feature), so it reserves 2 - 1 = 1 slot.
     // Total should be 2 live + 1 reserved = 3 slots!
     // Under the old bug, tieude-prompt was counted as a pipeline reviewer for 'feature', reserving 0 slots (giving 2).
-    let count = count_owner_slots(&temp_dir, "cos", None, &mock);
+    let count = count_owner_slots(&temp_dir, "cos", None, &mock, &cfg);
     assert_eq!(count, 3);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -758,6 +760,7 @@ fn test_cap_pipeline_rust_state_without_task_line() {
     // The same 2-slot pipeline must not also count its live builder as a standalone worker.
     let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-notask-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
     let owner = "quaqua-intake-lead";
 
     std::fs::write(temp_dir.join("sude-blockedfix.owner"), format!("{owner}\n")).unwrap();
@@ -773,7 +776,7 @@ fn test_cap_pipeline_rust_state_without_task_line() {
     );
 
     // 1 live builder + (2 - 1 already counted) reserved = 2, not 1 + 2 = 3.
-    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    let count = count_owner_slots(&temp_dir, owner, None, &mock, &cfg);
     assert_eq!(count, 2);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -784,6 +787,7 @@ fn test_cap_pipeline_rust_state_review_round() {
     // Builder + fresh reviewer of the same pipeline are its 2 slots, not 2 live + 2 reserved.
     let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-review-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
     let owner = "quaqua-intake-lead";
 
     std::fs::write(temp_dir.join("sude-blockedfix.owner"), format!("{owner}\n")).unwrap();
@@ -808,7 +812,7 @@ fn test_cap_pipeline_rust_state_review_round() {
         r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"},{"name":"suhuynh-blockedfixr1","agent_status":"working"}]}}"#,
     );
 
-    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    let count = count_owner_slots(&temp_dir, owner, None, &mock, &cfg);
     assert_eq!(count, 2);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -819,6 +823,7 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
     // Legacy/shell states carry `task=`; an explicit line is the task, not the file name.
     let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-taskline-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
     let owner = "cos";
 
     std::fs::write(temp_dir.join("sude-other.owner"), "cos\n").unwrap();
@@ -835,7 +840,7 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
     let mock = MockActivitiesHerdr::with_agent_list(
         r#"{"result":{"agents":[{"name":"sude-other","agent_status":"working"}]}}"#,
     );
-    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock), 2);
+    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock, &cfg), 2);
 
     std::fs::write(temp_dir.join("sude-blockedfix.owner"), "cos\n").unwrap();
     std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
@@ -851,7 +856,59 @@ fn test_cap_pipeline_state_task_line_wins_over_filename() {
         r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#,
     );
     // Not part of pipeline 'other': 1 live + full 2 reservation.
-    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock), 3);
+    assert_eq!(count_owner_slots(&temp_dir, owner, None, &mock, &cfg), 3);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_cap_count_ignores_process_env_team_toml() {
+    // Repro: another test in this binary points QUAQUA_TEAM_TOML at a config
+    // whose kinds are not the default set. Slot counting must not let that
+    // env decide who is a task worker, and a failed load must not silently
+    // demote every worker to a non-worker (which skips the pipeline reserve).
+    let _env_lock = lock_env();
+    let temp_dir =
+        std::env::temp_dir().join(format!("quaqua-cap-envfree-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let owner = "cos";
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
+
+    std::fs::write(temp_dir.join("sude-blockedfix.owner"), "cos\n").unwrap();
+    std::fs::write(temp_dir.join("sude-blockedfix.pipeline"), "blockedfix\n").unwrap();
+    std::fs::write(
+        temp_dir.join("pipeline-blockedfix.state"),
+        format!(
+            "task=other\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+
+    let mock = MockActivitiesHerdr::with_agent_list(
+        r#"{"result":{"agents":[{"name":"sude-blockedfix","agent_status":"working"}]}}"#,
+    );
+
+    // A valid config that only knows kind `ni`, plus an override that cannot
+    // be loaded at all. Neither may change the count: 1 live standalone
+    // worker + the 2-slot pipeline reserve.
+    let foreign = temp_dir.join("foreign-team.toml");
+    std::fs::write(
+        &foreign,
+        "schema_version = 2\n\n[kinds.ni]\nharness = \"claude\"\nmodel = \"m\"\neffort = \"low\"\n",
+    )
+    .unwrap();
+
+    for override_path in [foreign.as_path(), Path::new("/nonexistent/quaqua-team.toml")] {
+        std::env::set_var("QUAQUA_TEAM_TOML", override_path);
+        assert_eq!(
+            count_owner_slots(&temp_dir, owner, None, &mock, &cfg),
+            3,
+            "QUAQUA_TEAM_TOML={} must not change the slot count",
+            override_path.display()
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -863,6 +920,7 @@ fn test_cap_pipeline_double_count_repro() {
     let temp_dir =
         std::env::temp_dir().join(format!("quaqua-cap-doublecount-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
     let owner = "quaqua-rs-lead";
 
     std::fs::write(temp_dir.join("tieude-gridown2.owner"), format!("{owner}\n")).unwrap();
@@ -877,7 +935,7 @@ fn test_cap_pipeline_double_count_repro() {
         r#"{"result":{"agents":[{"name":"tieude-gridown2","agent_status":"working"}]}}"#,
     );
 
-    let count = count_owner_slots(&temp_dir, owner, None, &mock);
+    let count = count_owner_slots(&temp_dir, owner, None, &mock, &cfg);
     assert_eq!(
         count, 2,
         "a pipeline must count once (2 slots), never double-count to 3"
@@ -958,10 +1016,10 @@ fn test_team_toml_harness_routing() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates/workspace/team.toml");
     let cfg = config::load(&team_path).expect("valid team.toml");
 
-    // tieude is pi at effort max (H3a)
+    // tieude is pi at effort high (anh iu 2026-10-22: light, well-specced tasks only)
     assert_eq!(cfg.kinds["tieude"].harness, "pi");
     assert_eq!(cfg.kinds["tieude"].model, "opencode-go/deepseek-v4.1-flash");
-    assert_eq!(cfg.kinds["tieude"].effort.as_deref(), Some("max"));
+    assert_eq!(cfg.kinds["tieude"].effort.as_deref(), Some("high"));
     assert!(!cfg.kinds["tieude"].can_review);
     // detu is omp at effort high (anh iu 2026-10-16, 03ed0a7)
     assert_eq!(cfg.kinds["detu"].harness, "omp");
@@ -1028,7 +1086,7 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     assert_eq!(kind, "tieude");
     assert_eq!(launch.harness, "pi");
     assert_eq!(launch.model, "opencode-go/deepseek-v4.1-flash");
-    assert_eq!(launch.effort, "max");
+    assert_eq!(launch.effort, "high");
 
     let cmd = build_launch_cmd(
         &launch,
@@ -1040,7 +1098,7 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     )
     .unwrap();
     assert!(cmd.split_envs.is_empty());
-    assert!(cmd.agent_args.join(" ").contains("--thinking max --append-system-prompt /runs/test.rules.md"));
+    assert!(cmd.agent_args.join(" ").contains("--thinking high --append-system-prompt /runs/test.rules.md"));
 
     // 2. LEAD_KIND env override switches lead to detu (omp)
     let (kind_detu, launch_detu) =
@@ -1134,7 +1192,7 @@ fn test_spawn_args_parsing() {
     assert_eq!(opts.base.as_deref(), Some("main"));
     assert!(opts.review);
     assert_eq!(opts.name, "suhuynh-rev1");
-    assert_eq!(opts.kind, "suhuynh");
+    assert_eq!(opts.kind.as_deref(), Some("suhuynh"));
 
     // Trailing base without value
     let bad = vec![
@@ -1145,26 +1203,77 @@ fn test_spawn_args_parsing() {
     ];
     assert!(parse_spawn_args(&bad).is_err());
 }
+#[test]
+fn test_spawn_args_parsing_with_purpose() {
+    // --purpose with 2 positional args (name and repo)
+    let args = vec![
+        "--purpose".to_string(),
+        "review".to_string(),
+        "suhuynh-rev1".to_string(),
+        "/repo".to_string(),
+    ];
+    let opts = parse_spawn_args(&args).expect("valid args with purpose");
+    assert_eq!(opts.name, "suhuynh-rev1");
+    assert_eq!(opts.purpose.as_deref(), Some("review"));
+    assert_eq!(opts.kind, None);
+    assert_eq!(opts.repo_path, PathBuf::from("/repo"));
+
+    // --purpose= syntax with 3 positional args
+    let args2 = vec![
+        "--purpose=build".to_string(),
+        "sude-build1".to_string(),
+        "sude".to_string(),
+        "/repo".to_string(),
+    ];
+    let opts2 = parse_spawn_args(&args2).expect("valid args with purpose=");
+    assert_eq!(opts2.name, "sude-build1");
+    assert_eq!(opts2.purpose.as_deref(), Some("build"));
+    assert_eq!(opts2.kind.as_deref(), Some("sude"));
+}
+
 
 #[test]
 fn test_cli_cap_smoke() {
     let bin = env!("CARGO_BIN_EXE_quaqua");
+    let tmp = std::env::temp_dir().join(format!("quaqua-cap-cli-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let team = tmp.join("team.toml");
+    std::fs::write(&team, "schema_version = 2\n").unwrap();
+    let runs = tmp.join("runs");
+    let _ = std::fs::create_dir_all(&runs);
     let out = Command::new(bin)
         .arg("cap")
+        .env("QUAQUA_TEAM_TOML", &team)
+        .env("QUAQUA_RUNS_DIR", &runs)
         .output()
         .expect("runs quaqua cap");
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.trim().parse::<i64>().is_ok());
+
+    // A team.toml that cannot load must surface, never silently count as if
+    // every worker were a non-task worker.
+    let bad = Command::new(bin)
+        .arg("cap")
+        .env("QUAQUA_TEAM_TOML", tmp.join("missing-team.toml"))
+        .env("QUAQUA_RUNS_DIR", &runs)
+        .output()
+        .expect("runs quaqua cap");
+    assert!(!bad.status.success());
+    let err = String::from_utf8_lossy(&bad.stderr);
+    assert!(err.contains("error:"), "stderr: {err}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 #[test]
 fn test_taskforce_dual_lens_cap_reservation() {
     let tmp = std::env::temp_dir().join(format!("quaqua-cap-tf-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
     let mock = MockActivitiesHerdr::with_agent_list(r#"{"result":{"agents":[]}}"#);
 
     // Zero workers, no state -> 0
-    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 0);
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock, &cfg), 0);
 
     // Active dual-lens state with current PID (alive) -> reserves 2 slots
     let state_file = tmp.join("taskforce-mytest.state");
@@ -1177,7 +1286,7 @@ fn test_taskforce_dual_lens_cap_reservation() {
     )
     .unwrap();
 
-    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 2);
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock, &cfg), 2);
 
     // Finished dual-lens -> 0 slots reserved
     std::fs::write(
@@ -1188,7 +1297,7 @@ fn test_taskforce_dual_lens_cap_reservation() {
         ),
     )
     .unwrap();
-    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock), 0);
+    assert_eq!(count_owner_slots(&tmp, "cos", None, &mock, &cfg), 0);
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -1410,7 +1519,7 @@ fn test_claude_review_mode_verification() {
     ];
     let opts = parse_spawn_args(&args).unwrap();
     assert!(opts.review);
-    assert_eq!(opts.kind, "suhuynh");
+    assert_eq!(opts.kind.as_deref(), Some("suhuynh"));
 }
 
 fn kind(harness: &str, model: &str, effort: Option<&str>) -> config::Kind {
@@ -1424,6 +1533,10 @@ fn kind(harness: &str, model: &str, effort: Option<&str>) -> config::Kind {
     }
 }
 
+fn resolve_launch(kind: &config::Kind, kind_name: &str) -> Result<Launch, (i32, String)> {
+    let cfg = config::Config::default();
+    quaqua::launch::resolve_launch(kind, kind_name, &cfg)
+}
 #[test]
 fn test_launch_args_carry_exact_model_and_effort() {
     // opencode: model+effort travel as `provider/model#variant` in the pane env —
@@ -1651,7 +1764,7 @@ fn test_launch_fails_closed_without_model_or_effort() {
     )
     .unwrap_err()
     .1;
-    assert!(e.contains("is not in allowlist"), "{e}");
+    assert!(e.contains("fix: add model and variants to team.toml [opencode_models]"), "{e}");
 
     // claude's vocabulary is narrower than opencode's
     let e = resolve_launch(&kind("claude", "m", Some("minimal")), "ni")
@@ -1668,6 +1781,26 @@ fn test_launch_fails_closed_without_model_or_effort() {
         .unwrap_err()
         .1;
     assert!(e.contains("unsupported harness"), "{e}");
+}
+#[test]
+fn test_resolve_launch_uses_passed_cfg_for_opencode_models() {
+    let mut cfg = config::Config::default();
+    cfg.opencode_models.insert(
+        "my-custom-model".to_string(),
+        vec!["max".to_string()],
+    );
+    // Custom model passes because passed cfg has it in opencode_models
+    let k = kind("opencode", "my-custom-model", Some("max"));
+    let res = quaqua::launch::resolve_launch(&k, "custom-kind", &cfg);
+    assert!(res.is_ok(), "expected custom model to launch: {:?}", res.err());
+
+    // Without that entry in cfg, fails with hint naming team.toml
+    let default_cfg = config::Config::default();
+    let err = quaqua::launch::resolve_launch(&k, "custom-kind", &default_cfg).unwrap_err().1;
+    assert!(
+        err.contains("fix: add model and variants to team.toml [opencode_models]"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -1870,8 +2003,411 @@ impl Drop for EnvLockGuard {
         std::env::remove_var("HERDR_PANE_ID");
         std::env::remove_var("GRID_SKIP");
         std::env::remove_var("QUAQUA_TEST");
+        std::env::remove_var("QUAQUA_TEAM_TOML");
         ENV_BUSY.store(false, std::sync::atomic::Ordering::Release);
     }
+}
+
+#[test]
+fn test_spawn_worker_resolving_purpose() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = test_cfg_with_fallback();
+    cfg.kinds.insert(
+        "suhuynh".to_string(),
+        config::Kind {
+            harness: "claude".to_string(),
+            model: "opus".to_string(),
+            effort: Some("low".to_string()),
+            fallback: None,
+            can_review: true,
+            spawn: config::SPAWN_AUTO.to_string(),
+        },
+    );
+    cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
+
+    let git = SpawnTestGit;
+    let mut mock = MockActivities::new();
+    mock.register(
+        "herdr.pane_split",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+        name: String::new(),
+    }));
+    let herdr = MockActivitiesHerdr::new(mock);
+
+    let opts = parse_spawn_args(&[
+        "--purpose".to_string(),
+        "review".to_string(),
+        "suhuynh-purptest".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    assert_eq!(opts.purpose.as_deref(), Some("review"));
+    assert_eq!(opts.kind, None);
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+    assert!(res.is_ok(), "spawn should resolve purpose and succeed: {:?}", res.err());
+
+    let starts = herdr.agent_starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].0, "suhuynh-purptest");
+    assert_eq!(starts[0].1, "claude");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_spawn_worker_purpose_with_matching_positional_kind() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-match-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = test_cfg_with_fallback();
+    cfg.kinds.insert(
+        "suhuynh".to_string(),
+        config::Kind {
+            harness: "claude".to_string(),
+            model: "opus".to_string(),
+            effort: Some("low".to_string()),
+            fallback: None,
+            can_review: true,
+            spawn: config::SPAWN_AUTO.to_string(),
+        },
+    );
+    cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
+
+    let git = SpawnTestGit;
+    let mut mock = MockActivities::new();
+    mock.register(
+        "herdr.pane_split",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+        name: String::new(),
+    }));
+    let herdr = MockActivitiesHerdr::new(mock);
+
+    let opts = parse_spawn_args(&[
+        "--purpose".to_string(),
+        "review".to_string(),
+        "suhuynh-purpmatch".to_string(),
+        "suhuynh".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+    assert!(res.is_ok(), "spawn with matching kind should succeed: {:?}", res.err());
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_spawn_worker_purpose_with_mismatched_positional_kind_fails() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-mismatch-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = test_cfg_with_fallback();
+    cfg.kinds.insert(
+        "suhuynh".to_string(),
+        config::Kind {
+            harness: "claude".to_string(),
+            model: "opus".to_string(),
+            effort: Some("low".to_string()),
+            fallback: None,
+            can_review: true,
+            spawn: config::SPAWN_AUTO.to_string(),
+        },
+    );
+    cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
+
+    let git = SpawnTestGit;
+    let herdr = MockActivitiesHerdr::new(MockActivities::new());
+
+    let opts = parse_spawn_args(&[
+        "--purpose".to_string(),
+        "review".to_string(),
+        "suhuynh-purpmismatch".to_string(),
+        "sude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+    assert!(res.is_err(), "spawn with mismatched kind should fail");
+    let (code, msg) = res.unwrap_err();
+    assert_eq!(code, 1);
+    assert!(
+        msg.contains("suhuynh") && msg.contains("sude"),
+        "error message should name both resolved kind 'suhuynh' and positional kind 'sude', got: {msg}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_spawn_worker_purpose_with_colon_resolves_correctly() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-colon-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = test_cfg_with_fallback();
+    cfg.kinds.insert(
+        "sude".to_string(),
+        config::Kind {
+            harness: "omp".to_string(),
+            model: "gemini".to_string(),
+            effort: Some("high".to_string()),
+            fallback: None,
+            can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
+        },
+    );
+    cfg.purposes.insert("fix:ui".to_string(), "sude".to_string());
+
+    let git = SpawnTestGit;
+    let mut mock = MockActivities::new();
+    mock.register(
+        "herdr.pane_split",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+        name: String::new(),
+    }));
+    let herdr = MockActivitiesHerdr::new(mock);
+
+    let opts = parse_spawn_args(&[
+        "--purpose".to_string(),
+        "fix:ui".to_string(),
+        "sude-colontest".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+    assert!(res.is_ok(), "spawn with colon in purpose should resolve correctly: {:?}", res.err());
+
+    let starts = herdr.agent_starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].0, "sude-colontest");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_renamed_kind_passes_cap_cleanup_cost() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-renamed-kind-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+
+    let team_path = temp.join("team.toml");
+    let team_content = r#"schema_version = 2
+[limits]
+depth = 2
+max_workers_per_orchestrator = 4
+weights = { default = 1, pipeline = 2 }
+
+[timers]
+budget_default = "45m"
+hard_cap = "120m"
+stall = "10m"
+idle = "2m"
+nudge_at = 0.8
+grace = 0.25
+pilot_budget = "30m"
+
+[strategy]
+default_kind = "nhanvat"
+default_reviewer = ["nhanvat"]
+builder_reviewer_differ = "none"
+
+[purposes]
+work = "nhanvat"
+
+[kinds.tieude]
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+effort = "max"
+
+[kinds.sude]
+harness = "omp"
+model = "google-antigravity/gemini-3.8-flash"
+effort = "high"
+
+[kinds.suhuynh]
+harness = "claude"
+model = "opus-5.5"
+effort = "high"
+can_review = true
+
+[kinds.nhanvat]
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+effort = "max"
+can_review = true
+
+[grid]
+workers_tab = "workers"
+"#;
+    std::fs::write(&team_path, team_content).unwrap();
+
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::set_var("QUAQUA_TEAM_TOML", team_path.to_str().unwrap());
+
+    let cfg = quaqua::config::load_team_config().expect("loads custom team.toml");
+    assert!(cfg.kinds.contains_key("nhanvat"));
+
+    // 1. Cap: is_task_worker_name dynamically recognizes nhanvat from team.toml
+    assert!(quaqua::cap::is_task_worker_name("nhanvat-test1", &cfg));
+    assert!(!quaqua::cap::is_task_worker_name("nhanvat-lead", &cfg));
+    assert!(!quaqua::cap::is_task_worker_name("unknown-test1", &cfg));
+
+    // 2. Cost: guess_harness_from_config correctly maps nhanvat to opencode
+    assert!(quaqua::worker::prompt::cost::is_opencode_worker("", "nhanvat-test1"));
+    assert!(!quaqua::worker::prompt::cost::is_omp_worker("", "nhanvat-test1"));
+
+    // 3. Cleanup: cleanup_worker correctly records telemetry with kind = "nhanvat"
+    let worker_name = "nhanvat-test1";
+    let wt = temp.join(".wt").join(worker_name);
+    let _ = std::fs::create_dir_all(&wt);
+    std::fs::write(runs_dir.join(format!("{worker_name}.owner")), "cos\n").unwrap();
+
+    let herdr = MockActivitiesHerdr::for_cleanup("w1:p3");
+    let git = SpawnTestGit;
+    let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
+    assert!(res.is_ok(), "cleanup failed: {:?}", res);
+
+    // Verify telemetry JSONL has kind: "nhanvat"
+    let tele_path = runs_dir.join("telemetry.jsonl");
+    assert!(tele_path.exists());
+    let content = std::fs::read_to_string(&tele_path).unwrap();
+    assert!(content.contains("\"kind\":\"nhanvat\""), "telemetry missing kind 'nhanvat': {content}");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+#[test]
+fn test_hyphenated_kind_resolution_ni_fast_vs_ni() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-hyphen-kind-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+
+    let team_path = temp.join("team.toml");
+    let team_content = r#"schema_version = 2
+[limits]
+depth = 2
+max_workers_per_orchestrator = 4
+weights = { default = 1, pipeline = 2 }
+
+[timers]
+budget_default = "45m"
+hard_cap = "120m"
+stall = "10m"
+idle = "2m"
+nudge_at = 0.8
+grace = 0.25
+pilot_budget = "30m"
+
+[strategy]
+default_kind = "ni"
+default_reviewer = ["ni"]
+builder_reviewer_differ = "none"
+
+[kinds.ni]
+harness = "claude"
+model = "opus-5.5"
+effort = "low"
+can_review = true
+
+[kinds.ni-fast]
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash"
+effort = "max"
+can_review = true
+
+[grid]
+workers_tab = "workers"
+"#;
+    std::fs::write(&team_path, team_content).unwrap();
+
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::set_var("QUAQUA_TEAM_TOML", team_path.to_str().unwrap());
+
+    let worker_name = "ni-fast-worker1";
+
+    // 1. Cost harness guessing must resolve to opencode, not claude
+    assert!(
+        quaqua::worker::prompt::cost::is_opencode_worker("", worker_name),
+        "ni-fast-worker1 must be recognized as opencode worker"
+    );
+    assert!(
+        !quaqua::worker::prompt::cost::is_claude_worker("", worker_name),
+        "ni-fast-worker1 must NOT be recognized as claude worker"
+    );
+
+    // 2. Cleanup telemetry must record kind = "ni-fast", not "ni"
+    let wt = temp.join(".wt").join(worker_name);
+    let _ = std::fs::create_dir_all(&wt);
+    std::fs::write(runs_dir.join(format!("{worker_name}.owner")), "cos\n").unwrap();
+
+    let herdr = MockActivitiesHerdr::for_cleanup("w1:p3");
+    let git = SpawnTestGit;
+    let res = quaqua::worker::cleanup::cleanup_worker(worker_name, &repo_dir, &git, &herdr);
+    assert!(res.is_ok(), "cleanup failed: {:?}", res);
+
+    let tele_path = runs_dir.join("telemetry.jsonl");
+    assert!(tele_path.exists());
+    let content = std::fs::read_to_string(&tele_path).unwrap();
+    assert!(
+        content.contains("\"kind\":\"ni-fast\""),
+        "telemetry must record kind 'ni-fast', got: {content}"
+    );
+    assert!(
+        content.contains("\"harness\":\"opencode\""),
+        "telemetry must record harness 'opencode', got: {content}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
 }
 #[test]
 fn test_spawn_worker_fallback_scenarios() {

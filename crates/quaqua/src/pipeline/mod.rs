@@ -414,7 +414,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         repo_path = state_repo;
     } else {
         // Fresh start
-        let mut builder = "sude".to_string();
+        let mut builder_opt: Option<String> = None;
         let mut reviewer_opt: Option<String> = None;
         let mut review = "auto".to_string();
         let mut rounds = 2u32;
@@ -439,10 +439,10 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                 if i + 1 >= args.len() {
                     return Err((1, format!("{}\n", USAGE)));
                 }
-                builder = args[i + 1].clone();
+                builder_opt = Some(args[i + 1].clone());
                 i += 2;
             } else if let Some(v) = arg.strip_prefix("--builder=") {
-                builder = v.to_string();
+                builder_opt = Some(v.to_string());
                 i += 1;
             } else if arg == "--reviewer" {
                 if i + 1 >= args.len() {
@@ -559,6 +559,9 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         } else {
             base_cfg
         };
+        let builder = builder_opt
+            .or_else(|| cfg.purposes.get("build").cloned())
+            .unwrap_or_else(|| cfg.strategy.default_kind.clone());
         let bh = harness_of_kind(&builder, &cfg)
             .ok_or_else(|| (1, format!("unknown builder kind: {builder}\n")))?;
 
@@ -613,7 +616,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         let max_workers = cfg.limits.max_workers_per_orchestrator;
         let pipe_weight = cfg.limits.weights.get("pipeline").copied().unwrap_or(2);
 
-        let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr);
+        let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr, &cfg);
         if slots_used + pipe_weight > max_workers {
             eprintln!("error: worker cap exceeded (owner '{owner}' has {slots_used} slots in use; pipeline reserves {pipe_weight}, cap is {max_workers})");
             return Err((2, String::new()));
@@ -1568,6 +1571,38 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 );
                                 let b = format!("review verdict void: {why}");
                                 return ctx.finish(&mut state, "blocked", 6, Some(&b)).map(|_| ());
+                            }
+                        }
+                        if is_reviewer
+                            || kind == ChildKind::Build
+                            || matches!(kind, ChildKind::Fix(_))
+                        {
+                            let rep_content = resolve_child_report_content(
+                                &ctx.runs_dir,
+                                &child_report_path,
+                                &child_input.name,
+                                kind,
+                            );
+                            let should_record = if is_reviewer {
+                                crate::pipeline::parse_report_content(&rep_content).is_ok()
+                            } else {
+                                report_is_unfinished(&rep_content).is_none()
+                            };
+                            if should_record {
+                                let _ = crate::state::WorkerMetadata::save_pipeline(
+                                    &ctx.runs_dir,
+                                    &child_input.name,
+                                    &ctx.task,
+                                );
+                                let _ =
+                                    crate::worker::prompt::verdict::record_verdict_on_acceptance(
+                                        &ctx.runs_dir,
+                                        &child_input.name,
+                                        &rep_content,
+                                        is_reviewer,
+                                        ctx.git,
+                                        Some(&ctx.repo_path),
+                                    );
                             }
                         }
 
@@ -2665,7 +2700,7 @@ fn report_has_outcome_no_changes(content: &str) -> bool {
     false
 }
 
-fn parse_verdict_str(verdict_line: &str) -> Result<(u32, bool), String> {
+pub(crate) fn parse_verdict_str(verdict_line: &str) -> Result<(u32, bool), String> {
     if verdict_line.contains("## Challenge") {
         return Ok((0, true));
     }
@@ -2700,8 +2735,38 @@ fn parse_verdict_str(verdict_line: &str) -> Result<(u32, bool), String> {
         "unparseable verdict line: '{verdict_line}'; expected 'Verdict: clean' or 'Verdict: <N> findings'"
     ))
 }
+fn resolve_child_report_content(
+    runs_dir: &Path,
+    child_report_path: &Path,
+    worker_name: &str,
+    kind: ChildKind,
+) -> String {
+    if child_report_path.is_file() {
+        std::fs::read_to_string(child_report_path).unwrap_or_default()
+    } else {
+        match kind {
+            ChildKind::Fix(r) => {
+                let fix_md = runs_dir.join(format!("{worker_name}.fix{r}.md"));
+                if fix_md.is_file() {
+                    std::fs::read_to_string(&fix_md).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+            ChildKind::Build => {
+                let build_md = runs_dir.join(format!("{worker_name}.build.md"));
+                if build_md.is_file() {
+                    std::fs::read_to_string(&build_md).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        }
+    }
+}
 
-fn parse_report_content(content: &str) -> Result<(u32, bool), String> {
+pub(crate) fn parse_report_content(content: &str) -> Result<(u32, bool), String> {
     if content
         .lines()
         .any(|l| l.trim().starts_with("## Challenge"))
@@ -3985,7 +4050,19 @@ mod tests {
                 }
             }
         }
-        let out = cmd.env(MARK, "1").output().unwrap();
+        let child = {
+            // The child inherits the process env at spawn. On platforms without
+            // /proc/self/environ (macOS) that copy is the live env, so hold the
+            // env lock until the child exists: another test's temp QUAQUA_* or
+            // PATH must not leak into the isolated run.
+            let _env_lock = crate::test_env::lock_env();
+            cmd.env(MARK, "1")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let out = child.wait_with_output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
             out.status.success() && stdout.contains("1 passed"),
@@ -4093,12 +4170,27 @@ REPEOF
                 if [ -d "$WT" ]; then
                   (cd "$WT" && git commit --allow-empty -m "build commit" 2>/dev/null)
                 fi
-                cat <<'REPEOF' > "$QUAQUA_RUNS_DIR/$NAME.md"
+                if [ -f "$QUAQUA_RUNS_DIR/stub_build_verified" ]; then
+                  HEAD_SHA="$(cd "$WT" && git rev-parse HEAD 2>/dev/null)"
+                  cat <<REPEOF > "$QUAQUA_RUNS_DIR/$NAME.md"
+# Build
+Implemented plan.
+Verified: unit-test-verified $HEAD_SHA
+## Lessons
+none
+REPEOF
+                else
+                  cat <<'REPEOF' > "$QUAQUA_RUNS_DIR/$NAME.md"
 # Build
 Implemented plan.
 ## Lessons
 none
 REPEOF
+                fi
+                if [ -f "$QUAQUA_RUNS_DIR/stub_lock_db" ]; then
+                  mv "$QUAQUA_RUNS_DIR/quaqua.db" "$QUAQUA_RUNS_DIR/quaqua.db.locked"
+                  mkdir "$QUAQUA_RUNS_DIR/quaqua.db"
+                fi
                 ;;
               *FIX*)
                 WT="$(dirname "$QUAQUA_RUNS_DIR")/.wt/$NAME"
@@ -4204,12 +4296,41 @@ esac
     }
 
     #[test]
+    fn test_finding5_fix_report_fallback_prefers_fix_file() {
+        let runs_dir = std::env::temp_dir().join(format!("quaqua-f5-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runs_dir);
+        std::fs::create_dir_all(&runs_dir).unwrap();
+
+        let name = "sude-task";
+        let build_md = runs_dir.join(format!("{name}.build.md"));
+        let fix_md = runs_dir.join(format!("{name}.fix1.md"));
+        let missing_report = runs_dir.join(format!("{name}.md"));
+
+        std::fs::write(&build_md, "# Build\nVerified: unit-test-verified sha1\n").unwrap();
+        std::fs::write(&fix_md, "# Fix\nVerified: cargo-test-verified sha2\n").unwrap();
+
+        // When resolving a Fix(1) child whose report was renamed, it MUST prefer .fix1.md over .build.md
+        let resolved =
+            resolve_child_report_content(&runs_dir, &missing_report, name, ChildKind::Fix(1));
+        assert!(
+            resolved.contains("cargo-test-verified sha2"),
+            "fix fallback must read .fix1.md, not .build.md, got: {resolved}"
+        );
+        assert!(
+            !resolved.contains("unit-test-verified sha1"),
+            "fix fallback must not read .build.md"
+        );
+        let _ = std::fs::remove_dir_all(&runs_dir);
+    }
+
+    #[test]
     fn test_finding2_driver_unparseable_verdict_fails_closed() {
         if !in_isolated_driver_process(
             "pipeline::tests::test_finding2_driver_unparseable_verdict_fails_closed",
         ) {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("f2-bad");
@@ -4351,6 +4472,20 @@ esac
             "journal must record 2 child_started attempts for review child"
         );
 
+        // 7. Verify verdict on clean completion is ReviewClean, not blocked by the earlier unparseable report
+        let state_file = runs_dir.join(format!("pipeline-{task}.state"));
+        let state = PipelineState::load(&state_file).unwrap();
+        let builder_branch = format!("quaqua/sude-{task}");
+        let verdict = journal
+            .strongest_verdict(&builder_branch, &state.head_sha)
+            .unwrap()
+            .expect("must record verdict on clean completion");
+        assert_eq!(
+            verdict.level,
+            crate::engine::journal_sqlite::VerdictLevel::ReviewClean,
+            "corrected review report must record review-clean, not inconclusive"
+        );
+
         let _ = std::fs::remove_dir_all(&base_dir);
     }
 
@@ -4361,6 +4496,7 @@ esac
         ) {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let task = "h4-ro";
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
@@ -4391,7 +4527,10 @@ esac
             "--review".to_string(),
             "always".to_string(),
         ];
-        assert_eq!(handle_pipeline(&args, &git, &herdr), Err((5, String::new())));
+        assert_eq!(
+            handle_pipeline(&args, &git, &herdr),
+            Err((5, String::new()))
+        );
 
         let wt_dir = base_dir.join(".wt").join(format!("sude-{task}"));
         let _ = std::process::Command::new("git")
@@ -4559,6 +4698,7 @@ esac
         ) {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("f5-e2e");
@@ -4632,6 +4772,453 @@ esac
             "pipeline md must log review round 2"
         );
 
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+    #[test]
+    fn test_s1b_acceptance_case1_reviewer_clean_records_review_clean_at_baseline_sha() {
+        if !in_isolated_driver_process(
+            "pipeline::tests::test_s1b_acceptance_case1_reviewer_clean_records_review_clean_at_baseline_sha",
+        ) {
+            return;
+        }
+        let _env_lock = crate::test_env::lock_env();
+        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
+            setup_test_pipeline_workspace("s1b-rev");
+
+        let _guard_team = TestEnvVarGuard::set("QUAQUA_TEAM_TOML", team_file.to_str().unwrap());
+        let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_bin.to_str().unwrap());
+        let _guard_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _guard_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+        let _guard_owner = TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+        let _guard_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _guard_stall = TestEnvVarGuard::set("PROMPT_WORKER_STALL_SEC", "10");
+        let _guard_idle = TestEnvVarGuard::set("PROMPT_WORKER_IDLE_SEC", "10");
+
+        let git = Git::new();
+        let herdr = Herdr {
+            bin: stub_bin.to_string_lossy().to_string(),
+        };
+        let brief_file = repo_dir.join("brief.md");
+
+        let task = "s1b-rev";
+        let args = vec![
+            task.to_string(),
+            repo_dir.to_string_lossy().to_string(),
+            "--brief".to_string(),
+            brief_file.to_string_lossy().to_string(),
+            "--review".to_string(),
+            "always".to_string(),
+            "--rounds".to_string(),
+            "2".to_string(),
+        ];
+
+        // 1. Initial invocation runs Plan, pauses with exit 5 (plan-ready)
+        let plan_res = handle_pipeline(&args, &git, &herdr);
+        assert_eq!(plan_res, Err((5, String::new())));
+
+        // 2. Resume invocation drives Build -> Review r1 (1 finding) -> Fix r1 -> Review r2 (clean)
+        let resume_args = vec![
+            "--resume".to_string(),
+            task.to_string(),
+            repo_dir.to_string_lossy().to_string(),
+        ];
+
+        let final_res = handle_pipeline(&resume_args, &git, &herdr);
+        assert_eq!(final_res, Ok(()));
+
+        // 3. Verify verdict event in journal
+        let state_file = runs_dir.join(format!("pipeline-{task}.state"));
+        let state = PipelineState::load(&state_file).unwrap();
+        let builder_branch = format!("quaqua/sude-{task}");
+
+        let db_path = runs_dir.join("quaqua.db");
+        let journal = SqliteJournal::open(&db_path).unwrap();
+        let verdict = journal
+            .strongest_verdict(&builder_branch, &state.head_sha)
+            .unwrap()
+            .expect("pipeline reviewer Verdict: clean must record review-clean verdict in journal");
+
+        use crate::engine::journal_sqlite::{VerdictLevel, VerdictSource};
+        assert_eq!(verdict.level, VerdictLevel::ReviewClean);
+        assert_eq!(verdict.source, VerdictSource::Verifier);
+        assert_eq!(verdict.builder_kind, Some("sude".to_string()));
+        assert_eq!(verdict.verifier_kind, Some("suhuynh".to_string()));
+        assert_eq!(verdict.verifier, format!("suhuynh-{task}r2"));
+        assert_eq!(verdict.branch, builder_branch);
+        assert_eq!(verdict.sha, state.head_sha);
+
+        // Pin finding 4: r1 VerifierFailed must be recorded at build SHA (HEAD~1), not final fix SHA
+        let wt_dir = base_dir.join(".wt").join(format!("sude-{task}"));
+        let build_sha = String::from_utf8(
+            std::process::Command::new("git")
+                .args(&["rev-parse", "HEAD~1"])
+                .current_dir(&wt_dir)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_ne!(
+            build_sha, state.head_sha,
+            "build sha must differ from fix sha"
+        );
+
+        let r1_verdicts = journal.load_verdicts(&builder_branch, &build_sha).unwrap();
+        let r1_verifier = r1_verdicts
+            .iter()
+            .find(|v| v.source == VerdictSource::Verifier)
+            .expect("must have verifier verdict at build sha");
+        assert_eq!(r1_verifier.level, VerdictLevel::VerifierFailed);
+        assert_eq!(r1_verifier.sha, build_sha);
+        assert_eq!(r1_verifier.verifier, format!("suhuynh-{task}r1"));
+
+        let r1_strongest = journal
+            .strongest_verdict(&builder_branch, &build_sha)
+            .unwrap()
+            .expect("must have strongest verdict at build sha");
+        assert_eq!(r1_strongest.level, VerdictLevel::VerifierFailed);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+    #[test]
+    fn test_s1b_acceptance_case2_builder_verified_line_records_source_self() {
+        if !in_isolated_driver_process(
+            "pipeline::tests::test_s1b_acceptance_case2_builder_verified_line_records_source_self",
+        ) {
+            return;
+        }
+        let _env_lock = crate::test_env::lock_env();
+        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
+            setup_test_pipeline_workspace("s1b-bld");
+
+        let _guard_team = TestEnvVarGuard::set("QUAQUA_TEAM_TOML", team_file.to_str().unwrap());
+        let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_bin.to_str().unwrap());
+        let _guard_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _guard_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+        let _guard_owner = TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+        let _guard_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _guard_stall = TestEnvVarGuard::set("PROMPT_WORKER_STALL_SEC", "10");
+        let _guard_idle = TestEnvVarGuard::set("PROMPT_WORKER_IDLE_SEC", "10");
+
+        let git = Git::new();
+        let herdr = Herdr {
+            bin: stub_bin.to_string_lossy().to_string(),
+        };
+        let brief_file = repo_dir.join("brief.md");
+
+        let task = "s1b-bld";
+        let args = vec![
+            task.to_string(),
+            repo_dir.to_string_lossy().to_string(),
+            "--brief".to_string(),
+            brief_file.to_string_lossy().to_string(),
+            "--review".to_string(),
+            "skip".to_string(),
+        ];
+
+        // 1. Initial invocation runs Plan, pauses with exit 5 (plan-ready)
+        let plan_res = handle_pipeline(&args, &git, &herdr);
+        assert_eq!(plan_res, Err((5, String::new())));
+
+        // 2. Enable stub_build_verified trigger so herdr-stub writes report with Verified: matching HEAD
+        std::fs::write(runs_dir.join("stub_build_verified"), "1").unwrap();
+
+        // 3. Resume invocation executes Build (review is skipped)
+        let resume_args = vec![
+            "--resume".to_string(),
+            task.to_string(),
+            repo_dir.to_string_lossy().to_string(),
+        ];
+
+        let final_res = handle_pipeline(&resume_args, &git, &herdr);
+        assert_eq!(final_res, Ok(()));
+
+        // 4. Verify builder self-report verdict in journal
+        let state_file = runs_dir.join(format!("pipeline-{task}.state"));
+        let state = PipelineState::load(&state_file).unwrap();
+        let builder_branch = format!("quaqua/sude-{task}");
+        let db_path = runs_dir.join("quaqua.db");
+        let journal = SqliteJournal::open(&db_path).unwrap();
+        let records = journal
+            .load_verdicts(&builder_branch, &state.head_sha)
+            .unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "exactly one verdict event should be recorded"
+        );
+        let verdict = &records[0];
+
+        use crate::engine::journal_sqlite::{VerdictLevel, VerdictSource};
+        assert_eq!(verdict.level, VerdictLevel::UnitTestVerified);
+        assert_eq!(verdict.source, VerdictSource::SelfReport);
+        assert_eq!(verdict.builder_kind, Some("sude".to_string()));
+        assert_eq!(verdict.verifier, format!("sude-{task}"));
+        assert_eq!(verdict.branch, builder_branch);
+        assert_eq!(verdict.sha, state.head_sha);
+
+        // F6 rule: self-report alone is not verified when evaluated by strongest_verdict
+        let effective = journal
+            .strongest_verdict(&builder_branch, &state.head_sha)
+            .unwrap()
+            .expect("must return effective verdict");
+        assert_eq!(effective.source, VerdictSource::SelfReport);
+        assert_eq!(effective.level, VerdictLevel::Inconclusive);
+        assert!(!effective.is_verified());
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_s1b_acceptance_case3_locked_db_does_not_fail_pipeline() {
+        if !in_isolated_driver_process(
+            "pipeline::tests::test_s1b_acceptance_case3_locked_db_does_not_fail_pipeline",
+        ) {
+            return;
+        }
+        let _env_lock = crate::test_env::lock_env();
+        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
+            setup_test_pipeline_workspace("s1b-lock");
+
+        let _guard_team = TestEnvVarGuard::set("QUAQUA_TEAM_TOML", team_file.to_str().unwrap());
+        let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_bin.to_str().unwrap());
+        let _guard_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _guard_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+        let _guard_owner = TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+        let _guard_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _guard_stall = TestEnvVarGuard::set("PROMPT_WORKER_STALL_SEC", "10");
+        let _guard_idle = TestEnvVarGuard::set("PROMPT_WORKER_IDLE_SEC", "10");
+
+        let git = Git::new();
+        let herdr = Herdr {
+            bin: stub_bin.to_string_lossy().to_string(),
+        };
+        let brief_file = repo_dir.join("brief.md");
+
+        let task = "s1b-lock";
+        let args = vec![
+            task.to_string(),
+            repo_dir.to_string_lossy().to_string(),
+            "--brief".to_string(),
+            brief_file.to_string_lossy().to_string(),
+            "--review".to_string(),
+            "skip".to_string(),
+        ];
+
+        // 1. Initial invocation runs Plan, pauses with exit 5 (plan-ready)
+        let plan_res = handle_pipeline(&args, &git, &herdr);
+        assert_eq!(plan_res, Err((5, String::new())));
+
+        // 2. Enable stub_lock_db trigger to lock quaqua.db during build acceptance
+        std::fs::write(runs_dir.join("stub_lock_db"), "1").unwrap();
+
+        // 3. Resume invocation executes Build with locked DB during acceptance
+        let resume_args = vec![
+            "--resume".to_string(),
+            task.to_string(),
+            repo_dir.to_string_lossy().to_string(),
+        ];
+
+        let final_res = handle_pipeline(&resume_args, &git, &herdr);
+        assert_eq!(final_res, Ok(()), "a locked db must not fail the pipeline");
+
+        let pfile_content =
+            std::fs::read_to_string(runs_dir.join(format!("pipeline-{task}.md"))).unwrap();
+        assert!(
+            pfile_content.contains("- status: clean"),
+            "pipeline must still achieve clean status despite locked db"
+        );
+
+        let state_file = runs_dir.join(format!("pipeline-{task}.state"));
+        let state = PipelineState::load(&state_file).unwrap();
+        let builder_branch = format!("quaqua/sude-{task}");
+        let locked_bak = runs_dir.join("quaqua.db.locked");
+        if locked_bak.is_file() {
+            let _ = std::fs::remove_dir(runs_dir.join("quaqua.db"));
+            let _ = std::fs::rename(&locked_bak, runs_dir.join("quaqua.db"));
+        }
+        let db_path = runs_dir.join("quaqua.db");
+        let journal = SqliteJournal::open(&db_path).unwrap();
+        let records = journal
+            .load_verdicts(&builder_branch, &state.head_sha)
+            .unwrap();
+        assert!(
+            records.is_empty(),
+            "locked db must cause verdict write to fail, but found: {:?}",
+            records
+        );
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_s1b_acceptance_case4_rerun_adds_no_duplicate() {
+        if !in_isolated_driver_process(
+            "pipeline::tests::test_s1b_acceptance_case4_rerun_adds_no_duplicate",
+        ) {
+            return;
+        }
+        let _env_lock = crate::test_env::lock_env();
+        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
+            setup_test_pipeline_workspace("s1b-dup");
+
+        let _guard_team = TestEnvVarGuard::set("QUAQUA_TEAM_TOML", team_file.to_str().unwrap());
+        let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_bin.to_str().unwrap());
+        let _guard_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _guard_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+        let _guard_owner = TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+        let _guard_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _guard_stall = TestEnvVarGuard::set("PROMPT_WORKER_STALL_SEC", "10");
+        let _guard_idle = TestEnvVarGuard::set("PROMPT_WORKER_IDLE_SEC", "10");
+
+        let git = Git::new();
+        let herdr = Herdr {
+            bin: stub_bin.to_string_lossy().to_string(),
+        };
+        let brief_file = repo_dir.join("brief.md");
+
+        let task = "s1b-dup";
+        let args = vec![
+            task.to_string(),
+            repo_dir.to_string_lossy().to_string(),
+            "--brief".to_string(),
+            brief_file.to_string_lossy().to_string(),
+            "--review".to_string(),
+            "always".to_string(),
+            "--rounds".to_string(),
+            "2".to_string(),
+        ];
+
+        // 1. Initial invocation runs Plan, pauses with exit 5 (plan-ready)
+        let plan_res = handle_pipeline(&args, &git, &herdr);
+        assert_eq!(plan_res, Err((5, String::new())));
+
+        // 2. Resume invocation drives Build -> Review r1 (1 finding) -> Fix r1 -> Review r2 (clean)
+        let resume_args = vec![
+            "--resume".to_string(),
+            task.to_string(),
+            repo_dir.to_string_lossy().to_string(),
+        ];
+
+        let final_res = handle_pipeline(&resume_args, &git, &herdr);
+        assert_eq!(final_res, Ok(()));
+
+        let db_path = runs_dir.join("quaqua.db");
+
+        // Count review-clean verdicts in journal after run 1
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let count_clean_1: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'verdict' AND payload_json LIKE '%review-clean%';",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count_clean_1, 1,
+            "exactly one review-clean verdict should be recorded"
+        );
+
+        // Re-run acceptance on the same reviewer report at the same SHA
+        let state_file = runs_dir.join(format!("pipeline-{task}.state"));
+        let state = PipelineState::load(&state_file).unwrap();
+        let rev_worker = format!("suhuynh-{task}r2");
+        let _ = crate::state::WorkerMetadata::save_pipeline(&runs_dir, &rev_worker, task);
+        let rev_wt = base_dir.join(".wt").join(&rev_worker);
+        let _ = std::fs::write(
+            runs_dir.join(format!(".{rev_worker}.readonly")),
+            format!("{}\nHEAD {}\n", rev_wt.display(), state.head_sha),
+        );
+        let rev_report =
+            std::fs::read_to_string(runs_dir.join(format!("suhuynh-{task}r2.md"))).unwrap();
+        let git_ops = Git::new();
+        let record_res = crate::worker::prompt::verdict::record_verdict_on_acceptance(
+            &runs_dir,
+            &rev_worker,
+            &rev_report,
+            true,
+            &git_ops,
+            Some(&repo_dir),
+        );
+        assert!(record_res.is_ok());
+
+        // Count must still be 1 (deduplicated)
+        let count_clean_2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'verdict' AND payload_json LIKE '%review-clean%';",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_clean_2, 1, "re-run must add no duplicate verdict");
+
+        // Now test Fix round at a new SHA vs re-run at that same SHA
+        let fix_worker = format!("sude-{task}");
+        let wt_dir = base_dir.join(".wt").join(&fix_worker);
+        let _ = std::process::Command::new("git")
+            .args(&["commit", "--allow-empty", "-m", "fix commit 2 at new sha"])
+            .current_dir(&wt_dir)
+            .output();
+        let out = std::process::Command::new("git")
+            .args(&["rev-parse", "HEAD"])
+            .current_dir(&wt_dir)
+            .output()
+            .unwrap();
+        let fix_sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let fix_report =
+            format!("# Fix\nVerified: unit-test-verified {fix_sha}\n## Lessons\nnone\n");
+
+        // Record fix at new SHA
+        let fix_res1 = crate::worker::prompt::verdict::record_verdict_on_acceptance(
+            &runs_dir,
+            &fix_worker,
+            &fix_report,
+            false,
+            &git_ops,
+            Some(&repo_dir),
+        );
+        assert!(fix_res1.is_ok());
+
+        let count_fix_1: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM events WHERE kind = 'verdict' AND payload_json LIKE '%{fix_sha}%';"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_fix_1, 1, "fix at new SHA must record verdict");
+
+        // Re-run fix at same SHA -> no duplicate
+        let fix_res2 = crate::worker::prompt::verdict::record_verdict_on_acceptance(
+            &runs_dir,
+            &fix_worker,
+            &fix_report,
+            false,
+            &git_ops,
+            Some(&repo_dir),
+        );
+        assert!(fix_res2.is_ok());
+
+        let count_fix_2: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM events WHERE kind = 'verdict' AND payload_json LIKE '%{fix_sha}%';"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count_fix_2, 1,
+            "re-run of fix at same SHA must add no duplicate"
+        );
         let _ = std::fs::remove_dir_all(&base_dir);
     }
 
@@ -5493,6 +6080,7 @@ esac
         if !in_isolated_driver_process("pipeline::tests::test_design_test_7_child_watchdog_exit_4_opens_attempt_2_no_second_prompt") {
             return;
         }
+        let _env_lock = crate::test_env::lock_env();
         let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("d7-wd");

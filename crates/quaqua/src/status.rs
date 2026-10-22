@@ -4,14 +4,19 @@
 //! scans active workers from `herdr.agent_list()` and `runs/*.owner`,
 //! and flags coordination anomalies like `WAITER-LOST` (issue #47).
 
+use crate::worker::cleanup::WorkerTelemetryRow;
+use crate::worker::prompt::cost::Tokens;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
-use crate::worker::cleanup::WorkerTelemetryRow;
-use crate::worker::prompt::cost::Tokens;
 
 use crate::cap::is_task_worker_name;
+use crate::config::{load_team_config, Config};
+use crate::engine::journal_sqlite::{
+    strongest_verdict_from_slice, SqliteJournal, VerdictLevel, VerdictRecord, VerdictSource,
+};
+use crate::git::{Git, GitOps};
 use crate::herdr::HerdrOps;
 use crate::state::WorkerMetadata;
 
@@ -64,6 +69,216 @@ pub struct OrchestrationRow {
     pub phase: String,
     pub wait_time: String,
     pub flags: Vec<WarningFlag>,
+}
+
+/// A branch verdict row showing the strongest verdict and freshness flags (§ S2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchVerdictRow {
+    pub branch: String,
+    pub head_sha: String,
+    pub verdict_sha: String,
+    pub level: VerdictLevel,
+    pub is_verified: bool,
+    pub stale: bool,
+    pub unresolved: bool,
+    pub same_harness: bool,
+}
+
+/// Returns true if the verifier's harness matches the builder kind's harness in team.toml (§ S2).
+pub fn is_same_harness(verdict: &VerdictRecord, cfg: Option<&Config>) -> bool {
+    if verdict.source != VerdictSource::Verifier {
+        return false;
+    }
+
+    let verifier_harness = if !verdict.harness.is_empty() {
+        verdict.harness.clone()
+    } else if let Some(vk) = &verdict.verifier_kind {
+        cfg.and_then(|c| c.kinds.get(vk))
+            .map(|k| k.harness.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let builder_harness = if let Some(bk) = &verdict.builder_kind {
+        cfg.and_then(|c| c.kinds.get(bk))
+            .map(|k| k.harness.clone())
+            .unwrap_or_default()
+    } else {
+        let b_part = verdict
+            .branch
+            .strip_prefix("quaqua/")
+            .unwrap_or(&verdict.branch);
+        let inferred_kind = b_part.split('-').next().unwrap_or(b_part);
+        cfg.and_then(|c| c.kinds.get(inferred_kind))
+            .map(|k| k.harness.clone())
+            .unwrap_or_default()
+    };
+
+    !verifier_harness.is_empty()
+        && !builder_harness.is_empty()
+        && verifier_harness == builder_harness
+}
+
+fn resolve_branch_head<G: GitOps>(git: &G, repo: &Path, branch: &str) -> Option<String> {
+    let ref_name = if branch.starts_with("refs/") {
+        branch.to_string()
+    } else {
+        format!("refs/heads/{branch}")
+    };
+    if let Ok(out) = git.run_in(repo, &["rev-parse", "--verify", "--quiet", &ref_name]) {
+        if out.status.success() {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !sha.is_empty() {
+                return Some(sha);
+            }
+        }
+    }
+    if let Ok(out) = git.run_in(repo, &["rev-parse", "--verify", "--quiet", branch]) {
+        if out.status.success() {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !sha.is_empty() {
+                return Some(sha);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_candidate_repos(repo: &Path) -> Vec<PathBuf> {
+    let mut repos = crate::merge::resolve_project_repos_from_index();
+    if repo.join("projects/INDEX.md").is_file() {
+        for r in crate::merge::resolve_project_repos_from_workspace(repo) {
+            if !repos.contains(&r) {
+                repos.push(r);
+            }
+        }
+    }
+    if repo.is_dir() && !repos.contains(&repo.to_path_buf()) {
+        repos.push(repo.to_path_buf());
+    }
+    repos
+}
+
+fn resolve_branch_head_in_repos<G: GitOps>(
+    git: &G,
+    repos: &[PathBuf],
+    branch: &str,
+) -> Option<String> {
+    for r in repos {
+        if let Some(sha) = resolve_branch_head(git, r, branch) {
+            return Some(sha);
+        }
+    }
+    None
+}
+
+/// Query branch verdict rows from the journal and repository (§ S2).
+pub fn query_branch_verdicts<G: GitOps>(
+    db_path: &Path,
+    repo: &Path,
+    git: &G,
+) -> Result<Vec<BranchVerdictRow>, String> {
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let journal = SqliteJournal::open(db_path)
+        .map_err(|e| format!("db error: cannot open {}: {e}", db_path.display()))?;
+
+    let all_verdicts = journal
+        .load_all_verdicts()
+        .map_err(|e| format!("db error: loading verdicts: {e}"))?;
+
+    if all_verdicts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let team_cfg = load_team_config().ok();
+    let candidate_repos = resolve_candidate_repos(repo);
+
+    let mut branch_records: BTreeMap<String, Vec<&VerdictRecord>> = BTreeMap::new();
+    for v in &all_verdicts {
+        branch_records.entry(v.branch.clone()).or_default().push(v);
+    }
+
+    let mut rows = Vec::new();
+    for (branch, records) in branch_records {
+        let head_sha_opt = resolve_branch_head_in_repos(git, &candidate_repos, &branch);
+
+        match head_sha_opt {
+            Some(head_sha) => {
+                let records_at_head: Vec<&VerdictRecord> = records
+                    .iter()
+                    .copied()
+                    .filter(|v| v.sha == head_sha)
+                    .collect();
+                let verdict_at_head = strongest_verdict_from_slice(&records_at_head);
+
+                if let Some(v) = verdict_at_head {
+                    let same_harness = is_same_harness(&v, team_cfg.as_ref());
+                    rows.push(BranchVerdictRow {
+                        branch,
+                        head_sha,
+                        verdict_sha: v.sha.clone(),
+                        level: v.level,
+                        is_verified: v.is_verified(),
+                        stale: false,
+                        unresolved: false,
+                        same_harness,
+                    });
+                } else {
+                    let last_record = records.last().unwrap();
+                    let records_at_last_sha: Vec<&VerdictRecord> = records
+                        .iter()
+                        .copied()
+                        .filter(|v| v.sha == last_record.sha)
+                        .collect();
+                    let strongest_old = strongest_verdict_from_slice(&records_at_last_sha);
+
+                    if let Some(v) = strongest_old {
+                        let same_harness = is_same_harness(&v, team_cfg.as_ref());
+                        let stale = head_sha != v.sha;
+                        rows.push(BranchVerdictRow {
+                            branch,
+                            head_sha,
+                            verdict_sha: v.sha.clone(),
+                            level: v.level,
+                            is_verified: false,
+                            stale,
+                            unresolved: false,
+                            same_harness,
+                        });
+                    }
+                }
+            }
+            None => {
+                let last_record = records.last().unwrap();
+                let records_at_last_sha: Vec<&VerdictRecord> = records
+                    .iter()
+                    .copied()
+                    .filter(|v| v.sha == last_record.sha)
+                    .collect();
+                let strongest = strongest_verdict_from_slice(&records_at_last_sha);
+
+                if let Some(v) = strongest {
+                    let same_harness = is_same_harness(&v, team_cfg.as_ref());
+                    rows.push(BranchVerdictRow {
+                        branch,
+                        head_sha: String::new(),
+                        verdict_sha: v.sha.clone(),
+                        level: v.level,
+                        is_verified: false,
+                        stale: false,
+                        unresolved: true,
+                        same_harness,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(rows)
 }
 
 /// Query workflow rows from `<workspace_root>/runs/quaqua.db`.
@@ -200,9 +415,13 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
 ///
 /// Propagates `herdr error: ...` on I/O or JSON decoding errors to avoid
 /// emitting misleading `missing` statuses and false `ORPHAN` flags.
+///
+/// `cfg` decides which names are task workers; callers resolve it once so this
+/// scan never reads process-global env.
 pub fn scan_orchestration<H: HerdrOps>(
     runs_dir: &Path,
     herdr: &H,
+    cfg: &Config,
 ) -> Result<Vec<OrchestrationRow>, String> {
     let json_str = herdr
         .agent_list()
@@ -349,7 +568,7 @@ pub fn scan_orchestration<H: HerdrOps>(
             }
         };
         let has_progress = WorkerMetadata::progress_path(runs_dir, &name).exists();
-        if is_task_worker_name(&name) && agent_status == "idle" && !has_session && !has_progress {
+        if is_task_worker_name(&name, cfg) && agent_status == "idle" && !has_session && !has_progress {
             flags.push(WarningFlag::IdleUnprompted);
         }
 
@@ -403,6 +622,7 @@ pub fn scan_orchestration<H: HerdrOps>(
 pub fn format_status_report(
     workflows: Result<&[WorkflowStatusRow], &str>,
     orchestration: Result<&[OrchestrationRow], &str>,
+    verdicts: Result<&[BranchVerdictRow], &str>,
 ) -> String {
     let mut out = String::new();
 
@@ -478,6 +698,53 @@ pub fn format_status_report(
         }
     }
 
+    out.push_str("\n=== Verdicts ===\n");
+    match verdicts {
+        Ok(v_rows) if v_rows.is_empty() => {
+            out.push_str("no verdicts\n");
+        }
+        Ok(v_rows) => {
+            out.push_str(&format!(
+                "{:<24} {:<12} {:<20} {}\n",
+                "BRANCH", "HEAD", "VERDICT", "FLAGS"
+            ));
+            for r in v_rows {
+                let mut flags = Vec::new();
+                if r.unresolved {
+                    flags.push("unresolved");
+                }
+                if r.stale {
+                    flags.push("stale");
+                }
+                if r.same_harness {
+                    flags.push("same-harness");
+                }
+                let flags_str = if flags.is_empty() {
+                    "-".to_string()
+                } else {
+                    flags.join(", ")
+                };
+                let head_str = if r.head_sha.len() >= 7 {
+                    &r.head_sha[..7]
+                } else if r.head_sha.is_empty() {
+                    "-"
+                } else {
+                    &r.head_sha
+                };
+                out.push_str(&format!(
+                    "{:<24} {:<12} {:<20} {}\n",
+                    r.branch,
+                    head_str,
+                    r.level.as_str(),
+                    flags_str
+                ));
+            }
+        }
+        Err(err) => {
+            out.push_str(&format!("{err}\n"));
+        }
+    }
+
     out
 }
 
@@ -487,17 +754,36 @@ pub fn render_status<H: HerdrOps>(
     runs_dir: &Path,
     herdr: &H,
 ) -> Result<String, String> {
+    let git = Git::new();
+    render_status_with_git(db_path, runs_dir, herdr, &git)
+}
+
+/// Render status with explicit Git implementation.
+pub fn render_status_with_git<H: HerdrOps, G: GitOps>(
+    db_path: &Path,
+    runs_dir: &Path,
+    herdr: &H,
+    git: &G,
+) -> Result<String, String> {
     let wf_res = query_workflows(db_path);
-    let orch_res = scan_orchestration(runs_dir, herdr);
+    let orch_res = load_team_config()
+        .map_err(|(_, msg)| msg.trim_end().to_string())
+        .and_then(|cfg| scan_orchestration(runs_dir, herdr, &cfg));
+    let repo = runs_dir.parent().unwrap_or_else(|| Path::new("."));
+    let verdicts_res = query_branch_verdicts(db_path, repo, git);
     Ok(format_status_report(
         wf_res.as_deref().map_err(|e| e.as_str()),
         orch_res.as_deref().map_err(|e| e.as_str()),
+        verdicts_res.as_deref().map_err(|e| e.as_str()),
     ))
 }
 
 /// CLI entrypoint for `quaqua status`.
 pub fn handle_status<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, String> {
-    if args.iter().any(|a| a == "--metrics" || a.starts_with("--metrics=")) {
+    if args
+        .iter()
+        .any(|a| a == "--metrics" || a.starts_with("--metrics="))
+    {
         let metrics_args = parse_metrics_args(args)?;
         let runs_dir = if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
             PathBuf::from(dir)
@@ -509,10 +795,12 @@ pub fn handle_status<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, Str
         return Ok(0);
     }
 
-    let db_path = crate::workspace::workspace_root()
-        .join("runs")
-        .join("quaqua.db");
-    let runs_dir = crate::workspace::workspace_root().join("runs");
+    let runs_dir = if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
+        PathBuf::from(dir)
+    } else {
+        crate::workspace::workspace_root().join("runs")
+    };
+    let db_path = runs_dir.join("quaqua.db");
     let report = render_status(&db_path, &runs_dir, herdr)?;
     print!("{report}");
     Ok(0)
@@ -601,9 +889,67 @@ pub struct MetricsReport {
     pub workers: Vec<WorkerTelemetryRow>,
     pub pipelines: Vec<PipelineTelemetryItem>,
     pub total: MetricsTotal,
+    #[serde(default)]
+    pub journal: JournalMetrics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// `playbook_gap` rollup for one playbook name (§ S5, counted in § S7).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlaybookGapTally {
+    pub events: usize,
+    pub missing: usize,
+    pub unreasoned: usize,
+}
+
+/// Journal-derived counts for the pstack success metrics (§ S7).
+///
+/// Verdicts, `playbook_gap` and watchdog exits come from `runs/quaqua.db` read
+/// only. G1 (merges with no verdict at the incoming head) cannot come from the
+/// journal alone: the engine records no merge event, so merge commits are listed
+/// from git on the upstream `main` (or local `main`) and every integration
+/// branch, windowed by merge commit date, and matched against the whole journal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JournalMetrics {
+    /// Verdict events inside the `--since` window, one entry per level.
+    pub verdicts: BTreeMap<String, usize>,
+    pub verdicts_total: usize,
+    /// `playbook_gap` events inside the window, per playbook name.
+    pub playbook_gaps: BTreeMap<String, PlaybookGapTally>,
+    pub playbook_gap_events: usize,
+    pub playbook_gap_missing: usize,
+    pub playbook_gap_unreasoned: usize,
+    /// G1: merge commits scanned inside the window (the S0 baseline's unit).
+    #[serde(default)]
+    pub merges: usize,
+    /// G1: incoming merge heads inside the window, checked against the whole journal.
+    pub merges_checked: usize,
+    /// Heads whose strongest verdict is not a verifier pass (G1 numerator).
+    pub merges_without_verdict: usize,
+    /// Split of `merges_without_verdict`: no journal record at all, versus a
+    /// record whose strongest verdict is failed, blocked or inconclusive.
+    #[serde(default)]
+    pub merges_no_verdict: usize,
+    #[serde(default)]
+    pub merges_not_pass: usize,
+    /// Up to five `target@sha` of the merges counted in `merges_without_verdict`.
+    #[serde(default)]
+    pub merges_missing_samples: Vec<String>,
+    pub merge_repos: usize,
+    /// G1 per repository and ref, so a number can be traced to its source.
+    #[serde(default)]
+    pub merges_per_repo: Vec<MergeRepoStat>,
+    /// G1: whether any contributing ref scan hit the 500-merge cap.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not", alias = "merges_truncated")]
+    pub truncated: bool,
+    /// G2: watchdog exits inside the window.
+    pub accepted_reports: usize,
+    pub exit6: usize,
+    pub exit6_resumed: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MetricsTotal {
     pub workers: usize,
     pub usd: f64,
@@ -612,6 +958,33 @@ pub struct MetricsTotal {
     #[serde(default)]
     pub claude_unpriced: usize,
     pub wall_sec: u64,
+}
+
+/// G1 counts for one repository: the refs it was read from and what they held.
+///
+/// A merge reachable from several refs of the same repo is counted once, under
+/// the first ref: sums here match the totals.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeRepoStat {
+    pub repo: String,
+    /// Refs that contributed at least one merge, in scan order.
+    #[serde(default)]
+    pub refs: Vec<MergeRefStat>,
+    /// Merge commits counted for this repo (the S0 baseline's unit).
+    #[serde(default)]
+    pub merges: usize,
+    /// Incoming heads checked (one per ordinary merge).
+    pub checked: usize,
+    pub without_verdict: usize,
+}
+
+/// One ref a repo's G1 count was read from, with the merges it contributed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeRefStat {
+    pub target: String,
+    pub merges: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 pub fn parse_since_cutoff(since: &str, now_ms: u64) -> Result<u64, String> {
@@ -697,7 +1070,9 @@ pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
             total_usd += usd;
         } else {
             unpriced += 1;
-            if w.harness.as_deref().and_then(crate::harness::Harness::parse)
+            if w.harness
+                .as_deref()
+                .and_then(crate::harness::Harness::parse)
                 == Some(crate::harness::Harness::Claude)
                 || w.spend_src == "claude-tokens"
             {
@@ -709,6 +1084,12 @@ pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
         }
     }
     let worker_count = workers.len();
+    let repos = metric_repos(runs_dir);
+    let (journal, journal_error) =
+        match load_journal_metrics(&runs_dir.join("quaqua.db"), cutoff_ms, &repos, &Git::new()) {
+            Ok(metrics) => (metrics, None),
+            Err(err) => (JournalMetrics::default(), Some(err)),
+        };
     MetricsReport {
         since: args.since.clone(),
         workers,
@@ -720,7 +1101,537 @@ pub fn read_metrics(runs_dir: &Path, args: &MetricsArgs) -> MetricsReport {
             claude_unpriced,
             wall_sec: total_wall_sec,
         },
+        journal,
+        journal_error,
     }
+}
+
+/// Upper bound on merge commits scanned per integration target.
+const MERGE_SCAN_LIMIT: usize = 500;
+
+/// One merge commit and the heads it brought in (every parent after the first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergeCommit {
+    pub repo: PathBuf,
+    pub target: String,
+    pub sha: String,
+    pub incoming: Vec<String>,
+    pub target_truncated: bool,
+}
+
+/// One integration target scanned for merge commits and whether its scan was capped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergeRefScan {
+    pub repo: PathBuf,
+    pub target: String,
+    pub truncated: bool,
+}
+
+/// The result of scanning integration targets for merge commits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MergeScan {
+    pub commits: Vec<MergeCommit>,
+    pub scans: Vec<MergeRefScan>,
+}
+
+impl MergeScan {
+    pub fn is_truncated(&self) -> bool {
+        self.scans.iter().any(|s| s.truncated)
+    }
+
+    pub fn from_commits(commits: Vec<MergeCommit>) -> Self {
+        Self {
+            commits,
+            scans: Vec::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for MergeScan {
+    type Target = [MergeCommit];
+
+    fn deref(&self) -> &Self::Target {
+        &self.commits
+    }
+}
+
+/// Repos whose integration branches G1 looks at: every `projects/INDEX.md` row
+/// plus the workspace root itself when it is a checkout.
+pub(crate) fn metric_repos(runs_dir: &Path) -> Vec<PathBuf> {
+    let ws_root = runs_dir.parent().unwrap_or_else(|| Path::new("."));
+    let mut repos = crate::merge::resolve_project_repos_from_workspace(ws_root);
+    if ws_root.join(".git").exists() {
+        let root = ws_root.to_path_buf();
+        if !repos.contains(&root) {
+            repos.push(root);
+        }
+    }
+    repos
+}
+
+/// True when `branch` is an integration branch G1 counts merges into.
+///
+/// The plan names `<slug>-integ`; this programme's own branches are
+/// `quaqua/pstack-int` and `quaqua/pstack-int2`, so the suffix test covers
+/// `-integ` and `-int[<digits>]`.
+pub(crate) fn is_integration_branch(branch: &str) -> bool {
+    let short = branch.rsplit('/').next().unwrap_or(branch);
+    if short.ends_with("-integ") {
+        return true;
+    }
+    short
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .ends_with("-int")
+}
+
+/// Ref G1 reads `main` from: the upstream tracking ref when it exists, else the
+/// local branch. `origin/main` is what the S0 baseline measured, and it sees PR
+/// merges that a local `main` does not.
+fn main_target<G: GitOps>(repo: &Path, git: &G, local_heads: &[String]) -> Option<String> {
+    if git.rev_parse_commit(repo, "refs/remotes/origin/main") {
+        return Some("origin/main".to_string());
+    }
+    local_heads.iter().find(|b| b.as_str() == "main").cloned()
+}
+
+fn merge_targets<G: GitOps>(repo: &Path, git: &G) -> Vec<String> {
+    let Ok(out) = git.run_in(
+        repo,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    ) else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let heads: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut targets: Vec<String> = Vec::new();
+    if let Some(main) = main_target(repo, git, &heads) {
+        targets.push(main);
+    }
+    targets.extend(heads.iter().filter(|b| is_integration_branch(b)).cloned());
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+/// Lists merge commits reachable from each G1 target, newest first, windowed by
+/// committer date and capped at [`MERGE_SCAN_LIMIT`] per target. Deduplicated by
+/// SHA across targets, so a merge reachable from `main` and from an integration
+/// branch is counted once.
+fn collect_merge_commits<G: GitOps>(
+    repos: &[PathBuf],
+    git: &G,
+    cutoff_ms: u64,
+) -> MergeScan {
+    let fetch_limit = (MERGE_SCAN_LIMIT + 1).to_string();
+    let since = format!("--since=@{}", cutoff_ms / 1000);
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut commits = Vec::new();
+    let mut scans = Vec::new();
+    for repo in repos {
+        for target in merge_targets(repo, git) {
+            let mut args = vec![
+                "log",
+                "--merges",
+                "-n",
+                fetch_limit.as_str(),
+                "--format=%H %P",
+            ];
+            if cutoff_ms > 0 {
+                args.push(since.as_str());
+            }
+            args.push(target.as_str());
+            let Ok(out) = git.run_in(repo, &args) else {
+                continue;
+            };
+            if !out.status.success() {
+                continue;
+            }
+            let mut target_commits = Vec::new();
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let mut it = line.split_whitespace();
+                let Some(sha) = it.next() else { continue };
+                let parents: Vec<&str> = it.collect();
+                if parents.len() < 2 {
+                    continue;
+                }
+                target_commits.push((
+                    sha.to_string(),
+                    parents[1..]
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            let is_truncated = target_commits.len() > MERGE_SCAN_LIMIT;
+            scans.push(MergeRefScan {
+                repo: repo.clone(),
+                target: target.clone(),
+                truncated: is_truncated,
+            });
+            target_commits.truncate(MERGE_SCAN_LIMIT);
+            for (sha, incoming) in target_commits {
+                if !seen.insert(sha.clone()) {
+                    continue;
+                }
+                commits.push(MergeCommit {
+                    repo: repo.clone(),
+                    target: target.clone(),
+                    sha,
+                    incoming,
+                    target_truncated: is_truncated,
+                });
+            }
+        }
+    }
+    MergeScan { commits, scans }
+}
+
+fn sha_matches(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
+}
+
+/// A repo path as printed: `~/...` under `$HOME`, absolute otherwise.
+fn display_repo(repo: &Path) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if let Ok(rest) = repo.strip_prefix(&home) {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", rest.display());
+        }
+    }
+    repo.display().to_string()
+}
+
+/// G1 counts over the scanned merge commits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MergeTally {
+    pub merges: usize,
+    pub checked: usize,
+    pub without_verdict: usize,
+    pub no_verdict: usize,
+    pub not_pass: usize,
+    pub samples: Vec<String>,
+    pub repos: Vec<MergeRepoStat>,
+    pub truncated: bool,
+}
+
+/// G1: counts incoming merge heads and how many lack a verifier pass.
+///
+/// Coverage is [`strongest_verdict_from_slice`] (the single S1 selection rule)
+/// plus [`VerdictRecord::is_verified`]: the strongest verdict for the head must
+/// be an independent verifier pass. A head with no record, only a self-report,
+/// or a failed/blocked/inconclusive verifier verdict is not covered.
+pub(crate) fn count_merges_without_pass(
+    scan: &MergeScan,
+    verdicts: &[VerdictRecord],
+) -> MergeTally {
+    let mut tally = MergeTally {
+        truncated: scan.is_truncated(),
+        ..MergeTally::default()
+    };
+    let mut per_repo: BTreeMap<String, MergeRepoStat> = BTreeMap::new();
+    for commit in &scan.commits {
+        let repo = display_repo(&commit.repo);
+        tally.merges += 1;
+        let entry = per_repo
+            .entry(repo.clone())
+            .or_insert_with(|| MergeRepoStat {
+                repo,
+                ..MergeRepoStat::default()
+            });
+        match entry.refs.iter_mut().find(|r| r.target == commit.target) {
+            Some(r) => {
+                r.merges += 1;
+                r.truncated |= commit.target_truncated;
+            }
+            None => entry.refs.push(MergeRefStat {
+                target: commit.target.clone(),
+                merges: 1,
+                truncated: commit.target_truncated,
+            }),
+        }
+        entry.merges += 1;
+        for head in &commit.incoming {
+            tally.checked += 1;
+            entry.checked += 1;
+            let matching: Vec<&VerdictRecord> = verdicts
+                .iter()
+                .filter(|v| sha_matches(&v.sha, head))
+                .collect();
+            let strongest = strongest_verdict_from_slice(&matching);
+            if !strongest.as_ref().is_some_and(|v| v.is_verified()) {
+                tally.without_verdict += 1;
+                entry.without_verdict += 1;
+                if strongest.is_some() {
+                    tally.not_pass += 1;
+                } else {
+                    tally.no_verdict += 1;
+                }
+                if tally.samples.len() < 5 {
+                    let short: String = head.chars().take(7).collect();
+                    tally.samples.push(format!("{}@{short}", commit.target));
+                }
+            }
+        }
+    }
+    for ref_scan in &scan.scans {
+        if ref_scan.truncated {
+            tally.truncated = true;
+            let repo = display_repo(&ref_scan.repo);
+            let entry = per_repo
+                .entry(repo.clone())
+                .or_insert_with(|| MergeRepoStat {
+                    repo,
+                    ..MergeRepoStat::default()
+                });
+            match entry.refs.iter_mut().find(|r| r.target == ref_scan.target) {
+                Some(r) => {
+                    r.truncated = true;
+                }
+                None => {
+                    entry.refs.push(MergeRefStat {
+                        target: ref_scan.target.clone(),
+                        merges: 0,
+                        truncated: true,
+                    });
+                }
+            }
+        }
+    }
+    if !tally.truncated {
+        tally.truncated = scan.commits.iter().any(|c| c.target_truncated);
+    }
+    for (repo_name, entry) in &mut per_repo {
+        entry.refs.sort_by_key(|r| {
+            scan.scans
+                .iter()
+                .position(|s| display_repo(&s.repo) == *repo_name && s.target == r.target)
+                .unwrap_or(usize::MAX)
+        });
+    }
+    tally.repos = per_repo.into_values().collect();
+    tally
+}
+
+/// Fills the G1 fields of `metrics`: merges come from git, coverage from the
+/// whole journal (a verdict older than the window still covers its merge).
+fn fill_merge_metrics<G: GitOps>(
+    metrics: &mut JournalMetrics,
+    repos: &[PathBuf],
+    git: &G,
+    cutoff_ms: u64,
+    verdicts: &[VerdictRecord],
+) {
+    let scan = collect_merge_commits(repos, git, cutoff_ms);
+    let tally = count_merges_without_pass(&scan, verdicts);
+    metrics.merges = tally.merges;
+    metrics.merges_checked = tally.checked;
+    metrics.merges_without_verdict = tally.without_verdict;
+    metrics.merges_no_verdict = tally.no_verdict;
+    metrics.merges_not_pass = tally.not_pass;
+    metrics.merges_missing_samples = tally.samples;
+    metrics.merge_repos = tally
+        .repos
+        .iter()
+        .map(|s| s.repo.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    metrics.merges_per_repo = tally.repos;
+    metrics.truncated = tally.truncated;
+}
+
+/// Splits `worker:<name>#<n>` into its base and session number.
+fn session_base(id: &str) -> Option<(&str, u64)> {
+    let (base, n) = id.rsplit_once('#')?;
+    Some((base, n.parse().ok()?))
+}
+
+/// G2 numerator: an exit-6 session counts as resumed when a later session
+/// (`worker:<name>#<n+>`) exists for the same worker.
+fn exit6_was_resumed(wf_id: &str, max_session: &BTreeMap<String, u64>) -> bool {
+    let Some((base, n)) = session_base(wf_id) else {
+        return false;
+    };
+    max_session.get(base).is_some_and(|max| *max > n)
+}
+
+fn load_journal_metrics<G: GitOps>(
+    db_path: &Path,
+    cutoff_ms: u64,
+    repos: &[PathBuf],
+    git: &G,
+) -> Result<JournalMetrics, String> {
+    if !db_path.is_file() {
+        return Err(format!("journal not found at {}", db_path.display()));
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("db error: cannot open {}: {e}", db_path.display()))?;
+    conn.busy_timeout(Duration::from_millis(5000))
+        .map_err(|e| format!("db error: cannot set busy timeout: {e}"))?;
+
+    let has_events: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='events');",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("db error: checking events table: {e}"))?;
+    if !has_events {
+        // G1 comes from git alone: a journal without verdicts must still report
+        // the merges it cannot cover, not `0 checked`.
+        let mut metrics = JournalMetrics::default();
+        fill_merge_metrics(&mut metrics, repos, git, cutoff_ms, &[]);
+        return Ok(metrics);
+    }
+
+    let mut metrics = JournalMetrics::default();
+
+    // Verdicts: level counts inside the window, and every record for the G1
+    // check (an old verdict still covers a merge inside the window).
+    let mut all_verdicts: Vec<VerdictRecord> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ts_ms, payload_json FROM events WHERE kind = 'verdict' ORDER BY ts_ms ASC;",
+            )
+            .map_err(|e| format!("db error: preparing verdict query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("db error: reading verdicts: {e}"))?;
+        for row in rows {
+            let (ts_ms, payload) =
+                row.map_err(|e| format!("db error: reading verdict row: {e}"))?;
+            let Ok(record) = serde_json::from_str::<VerdictRecord>(&payload) else {
+                continue;
+            };
+            if (ts_ms.max(0) as u64) >= cutoff_ms {
+                metrics.verdicts_total += 1;
+                *metrics
+                    .verdicts
+                    .entry(record.level.as_str().to_string())
+                    .or_insert(0) += 1;
+            }
+            all_verdicts.push(record);
+        }
+    }
+
+    // playbook_gap events, rolled up by playbook name.
+    {
+        let mut stmt = conn
+            .prepare("SELECT ts_ms, payload_json FROM events WHERE kind = 'playbook_gap' ORDER BY ts_ms ASC;")
+            .map_err(|e| format!("db error: preparing playbook_gap query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("db error: reading playbook gaps: {e}"))?;
+        for row in rows {
+            let (ts_ms, payload) =
+                row.map_err(|e| format!("db error: reading playbook_gap row: {e}"))?;
+            if (ts_ms.max(0) as u64) < cutoff_ms {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            let name = value
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let missing = value
+                .get("missing")
+                .and_then(|m| m.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            let unreasoned = value
+                .get("unreasoned")
+                .and_then(|m| m.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            let tally = metrics.playbook_gaps.entry(name).or_default();
+            tally.events += 1;
+            tally.missing += missing;
+            tally.unreasoned += unreasoned;
+            metrics.playbook_gap_events += 1;
+            metrics.playbook_gap_missing += missing;
+            metrics.playbook_gap_unreasoned += unreasoned;
+        }
+    }
+
+    // G2: accepted reports (exit 0) and exit-6 sessions, with resumes.
+    let max_session = {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT workflow_id FROM events;")
+            .map_err(|e| format!("db error: preparing session query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("db error: reading sessions: {e}"))?;
+        let mut max_session: BTreeMap<String, u64> = BTreeMap::new();
+        for row in rows {
+            let wf_id = row.map_err(|e| format!("db error: reading session id: {e}"))?;
+            if let Some((base, n)) = session_base(&wf_id) {
+                let entry = max_session.entry(base.to_string()).or_insert(0);
+                *entry = (*entry).max(n);
+            }
+        }
+        max_session
+    };
+    {
+        let mut stmt = conn
+            .prepare("SELECT workflow_id, ts_ms, payload_json FROM events WHERE kind = 'workflow_completed' ORDER BY ts_ms ASC;")
+            .map_err(|e| format!("db error: preparing workflow_completed query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| format!("db error: reading workflow_completed: {e}"))?;
+        for row in rows {
+            let (wf_id, ts_ms, payload) =
+                row.map_err(|e| format!("db error: reading workflow_completed row: {e}"))?;
+            if (ts_ms.max(0) as u64) < cutoff_ms {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            let Some(exit) = value.get("exit").and_then(|e| e.as_i64()) else {
+                continue;
+            };
+            match exit {
+                0 => metrics.accepted_reports += 1,
+                6 => {
+                    metrics.exit6 += 1;
+                    if exit6_was_resumed(&wf_id, &max_session) {
+                        metrics.exit6_resumed += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // G1: merges are not journaled, so list them from git.
+    fill_merge_metrics(&mut metrics, repos, git, cutoff_ms, &all_verdicts);
+
+    Ok(metrics)
 }
 
 fn format_token_metric(tok: Option<&Tokens>) -> String {
@@ -855,6 +1766,103 @@ pub fn render_metrics_text(report: &MetricsReport) -> String {
         report.total.workers, report.total.usd, unpriced_str, total_wall_str
     ));
 
+    // § S7: journal counts, appended so every line above stays byte-identical.
+    match &report.journal_error {
+        Some(err) => out.push_str(&format!("journal: unavailable - {err}\n")),
+        None => {
+            let j = &report.journal;
+            if j.verdicts.is_empty() {
+                out.push_str("verdicts: none\n");
+            } else {
+                let levels: Vec<String> = j
+                    .verdicts
+                    .iter()
+                    .map(|(level, count)| format!("{level}={count}"))
+                    .collect();
+                out.push_str(&format!(
+                    "verdicts: {} total - {}\n",
+                    j.verdicts_total,
+                    levels.join(" ")
+                ));
+            }
+            if j.playbook_gaps.is_empty() {
+                out.push_str("playbook_gap: none\n");
+            } else {
+                let per: Vec<String> = j
+                    .playbook_gaps
+                    .iter()
+                    .map(|(name, tally)| {
+                        format!(
+                            "{name}={} (missing {}, unreasoned {})",
+                            tally.events, tally.missing, tally.unreasoned
+                        )
+                    })
+                    .collect();
+                out.push_str(&format!(
+                    "playbook_gap: {} events - {} - total missing {} unreasoned {}\n",
+                    j.playbook_gap_events,
+                    per.join(" - "),
+                    j.playbook_gap_missing,
+                    j.playbook_gap_unreasoned
+                ));
+            }
+            let samples = if j.merges_missing_samples.is_empty() {
+                String::new()
+            } else {
+                format!(" - {}", j.merges_missing_samples.join(", "))
+            };
+            let is_capped = j.truncated
+                || j.merges_per_repo
+                    .iter()
+                    .any(|repo| repo.refs.iter().any(|r| r.truncated));
+            let capped_notice = if is_capped { " (capped)" } else { "" };
+            out.push_str(&format!(
+                "merges: {} merge(s){} ({} incoming heads), {} without a verifier pass at the head (G1) - {} with no verdict, {} failed/blocked/inconclusive - {} repo(s), from git (no merge event is journaled), since {}{}\n",
+                j.merges,
+                capped_notice,
+                j.merges_checked,
+                j.merges_without_verdict,
+                j.merges_no_verdict,
+                j.merges_not_pass,
+                j.merge_repos,
+                report.since,
+                samples
+            ));
+            for stat in &j.merges_per_repo {
+                out.push_str(&format!(
+                    "  merges {}: {} merge(s), {} head(s), {} without - refs {}\n",
+                    stat.repo,
+                    stat.merges,
+                    stat.checked,
+                    stat.without_verdict,
+                    stat.refs
+                        .iter()
+                        .map(|r| {
+                            if r.truncated {
+                                format!("{}={} (capped)", r.target, r.merges)
+                            } else {
+                                format!("{}={}", r.target, r.merges)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            let rate = if j.accepted_reports == 0 {
+                "n/a".to_string()
+            } else {
+                format!(
+                    "{:.1}%",
+                    100.0 * j.exit6_resumed as f64 / j.accepted_reports as f64
+                )
+            };
+            out.push_str(&format!(
+                "exits: {} accepted, {} exit-6, {} resumed after exit 6 (G2 {})\n",
+                j.accepted_reports, j.exit6, j.exit6_resumed, rate
+            ));
+        }
+    }
+
     out
 }
 
@@ -875,6 +1883,12 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::process::{Child, Output};
+
+    /// Tests scan with the embedded config so no test can change the
+    /// process-global `QUAQUA_TEAM_TOML` they read.
+    fn test_team_cfg() -> crate::config::Config {
+        crate::config::embedded_team_config().expect("embedded team.toml")
+    }
 
     struct MockHerdr {
         agent_list_result: std::io::Result<String>,
@@ -1005,7 +2019,7 @@ mod tests {
         let workflows = res.unwrap();
         assert!(workflows.is_empty(), "expected empty workflows");
 
-        let report = format_status_report(Ok(&workflows), Ok(&[]));
+        let report = format_status_report(Ok(&workflows), Ok(&[]), Ok(&[]));
         assert!(
             report.contains("no workflows"),
             "must contain 'no workflows'"
@@ -1047,7 +2061,7 @@ mod tests {
         let workflows = res.unwrap();
         assert!(workflows.is_empty(), "expected 0 workflows in empty db");
 
-        let report = format_status_report(Ok(&workflows), Ok(&[]));
+        let report = format_status_report(Ok(&workflows), Ok(&[]), Ok(&[]));
         assert!(report.contains("no workflows"));
     }
 
@@ -1129,7 +2143,7 @@ mod tests {
 
         fs::write(tmp.join("sude-p4.owner"), "mu-lead\n").unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let p4 = rows
             .iter()
             .find(|r| r.name == "sude-p4")
@@ -1173,7 +2187,7 @@ mod tests {
             .set_accessed(now - Duration::from_secs(5));
         file.set_times(times).unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -1218,7 +2232,7 @@ mod tests {
         times = times.set_modified(mtime).set_accessed(atime);
         file.set_times(times).unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -1267,7 +2281,7 @@ mod tests {
         let mut marker_times = fs::FileTimes::new();
         marker_times = marker_times.set_modified(now);
         marker_file.set_times(marker_times).unwrap();
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -1314,7 +2328,7 @@ mod tests {
             .set_accessed(now - Duration::from_secs(10));
         report_file.set_times(report_times).unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -1357,7 +2371,7 @@ mod tests {
         let marker_path = tmp.join(".sude-e1.read");
         fs::create_dir(&marker_path).unwrap(); // is_file() is false, metadata/modified will not match a valid read marker
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -1388,7 +2402,7 @@ mod tests {
 
         fs::write(tmp.join("sude-e1.owner"), "arch-lead\n").unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -1420,7 +2434,7 @@ mod tests {
             "error message must start with 'db error:' but got: {err_msg}"
         );
 
-        let report = format_status_report(Err(&err_msg), Ok(&[]));
+        let report = format_status_report(Err(&err_msg), Ok(&[]), Ok(&[]));
         assert!(
             report.contains("db error:"),
             "rendered report must show db error"
@@ -1481,7 +2495,7 @@ mod tests {
         // Even with an owner file present, it must NOT emit false ORPHAN rows!
         fs::write(tmp.join("sude-test.owner"), "arch-lead\n").unwrap();
 
-        let res = scan_orchestration(&tmp, &mock);
+        let res = scan_orchestration(&tmp, &mock, &test_team_cfg());
         assert!(
             res.is_err(),
             "scan_orchestration must fail when herdr fails"
@@ -1492,7 +2506,7 @@ mod tests {
             "error must start with 'herdr error:' but got: {err_msg}"
         );
 
-        let report = format_status_report(Ok(&[]), Err(&err_msg));
+        let report = format_status_report(Ok(&[]), Err(&err_msg), Ok(&[]));
         assert!(
             report.contains("herdr error:"),
             "report must show herdr error"
@@ -1509,7 +2523,7 @@ mod tests {
         let _cleaner = TempDirCleaner(tmp.clone());
 
         let mock = MockHerdr::new("invalid json output from herdr");
-        let res = scan_orchestration(&tmp, &mock);
+        let res = scan_orchestration(&tmp, &mock, &test_team_cfg());
         assert!(
             res.is_err(),
             "scan_orchestration must fail on unparseable JSON"
@@ -1520,7 +2534,7 @@ mod tests {
             "error must identify invalid json, got: {err_msg}"
         );
 
-        let report = format_status_report(Ok(&[]), Err(&err_msg));
+        let report = format_status_report(Ok(&[]), Err(&err_msg), Ok(&[]));
         assert!(report.contains("herdr error: invalid agent list JSON"));
     }
 
@@ -1545,7 +2559,7 @@ mod tests {
         fs::write(tmp.join("sude-idle.owner"), "active-lead\n").unwrap();
         fs::write(tmp.join("sude-orphan.owner"), "ghost-lead\n").unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
 
         let done = rows
             .iter()
@@ -1569,6 +2583,7 @@ mod tests {
 
     #[test]
     fn test_status_table_formatting_text_output() {
+        let _env_lock = crate::test_env::lock_env();
         let tmp = temp_test_dir("format");
         let _cleaner = TempDirCleaner(tmp.clone());
 
@@ -1617,11 +2632,668 @@ mod tests {
         assert!(out.contains("sude-w1"));
         assert!(out.contains("WAIT"));
     }
+
+    #[test]
+    fn test_status_renders_all_sections_when_team_config_fails_to_load() {
+        let tmp = temp_test_dir("bad-team-config");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let db_path = tmp.join("quaqua.db");
+        let mock = MockHerdr::new(r#"{"result":{"agents":[]}}"#);
+
+        // A broken explicit team.toml must surface in the orchestration section;
+        // the workflows and verdicts sections still have to render.
+        let missing = tmp.join("missing-team.toml");
+        let _env_lock = crate::test_env::lock_env();
+        let _guard = EnvGuard::capture(&["QUAQUA_TEAM_TOML"]);
+        std::env::set_var("QUAQUA_TEAM_TOML", &missing);
+
+        let out = render_status(&db_path, &tmp, &mock)
+            .expect("status must keep rendering when team.toml fails to load");
+        assert!(out.contains("=== Workflows (runs/quaqua.db) ==="), "{out}");
+        assert!(out.contains("=== Verdicts ==="), "{out}");
+        assert!(out.contains("=== Orchestration ==="), "{out}");
+        assert!(
+            out.contains("missing-team.toml"),
+            "orchestration section must show the team.toml error: {out}"
+        );
+    }
+
+    #[test]
+    fn test_status_verdict_stale_on_new_commit() {
+        let tmp = temp_test_dir("stale-commit");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let repo = tmp.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        // Init git repo
+        let git = Git::new();
+        let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git.run_in(&repo, &["config", "user.name", "test"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "initial commit"])
+            .unwrap();
+
+        // Create branch quaqua/feat-stale at commit 1
+        let _ = git
+            .run_in(&repo, &["checkout", "-qb", "quaqua/feat-stale"])
+            .unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "commit 1"])
+            .unwrap();
+        let sha1 =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        // Record verdict in journal at sha1
+        let db_path = tmp.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+        let v1 = VerdictRecord {
+            branch: "quaqua/feat-stale".to_string(),
+            sha: sha1.clone(),
+            level: VerdictLevel::ReviewClean,
+            evidence: "verdict evidence".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "pi".to_string(),
+        };
+        journal
+            .record_verdict("wf-stale", &v1)
+            .expect("record verdict");
+
+        // Before new commit: head == verdict SHA -> not stale
+        let rows_before = query_branch_verdicts(&db_path, &repo, &git).expect("query before");
+        assert_eq!(rows_before.len(), 1);
+        assert_eq!(rows_before[0].branch, "quaqua/feat-stale");
+        assert_eq!(rows_before[0].head_sha, sha1);
+        assert_eq!(rows_before[0].verdict_sha, sha1);
+        assert_eq!(rows_before[0].level, VerdictLevel::ReviewClean);
+        assert!(!rows_before[0].stale);
+
+        // Make new commit on the branch
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "commit 2 (new)"])
+            .unwrap();
+        let sha2 =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+        assert_ne!(sha1, sha2, "new commit must produce different SHA");
+
+        // Query branch verdicts after new commit
+        let rows_after = query_branch_verdicts(&db_path, &repo, &git).expect("query after");
+        assert_eq!(rows_after.len(), 1);
+        assert_eq!(rows_after[0].branch, "quaqua/feat-stale");
+        assert_eq!(rows_after[0].head_sha, sha2);
+        assert_eq!(rows_after[0].verdict_sha, sha1);
+        assert_eq!(rows_after[0].level, VerdictLevel::ReviewClean);
+        assert!(
+            rows_after[0].stale,
+            "verdict must be marked stale on new commit"
+        );
+
+        // Check format_status_report output contains stale flag
+        let report = format_status_report(Ok(&[]), Ok(&[]), Ok(&rows_after));
+        assert!(report.contains("quaqua/feat-stale"));
+        assert!(report.contains("review-clean"));
+        assert!(report.contains("stale"));
+    }
+    #[test]
+    fn test_render_status_with_git_resolves_repo_from_index_and_flags_stale_or_unresolved() {
+        let _env_lock = crate::test_env::lock_env();
+        let ws = temp_test_dir("ws-render-status");
+        let _cleaner_ws = TempDirCleaner(ws.clone());
+        let proj_repo = temp_test_dir("proj-repo");
+        let _cleaner_repo = TempDirCleaner(proj_repo.clone());
+
+        fs::create_dir_all(&proj_repo).unwrap();
+        let git = Git::new();
+        let _ = git.run_in(&proj_repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&proj_repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git
+            .run_in(&proj_repo, &["config", "user.name", "test"])
+            .unwrap();
+        let _ = git
+            .run_in(&proj_repo, &["commit", "--allow-empty", "-qm", "initial"])
+            .unwrap();
+
+        // Branch quaqua/feat-moved in proj_repo
+        let _ = git
+            .run_in(&proj_repo, &["checkout", "-qb", "quaqua/feat-moved"])
+            .unwrap();
+        let _ = git
+            .run_in(&proj_repo, &["commit", "--allow-empty", "-qm", "commit 1"])
+            .unwrap();
+        let sha1 = String::from_utf8_lossy(
+            &git.run_in(&proj_repo, &["rev-parse", "HEAD"])
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+
+        // Setup workspace (NOT a git repository)
+        let projects_dir = ws.join("projects");
+        fs::create_dir_all(&projects_dir).unwrap();
+        fs::write(
+            projects_dir.join("INDEX.md"),
+            format!(
+                "# Projects\n\n| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| myproj | {} | cos | active | test |\n",
+                proj_repo.display()
+            ),
+        )
+        .unwrap();
+
+        let runs_dir = ws.join("runs");
+        fs::create_dir_all(&runs_dir).unwrap();
+        let db_path = runs_dir.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+
+        let v_stale = VerdictRecord {
+            branch: "quaqua/feat-moved".to_string(),
+            sha: sha1.clone(),
+            level: VerdictLevel::ReviewClean,
+            evidence: "evidence".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "pi".to_string(),
+        };
+        journal.record_verdict("wf-1", &v_stale).unwrap();
+
+        let v_unresolved = VerdictRecord {
+            branch: "quaqua/feat-missing".to_string(),
+            sha: "999999999999".to_string(),
+            level: VerdictLevel::UnitTestVerified,
+            evidence: "evidence".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "pi".to_string(),
+        };
+        journal.record_verdict("wf-2", &v_unresolved).unwrap();
+
+        // Advance quaqua/feat-moved in proj_repo
+        let _ = git
+            .run_in(&proj_repo, &["commit", "--allow-empty", "-qm", "commit 2"])
+            .unwrap();
+        let sha2 = String::from_utf8_lossy(
+            &git.run_in(&proj_repo, &["rev-parse", "HEAD"])
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        assert_ne!(sha1, sha2);
+
+        let mock = MockHerdr::new(r#"{"result":{"agents":[]}}"#);
+        let out = render_status_with_git(&db_path, &runs_dir, &mock, &git)
+            .expect("render status with git");
+
+        let stale_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("quaqua/feat-moved"))
+            .collect();
+        assert_eq!(stale_lines.len(), 1);
+        assert!(
+            stale_lines[0].contains("stale"),
+            "moved branch must be flagged stale when resolved from INDEX.md, got: {}",
+            stale_lines[0]
+        );
+
+        let unres_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("quaqua/feat-missing"))
+            .collect();
+        assert_eq!(unres_lines.len(), 1);
+        assert!(
+            unres_lines[0].contains("unresolved"),
+            "unresolvable branch must be flagged unresolved, got: {}",
+            unres_lines[0]
+        );
+    }
+
+    #[test]
+    fn test_status_verdict_strongest_per_branch_and_sha() {
+        let tmp = temp_test_dir("strongest-sha");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let repo = tmp.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let git = Git::new();
+        let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git.run_in(&repo, &["config", "user.name", "test"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "initial"])
+            .unwrap();
+
+        let _ = git
+            .run_in(&repo, &["checkout", "-qb", "quaqua/feat-strong"])
+            .unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "work"])
+            .unwrap();
+        let sha =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let db_path = tmp.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+
+        // 1. Builder self-report
+        let v_builder = VerdictRecord {
+            branch: "quaqua/feat-strong".to_string(),
+            sha: sha.clone(),
+            level: VerdictLevel::UnitTestVerified,
+            evidence: "builder unit tests pass".to_string(),
+            verifier: "sude-build".to_string(),
+            source: VerdictSource::SelfReport,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: None,
+            harness: "omp".to_string(),
+        };
+        journal.record_verdict("wf-builder", &v_builder).unwrap();
+
+        // 2. Verifier verdict (review-clean overrides self-report)
+        let v_rev_clean = VerdictRecord {
+            branch: "quaqua/feat-strong".to_string(),
+            sha: sha.clone(),
+            level: VerdictLevel::ReviewClean,
+            evidence: "Verdict: clean".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "pi".to_string(),
+        };
+        journal
+            .record_verdict("wf-rev-clean", &v_rev_clean)
+            .unwrap();
+
+        let rows = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].branch, "quaqua/feat-strong");
+        assert_eq!(rows[0].level, VerdictLevel::ReviewClean);
+        assert!(rows[0].is_verified);
+
+        // 3. Negative dominates: second verifier records verifier-blocked
+        let v_rev_blocked = VerdictRecord {
+            branch: "quaqua/feat-strong".to_string(),
+            sha: sha.clone(),
+            level: VerdictLevel::VerifierBlocked,
+            evidence: "Verdict: 1 findings".to_string(),
+            verifier: "truonglao-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("truonglao".to_string()),
+            harness: "claude".to_string(),
+        };
+        journal
+            .record_verdict("wf-rev-blocked", &v_rev_blocked)
+            .unwrap();
+
+        let rows2 = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts 2");
+        assert_eq!(rows2.len(), 1);
+        assert_eq!(
+            rows2[0].level,
+            VerdictLevel::VerifierBlocked,
+            "verifier-blocked must dominate over review-clean"
+        );
+        assert!(!rows2[0].is_verified);
+
+        let report = format_status_report(Ok(&[]), Ok(&[]), Ok(&rows2));
+        assert!(report.contains("quaqua/feat-strong"));
+        assert!(report.contains("verifier-blocked"));
+    }
+
+    #[test]
+    fn test_status_verdict_self_report_at_head_is_inconclusive() {
+        let tmp = temp_test_dir("self-report-head");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let repo = tmp.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let git = Git::new();
+        let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git.run_in(&repo, &["config", "user.name", "test"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "initial"])
+            .unwrap();
+
+        let _ = git
+            .run_in(&repo, &["checkout", "-qb", "quaqua/feat-self"])
+            .unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "work"])
+            .unwrap();
+        let sha =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let db_path = tmp.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+
+        // The only verdict for this branch is the builder's own report at head.
+        let v_builder = VerdictRecord {
+            branch: "quaqua/feat-self".to_string(),
+            sha: sha.clone(),
+            level: VerdictLevel::UnitTestVerified,
+            evidence: "builder unit tests pass".to_string(),
+            verifier: "sude-build".to_string(),
+            source: VerdictSource::SelfReport,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: None,
+            harness: "omp".to_string(),
+        };
+        journal.record_verdict("wf-builder", &v_builder).unwrap();
+
+        // The selector `quaqua status` uses must apply S1's F6 rule itself.
+        let records = vec![&v_builder];
+        let best = strongest_verdict_from_slice(&records).expect("verdict");
+        assert_eq!(
+            best.level,
+            VerdictLevel::Inconclusive,
+            "self-report alone must select as inconclusive, never its self-reported level"
+        );
+        assert!(!best.is_verified());
+
+        let rows = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].level, VerdictLevel::Inconclusive);
+        assert!(!rows[0].is_verified);
+
+        let report = format_status_report(Ok(&[]), Ok(&[]), Ok(&rows));
+        assert!(report.contains("quaqua/feat-self"));
+        assert!(report.contains("inconclusive"));
+        assert!(!report.contains("unit-test-verified"));
+    }
+
+    #[test]
+    fn test_status_verdict_same_harness_shown() {
+        let tmp = temp_test_dir("same-harness");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let repo = tmp.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        // Pin QUAQUA_TEAM_TOML to a fixture config where builder and verifier differ on exactly one side (§ S2 fix)
+        let fixture_path = tmp.join("fixture_team.toml");
+        fs::write(
+            &fixture_path,
+            r#"schema_version = 1
+
+[kinds.k-builder]
+harness = "omp"
+model = "m1"
+
+[kinds.k-verifier-same]
+harness = "omp"
+model = "m2"
+
+[kinds.k-verifier-diff]
+harness = "pi"
+model = "m3"
+"#,
+        )
+        .unwrap();
+
+        let _env_lock = crate::test_env::lock_env();
+        let _env_guard = EnvGuard::capture(&["QUAQUA_TEAM_TOML"]);
+        std::env::set_var("QUAQUA_TEAM_TOML", &fixture_path);
+        let git = Git::new();
+        let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git.run_in(&repo, &["config", "user.name", "test"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "initial"])
+            .unwrap();
+
+        // Branch 1: detu (verifier, omp) verifying sude (builder, omp) -> same-harness
+        let _ = git
+            .run_in(&repo, &["checkout", "-qb", "quaqua/feat-same"])
+            .unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "work same"])
+            .unwrap();
+        let sha_same =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        // Branch 2: suhuynh (verifier, pi) verifying sude (builder, omp) -> diff harness
+        let _ = git
+            .run_in(&repo, &["checkout", "-qb", "quaqua/feat-diff"])
+            .unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "work diff"])
+            .unwrap();
+        let sha_diff =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let db_path = tmp.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+
+        let v_same = VerdictRecord {
+            branch: "quaqua/feat-same".to_string(),
+            sha: sha_same,
+            level: VerdictLevel::ReviewClean,
+            evidence: "clean".to_string(),
+            verifier: "detu-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("k-builder".to_string()),
+            verifier_kind: Some("k-verifier-same".to_string()),
+            harness: "omp".to_string(),
+        };
+        journal.record_verdict("wf-same", &v_same).unwrap();
+
+        let v_diff = VerdictRecord {
+            branch: "quaqua/feat-diff".to_string(),
+            sha: sha_diff,
+            level: VerdictLevel::ReviewClean,
+            evidence: "clean".to_string(),
+            verifier: "suhuynh-rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("k-builder".to_string()),
+            verifier_kind: Some("k-verifier-diff".to_string()),
+            harness: "pi".to_string(),
+        };
+        journal.record_verdict("wf-diff", &v_diff).unwrap();
+
+        let rows = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts");
+        assert_eq!(rows.len(), 2);
+
+        let row_diff = rows
+            .iter()
+            .find(|r| r.branch == "quaqua/feat-diff")
+            .unwrap();
+        assert!(!row_diff.same_harness);
+
+        let row_same = rows
+            .iter()
+            .find(|r| r.branch == "quaqua/feat-same")
+            .unwrap();
+        assert!(
+            row_same.same_harness,
+            "must show same-harness when harnesses match"
+        );
+
+        let report = format_status_report(Ok(&[]), Ok(&[]), Ok(&rows));
+        assert!(report.contains("same-harness"));
+        let lines: Vec<&str> = report
+            .lines()
+            .filter(|l| l.contains("quaqua/feat-same"))
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("same-harness"));
+    }
+    #[test]
+    fn test_status_verdicts_grouped_in_one_pass() {
+        let tmp = temp_test_dir("group-one-pass");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let repo = tmp.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let git = Git::new();
+        let _ = git.run_in(&repo, &["init", "-q"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["config", "user.email", "test@test"])
+            .unwrap();
+        let _ = git.run_in(&repo, &["config", "user.name", "test"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "initial"])
+            .unwrap();
+
+        // 3 branches:
+        // b1: clean verdict at head
+        // b2: stale verdict (head moved)
+        // b3: unresolved (not in repo)
+        let _ = git.run_in(&repo, &["checkout", "-qb", "b1"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "b1 commit"])
+            .unwrap();
+        let sha_b1 =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let _ = git.run_in(&repo, &["checkout", "-qb", "b2"]).unwrap();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "b2 commit 1"])
+            .unwrap();
+        let sha_b2_old =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+        let _ = git
+            .run_in(&repo, &["commit", "--allow-empty", "-qm", "b2 commit 2"])
+            .unwrap();
+        let sha_b2_head =
+            String::from_utf8_lossy(&git.run_in(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let db_path = tmp.join("quaqua.db");
+        let mut journal = SqliteJournal::open(&db_path).expect("open journal");
+
+        journal
+            .record_verdict(
+                "wf-1",
+                &VerdictRecord {
+                    branch: "b1".to_string(),
+                    sha: sha_b1.clone(),
+                    level: VerdictLevel::ReviewClean,
+                    evidence: "clean".to_string(),
+                    verifier: "suhuynh-rev".to_string(),
+                    source: VerdictSource::Verifier,
+                    builder_kind: Some("sude".to_string()),
+                    verifier_kind: Some("suhuynh".to_string()),
+                    harness: "pi".to_string(),
+                },
+            )
+            .unwrap();
+
+        journal
+            .record_verdict(
+                "wf-2",
+                &VerdictRecord {
+                    branch: "b2".to_string(),
+                    sha: sha_b2_old.clone(),
+                    level: VerdictLevel::UnitTestVerified,
+                    evidence: "unit verified".to_string(),
+                    verifier: "suhuynh-rev".to_string(),
+                    source: VerdictSource::Verifier,
+                    builder_kind: Some("sude".to_string()),
+                    verifier_kind: Some("suhuynh".to_string()),
+                    harness: "pi".to_string(),
+                },
+            )
+            .unwrap();
+
+        journal
+            .record_verdict(
+                "wf-3",
+                &VerdictRecord {
+                    branch: "b3".to_string(),
+                    sha: "000000000000".to_string(),
+                    level: VerdictLevel::UnitTestVerified,
+                    evidence: "integ verified".to_string(),
+                    verifier: "suhuynh-rev".to_string(),
+                    source: VerdictSource::Verifier,
+                    builder_kind: Some("sude".to_string()),
+                    verifier_kind: Some("suhuynh".to_string()),
+                    harness: "pi".to_string(),
+                },
+            )
+            .unwrap();
+
+        let rows = query_branch_verdicts(&db_path, &repo, &git).expect("query verdicts");
+        assert_eq!(rows.len(), 3);
+
+        let r1 = rows.iter().find(|r| r.branch == "b1").unwrap();
+        assert_eq!(r1.head_sha, sha_b1);
+        assert!(!r1.stale);
+        assert!(!r1.unresolved);
+
+        let r2 = rows.iter().find(|r| r.branch == "b2").unwrap();
+        assert_eq!(r2.head_sha, sha_b2_head);
+        assert_eq!(r2.verdict_sha, sha_b2_old);
+        assert!(r2.stale);
+        assert!(!r2.unresolved);
+
+        let r3 = rows.iter().find(|r| r.branch == "b3").unwrap();
+        assert!(r3.head_sha.is_empty());
+        assert!(!r3.stale);
+        assert!(r3.unresolved);
+    }
+    struct EnvGuard {
+        vars: Vec<(String, Option<String>)>,
+    }
+    impl EnvGuard {
+        fn capture(keys: &[&str]) -> Self {
+            let vars = keys
+                .iter()
+                .map(|k| (k.to_string(), std::env::var(k).ok()))
+                .collect();
+            Self { vars }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.vars {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod metrics {
     use super::*;
+    use crate::engine::journal::Journal;
+    use std::os::unix::process::ExitStatusExt;
 
     #[test]
     fn test_status_metrics_rendering_and_json_roundtrip() {
@@ -1659,7 +3331,9 @@ pub(crate) mod metrics {
         };
 
         let rendered = render_metrics(&runs_dir, &args).unwrap();
-        assert!(rendered.contains("=== Metrics (runs/telemetry.jsonl, since 2026-10-21T00:00:00Z) ==="));
+        assert!(
+            rendered.contains("=== Metrics (runs/telemetry.jsonl, since 2026-10-21T00:00:00Z) ===")
+        );
         assert!(rendered.contains("tieude-p74lock"));
         assert!(rendered.contains("detu-claudediff"));
         assert!(rendered.contains("truonglao-metrics"));
@@ -1716,9 +3390,12 @@ pub(crate) mod metrics {
         std::fs::create_dir_all(&runs_dir).unwrap();
         let tele_path = runs_dir.join("telemetry.jsonl");
 
+        let now_sec = crate::util::now_sec();
+        let now_ms = now_sec * 1000;
+
         // 1. Round-trip WorkerTelemetryRow with repo ~/quaqua and unpriced non-claude worker
         let row = WorkerTelemetryRow {
-            ts: "2026-10-21T12:00:00+07:00".to_string(),
+            ts: crate::usage::format_iso_vn(now_ms as i64),
             rec: "worker".to_string(),
             name: "sude-rt".to_string(),
             kind: Some("sude".to_string()),
@@ -1742,7 +3419,7 @@ pub(crate) mod metrics {
         let mut lines = vec![row_json];
         for i in 1..=10 {
             let p = PipelineTelemetryItem {
-                ts: format!("2026-10-21T12:{:02}:00+07:00", i),
+                ts: crate::usage::format_iso_vn((now_ms + (i as u64) * 1000) as i64),
                 rec: "pipeline".to_string(),
                 task: format!("task-{i}"),
                 repo: "~/quaqua".to_string(),
@@ -1783,8 +3460,6 @@ pub(crate) mod metrics {
         assert!(!rendered.contains("task-2 clean"));
 
         // 3. Test --since cutoff
-        let now_sec = crate::util::now_sec();
-        let now_ms = now_sec * 1000;
         let c_24h = parse_since_cutoff("24h", now_ms).unwrap();
         let c_7d = parse_since_cutoff("7d", now_ms).unwrap();
         assert!(c_24h > c_7d);
@@ -1794,12 +3469,19 @@ pub(crate) mod metrics {
         assert_eq!(c_overflow, 0);
 
         // Nit 11: invalid --since value is rejected with Err
-        assert!(parse_metrics_args(&["--metrics".to_string(), "--since".to_string(), "1w".to_string()]).is_err());
-        assert!(parse_metrics_args(&["--metrics".to_string(), "--since=invalid".to_string()]).is_err());
+        assert!(parse_metrics_args(&[
+            "--metrics".to_string(),
+            "--since".to_string(),
+            "1w".to_string()
+        ])
+        .is_err());
+        assert!(
+            parse_metrics_args(&["--metrics".to_string(), "--since=invalid".to_string()]).is_err()
+        );
 
         // Nit 14: long names expand name_width
         let long_worker = WorkerTelemetryRow {
-            ts: "2026-10-21T12:00:00+07:00".to_string(),
+            ts: crate::usage::format_iso_vn(now_ms as i64),
             rec: "worker".to_string(),
             name: "suhuynh-metricsrev".to_string(),
             kind: Some("suhuynh".to_string()),
@@ -1828,11 +3510,812 @@ pub(crate) mod metrics {
                 claude_unpriced: 0,
                 wall_sec: 300,
             },
+            journal: JournalMetrics::default(),
+            journal_error: None,
         };
         let rendered_long = render_metrics_text(&long_report);
         // 18 chars for suhuynh-metricsrev means header "name" is padded to 18 chars
         assert!(rendered_long.contains("name               kind/harness"));
         assert!(rendered_long.contains("suhuynh-metricsrev suhuynh/omp"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn temp_runs_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("status-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let runs_dir = dir.join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        dir
+    }
+
+    fn append_event(db: &Path, wf_id: &str, ts_ms: u64, kind: &str, payload: &str) {
+        let mut journal = SqliteJournal::open(db).expect("open journal");
+        journal
+            .append_event(
+                wf_id,
+                &crate::engine::journal::EventRecord::new(0, ts_ms, kind, payload),
+            )
+            .expect("append event");
+    }
+
+    fn verdict_payload(level: VerdictLevel, sha: &str) -> String {
+        serde_json::to_string(&VerdictRecord {
+            branch: "quaqua/s7".to_string(),
+            sha: sha.to_string(),
+            level,
+            evidence: "cargo test --locked -p quaqua metrics".to_string(),
+            verifier: "suhuynh-s7rev".to_string(),
+            source: VerdictSource::Verifier,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "omp".to_string(),
+        })
+        .unwrap()
+    }
+
+    fn gap_payload(name: &str, missing: &[u32], unreasoned: &[u32]) -> String {
+        serde_json::json!({
+            "name": name,
+            "missing": missing,
+            "unreasoned": unreasoned,
+        })
+        .to_string()
+    }
+
+    fn metrics_args() -> MetricsArgs {
+        MetricsArgs {
+            metrics: true,
+            since: "24h".to_string(),
+            owner: None,
+            json: false,
+        }
+    }
+
+    #[test]
+    fn test_metrics_verdicts_by_level_and_playbook_gaps() {
+        let tmp = temp_runs_dir("metrics-journal");
+        let runs_dir = tmp.join("runs");
+        let db = runs_dir.join("quaqua.db");
+        let now_ms = crate::util::now_sec() * 1000;
+
+        append_event(
+            &db,
+            "worker:sude-s7#1",
+            now_ms,
+            "verdict",
+            &verdict_payload(VerdictLevel::UnitTestVerified, "aaaa1111"),
+        );
+        append_event(
+            &db,
+            "worker:sude-s7b#1",
+            now_ms,
+            "verdict",
+            &verdict_payload(VerdictLevel::UnitTestVerified, "bbbb2222"),
+        );
+        append_event(
+            &db,
+            "worker:suhuynh-s7r#1",
+            now_ms,
+            "verdict",
+            &verdict_payload(VerdictLevel::ReviewClean, "cccc3333"),
+        );
+        append_event(
+            &db,
+            "worker:suhuynh-s7r#1",
+            now_ms,
+            "verdict",
+            &verdict_payload(VerdictLevel::Inconclusive, "dddd4444"),
+        );
+        // Outside the 24h window: still a verdict for G1, not counted by level.
+        append_event(
+            &db,
+            "worker:sude-old#1",
+            1_000,
+            "verdict",
+            &verdict_payload(VerdictLevel::VerifierFailed, "eeee5555"),
+        );
+
+        append_event(
+            &db,
+            "worker:sude-s7#1",
+            now_ms,
+            "playbook_gap",
+            &gap_payload("feature", &[1, 2], &[3]),
+        );
+        append_event(
+            &db,
+            "worker:sude-s7b#1",
+            now_ms,
+            "playbook_gap",
+            &gap_payload("feature", &[1], &[]),
+        );
+        append_event(
+            &db,
+            "worker:sude-s7c#1",
+            now_ms,
+            "playbook_gap",
+            &gap_payload("bug-fix", &[4, 5], &[6]),
+        );
+
+        let report = read_metrics(&runs_dir, &metrics_args());
+        assert_eq!(report.journal_error, None);
+        assert_eq!(report.journal.verdicts_total, 4);
+        assert_eq!(report.journal.verdicts.get("unit-test-verified"), Some(&2));
+        assert_eq!(report.journal.verdicts.get("review-clean"), Some(&1));
+        assert_eq!(report.journal.verdicts.get("inconclusive"), Some(&1));
+        assert_eq!(report.journal.verdicts.get("verifier-failed"), None);
+
+        assert_eq!(report.journal.playbook_gap_events, 3);
+        let feature = report.journal.playbook_gaps.get("feature").unwrap();
+        assert_eq!(
+            (feature.events, feature.missing, feature.unreasoned),
+            (2, 3, 1)
+        );
+        let bug = report.journal.playbook_gaps.get("bug-fix").unwrap();
+        assert_eq!((bug.events, bug.missing, bug.unreasoned), (1, 2, 1));
+        assert_eq!(report.journal.playbook_gap_missing, 5);
+        assert_eq!(report.journal.playbook_gap_unreasoned, 2);
+
+        let rendered = render_metrics(&runs_dir, &metrics_args()).unwrap();
+        assert!(rendered
+            .contains("verdicts: 4 total - inconclusive=1 review-clean=1 unit-test-verified=2\n"));
+        assert!(rendered.contains(
+            "playbook_gap: 3 events - bug-fix=1 (missing 2, unreasoned 1) - feature=2 (missing 3, unreasoned 1) - total missing 5 unreasoned 2\n"
+        ));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_metrics_exit6_resumes() {
+        let tmp = temp_runs_dir("metrics-exits");
+        let runs_dir = tmp.join("runs");
+        let db = runs_dir.join("quaqua.db");
+        let now_ms = crate::util::now_sec() * 1000;
+
+        append_event(&db, "worker:aa#1", now_ms, "workflow_started", "{}");
+        append_event(
+            &db,
+            "worker:aa#1",
+            now_ms,
+            "workflow_completed",
+            r#"{"exit":0}"#,
+        );
+
+        // bb hit exit 6 and was prompted again as #2: a resume.
+        append_event(
+            &db,
+            "worker:bb#1",
+            now_ms,
+            "workflow_completed",
+            r#"{"exit":6}"#,
+        );
+        append_event(&db, "worker:bb#2", now_ms, "workflow_started", "{}");
+
+        // cc hit exit 6 and was never resumed.
+        append_event(
+            &db,
+            "worker:cc#1",
+            now_ms,
+            "workflow_completed",
+            r#"{"exit":6}"#,
+        );
+
+        // Other exits are neither accepted nor exit-6.
+        append_event(
+            &db,
+            "worker:dd#1",
+            now_ms,
+            "workflow_completed",
+            r#"{"exit":3}"#,
+        );
+
+        let report = read_metrics(&runs_dir, &metrics_args());
+        assert_eq!(report.journal.accepted_reports, 1);
+        assert_eq!(report.journal.exit6, 2);
+        assert_eq!(report.journal.exit6_resumed, 1);
+
+        let rendered = render_metrics(&runs_dir, &metrics_args()).unwrap();
+        assert!(
+            rendered.contains("exits: 1 accepted, 2 exit-6, 1 resumed after exit 6 (G2 100.0%)\n")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn verdict_record(sha: &str, source: VerdictSource, level: VerdictLevel) -> VerdictRecord {
+        VerdictRecord {
+            branch: "quaqua/s7".to_string(),
+            sha: sha.to_string(),
+            level,
+            evidence: "cargo test".to_string(),
+            verifier: "suhuynh-s7rev".to_string(),
+            source,
+            builder_kind: Some("sude".to_string()),
+            verifier_kind: Some("suhuynh".to_string()),
+            harness: "omp".to_string(),
+        }
+    }
+
+    fn merge_commit(repo: &str, target: &str, sha: &str, incoming: &[&str]) -> MergeCommit {
+        MergeCommit {
+            repo: PathBuf::from(repo),
+            target: target.to_string(),
+            sha: sha.to_string(),
+            incoming: incoming.iter().map(|h| h.to_string()).collect(),
+            target_truncated: false,
+        }
+    }
+
+    #[test]
+    fn test_metrics_merge_without_pass_requires_verifier_pass() {
+        let commits = MergeScan::from_commits(vec![merge_commit(
+            "/repo/a",
+            "origin/main",
+            "m1",
+            &[
+                "aaaa111122223333", // verifier pass: covered
+                "bbbb222233334444", // self-report only: not covered (F6)
+                "cccc333344445555", // verifier failed
+                "dddd444455556666", // verifier blocked
+                "eeee555566667777", // verifier inconclusive
+                "ffff666677778888", // no journal record at all
+            ],
+        )]);
+        let verdicts = vec![
+            verdict_record(
+                "aaaa111122223333",
+                VerdictSource::Verifier,
+                VerdictLevel::UnitTestVerified,
+            ),
+            verdict_record(
+                "bbbb222233334444",
+                VerdictSource::SelfReport,
+                VerdictLevel::UnitTestVerified,
+            ),
+            verdict_record(
+                "cccc333344445555",
+                VerdictSource::Verifier,
+                VerdictLevel::VerifierFailed,
+            ),
+            verdict_record(
+                "dddd444455556666",
+                VerdictSource::Verifier,
+                VerdictLevel::VerifierBlocked,
+            ),
+            verdict_record(
+                "eeee555566667777",
+                VerdictSource::Verifier,
+                VerdictLevel::Inconclusive,
+            ),
+        ];
+
+        let tally = count_merges_without_pass(&commits, &verdicts);
+        assert_eq!(tally.merges, 1);
+        assert_eq!(tally.checked, 6);
+        assert_eq!(tally.without_verdict, 5);
+        assert_eq!(tally.no_verdict, 1);
+        assert_eq!(tally.not_pass, 4);
+        assert_eq!(tally.samples.first().unwrap(), "origin/main@bbbb222");
+        assert_eq!(
+            tally.repos,
+            vec![MergeRepoStat {
+                repo: "/repo/a".to_string(),
+                refs: vec![MergeRefStat {
+                    target: "origin/main".to_string(),
+                    merges: 1,
+                    truncated: false,
+                }],
+                merges: 1,
+                checked: 6,
+                without_verdict: 5,
+            }]
+        );
+
+        // No verdict records at all: every incoming head is unverified.
+        let tally = count_merges_without_pass(&commits, &[]);
+        assert_eq!(
+            (
+                tally.checked,
+                tally.without_verdict,
+                tally.no_verdict,
+                tally.not_pass
+            ),
+            (6, 6, 6, 0)
+        );
+    }
+
+    fn fake_output(ok: bool, stdout: &str) -> std::process::Output {
+        std::process::Output {
+            status: ExitStatusExt::from_raw(if ok { 0 } else { 1 }),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    struct MergeGit {
+        heads: Vec<String>,
+        origin_main: bool,
+        logs: std::collections::BTreeMap<String, String>,
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl MergeGit {
+        fn new(heads: &[&str], origin_main: bool) -> Self {
+            Self {
+                heads: heads.iter().map(|h| h.to_string()).collect(),
+                origin_main,
+                logs: std::collections::BTreeMap::new(),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn with_log(self, target: &str, lines: &[&str]) -> Self {
+            let mut s = self;
+            s.logs.insert(target.to_string(), lines.join("\n"));
+            s
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl GitOps for MergeGit {
+        fn run_in(&self, _dir: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            if args.contains(&"for-each-ref") {
+                Ok(fake_output(true, &self.heads.join("\n")))
+            } else if args.contains(&"rev-parse") {
+                Ok(fake_output(self.origin_main, ""))
+            } else if args.contains(&"log") {
+                let target = args.last().copied().unwrap_or("");
+                let out = self.logs.get(target).cloned().unwrap_or_default();
+                Ok(fake_output(true, &out))
+            } else {
+                Ok(fake_output(true, ""))
+            }
+        }
+
+        fn run(&self, _args: &[&str]) -> std::io::Result<std::process::Output> {
+            Ok(fake_output(true, ""))
+        }
+
+        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool {
+            self.origin_main
+        }
+
+        fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn worktree_add(
+            &self,
+            _repo: &Path,
+            _branch: &str,
+            _wt: &Path,
+            _base: Option<&str>,
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+
+        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
+            false
+        }
+
+        fn worktree_add_existing(
+            &self,
+            _repo: &Path,
+            _branch: &str,
+            _wt: &Path,
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+
+        fn worktree_remove(
+            &self,
+            _repo: &Path,
+            _wt: &Path,
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+
+        fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn is_core_bare(&self, _repo: &Path) -> bool {
+            false
+        }
+
+        fn has_core_worktree(&self, _repo: &Path) -> bool {
+            false
+        }
+
+        fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+
+        fn set_worktree_pushurl_blocked(&self, _wt: &Path, _remote: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn is_git_dir(&self, _cwd: &Path) -> bool {
+            true
+        }
+
+        fn diff_and_status(&self, _cwd: &Path) -> (String, String) {
+            (String::new(), "clean".to_string())
+        }
+    }
+
+    #[test]
+    fn test_metrics_merge_targets_prefer_upstream_and_cover_integ_branches() {
+        let repo = Path::new("/repo/a");
+        let heads = [
+            "main",
+            "quaqua/pstack-int2",
+            "quaqua/pstack-int",
+            "quaqua/s7-integ",
+            "quaqua/s7",
+            "develop",
+        ];
+        assert_eq!(
+            merge_targets(repo, &MergeGit::new(&heads, true)),
+            vec![
+                "origin/main",
+                "quaqua/pstack-int",
+                "quaqua/pstack-int2",
+                "quaqua/s7-integ"
+            ]
+        );
+        // No upstream ref: fall back to the local branch.
+        assert_eq!(
+            merge_targets(repo, &MergeGit::new(&heads, false)),
+            vec![
+                "main",
+                "quaqua/pstack-int",
+                "quaqua/pstack-int2",
+                "quaqua/s7-integ"
+            ]
+        );
+
+        assert!(is_integration_branch("quaqua/pstack-int2"));
+        assert!(is_integration_branch("quaqua/s7-integ"));
+        assert!(!is_integration_branch("quaqua/s7"));
+        assert!(!is_integration_branch("main"));
+        assert!(!is_integration_branch("quaqua/integration"));
+    }
+
+    #[test]
+    fn test_metrics_collect_merge_commits_window_parents_and_dedup() {
+        let repo = PathBuf::from("/repo/a");
+        let git = MergeGit::new(&["main", "quaqua/pstack-int2"], true)
+            .with_log(
+                "origin/main",
+                &[
+                    "m1 aaa bbb",
+                    "m1 aaa bbb", // same merge reached twice: counted once
+                    "m2 ccc",     // one parent: not a merge
+                    "m3 ddd eee fff",
+                ],
+            )
+            .with_log("quaqua/pstack-int2", &["m3 ddd eee fff"]);
+
+        let commits = collect_merge_commits(&[repo.clone()], &git, 1_700_000_000_000);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].repo, repo);
+        assert_eq!(commits[0].target, "origin/main");
+        assert_eq!(commits[0].sha, "m1");
+        // Incoming heads are every parent after the first.
+        assert_eq!(commits[0].incoming, vec!["bbb".to_string()]);
+        assert_eq!(commits[1].sha, "m3");
+        assert_eq!(
+            commits[1].incoming,
+            vec!["eee".to_string(), "fff".to_string()]
+        );
+
+        // F1: the window reaches git as a committer-date cutoff (seconds).
+        let log_calls: Vec<Vec<String>> = git
+            .calls()
+            .into_iter()
+            .filter(|c| c.iter().any(|a| a == "log"))
+            .collect();
+        assert!(!log_calls.is_empty());
+        for call in &log_calls {
+            assert!(call.iter().any(|a| a == "--since=@1700000000"));
+            assert!(call.iter().any(|a| a == "-n"));
+            assert!(call.iter().any(|a| a == "501"));
+        }
+
+        // Cutoff 0 means all history: no `--since` argument at all.
+        let git = MergeGit::new(&["main"], true).with_log("origin/main", &["m1 aaa bbb"]);
+        let _ = collect_merge_commits(&[repo], &git, 0);
+        assert!(git
+            .calls()
+            .iter()
+            .filter(|c| c.iter().any(|a| a == "log"))
+            .all(|c| !c.iter().any(|a| a.starts_with("--since="))));
+    }
+
+    #[test]
+    fn test_metrics_g1_wiring_reads_git_and_counts_without_events_table() {
+        let tmp = temp_runs_dir("metrics-g1wiring");
+        let runs_dir = tmp.join("runs");
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = MergeGit::new(&["main", "quaqua/pstack-int2"], true)
+            .with_log("origin/main", &["m1 aaaa1111 bbbb2222"])
+            .with_log("quaqua/pstack-int2", &["m2 cccc3333 dddd4444"]);
+
+        let db = runs_dir.join("quaqua.db");
+        let now_ms = crate::util::now_sec() * 1000;
+        append_event(
+            &db,
+            "worker:suke#1",
+            now_ms,
+            "verdict",
+            &verdict_payload(VerdictLevel::UnitTestVerified, "bbbb2222"),
+        );
+        let metrics = load_journal_metrics(&db, 0, &[repo.clone()], &git).unwrap();
+        assert_eq!(metrics.merges, 2);
+        assert_eq!(metrics.merges_checked, 2);
+        assert_eq!(metrics.merges_without_verdict, 1);
+        assert_eq!(metrics.merges_no_verdict, 1);
+        assert_eq!(metrics.merges_not_pass, 0);
+        assert_eq!(metrics.merge_repos, 1);
+        assert_eq!(
+            metrics.merges_per_repo,
+            vec![MergeRepoStat {
+                repo: repo.display().to_string(),
+                refs: vec![
+                    MergeRefStat {
+                        target: "origin/main".to_string(),
+                        merges: 1,
+                        truncated: false,
+                    },
+                    MergeRefStat {
+                        target: "quaqua/pstack-int2".to_string(),
+                        merges: 1,
+                        truncated: false,
+                    },
+                ],
+                merges: 2,
+                checked: 2,
+                without_verdict: 1,
+            }]
+        );
+
+        let report = MetricsReport {
+            since: "7d".to_string(),
+            workers: Vec::new(),
+            pipelines: Vec::new(),
+            total: MetricsTotal {
+                workers: 0,
+                usd: 0.0,
+                unpriced: 0,
+                claude_unpriced: 0,
+                wall_sec: 0,
+            },
+            journal: metrics,
+            journal_error: None,
+        };
+        let text = render_metrics_text(&report);
+        assert!(text.contains(
+            "merges: 2 merge(s) (2 incoming heads), 1 without a verifier pass at the head (G1) - 1 with no verdict, 0 failed/blocked/inconclusive - 1 repo(s), from git (no merge event is journaled), since 7d - quaqua/pstack-int2@dddd444\n"
+        ));
+        assert!(text.contains(&format!(
+            "  merges {}: 2 merge(s), 2 head(s), 1 without - refs origin/main=1, quaqua/pstack-int2=1\n",
+            repo.display()
+        )));
+
+        // A journal without an events table cannot zero G1: git still counts.
+        let empty = runs_dir.join("empty.db");
+        rusqlite::Connection::open(&empty)
+            .unwrap()
+            .execute_batch("CREATE TABLE other (x INTEGER);")
+            .unwrap();
+        let metrics = load_journal_metrics(&empty, 0, &[repo], &git).unwrap();
+        assert_eq!(metrics.merges_checked, 2);
+        assert_eq!(metrics.merges_without_verdict, 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_metrics_journal_unavailable_prints_a_line() {
+        let tmp = temp_runs_dir("metrics-nodb");
+        let runs_dir = tmp.join("runs");
+
+        let rendered = render_metrics(&runs_dir, &metrics_args()).unwrap();
+        assert!(rendered.contains("journal: unavailable - journal not found at"));
+        assert!(rendered.starts_with("=== Metrics (runs/telemetry.jsonl, since 24h) ==="));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_metrics_cap_truncation_notice_in_text_and_json() {
+        let tmp = temp_runs_dir("metrics-truncation");
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        // 501 merges: exceeds MERGE_SCAN_LIMIT (500) by 1
+        let mut log_501 = Vec::new();
+        for i in 0..501 {
+            log_501.push(format!("m{i:04} p{i:04}_1 p{i:04}_2"));
+        }
+        let log_501_refs: Vec<&str> = log_501.iter().map(|s| s.as_str()).collect();
+
+        let git = MergeGit::new(&["main"], true).with_log("origin/main", &log_501_refs);
+        let commits = collect_merge_commits(&[repo.clone()], &git, 0);
+        assert_eq!(commits.len(), 500);
+        assert!(commits.iter().all(|c| c.target_truncated));
+
+        let tally = count_merges_without_pass(&commits, &[]);
+        assert_eq!(tally.repos.len(), 1);
+        let ref_stat = &tally.repos[0].refs[0];
+        assert_eq!(ref_stat.target, "origin/main");
+        assert_eq!(ref_stat.merges, 500);
+        assert!(ref_stat.truncated);
+
+        let report = MetricsReport {
+            since: "7d".to_string(),
+            workers: Vec::new(),
+            pipelines: Vec::new(),
+            total: MetricsTotal::default(),
+            journal: JournalMetrics {
+                merges: tally.merges,
+                merges_checked: tally.checked,
+                merges_without_verdict: tally.without_verdict,
+                merges_no_verdict: tally.no_verdict,
+                merges_not_pass: tally.not_pass,
+                merges_missing_samples: tally.samples,
+                merge_repos: 1,
+                merges_per_repo: tally.repos,
+                truncated: tally.truncated,
+                ..Default::default()
+            },
+            journal_error: None,
+        };
+
+        // Text output surfaces the truncation notice on that ref's line
+        let text = render_metrics_text(&report);
+        assert!(text.contains("refs origin/main=500 (capped)"));
+        assert!(text.contains("merges: 500 merge(s) (capped)"));
+        let json_str = serde_json::to_string_pretty(&report).unwrap();
+        assert!(json_str.contains("\"truncated\": true"));
+        let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_val["journal"]["truncated"], true);
+
+        let deserialized: MetricsReport = serde_json::from_str(&json_str).unwrap();
+        assert!(deserialized.journal.merges_per_repo[0].refs[0].truncated);
+        assert!(deserialized.journal.truncated);
+
+        // When exactly at or below cap (e.g. 500 merges): truncated must be false
+        let log_500_refs = &log_501_refs[..500];
+        let git_500 = MergeGit::new(&["main"], true).with_log("origin/main", log_500_refs);
+        let commits_500 = collect_merge_commits(&[repo.clone()], &git_500, 0);
+        assert_eq!(commits_500.len(), 500);
+        assert!(!commits_500.iter().any(|c| c.target_truncated));
+
+        let tally_500 = count_merges_without_pass(&commits_500, &[]);
+        let ref_stat_500 = &tally_500.repos[0].refs[0];
+        assert_eq!(ref_stat_500.merges, 500);
+        assert!(!ref_stat_500.truncated);
+
+        let report_500 = MetricsReport {
+            journal: JournalMetrics {
+                merges_per_repo: tally_500.repos,
+                truncated: tally_500.truncated,
+                ..Default::default()
+            },
+            ..report.clone()
+        };
+        let text_500 = render_metrics_text(&report_500);
+        assert!(text_500.contains("refs origin/main=500\n"));
+        assert!(!text_500.contains("(capped)"));
+
+        let json_500 = serde_json::to_string_pretty(&report_500).unwrap();
+        assert!(!json_500.contains("\"truncated\""));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_metrics_g1_ref_stays_capped_when_all_commits_deduped() {
+        let tmp = std::env::temp_dir().join(format!("quaqua-test-metrics-dedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let projects = tmp.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let repo = tmp.join("repo-dedup");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        std::fs::write(
+            projects.join("INDEX.md"),
+            format!(
+                "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| p1 | {} | user | active | g |\n",
+                repo.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            projects.join("p1.md"),
+            "# p1\nIntegration branch: `quaqua/pstack-int2`\n",
+        )
+        .unwrap();
+
+        let mut log_main = Vec::new();
+        for i in 0..500 {
+            log_main.push(format!("m{i:04} p{i:04}_1 p{i:04}_2"));
+        }
+        let log_main_refs: Vec<&str> = log_main.iter().map(|s| s.as_str()).collect();
+
+        let mut log_integ = Vec::new();
+        for i in 0..500 {
+            log_integ.push(format!("m{i:04} p{i:04}_1 p{i:04}_2"));
+        }
+        log_integ.push("m0500 extra1 extra2".to_string());
+        let log_integ_refs: Vec<&str> = log_integ.iter().map(|s| s.as_str()).collect();
+
+        let git = MergeGit::new(&["main", "quaqua/pstack-int2"], true)
+            .with_log("origin/main", &log_main_refs)
+            .with_log("quaqua/pstack-int2", &log_integ_refs);
+
+        let commits = collect_merge_commits(&[repo.clone()], &git, 0);
+        let tally = count_merges_without_pass(&commits, &[]);
+
+        let repo_stat = &tally.repos[0];
+        let integ_ref = repo_stat
+            .refs
+            .iter()
+            .find(|r| r.target == "quaqua/pstack-int2")
+            .expect("capped ref should remain present even if all kept commits are deduped");
+        assert_eq!(integ_ref.merges, 0);
+        assert!(integ_ref.truncated);
+
+        let report = MetricsReport {
+            since: "7d".to_string(),
+            workers: Vec::new(),
+            pipelines: Vec::new(),
+            total: MetricsTotal::default(),
+            journal: JournalMetrics {
+                merges: tally.merges,
+                merges_checked: tally.checked,
+                merges_without_verdict: tally.without_verdict,
+                merges_no_verdict: tally.no_verdict,
+                merges_not_pass: tally.not_pass,
+                merges_missing_samples: tally.samples,
+                merge_repos: 1,
+                merges_per_repo: tally.repos,
+                truncated: tally.truncated,
+                ..Default::default()
+            },
+            journal_error: None,
+        };
+
+        let text = render_metrics_text(&report);
+        assert!(text.contains("quaqua/pstack-int2=0 (capped)"));
+        assert!(text.contains("merges: 500 merge(s) (capped)"));
+
+        let json_str = serde_json::to_string_pretty(&report).unwrap();
+        let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_val["journal"]["truncated"], true);
+
+        let deserialized: MetricsReport = serde_json::from_str(&json_str).unwrap();
+        assert!(deserialized.journal.truncated);
+        assert_eq!(
+            deserialized.journal.merges_per_repo[0]
+                .refs
+                .iter()
+                .find(|r| r.target == "quaqua/pstack-int2")
+                .unwrap()
+                .truncated,
+            true
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

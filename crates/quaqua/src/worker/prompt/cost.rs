@@ -132,14 +132,20 @@ pub fn resolve_cost_budget(task: &str) -> Option<f64> {
     brief_cost_budget(task)
 }
 
+fn guess_harness_from_config(name: &str) -> Option<Harness> {
+    let cfg = crate::config::load_team_config().ok()?;
+    let kind_name = crate::config::kind_of_worker(&cfg, name)?;
+    let kind_info = cfg.kinds.get(kind_name)?;
+    Harness::parse(&kind_info.harness)
+}
+
 /// True when this worker reported spend through omp session transcripts.
 pub fn is_omp_worker(harness: &str, name: &str) -> bool {
     Harness::parse(harness) == Some(Harness::Omp)
-        || (harness.is_empty() && (name.starts_with("sude-") || name.starts_with("detu-")))
+        || (harness.is_empty() && guess_harness_from_config(name) == Some(Harness::Omp))
 }
 
-/// True when this worker reports spend through pi session transcripts. No name
-/// fallback: pi kinds share prefixes with opencode ones (`tieude-`, `suhuynh-`).
+/// True when this worker reports spend through pi session transcripts.
 pub fn is_pi_worker(harness: &str) -> bool {
     Harness::parse(harness) == Some(Harness::Pi)
 }
@@ -152,15 +158,14 @@ pub fn pi_session_dir(runs_dir: &Path, name: &str) -> PathBuf {
 /// True when this worker reported spend through claude session transcripts.
 pub fn is_claude_worker(harness: &str, name: &str) -> bool {
     Harness::parse(harness) == Some(Harness::Claude)
-        || (harness.is_empty() && (name.starts_with("ni-") || name.starts_with("truonglao-")))
+        || (harness.is_empty() && guess_harness_from_config(name) == Some(Harness::Claude))
 }
 
 /// True when this worker reported spend through opencode sqlite database.
 pub fn is_opencode_worker(harness: &str, name: &str) -> bool {
     Harness::parse(harness) == Some(Harness::Opencode)
-        || (harness.is_empty() && (name.starts_with("tieude-") || name.starts_with("suhuynh-")))
+        || (harness.is_empty() && guess_harness_from_config(name) == Some(Harness::Opencode))
 }
-
 /// omp's session directory name for a worktree path: `$HOME` is stripped, then
 /// every `/` becomes `-` (the leading dash is kept).
 ///
@@ -1407,11 +1412,15 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        std::env::set_var("QUAQUA_RUNS_DIR", &runs);
-        std::env::set_var("QUAQUA_COST_DB_PATH", &db);
-        let spend = read_worker_spend("tieude-x", "s1", cwd, "pi", None);
-        std::env::remove_var("QUAQUA_RUNS_DIR");
-        std::env::remove_var("QUAQUA_COST_DB_PATH");
+        // Process-global: hold the env lock while `read_worker_spend` reads
+        // these, and restore the previous values instead of removing them.
+        let spend = {
+            use crate::test_env::{lock_env, TestEnvVarGuard};
+            let _env_lock = lock_env();
+            let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs);
+            let _guard_db = TestEnvVarGuard::set("QUAQUA_COST_DB_PATH", &db);
+            read_worker_spend("tieude-x", "s1", cwd, "pi", None)
+        };
         let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(spend.spend_src, "pi-session");
         let usd = spend.usd.expect("pi cost");

@@ -116,7 +116,7 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
         .get(&targs.mode)
         .copied()
         .unwrap_or(if targs.mode == "dual-lens" { 2 } else { 1 });
-    let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr);
+    let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr, &cfg);
     if slots_used + weight > max_workers {
         return Err((
             2,
@@ -150,19 +150,26 @@ fn run_advisor(
     git: &Git,
     herdr: &Herdr,
 ) -> Result<(), (i32, String)> {
+    let default_advisor = cfg
+        .purposes
+        .get("review")
+        .or_else(|| cfg.strategy.default_reviewer.first())
+        .unwrap_or(&cfg.strategy.default_kind)
+        .clone();
     let members = cfg
         .taskforce
         .get("advisor")
         .map(|t| t.members.clone())
-        .unwrap_or_else(|| vec!["suhuynh".to_string()]);
-    let kind = members.first().map(|s| s.as_str()).unwrap_or("suhuynh");
+        .unwrap_or_else(|| vec![default_advisor.clone()]);
+    let kind = members.first().map(|s| s.as_str()).unwrap_or(&default_advisor);
     let worker_name = format!("{kind}-{}", args.task);
 
     let opts = crate::worker::spawn::SpawnOptions {
         base: args.base.clone(),
         review: true,
         name: worker_name.clone(),
-        kind: kind.to_string(),
+        kind: Some(kind.to_string()),
+        purpose: None,
         repo_path: args.repo.clone(),
         approve_kinds: args.approve_kinds.clone(),
     };
@@ -207,13 +214,25 @@ fn run_dual_lens(
     git: &Git,
     herdr: &Herdr,
 ) -> Result<(), (i32, String)> {
+    let default_lens1 = cfg
+        .purposes
+        .get("design")
+        .or_else(|| cfg.purposes.get("research"))
+        .unwrap_or(&cfg.strategy.default_kind)
+        .clone();
+    let default_lens2 = cfg
+        .purposes
+        .get("review")
+        .or_else(|| cfg.strategy.default_reviewer.first())
+        .unwrap_or(&cfg.strategy.default_kind)
+        .clone();
     let members = cfg
         .taskforce
         .get("dual-lens")
         .map(|t| t.members.clone())
-        .unwrap_or_else(|| vec!["truonglao".to_string(), "suhuynh".to_string()]);
-    let kind1 = members.first().map(|s| s.as_str()).unwrap_or("truonglao");
-    let kind2 = members.get(1).map(|s| s.as_str()).unwrap_or("suhuynh");
+        .unwrap_or_else(|| vec![default_lens1.clone(), default_lens2.clone()]);
+    let kind1 = members.first().map(|s| s.as_str()).unwrap_or(&default_lens1);
+    let kind2 = members.get(1).map(|s| s.as_str()).unwrap_or(&default_lens2);
 
     let w1 = format!("{kind1}-{}dl1", args.task);
     let w2 = format!("{kind2}-{}dl2", args.task);
@@ -235,7 +254,8 @@ fn run_dual_lens(
         base: args.base.clone(),
         review: true,
         name: w1.clone(),
-        kind: kind1.to_string(),
+        kind: Some(kind1.to_string()),
+        purpose: None,
         repo_path: args.repo.clone(),
         approve_kinds: args.approve_kinds.clone(),
     };
@@ -244,7 +264,8 @@ fn run_dual_lens(
         base: args.base.clone(),
         review: true,
         name: w2.clone(),
-        kind: kind2.to_string(),
+        kind: Some(kind2.to_string()),
+        purpose: None,
         repo_path: args.repo.clone(),
         approve_kinds: args.approve_kinds.clone(),
     };

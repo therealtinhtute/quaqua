@@ -179,9 +179,19 @@ pub fn append_worker_telemetry(
 
 
         if kind.is_none() {
-            let prefix = name.split('-').next().unwrap_or("");
-            if matches!(prefix, "tieude" | "suhuynh" | "sude" | "detu" | "ni" | "truonglao") {
-                kind = Some(prefix.to_string());
+            if let Ok(cfg) = crate::config::load_team_config() {
+                if let Some(k) = crate::config::kind_of_worker(&cfg, name) {
+                    kind = Some(k.to_string());
+                }
+            }
+        }
+        if harness.is_none() {
+            if let Some(k) = &kind {
+                if let Ok(cfg) = crate::config::load_team_config() {
+                    if let Some(kind_info) = cfg.kinds.get(k) {
+                        harness = Some(kind_info.harness.clone());
+                    }
+                }
             }
         }
 
@@ -376,6 +386,7 @@ pub fn cleanup_worker_in<G: GitOps, H: HerdrOps>(
     );
 
     WorkerMetadata::cleanup_worker_files(&runs_dir, name);
+    let _ = std::fs::remove_file(runs_dir.join(format!("{name}.base")));
     println!("cleaned {name} (branch quaqua/{name} kept)");
     Ok(())
 }
@@ -566,6 +577,7 @@ pub(crate) mod metrics {
     #[test]
     fn test_cleanup_metrics_happy_path() {
         let _lock = TEST_LOCK.lock().unwrap();
+        let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-metrics-happy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -649,6 +661,7 @@ pub(crate) mod metrics {
     #[test]
     fn test_cleanup_metrics_all_readers_failing() {
         let _lock = TEST_LOCK.lock().unwrap();
+        let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-metrics-fail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let runs_dir = tmp.join("runs");
@@ -690,6 +703,7 @@ pub(crate) mod metrics {
     #[test]
     fn test_cleanup_metrics_second_lifecycle_excludes_first() {
         let _lock = TEST_LOCK.lock().unwrap();
+        let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-metrics-reuse-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let runs_dir = tmp.join("runs");
@@ -772,6 +786,7 @@ pub(crate) mod metrics {
     #[test]
     fn test_cleanup_failure_retry_produces_single_row() {
         let _lock = TEST_LOCK.lock().unwrap();
+        let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-fail-retry-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let runs_dir = tmp.join("runs");
@@ -813,6 +828,7 @@ pub(crate) mod metrics {
     #[test]
     fn test_cleanup_metrics_journal_fields() {
         let _lock = TEST_LOCK.lock().unwrap();
+        let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-journal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -878,6 +894,7 @@ pub(crate) mod metrics {
     #[test]
     fn test_cleanup_metrics_failing_harness_readers() {
         let _lock = TEST_LOCK.lock().unwrap();
+        let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-failing-readers-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let runs_dir = tmp.join("runs");
@@ -938,6 +955,7 @@ pub(crate) mod metrics {
     #[test]
     fn test_format_repo_path_boundary() {
         let _lock = TEST_LOCK.lock().unwrap();
+        let _env_lock = crate::test_env::lock_env();
         let _env_home = TestEnvVarGuard::set("HOME", "/mock/root/user");
 
         assert_eq!(format_repo_path(Path::new("/mock/root/user/quaqua")), "~/quaqua");

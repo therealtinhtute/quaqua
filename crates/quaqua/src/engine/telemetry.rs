@@ -25,7 +25,7 @@ pub const GEN_AI_OPERATION_NAME: &str = "gen_ai.operation.name";
 /// The unique identifier or name of the agent executing the step.
 pub const GEN_AI_AGENT_NAME: &str = "gen_ai.agent.name";
 
-/// The role/profile of the agent (e.g. "cos", "lead", "sude", "suhuynh").
+/// The role/profile of the agent (e.g. "cos", "lead", "builder", "reviewer").
 pub const GEN_AI_AGENT_ROLE: &str = "gen_ai.agent.role";
 
 /// Error type for telemetry operations.
