@@ -4053,10 +4053,11 @@ pub(crate) mod metrics {
         // Text output surfaces the truncation notice on that ref's line
         let text = render_metrics_text(&report);
         assert!(text.contains("refs origin/main=500 (capped)"));
-
-        // JSON output surfaces truncated: true
+        assert!(text.contains("merges: 500 merge(s) (capped)"));
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         assert!(json_str.contains("\"truncated\": true"));
+        let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_val["journal"]["truncated"], true);
 
         let deserialized: MetricsReport = serde_json::from_str(&json_str).unwrap();
         assert!(deserialized.journal.merges_per_repo[0].refs[0].truncated);
@@ -4087,6 +4088,95 @@ pub(crate) mod metrics {
         let json_500 = serde_json::to_string_pretty(&report_500).unwrap();
         assert!(!json_500.contains("\"truncated\""));
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_metrics_g1_ref_stays_capped_when_all_commits_deduped() {
+        let tmp = std::env::temp_dir().join(format!("quaqua-test-metrics-dedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let projects = tmp.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let repo = tmp.join("repo-dedup");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        std::fs::write(
+            projects.join("INDEX.md"),
+            format!(
+                "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| p1 | {} | user | active | g |\n",
+                repo.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            projects.join("p1.md"),
+            "# p1\nIntegration branch: `quaqua/pstack-int2`\n",
+        )
+        .unwrap();
+
+        let prev = std::env::var("QUAQUA_WORKSPACE_ROOT").ok();
+        std::env::set_var("QUAQUA_WORKSPACE_ROOT", &tmp);
+
+        let mut log_main = Vec::new();
+        for i in 0..500 {
+            log_main.push(format!("m{i:04} p{i:04}_1 p{i:04}_2"));
+        }
+        let log_main_refs: Vec<&str> = log_main.iter().map(|s| s.as_str()).collect();
+
+        let mut log_integ = Vec::new();
+        for i in 0..500 {
+            log_integ.push(format!("m{i:04} p{i:04}_1 p{i:04}_2"));
+        }
+        log_integ.push("m0500 extra1 extra2".to_string());
+        let log_integ_refs: Vec<&str> = log_integ.iter().map(|s| s.as_str()).collect();
+
+        let git = MergeGit::new(&["main", "quaqua/pstack-int2"], true)
+            .with_log("origin/main", &log_main_refs)
+            .with_log("origin/quaqua/pstack-int2", &log_integ_refs);
+
+        let commits = collect_merge_commits(&[repo.clone()], &git, 0);
+        let tally = count_merges_without_pass(&commits, &[]);
+
+        let repo_stat = &tally.repos[0];
+        let integ_ref = repo_stat
+            .refs
+            .iter()
+            .find(|r| r.target == "origin/quaqua/pstack-int2")
+            .expect("capped ref should remain present even if all kept commits are deduped");
+        assert_eq!(integ_ref.merges, 0);
+        assert!(integ_ref.truncated);
+
+        let report = MetricsReport {
+            since: "7d".to_string(),
+            workers: Vec::new(),
+            pipelines: Vec::new(),
+            total: MetricsTotal::default(),
+            journal: JournalMetrics {
+                merges: tally.merges,
+                merges_checked: tally.checked,
+                merges_without_verdict: tally.without_verdict,
+                merges_no_verdict: tally.no_verdict,
+                merges_not_pass: tally.not_pass,
+                merges_missing_samples: tally.samples,
+                merge_repos: 1,
+                merges_per_repo: tally.repos,
+                ..Default::default()
+            },
+            journal_error: None,
+        };
+
+        let text = render_metrics_text(&report);
+        assert!(text.contains("origin/quaqua/pstack-int2=0 (capped)"));
+        assert!(text.contains("merges: 500 merge(s) (capped)"));
+
+        let json_str = serde_json::to_string_pretty(&report).unwrap();
+        let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_val["journal"]["truncated"], true);
+
+        match prev {
+            Some(v) => std::env::set_var("QUAQUA_WORKSPACE_ROOT", v),
+            None => std::env::remove_var("QUAQUA_WORKSPACE_ROOT"),
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
