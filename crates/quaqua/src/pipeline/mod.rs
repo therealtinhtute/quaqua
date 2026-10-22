@@ -1447,10 +1447,46 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 ctx.archive_stale(&child_report_path);
                             }
 
-                            let prompt_body = format!(
-                                    "{}. When done, write summary (changes, test cmd+result, risks) to a temp file and rename it to ~/quaqua/runs/{}.md (publish it atomically, never a partial file); reply only the path.",
-                                    child_input.brief, child_input.name
-                                );
+                            // § S4 parity with `worker prompt`: the brief's
+                            // `Playbook:` steps reach the prompt this builder
+                            // receives, and the pin records what it got. The
+                            // header is read from the coordinator's brief file:
+                            // the prompt text is prefixed with engine context
+                            // (the approved plan), so its header block is not
+                            // the brief's. Reviewer prompts are the engine's own
+                            // review brief and never carry the worker steps. A
+                            // named-but-unresolvable playbook blocks before the
+                            // prompt: the worker would otherwise be promised
+                            // steps it never received.
+                            let playbook_source = if is_reviewer {
+                                ""
+                            } else {
+                                ctx.brief_text.as_str()
+                            };
+                            let injection =
+                                match crate::worker::prompt::brief::prepare_injection_in_workspace(
+                                    playbook_source,
+                                ) {
+                                    Ok(injection) => injection,
+                                    Err((_code, msg)) => {
+                                        let b = format!(
+                                            "{} — fix the brief, then 'quaqua pipeline --resume {} {}'",
+                                            msg.trim(),
+                                            ctx.task,
+                                            state.repo
+                                        );
+                                        state.prompted = 0;
+                                        let _ = state.save(&ctx.state_file);
+                                        return ctx
+                                            .finish(&mut state, "blocked", 1, Some(&b))
+                                            .map(|_| ());
+                                    }
+                                };
+                            let prompt_body = crate::worker::prompt::brief::compose_prompt_body(
+                                &child_input.name,
+                                &child_input.brief,
+                                injection.as_ref().map(|i| i.text.as_str()),
+                            );
                             let prompt_res =
                                 activities.execute(&ActivityRequest::Herdr(HerdrRequest::Prompt {
                                     name: child_input.name.clone(),
@@ -1465,6 +1501,13 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 let _ = state.save(&ctx.state_file);
                                 return ctx.finish(&mut state, "blocked", 1, Some(&b)).map(|_| ());
                             }
+                            // The worker only got the steps if the prompt was
+                            // accepted, so the pin is written after it.
+                            crate::worker::prompt::brief::pin_playbook(
+                                &ctx.runs_dir,
+                                &child_input.name,
+                                injection.as_ref(),
+                            );
                             state.prompted = 1;
                             state.prompt_ts = now_sec();
                             let _ = state.save(&ctx.state_file);
@@ -1571,6 +1614,39 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 );
                                 let b = format!("review verdict void: {why}");
                                 return ctx.finish(&mut state, "blocked", 6, Some(&b)).map(|_| ());
+                            }
+                        }
+                        // § S5 parity with `worker prompt`: an accepted builder
+                        // report that does not account for the steps pinned in
+                        // `runs/.<name>.playbook` warns and journals one
+                        // `playbook_gap`. Warn only — the pipeline exit stays
+                        // untouched. Reviewer reports are skipped inside the
+                        // check (they carry a `Verdict:` line, not a block); a
+                        // plan report is not checked because it does not claim
+                        // the steps ran.
+                        if is_reviewer
+                            || kind == ChildKind::Build
+                            || matches!(kind, ChildKind::Fix(_))
+                        {
+                            let rep_content = resolve_child_report_content(
+                                &ctx.runs_dir,
+                                &child_report_path,
+                                &child_input.name,
+                                kind,
+                            );
+                            let accepted = if is_reviewer {
+                                crate::pipeline::parse_report_content(&rep_content).is_ok()
+                            } else {
+                                report_is_unfinished(&rep_content).is_none()
+                            };
+                            if accepted {
+                                crate::worker::prompt::playbook_check::warn_playbook_gaps(
+                                    &mut journal,
+                                    &ctx.runs_dir,
+                                    &child_input.name,
+                                    &rep_content,
+                                    is_reviewer,
+                                );
                             }
                         }
                         if is_reviewer

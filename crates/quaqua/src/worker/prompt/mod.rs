@@ -647,8 +647,7 @@ pub fn prompt_worker<G: GitOps>(
         // § S4: a new task starts with no playbook pin. Dropping it before the
         // prompt means a submission that never lands (or a pin write that
         // fails) leaves no file for S5 to check against this task's report.
-        let playbook_state = runs_dir.join(format!(".{name}.playbook"));
-        let _ = std::fs::remove_file(&playbook_state);
+        brief::pin_playbook(&runs_dir, name, None);
 
         // Pre-prompt grid check
         if std::env::var("GRID_SKIP").as_deref() != Ok("1")
@@ -725,17 +724,8 @@ pub fn prompt_worker<G: GitOps>(
         }
 
         // The worker only got the steps if the prompt landed, so the pin
-        // (`runs/.<name>.playbook`) is written here, after the land check, via
-        // a temp file + rename: a failed write must never leave a partial pin.
-        if let Some(injection) = &injection {
-            let tmp = runs_dir.join(format!(".{name}.playbook.tmp"));
-            let written = std::fs::write(&tmp, injection.state_content())
-                .and_then(|()| std::fs::rename(&tmp, &playbook_state));
-            if let Err(e) = written {
-                let _ = std::fs::remove_file(&tmp);
-                eprintln!("warning: cannot write {}: {e}", playbook_state.display());
-            }
-        }
+        // (`runs/.<name>.playbook`) is written here, after the land check.
+        brief::pin_playbook(&runs_dir, name, injection.as_ref());
 
         let next_k = k_max + 1;
         let wf_id = format!("worker:{name}#{next_k}");

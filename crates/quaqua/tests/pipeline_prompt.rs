@@ -106,7 +106,7 @@ impl Fixture {
         .unwrap();
         fs::write(
             self.playbooks.join("fixture.md"),
-            "---\nname: fixture\nwhen: A fixture playbook.\n---\n\n## Worker\n\n1. Reproduce the failure before fixing.\n2. Fix the root cause.\n",
+            "---\nname: fixture\nwhen: A fixture playbook.\n---\n\n## Orchestrator\n\n1. Approve the plan.\n\n## Worker\n\n1. Reproduce the failure before fixing.\n2. Fix the root cause.\n",
         )
         .unwrap();
     }
@@ -144,10 +144,9 @@ impl Fixture {
     /// The spawn base the build gate compares HEAD against.
     fn set_base_sha(&self, task: &str, sha: &str) {
         let path = self.runs.join(format!("pipeline-{task}.state"));
-        let content = fs::read_to_string(&path).unwrap().replace(
-            "base_sha=\n",
-            &format!("base_sha={sha}\n"),
-        );
+        let content = fs::read_to_string(&path)
+            .unwrap()
+            .replace("base_sha=\n", &format!("base_sha={sha}\n"));
         fs::write(&path, content).unwrap();
     }
 
