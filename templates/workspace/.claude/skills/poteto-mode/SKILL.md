@@ -29,15 +29,24 @@ Before writing any worker brief, route through `/poteto-mode`:
 
 The Principles section below grounds every trigger. In your reply, name each principle that shaped a decision and the specific choice it changed. Cite only principles whose leaf you read this session.
 
-Remaining triggers:
+MVP triggers:
 
 - About to ask a question on a "which approach", "how should I", or "what should this do" fork: classify it before asking. If the answer is an observable fact (behavior, timing, layout, output, perf), it is not the human's to answer. Settle it by running an experiment, reproduction, or prototype and let the result decide. If the task is a read-only investigation whose deliverable is a cited answer, answer from evidence. Reserve questions for genuine product or preference calls no experiment can settle. Under a full-autonomy grant, decide calls covered by the grant, act, and report. Irreversible writes in Autonomy always pause.
-- Any code: name the data shape first, and choose its organizing structure per **principle-model-the-domain**.
+- Any code: routes to `feature` in the MVP; once P2 lands, name the data shape first and choose its organizing structure per **principle-model-the-domain** (P2).
 - Nontrivial multi-step: establish the throughput checkpoint across blocking first steps, independent workstreams, shared mutable state, and smallest safe decomposition.
-- Any PR-status request ("babysit this", "get it green"): routes to the Babysit playbook.
-- Asked to land or ship a green stack: routes to the Shipping playbook. Green is not safe; require independent verification per unit.
+- Any PR-status request ("babysit this", "get it green"): routes to `figure-it-out` in the MVP (routes to Babysit once P2 lands).
+- Asked to land or ship a green stack: routes to `figure-it-out` in the MVP (routes to Shipping once P2 lands). Green is not safe; require independent verification per unit.
 - Broken skill mid-task: fix it in its own unit. Do not block. Do not silently work around it.
-- Long, autonomous, or multi-phase work, or work the operator steps away from to review later: routes to `figure-it-out` (or `multi-phase-plan`), maintaining an auditable decision trail.
+- Long, autonomous, or multi-phase work, or work the operator steps away from to review later: routes to `figure-it-out` in the MVP (routes to `multi-phase-plan` once P2 lands; maps pstack `show-me-your-work`), maintaining an auditable decision trail.
+
+Deferred routes with quaqua mappings (P2):
+
+- Nontrivial change, architecture decision, or "are we sure?" (P2): routes to taskforce advisor (`quaqua taskforce advisor`) (maps pstack `how`).
+- Code crossing a function boundary (P2): routes to taskforce `dual-lens` (`quaqua taskforce dual-lens`) for parallel design exploration before implementing (maps pstack `architect`).
+- Parallel fan-out (P2): routes to worker fan-out per `models.md` kinds and grid layout (maps pstack `swarm`). For bakeoffs or competitive designs, routes to N workers of different kinds + judge (maps pstack `arena`).
+- Contested design (P2): routes to cross-harness reviewer on a different model (maps pstack `interrogate`).
+- Docs, RFCs, readmes, PR descriptions, or commit messages (P2): deferred to P2 documentation skill (maps pstack `technical-writing`).
+- Running a benchmark or reporting measured numbers (P2): follow **Explain the Number**; deferred to P2 benchmark checklist (maps pstack `benchmark-checklist`).
 
 ## Principles
 
@@ -84,11 +93,17 @@ Read the leaf in full for any principle you cite. Each leaf lives under `princip
 
 ## Autonomy
 
-**Just do it.** Reversible work and external queries proceed without asking.
+**Just do it.** Reversible work and external queries proceed without asking. Never block on the human for reversible calls; proceed, present the result, and let the human course-correct (`AGENTS.md`).
 
-**Always pause** for irreversible writes: force-push to shared branches, deploys, data deletion, public messages.
+**Always pause for irreversible actions.** Never approve on anh iu's behalf without explicit approval (`AGENTS.md`):
+- Deleting data
+- Push or force-push
+- Branch delete or merge to main
+- Deploy
+- Spending money
+- Sending or publishing anything outward
 
-**Session overrides:** "Don't stop", "run until done", or "be fully autonomous" mean keep going.
+**Session overrides.** "Don't stop", "run until done", or "be fully autonomous" mean keep going on reversible work, but never bypass anh iu's approval for the irreversible actions above.
 
 **No is an acceptable answer.** Asked whether to do something, invited to add scope, or shown an approach, reply with your real judgment. Decline, push back, or say "this doesn't earn its place" when true. A recommendation is a judgment, not a validation. Candor over sycophancy.
 
@@ -98,7 +113,7 @@ Workers are spawned via `quaqua worker spawn <name> <kind> <repo>`.
 
 - **Match the kind to the job:** Assign worker kinds (`tieude`, `detu`, `sude`, `ni`, `suhuynh`, `truonglao`) strictly per `models.md`.
 - **Coordinator owns the outcome:** You own every worker's work. Review the diff and verify evidence yourself; never pass through unverified claims.
-- **Fresh subagents by default:** Give new work to a fresh worker with consolidated scope (original brief, directives, prior report and branch). Resume an existing worker only when work strictly depends on resident state (local worktree, uncommitted changes, or running daemon).
+- **Resume vs fresh:** Resume is the default for existing work. A half-done, stalled or killed worker resumes the same session (`quaqua worker prompt --resume`); a fresh spawn only when the goal changed or the worktree is unrecoverable (`AGENTS.md`). New work gets a fresh worker with consolidated scope (original brief, directives, prior report and branch).
 - **Worker boundary:** Never route inside a worker. Workers do not run `/poteto-mode`. Under S4, `quaqua worker prompt` injects the playbook's `## Worker` steps and cited principles, pinning `runs/.<name>.playbook`. A worker that loads this skill stops immediately.
 
 ## Writing the reply
