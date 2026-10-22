@@ -2086,6 +2086,62 @@ fn test_spawn_worker_purpose_with_mismatched_positional_kind_fails() {
 }
 
 #[test]
+fn test_spawn_worker_purpose_with_colon_resolves_correctly() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-colon-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("quaqua/runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = test_cfg_with_fallback();
+    cfg.kinds.insert(
+        "sude".to_string(),
+        config::Kind {
+            harness: "omp".to_string(),
+            model: "gemini".to_string(),
+            effort: Some("high".to_string()),
+            fallback: None,
+            can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
+        },
+    );
+    cfg.purposes.insert("fix:ui".to_string(), "sude".to_string());
+
+    let git = SpawnTestGit;
+    let mut mock = MockActivities::new();
+    mock.register(
+        "herdr.pane_split",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+        name: String::new(),
+    }));
+    let herdr = MockActivitiesHerdr::new(mock);
+
+    let opts = parse_spawn_args(&[
+        "--purpose".to_string(),
+        "fix:ui".to_string(),
+        "sude-colontest".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
+    assert!(res.is_ok(), "spawn with colon in purpose should resolve correctly: {:?}", res.err());
+
+    let starts = herdr.agent_starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].0, "sude-colontest");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
 fn test_renamed_kind_passes_cap_cleanup_cost() {
     let _env_lock = lock_env();
     let temp = std::env::temp_dir().join(format!("quaqua-renamed-kind-{}", std::process::id()));
