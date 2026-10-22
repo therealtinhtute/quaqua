@@ -1,22 +1,17 @@
 //! Worker cap calculation and enforcement (`quaqua cap`).
 
+use crate::config::Config;
 use crate::herdr::HerdrOps;
 use crate::state::{ExecutionState, WorkerMetadata};
 use crate::util::is_pid_alive;
 use serde_json::Value;
 use std::path::Path;
 
-/// Check if a worker name matches `<kind>-...` and does not end with `-lead`.
-pub fn is_task_worker_name(name: &str) -> bool {
-    if let Ok(cfg) = crate::config::load_team_config() {
-        is_task_worker_name_in_config(name, &cfg)
-    } else {
-        false
-    }
-}
-
 /// Check if a worker name matches `<kind>-...` for any kind in `cfg.kinds` and does not end with `-lead`.
-pub fn is_task_worker_name_in_config(name: &str, cfg: &crate::config::Config) -> bool {
+///
+/// The config is passed in so callers resolve it once (and can surface a load
+/// failure) instead of every check reading process-global env.
+pub fn is_task_worker_name(name: &str, cfg: &Config) -> bool {
     crate::config::kind_of_worker(cfg, name).is_some()
 }
 
@@ -50,6 +45,7 @@ pub fn count_owner_slots<H: HerdrOps>(
     owner: &str,
     exclude_worker: Option<&str>,
     herdr: &H,
+    cfg: &Config,
 ) -> i64 {
     let mut live_workers = Vec::new();
     if let Ok(agent_list_json) = herdr.agent_list() {
@@ -58,7 +54,7 @@ pub fn count_owner_slots<H: HerdrOps>(
                 for agent in agents {
                     let status = agent.get("agent_status").and_then(|s| s.as_str()).unwrap_or("");
                     let name = agent.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    if status != "dead" && !name.is_empty() && is_task_worker_name(name) {
+                    if status != "dead" && !name.is_empty() && is_task_worker_name(name, cfg) {
                         if Some(name) != exclude_worker {
                             live_workers.push(name.to_string());
                         }
@@ -75,15 +71,11 @@ pub fn count_owner_slots<H: HerdrOps>(
             o_workers.push(w.clone());
         }
     }
-    let cfg_opt = crate::config::load_team_config().ok();
-    let pipe_weight = cfg_opt
-        .as_ref()
-        .and_then(|c| c.limits.weights.get("pipeline"))
-        .copied()
-        .unwrap_or(2);
-    let dual_lens_weight = cfg_opt
-        .as_ref()
-        .and_then(|c| c.limits.weights.get("dual-lens"))
+    let pipe_weight = cfg.limits.weights.get("pipeline").copied().unwrap_or(2);
+    let dual_lens_weight = cfg
+        .limits
+        .weights
+        .get("dual-lens")
         .copied()
         .unwrap_or(2);
 
@@ -141,9 +133,9 @@ pub fn count_owner_slots<H: HerdrOps>(
                     let weight = if t.kind == "dual-lens" || file_name.starts_with("dual-lens-") {
                         dual_lens_weight
                     } else {
-                        cfg_opt
-                            .as_ref()
-                            .and_then(|c| c.limits.weights.get(&t.kind))
+                        cfg.limits
+                            .weights
+                            .get(&t.kind)
                             .copied()
                             .unwrap_or(1)
                     };

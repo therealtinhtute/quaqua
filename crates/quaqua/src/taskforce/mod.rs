@@ -116,7 +116,7 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
         .get(&targs.mode)
         .copied()
         .unwrap_or(if targs.mode == "dual-lens" { 2 } else { 1 });
-    let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr);
+    let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr, &cfg);
     if slots_used + weight > max_workers {
         return Err((
             2,

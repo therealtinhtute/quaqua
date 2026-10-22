@@ -339,7 +339,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let _ = std::fs::create_dir_all(&runs_dir);
 
     if std::env::var("PIPELINE_TASK").is_err() {
-        let slots_used = count_owner_slots(&runs_dir, &owner, Some(&opts.name), herdr);
+        let slots_used = count_owner_slots(&runs_dir, &owner, Some(&opts.name), herdr, cfg);
         let max_workers = cfg.limits.max_workers_per_orchestrator;
         if slots_used >= max_workers {
             return Err((

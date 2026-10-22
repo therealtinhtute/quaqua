@@ -616,7 +616,7 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
         let max_workers = cfg.limits.max_workers_per_orchestrator;
         let pipe_weight = cfg.limits.weights.get("pipeline").copied().unwrap_or(2);
 
-        let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr);
+        let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr, &cfg);
         if slots_used + pipe_weight > max_workers {
             eprintln!("error: worker cap exceeded (owner '{owner}' has {slots_used} slots in use; pipeline reserves {pipe_weight}, cap is {max_workers})");
             return Err((2, String::new()));

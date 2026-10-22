@@ -415,9 +415,13 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
 ///
 /// Propagates `herdr error: ...` on I/O or JSON decoding errors to avoid
 /// emitting misleading `missing` statuses and false `ORPHAN` flags.
+///
+/// `cfg` decides which names are task workers; callers resolve it once so this
+/// scan never reads process-global env.
 pub fn scan_orchestration<H: HerdrOps>(
     runs_dir: &Path,
     herdr: &H,
+    cfg: &Config,
 ) -> Result<Vec<OrchestrationRow>, String> {
     let json_str = herdr
         .agent_list()
@@ -564,7 +568,7 @@ pub fn scan_orchestration<H: HerdrOps>(
             }
         };
         let has_progress = WorkerMetadata::progress_path(runs_dir, &name).exists();
-        if is_task_worker_name(&name) && agent_status == "idle" && !has_session && !has_progress {
+        if is_task_worker_name(&name, cfg) && agent_status == "idle" && !has_session && !has_progress {
             flags.push(WarningFlag::IdleUnprompted);
         }
 
@@ -761,8 +765,9 @@ pub fn render_status_with_git<H: HerdrOps, G: GitOps>(
     herdr: &H,
     git: &G,
 ) -> Result<String, String> {
+    let cfg = load_team_config().map_err(|(_, msg)| msg.trim_end().to_string())?;
     let wf_res = query_workflows(db_path);
-    let orch_res = scan_orchestration(runs_dir, herdr);
+    let orch_res = scan_orchestration(runs_dir, herdr, &cfg);
     let repo = runs_dir.parent().unwrap_or_else(|| Path::new("."));
     let verdicts_res = query_branch_verdicts(db_path, repo, git);
     Ok(format_status_report(
@@ -1878,6 +1883,12 @@ mod tests {
     use std::path::PathBuf;
     use std::process::{Child, Output};
 
+    /// Tests scan with the embedded config so no test can change the
+    /// process-global `QUAQUA_TEAM_TOML` they read.
+    fn test_team_cfg() -> crate::config::Config {
+        crate::config::embedded_team_config().expect("embedded team.toml")
+    }
+
     struct MockHerdr {
         agent_list_result: std::io::Result<String>,
     }
@@ -2131,7 +2142,7 @@ mod tests {
 
         fs::write(tmp.join("sude-p4.owner"), "mu-lead\n").unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let p4 = rows
             .iter()
             .find(|r| r.name == "sude-p4")
@@ -2175,7 +2186,7 @@ mod tests {
             .set_accessed(now - Duration::from_secs(5));
         file.set_times(times).unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -2220,7 +2231,7 @@ mod tests {
         times = times.set_modified(mtime).set_accessed(atime);
         file.set_times(times).unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -2269,7 +2280,7 @@ mod tests {
         let mut marker_times = fs::FileTimes::new();
         marker_times = marker_times.set_modified(now);
         marker_file.set_times(marker_times).unwrap();
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -2316,7 +2327,7 @@ mod tests {
             .set_accessed(now - Duration::from_secs(10));
         report_file.set_times(report_times).unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -2359,7 +2370,7 @@ mod tests {
         let marker_path = tmp.join(".sude-e1.read");
         fs::create_dir(&marker_path).unwrap(); // is_file() is false, metadata/modified will not match a valid read marker
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -2390,7 +2401,7 @@ mod tests {
 
         fs::write(tmp.join("sude-e1.owner"), "arch-lead\n").unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
         let e1 = rows
             .iter()
             .find(|r| r.name == "sude-e1")
@@ -2483,7 +2494,7 @@ mod tests {
         // Even with an owner file present, it must NOT emit false ORPHAN rows!
         fs::write(tmp.join("sude-test.owner"), "arch-lead\n").unwrap();
 
-        let res = scan_orchestration(&tmp, &mock);
+        let res = scan_orchestration(&tmp, &mock, &test_team_cfg());
         assert!(
             res.is_err(),
             "scan_orchestration must fail when herdr fails"
@@ -2511,7 +2522,7 @@ mod tests {
         let _cleaner = TempDirCleaner(tmp.clone());
 
         let mock = MockHerdr::new("invalid json output from herdr");
-        let res = scan_orchestration(&tmp, &mock);
+        let res = scan_orchestration(&tmp, &mock, &test_team_cfg());
         assert!(
             res.is_err(),
             "scan_orchestration must fail on unparseable JSON"
@@ -2547,7 +2558,7 @@ mod tests {
         fs::write(tmp.join("sude-idle.owner"), "active-lead\n").unwrap();
         fs::write(tmp.join("sude-orphan.owner"), "ghost-lead\n").unwrap();
 
-        let rows = scan_orchestration(&tmp, &mock).expect("scan orchestration");
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
 
         let done = rows
             .iter()
@@ -4209,9 +4220,6 @@ pub(crate) mod metrics {
         )
         .unwrap();
 
-        let prev = std::env::var("QUAQUA_WORKSPACE_ROOT").ok();
-        std::env::set_var("QUAQUA_WORKSPACE_ROOT", &tmp);
-
         let mut log_main = Vec::new();
         for i in 0..500 {
             log_main.push(format!("m{i:04} p{i:04}_1 p{i:04}_2"));
@@ -4281,10 +4289,6 @@ pub(crate) mod metrics {
             true
         );
 
-        match prev {
-            Some(v) => std::env::set_var("QUAQUA_WORKSPACE_ROOT", v),
-            None => std::env::remove_var("QUAQUA_WORKSPACE_ROOT"),
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
