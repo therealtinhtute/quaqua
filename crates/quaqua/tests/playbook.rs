@@ -695,9 +695,101 @@ fn f2_default_path_with_no_workspace_dir_errors() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(code, 1, "default path with no workspace must exit 1");
     assert!(
+        stderr.contains("no quaqua workspace at")
+            || stderr.contains("projects/INDEX.md is missing"),
+        "stderr should state workspace error: {stderr}"
+    );
+}
+
+#[test]
+fn default_path_missing_playbooks_dir_in_valid_workspace_errors() {
+    let sandbox = TempDir::new("ws-no-playbooks");
+    let ws = sandbox.sub("ws");
+    sandbox.write_file("ws/projects/INDEX.md", "# Projects\n");
+    sandbox.write_file("ws/principles/prove-it-works.md", "# Prove it works\n");
+
+    let bin = env!("CARGO_BIN_EXE_quaqua");
+    let out = Command::new(bin)
+        .args(&["playbook", "list"])
+        .env("QUAQUA_HOME", &ws)
+        .env_remove("QUAQUA_ROOT")
+        .env_remove("QUAQUA_PLAYBOOKS_DIR")
+        .env_remove("QUAQUA_PRINCIPLES_DIR")
+        .output()
+        .expect("failed to execute quaqua binary");
+
+    let code = out.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        code, 1,
+        "missing playbooks dir in valid workspace must exit 1"
+    );
+    assert!(
         stderr.contains("playbooks directory not found"),
         "stderr should state playbooks directory not found: {stderr}"
     );
+}
+
+#[test]
+fn finding_3_default_path_pins_valid_workspace_and_rejects_non_workspace() {
+    let sandbox = TempDir::new("f3-workspace-resolution");
+
+    // 1. Non-workspace directory: has playbooks/ and principles/ dirs, but NO projects/INDEX.md
+    let non_ws = sandbox.sub("non-ws");
+    sandbox.write_file(
+        "non-ws/playbooks/test.md",
+        "---\nname: test\nwhen: Test.\n---\n## Orchestrator\nPlan.\n## Worker\n1. Step citing principle-prove-it-works.\n",
+    );
+    sandbox.write_file("non-ws/principles/prove-it-works.md", "# Prove it works\n");
+
+    let bin = env!("CARGO_BIN_EXE_quaqua");
+    let out = Command::new(bin)
+        .args(&["playbook", "list"])
+        .env("QUAQUA_HOME", &non_ws)
+        .env_remove("QUAQUA_ROOT")
+        .env_remove("QUAQUA_PLAYBOOKS_DIR")
+        .env_remove("QUAQUA_PRINCIPLES_DIR")
+        .output()
+        .expect("failed to execute quaqua binary");
+
+    let code = out.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        code, 1,
+        "non-workspace dir must exit 1 even if playbooks/ exists"
+    );
+    assert!(
+        stderr.contains("no quaqua workspace at")
+            || stderr.contains("projects/INDEX.md is missing"),
+        "stderr must report workspace error, got: {stderr}"
+    );
+
+    // 2. Valid workspace: has projects/INDEX.md, playbooks/, principles/
+    let valid_ws = sandbox.sub("valid-ws");
+    sandbox.write_file("valid-ws/projects/INDEX.md", "# Projects\n");
+    sandbox.write_file(
+        "valid-ws/playbooks/sample.md",
+        "---\nname: sample\nwhen: Sample playbook.\n---\n## Orchestrator\nPlan.\n## Worker\n1. Step citing principle-prove-it-works.\n",
+    );
+    sandbox.write_file(
+        "valid-ws/principles/prove-it-works.md",
+        "# Prove it works\n",
+    );
+
+    let out_valid = Command::new(bin)
+        .args(&["playbook", "list"])
+        .env("QUAQUA_HOME", &valid_ws)
+        .env_remove("QUAQUA_ROOT")
+        .env_remove("QUAQUA_PLAYBOOKS_DIR")
+        .env_remove("QUAQUA_PRINCIPLES_DIR")
+        .output()
+        .expect("failed to execute quaqua binary");
+
+    let code_valid = out_valid.status.code().unwrap_or(-1);
+    let stdout_valid = String::from_utf8_lossy(&out_valid.stdout).to_string();
+    let stderr_valid = String::from_utf8_lossy(&out_valid.stderr).to_string();
+    assert_eq!(code_valid, 0, "valid workspace must exit 0: {stderr_valid}");
+    assert!(stdout_valid.contains("sample — Sample playbook."));
 }
 
 #[test]

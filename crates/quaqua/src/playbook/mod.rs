@@ -515,37 +515,33 @@ pub fn read_principle(name: &str, principles_dir: &Path) -> Result<String, Playb
 }
 
 /// Resolve the playbooks directory from CLI flags, env vars, or workspace defaults.
-pub fn resolve_playbooks_dir(explicit: Option<&Path>) -> PathBuf {
+pub fn resolve_playbooks_dir(explicit: Option<&Path>) -> Result<PathBuf, PlaybookError> {
     if let Some(p) = explicit {
-        return p.to_path_buf();
+        return Ok(p.to_path_buf());
     }
     if let Some(val) = std::env::var_os("QUAQUA_PLAYBOOKS_DIR") {
         if !val.is_empty() {
-            return PathBuf::from(val);
+            return Ok(PathBuf::from(val));
         }
     }
-    let ws_root = match crate::workspace::workspace_root_checked() {
-        Ok(root) => root,
-        Err(_) => crate::workspace::workspace_root(),
-    };
-    ws_root.join("playbooks")
+    let ws_root = crate::workspace::workspace_root_checked()
+        .map_err(|(_rc, msg)| PlaybookError::WorkspaceError(msg.trim_end().to_string()))?;
+    Ok(ws_root.join("playbooks"))
 }
 
 /// Resolve the principles directory from CLI flags, env vars, or workspace defaults.
-pub fn resolve_principles_dir(explicit: Option<&Path>) -> PathBuf {
+pub fn resolve_principles_dir(explicit: Option<&Path>) -> Result<PathBuf, PlaybookError> {
     if let Some(p) = explicit {
-        return p.to_path_buf();
+        return Ok(p.to_path_buf());
     }
     if let Some(val) = std::env::var_os("QUAQUA_PRINCIPLES_DIR") {
         if !val.is_empty() {
-            return PathBuf::from(val);
+            return Ok(PathBuf::from(val));
         }
     }
-    let ws_root = match crate::workspace::workspace_root_checked() {
-        Ok(root) => root,
-        Err(_) => crate::workspace::workspace_root(),
-    };
-    ws_root.join("principles")
+    let ws_root = crate::workspace::workspace_root_checked()
+        .map_err(|(_rc, msg)| PlaybookError::WorkspaceError(msg.trim_end().to_string()))?;
+    Ok(ws_root.join("principles"))
 }
 
 /// Execute `quaqua playbook list`: format `<name> — <when>` per file.

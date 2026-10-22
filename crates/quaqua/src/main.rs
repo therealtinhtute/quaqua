@@ -603,14 +603,23 @@ fn main() {
                 dir,
                 principles_dir,
             } => {
-                let pb_dir = quaqua::playbook::resolve_playbooks_dir(dir.as_deref());
-                let pr_dir = quaqua::playbook::resolve_principles_dir(principles_dir.as_deref());
-                match quaqua::playbook::run_list(&pb_dir, &pr_dir) {
-                    Ok(out) => {
-                        print!("{out}");
-                        0
+                match (
+                    quaqua::playbook::resolve_playbooks_dir(dir.as_deref()),
+                    quaqua::playbook::resolve_principles_dir(principles_dir.as_deref()),
+                ) {
+                    (Ok(pb_dir), Ok(pr_dir)) => {
+                        match quaqua::playbook::run_list(&pb_dir, &pr_dir) {
+                            Ok(out) => {
+                                print!("{out}");
+                                0
+                            }
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                1
+                            }
+                        }
                     }
-                    Err(e) => {
+                    (Err(e), _) | (_, Err(e)) => {
                         eprintln!("error: {e}");
                         1
                     }
@@ -621,14 +630,23 @@ fn main() {
                 dir,
                 principles_dir,
             } => {
-                let pb_dir = quaqua::playbook::resolve_playbooks_dir(dir.as_deref());
-                let pr_dir = quaqua::playbook::resolve_principles_dir(principles_dir.as_deref());
-                match quaqua::playbook::run_show(&name, &pb_dir, &pr_dir) {
-                    Ok(out) => {
-                        print!("{out}");
-                        0
+                match (
+                    quaqua::playbook::resolve_playbooks_dir(dir.as_deref()),
+                    quaqua::playbook::resolve_principles_dir(principles_dir.as_deref()),
+                ) {
+                    (Ok(pb_dir), Ok(pr_dir)) => {
+                        match quaqua::playbook::run_show(&name, &pb_dir, &pr_dir) {
+                            Ok(out) => {
+                                print!("{out}");
+                                0
+                            }
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                1
+                            }
+                        }
                     }
-                    Err(e) => {
+                    (Err(e), _) | (_, Err(e)) => {
                         eprintln!("error: {e}");
                         1
                     }
