@@ -274,6 +274,26 @@ pub fn warn_brief_headers(task: &str) {
     }
 }
 
+/// § S4: write (or drop) `runs/.<name>.playbook` for the prompt that just
+/// landed. `None` removes the file, so a pin left by an earlier task can never
+/// be checked against this task's report. A temp file + rename keeps a failed
+/// write from leaving a partial pin. The one writer of the pin format, shared
+/// by `worker prompt` and `quaqua pipeline`.
+pub fn pin_playbook(runs_dir: &Path, name: &str, injection: Option<&PlaybookInjection>) {
+    let path = runs_dir.join(format!(".{name}.playbook"));
+    let Some(injection) = injection else {
+        let _ = std::fs::remove_file(&path);
+        return;
+    };
+    let tmp = runs_dir.join(format!(".{name}.playbook.tmp"));
+    let written =
+        std::fs::write(&tmp, injection.state_content()).and_then(|()| std::fs::rename(&tmp, &path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("warning: cannot write {}: {e}", path.display());
+    }
+}
+
 /// The prompt body handed to the agent: the brief, the injection when there is
 /// one, then the report instruction. Without an injection it is byte-identical
 /// to the body before § S4.

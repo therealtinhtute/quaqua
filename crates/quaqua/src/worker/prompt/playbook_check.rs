@@ -1,9 +1,10 @@
 //! Warn-only check of an accepted builder report's `## Playbook` block (§ S5).
 //!
-//! `worker prompt` pins the playbook name and the step ids the worker actually
-//! received in `runs/.<name>.playbook` (§ S4). A builder report must account for
-//! every pinned id, either as `<id>: done` or as `<id>: skip: <reason>`; a step
-//! its harness cannot run is reported as
+//! A builder prompt pins the playbook name and the step ids the worker actually
+//! received in `runs/.<name>.playbook` (§ S4, written by `brief::pin_playbook`
+//! from both `worker prompt` and `quaqua pipeline`). A builder report must
+//! account for every pinned id, either as `<id>: done` or as
+//! `<id>: skip: <reason>`; a step its harness cannot run is reported as
 //! `<id>: skip: unsupported on <harness>, <reason>` and counts as a valid skip.
 //!
 //! A gap warns and journals one `playbook_gap {name, missing, unreasoned}`
@@ -104,7 +105,7 @@ fn id_list(ids: &[u32]) -> String {
     }
 }
 
-/// `runs/.<name>.playbook`, written by `worker prompt`: `name=<n>\nids=1,2,3`.
+/// `runs/.<name>.playbook`, written by `brief::pin_playbook`: `name=<n>\nids=1,2,3`.
 /// An absent, unreadable or id-less file means the worker received no steps, so
 /// there is nothing to check.
 fn read_pin(path: &Path) -> Option<Pin> {
