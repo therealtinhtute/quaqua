@@ -285,6 +285,20 @@ pub(crate) fn run<W: Workflow, C: RunnerClock>(
     activities: &mut dyn Activity,
     clock: &mut C,
 ) -> Result<RunnerOutcome<W::Output>, RunnerError> {
+    // Persist the starting state before the first event. Until the first
+    // periodic snapshot, this row is the only replay base a later [`resume`]
+    // has after a kill; without it the resume dies with `NoInitialState`.
+    if journal.load_latest_snapshot(workflow_id)?.is_none() {
+        journal.append_snapshot(
+            workflow_id,
+            &SnapshotRecord::new(
+                0,
+                serde_json::to_string(&initial_state)
+                    .map_err(|e| RunnerError::Serialization(e.to_string()))?,
+            ),
+        )?;
+    }
+
     run_until_blocked(
         workflow,
         workflow_id,

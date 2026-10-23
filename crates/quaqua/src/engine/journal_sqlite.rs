@@ -207,6 +207,36 @@ pub struct SqliteJournal {
     path: PathBuf,
 }
 
+/// How long a journal operation waits for a competing connection, in ms.
+const BUSY_TIMEOUT_MS: u64 = 5000;
+
+/// True for SQLite's transient lock errors (`SQLITE_BUSY` / `SQLITE_LOCKED`).
+fn is_lock_error(err: &rusqlite::Error) -> bool {
+    matches!(
+        err.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+/// Retries `op` while SQLite reports a transient lock, for up to [`BUSY_TIMEOUT_MS`].
+///
+/// `busy_timeout` covers the statements SQLite knows it can safely re-run, but
+/// not `PRAGMA journal_mode`: switching a rollback-journal database to WAL
+/// returns `SQLITE_BUSY` immediately when another connection holds the write
+/// lock, even with a timeout set. Opening the journal while another runner is
+/// writing is normal, so the retry lives here rather than at each caller.
+fn retry_while_busy<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(BUSY_TIMEOUT_MS);
+    loop {
+        match op() {
+            Err(err) if is_lock_error(&err) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
 impl SqliteJournal {
     /// Returns the default SQLite journal path at `<workspace_root>/runs/quaqua.db`.
     pub fn default_path() -> PathBuf {
@@ -236,32 +266,38 @@ impl SqliteJournal {
         let conn = rusqlite::Connection::open(path)
             .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
-        // Configure WAL mode and 5-second busy timeout for concurrent access.
-        conn.pragma_update(None, "journal_mode", "WAL")
+        // Set the timeout first so everything after it waits for a competing
+        // connection instead of failing immediately.
+        conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)
             .map_err(|e| JournalError::StorageError(e.to_string()))?;
-        conn.pragma_update(None, "busy_timeout", 5000)
+
+        // WAL mode is what makes concurrent readers and writers safe, but the
+        // mode change bypasses the busy handler (see `retry_while_busy`).
+        retry_while_busy(|| conn.pragma_update(None, "journal_mode", "WAL"))
             .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
         // Initialize schema exactly per journal.rs specification.
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS events (
-                workflow_id TEXT NOT NULL,
-                seq INTEGER NOT NULL,
-                ts_ms INTEGER NOT NULL,
-                kind TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                PRIMARY KEY (workflow_id, seq)
-            );
+        retry_while_busy(|| {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS events (
+                    workflow_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    ts_ms INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, seq)
+                );
 
-            CREATE TABLE IF NOT EXISTS snapshots (
-                workflow_id TEXT NOT NULL,
-                seq INTEGER NOT NULL,
-                state_json TEXT NOT NULL,
-                PRIMARY KEY (workflow_id, seq)
-            );
-            "#,
-        )
+                CREATE TABLE IF NOT EXISTS snapshots (
+                    workflow_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    state_json TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, seq)
+                );
+                "#,
+            )
+        })
         .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
         Ok(Self {
