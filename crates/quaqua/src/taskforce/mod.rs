@@ -109,7 +109,6 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
     } else {
         base_cfg
     };
-    let max_workers = cfg.limits.max_workers_per_orchestrator;
     let weight = cfg
         .limits
         .weights
@@ -117,15 +116,8 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
         .copied()
         .unwrap_or(if targs.mode == "dual-lens" { 2 } else { 1 });
     let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr, &cfg);
-    if slots_used + weight > max_workers {
-        return Err((
-            2,
-            format!(
-                "error: worker cap exceeded (owner '{owner}' has {slots_used} slots in use; {} reserves {weight}, cap is {max_workers})\n",
-                targs.mode
-            ),
-        ));
-    }
+    crate::cap::check_owner_cap(&cfg, &owner, slots_used, weight, &targs.mode)
+        .map_err(|e| (2, format!("error: {e}\n")))?;
 
     let brief_content = std::fs::read_to_string(&targs.brief).map_err(|e| {
         (

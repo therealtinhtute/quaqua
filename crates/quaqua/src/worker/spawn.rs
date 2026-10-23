@@ -214,14 +214,6 @@ pub fn default_grid_tab(owner: &str, repo_name: &str) -> String {
     }
 }
 
-/// True for an owner that names a project team's Lead (`<slug>-lead`).
-fn is_project_owner(owner: &str) -> bool {
-    owner
-        .strip_suffix("-lead")
-        .map(|slug| !slug.is_empty())
-        .unwrap_or(false)
-}
-
 /// The owner of the pane this process runs in, when herdr can still see it:
 /// `grid_owner` of a pane that is not itself a worker.
 fn caller_pane_owner<H: HerdrOps>(herdr: &H) -> Option<String> {
@@ -260,7 +252,11 @@ fn resolve_owner<H: HerdrOps>(herdr: &H) -> String {
         .filter(|o| !o.is_empty())
         .unwrap_or_else(|| "cos".to_string());
     match caller_pane_owner(herdr) {
-        Some(pane) if is_project_owner(&pane) && !is_project_owner(&env_owner) => pane,
+        Some(pane)
+            if crate::cap::is_lead_owner(&pane) && !crate::cap::is_lead_owner(&env_owner) =>
+        {
+            pane
+        }
         _ => env_owner,
     }
 }
@@ -361,16 +357,8 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
 
     if std::env::var("PIPELINE_TASK").is_err() {
         let slots_used = count_owner_slots(&runs_dir, &owner, Some(&opts.name), herdr, cfg);
-        let max_workers = cfg.limits.max_workers_per_orchestrator;
-        if slots_used >= max_workers {
-            return Err((
-                1,
-                format!(
-                    "error: worker cap exceeded ({slots_used} live worker slots for owner '{owner}'; cap is {max_workers}) — cannot spawn {}\n",
-                    opts.name
-                ),
-            ));
-        }
+        crate::cap::check_owner_cap(cfg, &owner, slots_used, 1, "this spawn")
+            .map_err(|e| (1, format!("error: {e} — cannot spawn {}\n", opts.name)))?;
     }
 
     prepare_worktree(git, &repo, &wt, &opts.name, opts.base.as_deref())?;

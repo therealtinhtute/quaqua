@@ -130,6 +130,42 @@ fn config_get_cap_applies_project_override() {
 }
 
 #[test]
+fn config_lead_peer_cap_matches_the_slp() {
+    let file = repo_team();
+
+    // the SLP pair: builder sude (omp) and reviewer suhuynh (pi) differ by harness
+    let differ = run(&["config", "get", "strategy.builder_reviewer_differ", "--file", &file]);
+    assert_eq!(stdout(&differ).trim(), "harness");
+
+    // a Lead spawns at most 4 Peers ...
+    let peers = run(&["config", "get", "roles.lead.max_peers", "--file", &file]);
+    assert!(peers.status.success(), "get failed: {}", stderr(&peers));
+    assert_eq!(stdout(&peers).trim(), "4");
+
+    // ... while the CoS keeps the global cap
+    let cap = run(&[
+        "config",
+        "get",
+        "limits.max_workers_per_orchestrator",
+        "--file",
+        &file,
+    ]);
+    assert_eq!(stdout(&cap).trim(), "8");
+
+    // an older team.toml without the key loads and still resolves the default
+    let base = fixtures_dir().join("base.toml");
+    let old = run(&[
+        "config",
+        "get",
+        "roles.lead.max_peers",
+        "--file",
+        &base.to_string_lossy(),
+    ]);
+    assert!(old.status.success(), "get failed: {}", stderr(&old));
+    assert_eq!(stdout(&old).trim(), "4");
+}
+
+#[test]
 fn config_get_can_review_and_kind_fields() {
     let can = run(&["config", "get", "kinds.suhuynh.can_review", "--file", &repo_team()]);
     assert_eq!(stdout(&can).trim(), "true");
@@ -193,6 +229,9 @@ fn config_invalid_fixtures_are_rejected() {
         ("typo-section.toml", "unknown field `project`"),
         ("empty-reviewer.toml", "default_reviewer is empty"),
         ("project-cap-zero.toml", "is below 1"),
+        ("lead-max-peers-over.toml", "roles.lead.max_peers 9 must be in 1..=8"),
+        ("lead-max-peers-zero.toml", "roles.lead.max_peers 0 must be in 1..=8"),
+        ("cos-max-peers.toml", "role 'cos' takes no max_peers"),
         ("bad-timer-duration.toml", "timers.budget_default"),
         ("bad-timer-nudge.toml", "timers.nudge_at"),
         ("bad-timer-grace.toml", "timers.grace"),

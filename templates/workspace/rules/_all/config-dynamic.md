@@ -7,11 +7,15 @@ Cấu hình đổi **không cần sửa code**: mọi giá trị nằm trong `te
 - **Hệ quả:** sửa `team.toml` có tác dụng ngay cho spawn kế tiếp (worker, pipeline, lead — không rebuild). NHƯNG nếu không tìm thấy file lúc chạy, binary rơi về bản nhúng lúc build — muốn đổi giá trị nhúng phải rebuild.
 - `[projects.<slug>]` merge đè lên default theo project (`config::resolve`).
 
+## Cap
+- CoS: `[limits] max_workers_per_orchestrator` (trần `CAP_CEILING` = 8). Lead: `[roles.lead] max_peers`, mặc định 4, phải trong `1..=trần`.
+- Một cổng duy nhất cho mọi đường spawn (worker, pipeline, taskforce): `cap::check_owner_cap` — owner `<slug>-lead` bị chặn ở `max_peers`, owner khác ở `[limits]`. Pipeline nặng 2 slot (`[limits.weights]`).
+
 ## Kind = một profile
 `[kinds.<name>]` gói `harness` (opencode/omp/claude) · `model` · `effort` (bắt buộc; opencode: variant `#effort`) · `fallback` (1 hop khi start fail) · `can_review`.
 - Đổi model/effort của một kind = sửa 1 dòng trong team.toml; spawn kế tiếp dùng giá trị mới.
 - Reviewer: bất kỳ kind `can_review = true` — pipeline không còn allowlist cứng (2026-10-17, runs/sude-guard.md); fallback của reviewer cũng phải `can_review = true`.
-- Builder/reviewer khác nhau: `strategy.builder_reviewer_differ` — giá trị `kind` hiện **chưa được pipeline enforce** (pipeline vẫn so harness; ghi nhận 2026-10-17).
+- Builder/reviewer khác harness: `strategy.builder_reviewer_differ = "harness"` (mặc định) — `config validate` so cặp mặc định (`purposes.build`, không có thì `default_kind`, với `default_reviewer`); pipeline còn từ chối mọi cặp trùng harness lúc chạy (kể cả `--builder`/`--reviewer` chỉ định). `"kind"` và `"none"` chỉ tắt kiểm tra lúc validate, không tắt kiểm tra lúc chạy.
 - Lead: `strategy.lead_kind` (override `LEAD_KIND`), đi qua cùng `build_launch_cmd` như worker.
 
 ## Một lần, không đổi file

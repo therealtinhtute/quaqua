@@ -9,8 +9,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 2;
-/// AGENTS.md `## Rules`: "Max 4 task workers per orchestrator".
+/// AGENTS.md `## Rules`: the ceiling on `[limits] max_workers_per_orchestrator`.
 pub const CAP_CEILING: i64 = 8;
+/// AGENTS.md `## Roles (SLP)`: a project Lead spawns at most 4 Peers.
+/// `[roles.lead] max_peers` overrides it; the CoS keeps `[limits]`.
+pub const DEFAULT_LEAD_MAX_PEERS: i64 = 4;
 /// `can_spawn` / `can_prompt` vocabulary (role classes).
 pub const ROLE_CLASSES: [&str; 4] = ["cos", "lead", "peer", "taskforce"];
 /// `[roles.<r>]` table keys.
@@ -162,6 +165,10 @@ pub struct Role {
     pub can_prompt: Vec<String>,
     #[serde(default)]
     pub reports_to: Option<String>,
+    /// `[roles.lead]` only: the most live worker slots (weights included) the
+    /// owner `<slug>-lead` may hold. Absent → `DEFAULT_LEAD_MAX_PEERS`.
+    #[serde(default)]
+    pub max_peers: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -503,6 +510,16 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
                 return Err(format!("unknown role in reports_to '{to}'"));
             }
         }
+        if let Some(peers) = role.max_peers {
+            if name != "lead" {
+                return Err(format!(
+                    "role '{name}' takes no max_peers (only roles.lead caps its Peers)"
+                ));
+            }
+            if peers < 1 || peers > cap {
+                return Err(format!("roles.lead.max_peers {peers} must be in 1..={cap}"));
+            }
+        }
     }
 
     if !["none", "harness", "kind"].contains(&cfg.strategy.builder_reviewer_differ.as_str()) {
@@ -531,16 +548,26 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         }
     }
 
-    // builder/reviewer harness rule (strategy.builder_reviewer_differ = "harness")
+    // builder/reviewer harness rule (strategy.builder_reviewer_differ = "harness").
+    // The pair checked is the one a default `quaqua pipeline` runs: the builder
+    // resolves from `purposes.build`, else `default_kind` (pipeline/mod.rs), and
+    // the reviewer from `default_reviewer` — so a Lead that overrode the builder
+    // purpose stays SLP-compliant without making `default_kind` the builder.
     if cfg.strategy.builder_reviewer_differ == "harness" {
-        let b = &cfg.kinds[&cfg.strategy.default_kind];
-        for r in &cfg.strategy.default_reviewer {
-            let rk = &cfg.kinds[r];
-            if rk.harness == b.harness {
-                return Err(format!(
-                    "builder '{}' and reviewer '{}' share harness '{}'",
-                    cfg.strategy.default_kind, r, b.harness
-                ));
+        let builder = cfg
+            .purposes
+            .get("build")
+            .map(String::as_str)
+            .unwrap_or(cfg.strategy.default_kind.as_str());
+        if let Some(b) = cfg.kinds.get(builder) {
+            for r in &cfg.strategy.default_reviewer {
+                let rk = &cfg.kinds[r];
+                if rk.harness == b.harness {
+                    return Err(format!(
+                        "builder '{builder}' and reviewer '{r}' share harness '{}'",
+                        b.harness
+                    ));
+                }
             }
         }
     }
@@ -718,12 +745,22 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
                 _ => return Err(unknown()),
             }
         }
+        ["roles", "lead", "max_peers"] => cfg
+            .roles
+            .get("lead")
+            .and_then(|role| role.max_peers)
+            .unwrap_or(DEFAULT_LEAD_MAX_PEERS)
+            .to_string(),
         ["roles", r, field] => {
             let role = cfg.roles.get(*r).ok_or_else(unknown)?;
             match *field {
                 "can_spawn" => role.can_spawn.join("\n"),
                 "can_prompt" => role.can_prompt.join("\n"),
                 "reports_to" => role.reports_to.clone().unwrap_or_default(),
+                "max_peers" => role
+                    .max_peers
+                    .map(|n| n.to_string())
+                    .ok_or_else(|| format!("key '{key}' is unset"))?,
                 _ => return Err(unknown()),
             }
         }
@@ -816,6 +853,87 @@ workers_tab = "workers"
         let mut c = base();
         c.limits.max_workers_per_orchestrator = 9;
         assert!(validate(&c).unwrap_err().contains("over the cap"));
+    }
+
+    #[test]
+    fn lead_max_peers_must_fit_the_global_cap() {
+        let mut c = base();
+        c.roles.insert(
+            "lead".to_string(),
+            Role {
+                max_peers: Some(5),
+                ..Default::default()
+            },
+        );
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("roles.lead.max_peers 5 must be in 1..=4"), "{err}");
+
+        c.roles.get_mut("lead").unwrap().max_peers = Some(0);
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("roles.lead.max_peers 0 must be in 1..=4"), "{err}");
+
+        c.roles.get_mut("lead").unwrap().max_peers = Some(4);
+        assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn max_peers_belongs_to_the_lead_role_only() {
+        let mut c = base();
+        c.roles.insert(
+            "cos".to_string(),
+            Role {
+                can_spawn: vec!["lead".to_string()],
+                max_peers: Some(2),
+                ..Default::default()
+            },
+        );
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("role 'cos' takes no max_peers"), "{err}");
+    }
+
+    #[test]
+    fn lead_max_peers_gets_the_default_without_a_roles_lead_table() {
+        // An older team.toml has no [roles.lead] at all: the cap still resolves.
+        let c = base();
+        assert!(!c.roles.contains_key("lead"));
+        assert_eq!(get(&c, "roles.lead.max_peers", None).unwrap(), "4");
+        assert!(get(&c, "roles.cos.max_peers", None)
+            .unwrap_err()
+            .contains("is unset"));
+    }
+
+    #[test]
+    fn harness_differ_checks_the_pipeline_default_builder() {
+        // `quaqua pipeline` builds with purposes.build when set, so a config whose
+        // default worker kind shares the reviewer's harness is still SLP-compliant.
+        let mut c = base();
+        let tieude = c.kinds.get_mut("tieude").unwrap();
+        tieude.harness = "claude".to_string();
+        tieude.model = "m".to_string();
+        tieude.effort = Some("high".to_string());
+        tieude.fallback = None;
+
+        // no build purpose: the default builder IS default_kind, so it is rejected
+        let err = validate(&c).unwrap_err();
+        assert!(
+            err.contains("builder 'tieude' and reviewer 'suhuynh' share harness 'claude'"),
+            "{err}"
+        );
+
+        // purposes.build names the builder a default pipeline runs; it differs
+        c.purposes.insert("build".to_string(), "sude".to_string());
+        c.kinds.insert(
+            "sude".to_string(),
+            Kind {
+                harness: "omp".to_string(),
+                model: "google-antigravity/gemini-3.8-flash".to_string(),
+                effort: Some("high".to_string()),
+                fallback: None,
+                can_review: false,
+                spawn: SPAWN_AUTO.to_string(),
+            },
+        );
+        assert!(validate(&c).is_ok());
     }
 
     #[test]

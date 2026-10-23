@@ -1466,6 +1466,76 @@ can_review = true
     assert_eq!(sel_fallback, "ni");
 }
 
+/// SLP: a project Lead spawns at most `[roles.lead] max_peers` (default 4) Peers;
+/// the CoS keeps the global `[limits] max_workers_per_orchestrator`. Every spawn
+/// path checks the same gate, so a refusal names the cap that fired.
+#[test]
+fn test_lead_peer_cap_holds_while_cos_keeps_the_global_cap() {
+    use quaqua::cap::{check_owner_cap, owner_cap};
+
+    let toml_str = r#"
+schema_version = 2
+[limits]
+max_workers_per_orchestrator = 8
+weights = { pipeline = 2, "dual-lens" = 2 }
+"#;
+    // An older team.toml with no [roles] and no max_peers still caps a Lead at 4.
+    let cfg: quaqua::config::Config = toml::from_str(toml_str).unwrap();
+    assert_eq!(owner_cap(&cfg, "arch-lead"), 4);
+    assert_eq!(owner_cap(&cfg, "cos"), 8);
+
+    // 4 Peers is the limit: the 4th spawn fits, the 5th is refused, naming the cap.
+    assert!(check_owner_cap(&cfg, "arch-lead", 3, 1, "this spawn").is_ok());
+    let err = check_owner_cap(&cfg, "arch-lead", 4, 1, "this spawn").unwrap_err();
+    assert!(err.contains("worker cap exceeded"), "{err}");
+    assert!(err.contains("owner 'arch-lead'"), "{err}");
+    assert!(err.contains("roles.lead.max_peers is 4"), "{err}");
+
+    // A pipeline weighs 2 slots, so a Lead with 3 Peers cannot start one.
+    assert!(check_owner_cap(&cfg, "arch-lead", 2, 2, "the pipeline").is_ok());
+    assert!(check_owner_cap(&cfg, "arch-lead", 3, 2, "the pipeline").is_err());
+
+    // The CoS is untouched by the Lead cap: 8 slots, the 9th is refused.
+    assert!(check_owner_cap(&cfg, "cos", 7, 1, "this spawn").is_ok());
+    let err = check_owner_cap(&cfg, "cos", 8, 1, "this spawn").unwrap_err();
+    assert!(err.contains("limits.max_workers_per_orchestrator is 8"), "{err}");
+
+    // A project override only tightens: it lowers the Lead cap with the global one.
+    let tight: quaqua::config::Config = toml::from_str(
+        r#"
+schema_version = 2
+[limits]
+max_workers_per_orchestrator = 8
+[roles.lead]
+max_peers = 4
+[projects.zimage]
+max_workers_per_orchestrator = 3
+"#,
+    )
+    .unwrap();
+    let resolved = quaqua::config::resolve(tight, Some("zimage")).unwrap();
+    assert_eq!(owner_cap(&resolved, "arch-lead"), 3);
+    assert_eq!(owner_cap(&resolved, "cos"), 3);
+}
+
+#[test]
+fn test_lead_max_peers_overrides_the_default() {
+    use quaqua::cap::{check_owner_cap, owner_cap};
+
+    let toml_str = r#"
+schema_version = 2
+[limits]
+max_workers_per_orchestrator = 8
+[roles.lead]
+max_peers = 2
+"#;
+    let cfg: quaqua::config::Config = toml::from_str(toml_str).unwrap();
+    assert_eq!(owner_cap(&cfg, "baro-lead"), 2);
+    assert!(check_owner_cap(&cfg, "baro-lead", 1, 1, "this spawn").is_ok());
+    let err = check_owner_cap(&cfg, "baro-lead", 2, 1, "this spawn").unwrap_err();
+    assert!(err.contains("roles.lead.max_peers is 2"), "{err}");
+}
+
 #[test]
 fn test_pipeline_project_override_cap() {
     let toml_str = r#"

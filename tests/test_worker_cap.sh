@@ -6,7 +6,8 @@
 #    - an active pipeline + 6 standalone workers reaches cap (7th standalone refused).
 #    - an owner with 7 standalone workers cannot start a pipeline (exceeds cap of 8).
 # 4. Project Leads (<slug>-lead) do not count toward the worker cap.
-# 5. Rename leaves no dangling refs (legacy role).
+# 5. A Lead's own Peers cap at `[roles.lead] max_peers` (4); the CoS keeps the global cap.
+# 6. Rename leaves no dangling refs (legacy role).
 # Usage: tests/test_worker_cap.sh   (exit 0 = pass)
 set -euo pipefail
 
@@ -215,7 +216,29 @@ HOME="$T/home" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PA
 [[ $prc -eq 2 ]] || fail "pipeline cap refusal: exit $prc, want 2: $(cat "$T/err")"
 grep -q 'worker cap exceeded' "$T/err" || fail "pipeline cap refusal: missing error message: $(cat "$T/err")"
 echo "ok: pipeline counts as 2 -> owner with 7 workers cannot start pipeline (needs 2, cap is 8)"
-# ── 6. Dangling legacy references check ──────────────────────────────────────
+# ── 6. Lead Peer cap: <slug>-lead caps at 4 (team.toml [roles.lead] max_peers) ─
+cat > "$T/agents.json" <<'JSON'
+{"result":{"agents":[
+  {"name":"sude-p1","agent_status":"idle","pane_id":"p1"},
+  {"name":"sude-p2","agent_status":"idle","pane_id":"p2"},
+  {"name":"sude-p3","agent_status":"idle","pane_id":"p3"},
+  {"name":"sude-p4","agent_status":"idle","pane_id":"p4"}
+]}}
+JSON
+for i in 1 2 3 4; do
+  echo "baro-lead" > "$T/home/quaqua/runs/sude-p$i.owner"
+done
+spawn sude-p5 sude QUAQUA_OWNER=baro-lead
+[[ $rc -eq 1 ]] || fail "lead peer cap: exit $rc, want 1: $(cat "$T/err")"
+grep -q 'worker cap exceeded' "$T/err" || fail "lead peer cap: missing error message: $(cat "$T/err")"
+grep -q "owner 'baro-lead'" "$T/err" || fail "lead peer cap: owner not cited: $(cat "$T/err")"
+grep -q 'roles.lead.max_peers is 4' "$T/err" || fail "lead peer cap: cap not cited: $(cat "$T/err")"
+echo "ok: Lead Peer cap -> 5th Peer refused for owner baro-lead (max_peers is 4)"
+# the Lead's cap does not leak into the CoS
+spawn sude-cosfree sude QUAQUA_OWNER=cos
+[[ $rc -eq 0 ]] || fail "lead cap isolation: exit $rc, want 0: $(cat "$T/err")"
+echo "ok: Lead Peer cap -> CoS keeps the global cap (spawn allowed)"
+# ── 7. Dangling legacy references check ──────────────────────────────────────
 # No file in the repo (except AGENTS.md which CoS owns and git history) should mention the old name.
 # memory/ is tracked in this repo (upstream gitignores it): dated logs record the
 # old name as history — excluding them is intentional, not a gap in the check.

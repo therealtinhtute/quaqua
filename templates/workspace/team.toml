@@ -27,6 +27,7 @@ can_prompt = ["lead", "peer"]
 can_spawn  = ["peer", "taskforce"]
 can_prompt = ["peer"]
 reports_to = "cos"
+max_peers = 4                     # SLP (AGENTS.md `## Roles`): a Lead spawns ≤4 Peers; the CoS keeps [limits]
 [roles.peer]
 can_spawn  = []
 can_prompt = []
@@ -36,7 +37,7 @@ reports_to = "owner"
 default_kind = "tieude"                   # anh iu, 2026-10-15
 lead_kind = "ni"                        # anh iu: Lead runs on claude · opus-5.5 · low
 default_reviewer = ["suhuynh"]           # first available wins (anh iu, 2026-10-16)
-builder_reviewer_differ = "kind"
+builder_reviewer_differ = "harness"      # SLP: sude (omp) builds → suhuynh (pi) reviews; validate checks the default pair
 
 [purposes]
 build = "sude"
