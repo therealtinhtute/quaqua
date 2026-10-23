@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # tests/test_herdr_grid_rust.sh — verification for quaqua grid {plan,reconcile,hook}.
 # Tests differential equality between `quaqua grid plan` and `plan.jq` across all
-# fixtures in tests/fixtures/herdr-grid/*.json (including the 9 edge cases),
+# fixtures in tests/fixtures/herdr-quaqua/*.json (including the 9 edge cases),
 # plus --only + custom --tab scoping (dec5a30 bugfix) and 2-worker landing in GRID_TAB.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/.." && pwd)"
-fixdir="$repo_root/tests/fixtures/herdr-grid"
+fixdir="$repo_root/tests/fixtures/herdr-quaqua"
 plan_jq="$repo_root/plugins/herdr-quaqua/plan.jq"
 
 fail() {
@@ -15,7 +15,7 @@ fail() {
   exit 1
 }
 
-T=$(mktemp -d "${TMPDIR:-/tmp}/test-herdr-grid.XXXXXX")
+T=$(mktemp -d "${TMPDIR:-/tmp}/test-herdr-quaqua.XXXXXX")
 T=$(cd "$T" && pwd -P)
 trap 'rm -rf "$T"' EXIT
 

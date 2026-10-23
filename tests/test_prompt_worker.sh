@@ -333,7 +333,7 @@ echo "ok: --resume re-validates the report (still 6, then accepted after the rew
 # ── pre-prompt grid check: failing grid check blocks prompt ─────────────────
 prompt tieude-1 "Goal: fail grid
 Hard constraints: none
-Current design: fail" HERDR_STUB_SNAPSHOT="$(dirname "$here")/tests/fixtures/herdr-grid/1-worker.json" GRID_CHECK_TIMEOUT_SEC=0 QUAQUA_OWNER=cos
+Current design: fail" HERDR_STUB_SNAPSHOT="$(dirname "$here")/tests/fixtures/herdr-quaqua/1-worker.json" GRID_CHECK_TIMEOUT_SEC=0 QUAQUA_OWNER=cos
 [[ $rc -eq 1 ]] || fail "failing grid check: exit $rc, want 1"
 grep -q 'grid check failed' "$T/err" || fail "failing grid check: no error message on stderr: $(cat "$T/err")"
 ! grep -q 'agent prompt' "$T/calls" || fail "failing grid check: worker prompted despite failure: $(cat "$T/calls")"
