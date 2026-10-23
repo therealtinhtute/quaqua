@@ -1,7 +1,7 @@
 # pstack integration — PR specs
 
-Source: review session 2026-10-21 (pstack @ 190d287, plugin 0.15.29, vs quaqua main d24be71). Revised 2026-10-21 against main 309f698 (H1 + H2 merged; H3a + H4 in flight). v3 adds the router, figure-it-out, session lifecycle, and the orchestrate rules found on a second read. v3.1 (2026-10-21, main dd01e68, H3a + H4 merged): P1 split into P1a/P1b, coordinator-never-edits-code rule, merge warns without a verdict at head, fixed Verify lines, and an evidence audit (§ Audit). v3.2 (2026-10-22): non-Claude second pass on § Audit (`runs/suhuynh-pstackfit.md`), counts redone with recorded filters, exit 6 starts as a warning, 24 principles as cited leaves, 18 playbooks in P2a–d, the SLP team mapping, P3 first. v3.3 (2026-10-22, main dd01e68): applies the v3.2 review (`~/quaqua/docs/plans/pstack-integration-review.md`, workspace-private): an MVP of steps S0–S8, success metrics measured before building, idempotency rules, deterministic Phase 2 triggers; the full port starts right after S6.
-Status: **in progress** (2026-10-22) · S1–S7 + P2 (18 playbooks, 24 principles, `/poteto-mode`) built on `quaqua/pstack-integ` (#101, not merged); S8 pilot running (2 units merged); P5 `watch`/drain still deferred to its trigger. [F] = verified in repo/CLI or the pstack source, [A] = assumption the step must confirm first.
+Source: review session 2026-10-21 (pstack @ 190d287, plugin 0.15.29, vs quaqua main d24be71). Revised 2026-10-21 against main 309f698 (H1 + H2 merged; H3a + H4 in flight). v3 adds the router, figure-it-out, session lifecycle, and the orchestrate rules found on a second read. v3.1 (2026-10-21, main dd01e68, H3a + H4 merged): P1 split into P1a/P1b, coordinator-never-edits-code rule, merge warns without a verdict at head, fixed Verify lines, and an evidence audit (§ Audit). v3.2 (2026-10-22): non-Claude second pass on § Audit (`runs/suhuynh-pstackfit.md`), counts redone with recorded filters, exit 6 starts as a warning, 24 principles as cited leaves, 18 playbooks in P2a–d, the SLP team mapping, P3 first. v3.3 (2026-10-22, main dd01e68): applies the v3.2 review (`~/quaqua/docs/plans/pstack-integration-review.md`, workspace-private): an MVP of steps S0–S8, success metrics measured before building, idempotency rules, deterministic Phase 2 triggers; the full port starts right after S6. v3.4 (2026-10-23): pilot slimmed to ≥5 units/lane (anh iu).
+Status: **in progress** (2026-10-23) · S1–S7 + P2 (18 playbooks, 24 principles, `/poteto-mode`) merged on main (#101 merged); S8 pilot running; P5 `watch`/drain still deferred to its trigger. [F] = verified in repo/CLI or the pstack source, [A] = assumption the step must confirm first.
 
 Scope: only ideas ported from [pstack](https://github.com/cursor/plugins/tree/main/pstack): its skills, principles and playbooks. Nothing from other skill sets. Non-pstack work (drift, read-only reviewers, pi, `harness/`, Codex) lives in `harness-hygiene.md` + `pi-harness.md`.
 
@@ -172,7 +172,7 @@ Verify: `cargo test --locked -p quaqua --test init`
 
 ## Pilot (S8)
 
-- One pi worker (`opencode-go/deepseek-v4.1-flash`) and one claude worker, **≥10 real units each**, warn mode, on the S6 playbooks (P2 playbooks may land meanwhile; metrics are per playbook).
+- One pi worker (`opencode-go/deepseek-v4.1-flash`) and one claude worker, **≥5 real units each**, warn mode, on the S6 playbooks (P2 playbooks may land meanwhile; metrics are per playbook).
 - Count per report: `## Playbook` present, `playbook_gap` events, gaps that hid real unfinished work (G3), verdicts recorded, merges without a verdict (G1), exit-6 resumes (G2).
 - Output: § Phase 2 table filled with the real numbers, plus G1–G3 against the S0 baseline.
 
@@ -203,7 +203,7 @@ Each item is built only when its count from `quaqua status --metrics` (S7), the 
 
 | Item | Trigger | Source |
 |---|---|---|
-| exit 6 for a missing `## Playbook` | ≥10 reports per kind (claude, pi), section present ≥9/10 on each, G2 not above baseline | metrics + pilot log |
+| exit 6 for a missing `## Playbook` | ≥5 reports per kind (claude, pi), section present 5/5 on each, G2 not above baseline | metrics + pilot log |
 | Required Scope / Acceptance / Verify headers | ≥2 units failed or respawned in 30 days with root cause = that missing header (coordinator-labelled) | memory + journal |
 | `quaqua watch` + drain (v3.2 P5) | ≥1 WAITER-LOST / missed completion after the MVP lands, or a run with >4 concurrent workers | status |
 | Edit/Write deny hook for coordinators | 1 more coordinator-edit incident after the AGENTS rule lands | memory |

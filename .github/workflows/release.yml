@@ -29,14 +29,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Pinned, not -latest: the binary links the runner's glibc, so the
+          # build image sets the oldest glibc the linux archive runs on.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
             os: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      # A tag that disagrees with the crate ships a binary whose --version
+      # lies (v2.2.1 printed 0.1.0). Read the [package] version straight from
+      # the manifest, before any toolchain install, and stop on a mismatch.
+      - name: Tag matches crate version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/quaqua/Cargo.toml | head -n 1)"
+          if [ -z "$crate" ] || [ "$tag" != "$crate" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match crates/quaqua version '${crate}'" >&2
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches crate version ${crate}"
 
       # Pinned by SHA to the stable ref that carries toolchain 1.99.0 — the
       # toolchain the workspace is developed and tested against; there is no
