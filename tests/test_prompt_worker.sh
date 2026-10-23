@@ -124,7 +124,8 @@ malformed() {
   echo "ok: $label -> exit 6, WATCHDOG malformed-report, no path on stdout"
 }
 
-brief='Goal: do the thing
+brief='Topology: solo — one engine task
+Goal: do the thing
 Hard constraints: keep tests passing
 Current design (open to challenge): via the existing helper'
 
@@ -182,6 +183,13 @@ check_brief "fix the flaky test"
 [[ $rc -eq 1 ]] || fail "check-brief invalid: exit $rc, want 1"
 grep -q 'Goal.*Hard constraints.*Current design' "$T/err" \
   || fail "check-brief invalid: no brief error: $(cat "$T/err")"
+# The topology the coordinator chose is part of the contract (Lead gate).
+check_brief 'Goal: do the thing
+Hard constraints: keep tests passing
+Current design (open to challenge): via the existing helper'
+[[ $rc -eq 1 ]] || fail "check-brief no topology: exit $rc, want 1: $(cat "$T/err")"
+grep -q 'Topology: solo|lead' "$T/err" \
+  || fail "check-brief no topology: no Topology error: $(cat "$T/err")"
 rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
   "${QUAQUA_BIN:-quaqua}" worker prompt --check-brief >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "check-brief no arg: exit $rc, want 1"
@@ -333,7 +341,7 @@ echo "ok: --resume re-validates the report (still 6, then accepted after the rew
 # ── pre-prompt grid check: failing grid check blocks prompt ─────────────────
 prompt tieude-1 "Goal: fail grid
 Hard constraints: none
-Current design: fail" HERDR_STUB_SNAPSHOT="$(dirname "$here")/tests/fixtures/herdr-grid/1-worker.json" GRID_CHECK_TIMEOUT_SEC=0 QUAQUA_OWNER=cos
+Current design: fail" HERDR_STUB_SNAPSHOT="$(dirname "$here")/tests/fixtures/herdr-quaqua/1-worker.json" GRID_CHECK_TIMEOUT_SEC=0 QUAQUA_OWNER=cos
 [[ $rc -eq 1 ]] || fail "failing grid check: exit $rc, want 1"
 grep -q 'grid check failed' "$T/err" || fail "failing grid check: no error message on stderr: $(cat "$T/err")"
 ! grep -q 'agent prompt' "$T/calls" || fail "failing grid check: worker prompted despite failure: $(cat "$T/calls")"

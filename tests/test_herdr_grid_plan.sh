@@ -40,7 +40,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 plan_jq="$(cd "$here/.." && pwd)/plugins/herdr-quaqua/plan.jq"
-fixdir="$here/fixtures/herdr-grid"
+fixdir="$here/fixtures/herdr-quaqua"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 

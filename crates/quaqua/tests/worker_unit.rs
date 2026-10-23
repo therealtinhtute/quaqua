@@ -2123,6 +2123,7 @@ impl Drop for EnvLockGuard {
         std::env::remove_var("GRID_SKIP");
         std::env::remove_var("QUAQUA_TEST");
         std::env::remove_var("QUAQUA_TEAM_TOML");
+        std::env::remove_var("QUAQUA_HOME");
         ENV_BUSY.store(false, std::sync::atomic::Ordering::Release);
     }
 }
@@ -4123,5 +4124,336 @@ fn test_no_dangling_legacy_role_reference() {
     assert!(
         offenders.is_empty(),
         "files still name the retired role '{legacy}': {offenders:#?}"
+    );
+}
+
+// ─── Lead-required gate (AGENTS.md '## Roles (SLP)') ────────────────────────
+//
+// A `cos`-owned project with >= 2 topology signals refuses the spawn; one
+// signal only warns. `--solo "<reason>"` bypasses the block and records why.
+
+use quaqua::worker::leadgate::{self, GateInput, Signal};
+
+/// A temp workspace with one `cos` project (`q` → `<root>/repo`), a plan with
+/// `phases_left: 3`, and an empty runs dir.
+struct GateFixture {
+    root: PathBuf,
+    repo: PathBuf,
+    runs: PathBuf,
+}
+
+impl GateFixture {
+    fn new(tag: &str, owner: &str) -> Self {
+        let root =
+            std::env::temp_dir().join(format!("quaqua-leadgate-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["projects", "docs/plans/active", "memory", "runs", "repo"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let repo = root.join("repo");
+        std::fs::write(
+            root.join("projects/INDEX.md"),
+            format!(
+                "# Projects\n\n| slug | repo | owner | status | one-line goal |\n|---|---|---|---|---|\n| q | {} | {owner} | active | engine gate |\n",
+                repo.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join("projects/q.md"), "# q\n\nrepo: see INDEX\n").unwrap();
+        std::fs::write(
+            root.join("docs/plans/active/q.md"),
+            "---\nstatus: active\nphases_left: 3\n---\n# q plan\n",
+        )
+        .unwrap();
+        GateFixture {
+            repo: root.join("repo"),
+            runs: root.join("runs"),
+            root,
+        }
+    }
+
+    fn repo(&self) -> PathBuf {
+        self.repo.clone()
+    }
+
+    fn runs(&self) -> PathBuf {
+        self.runs.clone()
+    }
+
+    /// Two live build workers on the repo, attributed by `runs/<name>.repo`.
+    fn with_two_live_builders(&self) -> MockActivitiesHerdr {
+        for name in ["sude-live1", "tieude-live2"] {
+            std::fs::write(
+                self.runs().join(format!("{name}.repo")),
+                format!("{}\n", self.repo.display()),
+            )
+            .unwrap();
+        }
+        let agents = r#"{"result":{"agents":[{"name":"sude-live1","agent_status":"working"},{"name":"tieude-live2","agent_status":"working"}]}}"#.to_string();
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.agent_list",
+            ActivityResult::Herdr(HerdrResult::AgentOutput { content: agents }),
+        );
+        mock.register(
+            "herdr.pane_split",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+            }),
+        );
+        mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+            name: String::new(),
+        }));
+        MockActivitiesHerdr::new(mock)
+    }
+
+    /// An idle herdr: no live agents, a pane split that works.
+    fn idle_herdr(&self) -> MockActivitiesHerdr {
+        let mut mock = MockActivities::new();
+        mock.register(
+            "herdr.agent_list",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: r#"{"result":{"agents":[]}}"#.to_string(),
+            }),
+        );
+        mock.register(
+            "herdr.pane_split",
+            ActivityResult::Herdr(HerdrResult::AgentOutput {
+                content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+            }),
+        );
+        mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+            name: String::new(),
+        }));
+        MockActivitiesHerdr::new(mock)
+    }
+
+    /// Spawn `sude-gate` on the fixture repo through the real spawn path.
+    fn spawn(&self, herdr: &MockActivitiesHerdr, extra: &[&str]) -> Result<(), (i32, String)> {
+        let mut args: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        args.push("sude-gate".to_string());
+        args.push("sude".to_string());
+        args.push(self.repo().to_string_lossy().to_string());
+        let opts = parse_spawn_args(&args).unwrap();
+        quaqua::worker::spawn::spawn_worker(opts, &gate_cfg(), &SpawnTestGit, herdr)
+    }
+
+    fn today(&self) -> String {
+        leadgate::today_local()
+    }
+}
+
+impl Drop for GateFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn gate_cfg() -> config::Config {
+    let mut cfg = config::embedded_team_config().expect("embedded team.toml");
+    cfg.limits.weights.insert("pipeline".to_string(), 2);
+    cfg
+}
+
+/// The gate's view of a fixture spawn (all borrows live for the call).
+fn gate_input<'a>(
+    fx: &'a GateFixture,
+    repo: &'a Path,
+    name: &'a str,
+    solo: Option<&'a str>,
+) -> GateInput<'a> {
+    GateInput {
+        root: &fx.root,
+        runs_dir: &fx.runs,
+        repo,
+        name,
+        brief: None,
+        solo,
+        pipeline: None,
+    }
+}
+
+#[test]
+fn lead_gate_blocks_third_worker_on_a_multi_phase_cos_project() {
+    let _env_lock = lock_env();
+    let fx = GateFixture::new("block", "cos");
+    let herdr = fx.with_two_live_builders();
+    let repo = fx.repo();
+
+    let facts = leadgate::gather_facts(
+        &gate_input(&fx, &repo, "sude-gate", None),
+        &gate_cfg(),
+        &herdr,
+    )
+    .expect("repo maps to a cos-owned project");
+    assert_eq!(facts.slug, "q");
+    assert!(
+        facts
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::LiveBuildWorkers(3))),
+        "3rd live build worker must be a signal: {:?}",
+        facts.signals
+    );
+    assert!(
+        facts
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::PhasesLeft { left: 3, .. })),
+        "phases_left 3 must be a signal: {:?}",
+        facts.signals
+    );
+
+    let err = leadgate::check_spawn(
+        gate_input(&fx, &repo, "sude-gate", None),
+        &gate_cfg(),
+        &herdr,
+    )
+    .expect_err("two signals must block the spawn");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("needs a Lead"), "{}", err.1);
+    assert!(err.1.contains("quaqua lead spawn q"), "{}", err.1);
+    assert!(err.1.contains("phases_left 3"), "{}", err.1);
+    assert!(err.1.contains("live build worker slots"), "{}", err.1);
+}
+
+#[test]
+fn lead_gate_solo_override_lets_the_spawn_through_and_records_it() {
+    let _env_lock = lock_env();
+    let fx = GateFixture::new("solo", "cos");
+    std::env::set_var("QUAQUA_RUNS_DIR", fx.runs());
+    std::env::set_var("QUAQUA_HOME", &fx.root);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    let herdr = fx.with_two_live_builders();
+
+    let res = fx.spawn(&herdr, &["--solo", "one engine file, no Lead"]);
+    assert!(
+        res.is_ok(),
+        "solo must let the spawn through: {:?}",
+        res.err()
+    );
+    assert!(
+        herdr.agent_starts().iter().any(|(n, _)| n == "sude-gate"),
+        "the worker must actually start"
+    );
+
+    let memory = std::fs::read_to_string(fx.root.join("memory").join(format!("{}.md", fx.today())))
+        .expect("solo override must be recorded in today's memory file");
+    assert!(
+        memory.contains("- [q] solo override: one engine file, no Lead"),
+        "{memory}"
+    );
+}
+
+#[test]
+fn check_brief_requires_a_topology_header() {
+    use quaqua::worker::prompt::do_check_brief;
+
+    let _env_lock = lock_env();
+    let with =
+        "Topology: solo — one engine task\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    assert!(
+        do_check_brief(with).is_ok(),
+        "a declared topology must pass"
+    );
+
+    let without = "Goal: g\nHard constraints: none\nCurrent design: d\n";
+    let err = do_check_brief(without).expect_err("a brief without Topology is refused");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("Topology: solo|lead"), "{}", err.1);
+}
+
+#[test]
+fn lead_gate_refuses_a_short_solo_reason() {
+    let err = match parse_spawn_args(&[
+        "--solo".to_string(),
+        "short".to_string(),
+        "sude-gate".to_string(),
+        "sude".to_string(),
+        "/repo".to_string(),
+    ]) {
+        Ok(_) => panic!("a reason under 10 chars must be refused"),
+        Err(e) => e,
+    };
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("at least 10 characters"), "{}", err.1);
+}
+
+#[test]
+fn lead_gate_is_silent_for_a_lead_owned_project() {
+    let _env_lock = lock_env();
+    let fx = GateFixture::new("leadown", "q-lead");
+    let herdr = fx.with_two_live_builders();
+    let repo = fx.repo();
+    assert!(
+        leadgate::gather_facts(
+            &gate_input(&fx, &repo, "sude-gate", None),
+            &gate_cfg(),
+            &herdr
+        )
+        .is_none(),
+        "a project already owned by its Lead must not be gated"
+    );
+    assert!(leadgate::check_spawn(
+        gate_input(&fx, &repo, "sude-gate", None),
+        &gate_cfg(),
+        &herdr
+    )
+    .is_ok());
+}
+
+#[test]
+fn lead_gate_is_silent_for_a_repo_missing_from_the_index() {
+    let _env_lock = lock_env();
+    let fx = GateFixture::new("noindex", "cos");
+    let herdr = fx.with_two_live_builders();
+    let elsewhere =
+        std::env::temp_dir().join(format!("quaqua-leadgate-elsewhere-{}", std::process::id()));
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    assert!(
+        leadgate::gather_facts(
+            &gate_input(&fx, &elsewhere, "sude-gate", None),
+            &gate_cfg(),
+            &herdr
+        )
+        .is_none(),
+        "a repo with no INDEX row must not be gated"
+    );
+    assert!(leadgate::check_spawn(
+        gate_input(&fx, &elsewhere, "sude-gate", None),
+        &gate_cfg(),
+        &herdr
+    )
+    .is_ok());
+    let _ = std::fs::remove_dir_all(&elsewhere);
+}
+
+#[test]
+fn lead_gate_warns_on_a_single_signal_and_spawns() {
+    let _env_lock = lock_env();
+    let fx = GateFixture::new("warn", "cos");
+    let herdr = fx.idle_herdr();
+    let repo = fx.repo();
+
+    let facts = leadgate::gather_facts(
+        &gate_input(&fx, &repo, "sude-gate", None),
+        &gate_cfg(),
+        &herdr,
+    )
+    .expect("repo maps to a cos-owned project");
+    assert_eq!(facts.signals.len(), 1, "{:?}", facts.signals);
+    assert_eq!(
+        leadgate::verdict(facts.signals.clone()),
+        leadgate::Verdict::Warn(facts.signals)
+    );
+    assert!(
+        leadgate::check_spawn(
+            gate_input(&fx, &repo, "sude-gate", None),
+            &gate_cfg(),
+            &herdr
+        )
+        .is_ok(),
+        "one signal only warns"
     );
 }
