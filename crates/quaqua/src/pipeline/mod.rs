@@ -4088,6 +4088,29 @@ mod tests {
     }
     static PIPELINE_DRIVER_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Serialises the driver tests below. A panicking test must not wedge every
+    /// later acquisition in the same process, so poisoning is ignored (same rule
+    /// as [`crate::test_env::lock_env`]).
+    fn pipeline_driver_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        PIPELINE_DRIVER_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A test that panics while holding [`PIPELINE_DRIVER_TEST_MUTEX`] must not
+    /// cascade: acquiring the lock again in the same process still succeeds.
+    #[test]
+    fn test_pipeline_driver_lock_recovers_from_a_panicking_holder() {
+        let panicked = std::thread::spawn(|| {
+            let _lock = pipeline_driver_test_lock();
+            panic!("deliberate panic while holding PIPELINE_DRIVER_TEST_MUTEX");
+        })
+        .join();
+        assert!(panicked.is_err(), "holder thread should have panicked");
+
+        let _lock = pipeline_driver_test_lock();
+    }
+
     /// Driver tests drive spawn/git through process-global env (HOME, PATH,
     /// QUAQUA_*, HERDR_*) that engine:: tests mutate under their own lock.
     /// The parent re-runs `name` alone in a child test process built from the
@@ -4393,7 +4416,7 @@ esac
             return;
         }
         let _env_lock = crate::test_env::lock_env();
-        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let _lock = pipeline_driver_test_lock();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("f2-bad");
 
@@ -4559,7 +4582,7 @@ esac
             return;
         }
         let _env_lock = crate::test_env::lock_env();
-        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let _lock = pipeline_driver_test_lock();
         let task = "h4-ro";
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace(task);
@@ -4761,7 +4784,7 @@ esac
             return;
         }
         let _env_lock = crate::test_env::lock_env();
-        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let _lock = pipeline_driver_test_lock();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("f5-e2e");
 
@@ -4844,7 +4867,7 @@ esac
             return;
         }
         let _env_lock = crate::test_env::lock_env();
-        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let _lock = pipeline_driver_test_lock();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("s1b-rev");
 
@@ -4953,7 +4976,7 @@ esac
             return;
         }
         let _env_lock = crate::test_env::lock_env();
-        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let _lock = pipeline_driver_test_lock();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("s1b-bld");
 
@@ -5044,7 +5067,7 @@ esac
             return;
         }
         let _env_lock = crate::test_env::lock_env();
-        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let _lock = pipeline_driver_test_lock();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("s1b-lock");
 
@@ -5128,7 +5151,7 @@ esac
             return;
         }
         let _env_lock = crate::test_env::lock_env();
-        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let _lock = pipeline_driver_test_lock();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("s1b-dup");
 
@@ -6143,7 +6166,7 @@ esac
             return;
         }
         let _env_lock = crate::test_env::lock_env();
-        let _lock = PIPELINE_DRIVER_TEST_MUTEX.lock().unwrap();
+        let _lock = pipeline_driver_test_lock();
         let (base_dir, repo_dir, runs_dir, stub_bin, team_file) =
             setup_test_pipeline_workspace("d7-wd");
 
