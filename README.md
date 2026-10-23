@@ -159,8 +159,8 @@ RUN_SLOW_TESTS=1 tests/run.sh   # also run the 2 slow suites (or: tests/run.sh -
 `tests/run.sh` skips the two slow suites (`test_prompt_worker.sh`, `test_pipeline.sh`)
 unless the change touches a script they cover, and prints which it skipped and why.
 
-Tests run locally only — there is no test CI. The one workflow,
-`.github/workflows/release.yml`, runs on a `v*` tag and only builds and
+CI: `.github/workflows/test.yml` runs `cargo test --locked` and actionlint on every PR
+and push to `main`; `.github/workflows/release.yml` runs on a `v*` tag and builds and
 publishes the release.
 
 Run CoS (Quả Quả) from `~/quaqua` inside Herdr (`HERDR_ENV=1`); it spawns project Leads with
