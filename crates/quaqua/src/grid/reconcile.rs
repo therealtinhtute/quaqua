@@ -131,6 +131,11 @@ pub fn filter_ops_for_check<'a>(
             // `is_group_tab` made the check vacuous whenever GRID_TAB differed
             // from the group token (group `quaqua`, tab `quaqua-rs-workers`):
             // every op was dropped, so `--check` returned Ok on any layout.
+            //
+            // The chunk filter must bound both chunks, not only the overflow:
+            // with `--tab quaqua-workers` every pane of the group passes
+            // `accepts_workers_tab`, so an unfiltered chunk-1 op moved panes in
+            // `quaqua-workers-2` while the caller checked `quaqua-workers`.
             if let Some(tab) = tab_filter {
                 if !tab.is_empty() {
                     if !accepts_workers_tab(pgroup, pgtab, Some(tab)) {
@@ -139,6 +144,10 @@ pub fn filter_ops_for_check<'a>(
                     let base = pgtab.unwrap_or(pgroup);
                     let is_chunk_1_filter = tab == super::plan::chunk_tab_label(base, 1)
                         || tab == format!("{pgroup}-workers-2");
+                    let chunk_1_labels = [
+                        super::plan::chunk_tab_label(base, 1),
+                        format!("{pgroup}-workers-2"),
+                    ];
                     if is_chunk_1_filter {
                         let op_matches = match &op.target {
                             Target::NewTab { label } => label == tab,
@@ -157,6 +166,33 @@ pub fn filter_ops_for_check<'a>(
                         if !op_matches {
                             return false;
                         }
+                    } else {
+                        // Reciprocal of the chunk-1 filter: a check scoped to
+                        // the base tab must not apply an op that targets the
+                        // overflow tab. Without this, `--tab quaqua-workers`
+                        // accepted every pane of the group and moved panes in
+                        // `quaqua-workers-2` while checking `quaqua-workers`.
+                        let target_is_chunk_1 = match &op.target {
+                            Target::NewTab { label } => chunk_1_labels.iter().any(|l| l == label),
+                            Target::Split {
+                                tab: target_tab, ..
+                            } => {
+                                if target_tab == "@workers-2" || target_tab == "@workers" {
+                                    target_tab == "@workers-2"
+                                } else {
+                                    snapshot.tabs.iter().any(|t| {
+                                        t.tab_id == *target_tab
+                                            && t.label
+                                                .as_deref()
+                                                .map(|l| chunk_1_labels.iter().any(|c| c == l))
+                                                .unwrap_or(false)
+                                    })
+                                }
+                            }
+                        };
+                        if target_is_chunk_1 {
+                            return false;
+                        }
                     }
                 }
             }
@@ -164,6 +200,71 @@ pub fn filter_ops_for_check<'a>(
             true
         })
         .collect()
+}
+
+/// True when `op` re-places a pane into a workers tab whose current shape is
+/// wrong while another op into that same tab is deferred (its pane is
+/// `working`).
+///
+/// A rebuild re-places the panes of a full workers tab in cell order and is
+/// atomic: while a deferred pane still has to move, an idle pane's rebuild op
+/// cannot reach its cell, and applying it only repeats the same op on every
+/// poll (the live 4-pane vertical stack: pB idle, p9/pA working). Such an op
+/// must not fail the check; a later spawn/cleanup/prompt heals it once the
+/// deferred panes idle.
+fn blocked_by_deferred_rebuild(snap: &Snapshot, ops: &[Op], op: &Op) -> bool {
+    let Target::Split { tab, .. } = &op.target else {
+        return false;
+    };
+    // `@workers*` is resolved by apply_ops; leave those to the apply path.
+    if tab.starts_with('@') {
+        return false;
+    }
+    let layout = match snap.layouts.iter().find(|l| &l.tab_id == tab) {
+        Some(l) => l,
+        None => return false,
+    };
+    let occupants: Vec<&super::types::Pane> = snap
+        .panes
+        .iter()
+        .filter(|p| p.tab_id.as_deref() == Some(tab.as_str()))
+        .collect();
+    let m = occupants.len();
+    if m < 2 {
+        return false;
+    }
+    let area = layout.area.unwrap_or(super::types::Rect {
+        x: 0,
+        y: 0,
+        width: 200,
+        height: 50,
+    });
+    let rects: Vec<Option<super::types::Rect>> = occupants
+        .iter()
+        .map(|p| {
+            layout
+                .panes
+                .iter()
+                .find(|pl| pl.pane_id == p.pane_id)
+                .and_then(|pl| pl.rect)
+        })
+        .collect();
+    if !super::plan::layout_wrong(m, &area, &rects) {
+        return false;
+    }
+    let group = |pane_id: &str| {
+        snap.panes
+            .iter()
+            .find(|p| p.pane_id == pane_id)
+            .and_then(|p| p.tokens.as_ref())
+            .and_then(|t| t.grid_group.as_deref())
+    };
+    let op_group = group(&op.pane);
+    ops.iter().any(|other| {
+        other.deferred
+            && group(&other.pane) == op_group
+            && matches!(&other.target, Target::Split { tab: t, .. } if t == tab)
+    })
 }
 
 /// True for the tag that names a project team's Lead (`<slug>-lead`). Such an
@@ -259,7 +360,7 @@ pub fn grid_scope(
     GridScope { owner, workspace }
 }
 
-pub fn run_reconcile<D: HerdrDriver>(
+pub fn run_reconcile<D: HerdrDriver + 'static>(
     driver: &mut D,
     opts: &ReconcileOptions,
     default_tab: &str,
@@ -268,7 +369,15 @@ pub fn run_reconcile<D: HerdrDriver>(
     reconcile_core(driver, opts, default_tab, deferred_statuses).map(|_| ())
 }
 
-pub fn reconcile_core<D: HerdrDriver>(
+/// True only for the driver that applies to a running herdr daemon from this
+/// process (`CliHerdrDriver`). That driver races the plugin hook over the same
+/// tabs, so it takes the shared apply lock; an in-process driver (every test
+/// double) cannot race another process and must not touch the live state dir.
+fn driver_is_live<D: 'static>() -> bool {
+    std::any::TypeId::of::<D>() == std::any::TypeId::of::<CliHerdrDriver>()
+}
+
+pub fn reconcile_core<D: HerdrDriver + 'static>(
     driver: &mut D,
     opts: &ReconcileOptions,
     default_tab: &str,
@@ -287,6 +396,7 @@ pub fn reconcile_core<D: HerdrDriver>(
 
         let start_ts = now_sec();
         let poll = poll_interval();
+        let mut lock_noted = false;
 
         loop {
             // Finding 7: Retry snapshot failure until timeout
@@ -306,14 +416,32 @@ pub fn reconcile_core<D: HerdrDriver>(
 
             let scope = grid_scope(&snap, opts.owner.as_deref(), Some(tab));
             let ops = plan_with_deferred(&snap, deferred_statuses)?;
-            let rem_ops = filter_ops_for_check(
+            let rem_ops: Vec<Op> = filter_ops_for_check(
                 &ops,
                 &snap,
                 Some(&scope.owner),
                 opts.only.as_deref(),
                 Some(tab),
                 scope.workspace.as_deref(),
-            );
+            )
+            .into_iter()
+            .cloned()
+            .collect();
+            // The same scope without the `--only` name filter: a scoped
+            // worker's move can need a runnable prerequisite from an idle
+            // sibling in the same tab (pB lands only after pA moves right of
+            // p9). Applying those stays inside owner/tab/workspace scope.
+            let scoped_ops: Vec<Op> = filter_ops_for_check(
+                &ops,
+                &snap,
+                Some(&scope.owner),
+                None,
+                Some(tab),
+                scope.workspace.as_deref(),
+            )
+            .into_iter()
+            .cloned()
+            .collect();
 
             if opts.dry_run {
                 let serialized = serde_json::to_string(&rem_ops).map_err(|e| e.to_string())?;
@@ -329,6 +457,26 @@ pub fn reconcile_core<D: HerdrDriver>(
                 return Ok(false);
             }
 
+            // A rebuild op whose shape needs a deferred (`working`) sibling
+            // cannot reach its cell: applying it just repeats the same op on
+            // every poll and times the check out while `worker prompt` waits.
+            // Report it deferred and converge; a later pass heals it once the
+            // sibling idles.
+            let runnable: Vec<Op> = scoped_ops
+                .iter()
+                .filter(|op| !blocked_by_deferred_rebuild(&snap, &ops, op))
+                .cloned()
+                .collect();
+            if runnable.is_empty() {
+                for op in scoped_ops
+                    .iter()
+                    .filter(|op| blocked_by_deferred_rebuild(&snap, &ops, op))
+                {
+                    eprintln!("deferred: {} (waiting for a working sibling)", op.pane);
+                }
+                return Ok(false);
+            }
+
             let elapsed = now_sec().saturating_sub(start_ts);
             if elapsed >= timeout_sec {
                 let serialized = serde_json::to_string(&rem_ops).unwrap_or_default();
@@ -337,11 +485,56 @@ pub fn reconcile_core<D: HerdrDriver>(
                 ));
             }
 
+            // Heal in place: a move deferred while its pane was `working` turns
+            // runnable when the pane idles during the poll loop, so the check
+            // applies the runnable ops with the same apply path the repair uses
+            // instead of only re-planning until the deadline. Deferred ops never
+            // reach `rem_ops` (a pane still `working` stays deferred), and
+            // `apply_ops` re-checks every pane against a fresh snapshot before
+            // moving it. An apply error is a pane that went busy between the
+            // plan and the move; the next poll re-plans it as deferred, while a
+            // persistent one leaves the ops pending for the timeout report.
+            //
+            // The live driver shares the tabs with the plugin hook. The hook
+            // holds the shared apply lock while it parks/splits; a poll that
+            // finds it held skips its apply and retries on the next poll (the
+            // deadline still bounds the wait) instead of blocking `worker
+            // prompt` on another process.
+            let apply_result = if driver_is_live::<D>() {
+                match super::lock::try_acquire() {
+                    Ok(Some(_guard)) => Some(apply_ops(driver, &runnable, Some(&snap))),
+                    Ok(None) => {
+                        if !lock_noted {
+                            eprintln!(
+                                "grid check: apply skipped, the hook holds the grid apply lock; retrying"
+                            );
+                            lock_noted = true;
+                        }
+                        None
+                    }
+                    Err(e) => {
+                        if !lock_noted {
+                            eprintln!("grid check: apply lock unavailable: {e}");
+                            lock_noted = true;
+                        }
+                        None
+                    }
+                }
+            } else {
+                Some(apply_ops(driver, &runnable, Some(&snap)))
+            };
+            if let Some(Err(e)) = apply_result {
+                eprintln!("grid check: apply skipped: {e}");
+            }
+
             sleep(poll);
         }
     }
 
-    // Repair / apply mode
+    // Repair / apply mode. The live driver shares the daemon with the plugin
+    // hook, whose live mode applies ops on every status event. Both park panes
+    // in a scratch tab before an in-tab split, so the apply itself takes the
+    // same lock the hook holds; a hook apply is short, the lock waits ~5s.
     let snap = driver.snapshot()?;
     let scope = grid_scope(&snap, opts.owner.as_deref(), Some(tab));
 
@@ -608,6 +801,16 @@ pub fn reconcile_core<D: HerdrDriver>(
                     _ => false,
                 };
 
+                // A rebuild keeps the base pane (cell 0) where it is and
+                // re-places the rest around it, so it must follow cell order.
+                // The idle-first pivot is only for choosing who creates a tab
+                // that does not exist yet.
+                let order = if shape_wrong {
+                    build_orders.clone()
+                } else {
+                    order
+                };
+
                 for (pos, idx) in order.iter().copied().enumerate() {
                     let w = chunk_gws[idx];
                     let is_movable = movable_workers.iter().any(|(p, _)| p.pane_id == w.pane_id);
@@ -629,6 +832,29 @@ pub fn reconcile_core<D: HerdrDriver>(
                         continue;
                     }
 
+                    if shape_wrong {
+                        // Cell order: the base stays, every other pane splits
+                        // onto its cell parent — even when that parent is
+                        // `working`, because every pane of the rebuild is
+                        // already in the tab. A deferred parent propagates to
+                        // its children in `propagate_deferrals` below.
+                        let (parent, dir) =
+                            super::plan::placement(pos).expect("pos >= 1 has a parent cell");
+                        repair_ops.push(Op {
+                            op: "move".to_string(),
+                            pane: w.pane_id.clone(),
+                            deferred: is_deferred(w.agent_status.as_deref()),
+                            target: Target::Split {
+                                tab: target_tab_ref.clone(),
+                                anchor: chunk_gws[order[parent]].pane_id.clone(),
+                                direction: dir.to_string(),
+                                ratio: 0.5,
+                            },
+                        });
+                        present.push(w.pane_id.clone());
+                        continue;
+                    }
+
                     let in_place = !shape_wrong
                         && valid_tab
                             .map(|vt| w.tab_id.as_deref() == Some(&vt.tab_id))
@@ -645,8 +871,8 @@ pub fn reconcile_core<D: HerdrDriver>(
                     let (mode, anchor_idx, dir, ratio) = if pos == 0 {
                         ("new-tab", 0, "right", 0.5)
                     } else {
-                        let (parent, dir) = super::plan::placement(pos)
-                            .expect("pos >= 1 has a parent cell");
+                        let (parent, dir) =
+                            super::plan::placement(pos).expect("pos >= 1 has a parent cell");
                         ("split", order[parent], dir, 0.5)
                     };
 
@@ -767,6 +993,11 @@ pub fn reconcile_core<D: HerdrDriver>(
     }
 
     let moves_applied = repair_ops.iter().any(|op| !op.deferred);
+    let _lock = if moves_applied && driver_is_live::<D>() {
+        Some(super::lock::acquire()?)
+    } else {
+        None
+    };
     let pane_map = apply_ops(driver, &repair_ops, Some(&snap))?;
 
     // A working pane is never moved; say so instead of exiting 0 silently.
@@ -1026,7 +1257,9 @@ mod tests {
         Activity, ActivityError, ActivityRequest, ActivityResult, CostRequest, GridRequest,
         GridResult,
     };
-    use crate::grid::types::{Agent, Op, Pane, Snapshot, Tab, Target, Tokens};
+    use crate::grid::types::{
+        Agent, Layout, Op, Pane, PaneLayout, Rect, Snapshot, Tab, Target, Tokens,
+    };
     use crate::grid::MoveResult;
 
     fn make_worker(id: &str, group: &str, tab_id: Option<&str>, status: Option<&str>) -> Pane {
@@ -1053,10 +1286,25 @@ mod tests {
         pub snapshot: Snapshot,
         pub move_calls: Vec<(String, Target)>,
         pub rename_calls: Vec<(String, String)>,
+        pub snapshot_calls: usize,
+        /// `(call number, pane ids)`: those panes turn idle on that snapshot
+        /// call, modelling a `working` agent that finishes during the check's
+        /// poll loop.
+        pub idle_on_snapshot: Option<(usize, Vec<String>)>,
     }
 
     impl HerdrDriver for MockHerdrDriver {
         fn snapshot(&mut self) -> Result<Snapshot, String> {
+            self.snapshot_calls += 1;
+            if let Some((n, panes)) = self.idle_on_snapshot.clone() {
+                if n == self.snapshot_calls {
+                    for p in &mut self.snapshot.panes {
+                        if panes.iter().any(|id| id == &p.pane_id) {
+                            p.agent_status = Some("idle".to_string());
+                        }
+                    }
+                }
+            }
             Ok(self.snapshot.clone())
         }
 
@@ -1093,6 +1341,10 @@ mod tests {
                     if let Some(p) = self.snapshot.panes.iter_mut().find(|p| p.pane_id == pane) {
                         p.tab_id = Some(resolved_tab.clone());
                     }
+                    // A real herdr layout is stale after a move; drop it so a
+                    // re-plan takes the unknown-shape path instead of rebuilding
+                    // the same cells forever.
+                    self.snapshot.layouts.retain(|l| l.tab_id != resolved_tab);
                     Ok(MoveResult {
                         pane_id: pane.to_string(),
                         tab_id: resolved_tab,
@@ -1300,31 +1552,751 @@ mod tests {
         );
     }
 
+    fn panes_in_tab(driver: &MockHerdrDriver, label: &str) -> Vec<String> {
+        let tab_id = match driver
+            .snapshot
+            .tabs
+            .iter()
+            .find(|t| t.label.as_deref() == Some(label))
+        {
+            Some(t) => t.tab_id.clone(),
+            None => return Vec::new(),
+        };
+        driver
+            .snapshot
+            .panes
+            .iter()
+            .filter(|p| p.tab_id.as_deref() == Some(tab_id.as_str()))
+            .map(|p| p.pane_id.clone())
+            .collect()
+    }
+
+    fn check_opts(tab: &str, timeout_sec: u64) -> ReconcileOptions {
+        ReconcileOptions {
+            check: true,
+            repair: false,
+            tab: Some(tab.to_string()),
+            only: None,
+            owner: Some("cos".to_string()),
+            dry_run: false,
+            timeout_sec: Some(timeout_sec),
+        }
+    }
+
+    #[test]
+    fn test_check_applies_deferred_move_once_its_pane_idles() {
+        // Four spawned panes are still stacked in the orchestrator tab; p2 was
+        // `working` when the spawn's repair ran, so its move was deferred. The
+        // check sees it working on its first snapshot and idle on the next one:
+        // it must apply the runnable ops and then the deferred moves instead of
+        // polling until the deadline.
+        let snapshot = Snapshot {
+            tabs: vec![Tab {
+                tab_id: "tab:cos".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                label: Some("1".to_string()),
+                pane_count: Some(4),
+            }],
+            panes: vec![
+                make_worker("w1:t1:p1", "grp", Some("tab:cos"), Some("idle")),
+                make_worker("w1:t1:p2", "grp", Some("tab:cos"), Some("working")),
+                make_worker("w1:t1:p3", "grp", Some("tab:cos"), Some("idle")),
+                make_worker("w1:t1:p4", "grp", Some("tab:cos"), Some("idle")),
+            ],
+            ..Default::default()
+        };
+        let mut driver = MockHerdrDriver {
+            snapshot,
+            idle_on_snapshot: Some((2, vec!["w1:t1:p2".to_string()])),
+            ..Default::default()
+        };
+
+        run_reconcile(
+            &mut driver,
+            &check_opts("grp-workers", 2),
+            "grp-workers",
+            None,
+        )
+        .expect("check must heal the deferred moves once the pane idles");
+
+        let moved: Vec<&str> = driver.move_calls.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            moved.contains(&"w1:t1:p2"),
+            "the pane that was working on the first snapshot must be moved once idle: {:?}",
+            driver.move_calls
+        );
+        assert!(
+            moved.contains(&"w1:t1:p3"),
+            "the split that depended on the deferred pane must follow it: {:?}",
+            driver.move_calls
+        );
+        let in_tab = panes_in_tab(&driver, "grp-workers");
+        assert_eq!(
+            in_tab.len(),
+            4,
+            "all four workers must land in the workers tab: {in_tab:?}"
+        );
+    }
+
+    #[test]
+    fn test_check_never_moves_a_still_working_pane() {
+        // The check heals the idle pane's move but must leave the `working` one
+        // (and any split anchored on it) deferred.
+        let snapshot = Snapshot {
+            tabs: vec![Tab {
+                tab_id: "tab:cos".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                label: Some("1".to_string()),
+                pane_count: Some(2),
+            }],
+            panes: vec![
+                make_worker("w1:t1:p1", "grp", Some("tab:cos"), Some("idle")),
+                make_worker("w1:t1:p2", "grp", Some("tab:cos"), Some("working")),
+            ],
+            ..Default::default()
+        };
+        let mut driver = MockHerdrDriver {
+            snapshot,
+            ..Default::default()
+        };
+
+        run_reconcile(
+            &mut driver,
+            &check_opts("grp-workers", 2),
+            "grp-workers",
+            None,
+        )
+        .expect("check must converge after applying the runnable pane");
+
+        assert!(
+            !driver.move_calls.iter().any(|(p, _)| p == "w1:t1:p2"),
+            "a pane still working must never be moved: {:?}",
+            driver.move_calls
+        );
+        assert!(
+            !driver.move_calls.iter().any(|(_, t)| matches!(
+                t,
+                Target::Split { anchor, .. } if anchor == "w1:t1:p2"
+            )),
+            "no split may be anchored on a pane still working: {:?}",
+            driver.move_calls
+        );
+        let p2 = driver
+            .snapshot
+            .panes
+            .iter()
+            .find(|p| p.pane_id == "w1:t1:p2")
+            .unwrap();
+        assert_eq!(
+            p2.tab_id.as_deref(),
+            Some("tab:cos"),
+            "the working pane must stay in its tab"
+        );
+    }
+
+    /// Live repro (2026-10-22): four workers already live in `quaqua-workers`,
+    /// stacked vertically (the wrong shape); p6/pB are idle, p9/pA are
+    /// `working`. The 2x2 rebuild asks pB to split below p6, but that op can
+    /// only land once p9 moves right of p6 — p9 is deferred, so the op cannot
+    /// converge and the check used to time out (blocking `worker prompt`).
+    fn stacked_workers_snapshot() -> Snapshot {
+        let rect = |x, y, width, height| {
+            Some(Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        Snapshot {
+            tabs: vec![Tab {
+                tab_id: "w1:t3".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                label: Some("quaqua-workers".to_string()),
+                pane_count: Some(4),
+            }],
+            layouts: vec![Layout {
+                tab_id: "w1:t3".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                area: Some(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 64,
+                }),
+                panes: vec![
+                    PaneLayout {
+                        pane_id: "w1:t3:p6".to_string(),
+                        rect: rect(0, 0, 200, 8),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:pB".to_string(),
+                        rect: rect(0, 8, 200, 8),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:pA".to_string(),
+                        rect: rect(0, 16, 200, 16),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:p9".to_string(),
+                        rect: rect(0, 32, 200, 32),
+                    },
+                ],
+                zoomed: Some(false),
+            }],
+            panes: vec![
+                make_worker("w1:t3:p6", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:p9", "quaqua", Some("w1:t3"), Some("working")),
+                make_worker("w1:t3:pA", "quaqua", Some("w1:t3"), Some("working")),
+                make_worker("w1:t3:pB", "quaqua", Some("w1:t3"), Some("idle")),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_check_defers_rebuild_that_waits_on_working_siblings() {
+        let mut driver = MockHerdrDriver {
+            snapshot: stacked_workers_snapshot(),
+            ..Default::default()
+        };
+        let opts = super::ReconcileOptions {
+            check: true,
+            repair: false,
+            tab: Some("quaqua-workers".to_string()),
+            only: Some("w1:t3:pB".to_string()),
+            owner: Some("cos".to_string()),
+            dry_run: false,
+            timeout_sec: Some(2),
+        };
+
+        run_reconcile(&mut driver, &opts, "quaqua-workers", None)
+            .expect("a rebuild that waits on working siblings must not fail the check");
+
+        assert!(
+            !driver.move_calls.iter().any(|(p, _)| p == "w1:t3:pB"),
+            "the blocked rebuild op must stay deferred instead of being applied every poll: {:?}",
+            driver.move_calls
+        );
+    }
+
+    /// Third live repro (2026-10-22): three workers in `quaqua-workers`,
+    /// stacked vertically (the wrong shape); p9 is `working`, pA and pB are
+    /// idle. The `A │ B/C` target (p9 left full, pA top-right, pB
+    /// bottom-right) can be built by moving pA and pB only.
+    fn stacked_three_workers_snapshot() -> Snapshot {
+        let rect = |x, y, width, height| {
+            Some(Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        Snapshot {
+            tabs: vec![Tab {
+                tab_id: "w1:t3".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                label: Some("quaqua-workers".to_string()),
+                pane_count: Some(3),
+            }],
+            layouts: vec![Layout {
+                tab_id: "w1:t3".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                area: Some(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 64,
+                }),
+                panes: vec![
+                    PaneLayout {
+                        pane_id: "w1:t3:p9".to_string(),
+                        rect: rect(0, 0, 200, 21),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:pA".to_string(),
+                        rect: rect(0, 21, 200, 21),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:pB".to_string(),
+                        rect: rect(0, 42, 200, 22),
+                    },
+                ],
+                zoomed: Some(false),
+            }],
+            panes: vec![
+                make_worker("w1:t3:p9", "quaqua", Some("w1:t3"), Some("working")),
+                make_worker("w1:t3:pA", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:pB", "quaqua", Some("w1:t3"), Some("idle")),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_repair_rebuilds_around_a_working_base_pane() {
+        let mut driver = MockHerdrDriver {
+            snapshot: stacked_three_workers_snapshot(),
+            ..Default::default()
+        };
+        let opts = super::ReconcileOptions {
+            check: false,
+            repair: true,
+            tab: Some("quaqua-workers".to_string()),
+            only: None,
+            owner: Some("cos".to_string()),
+            dry_run: false,
+            timeout_sec: None,
+        };
+
+        run_reconcile(&mut driver, &opts, "quaqua-workers", None)
+            .expect("repair must build around a working base pane");
+
+        let splits: Vec<(&str, &Target)> = driver
+            .move_calls
+            .iter()
+            .filter(|(_, t)| matches!(t, Target::Split { .. }))
+            .map(|(p, t)| (p.as_str(), t))
+            .collect();
+        assert_eq!(
+            splits.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+            vec!["w1:t3:pA", "w1:t3:pB"],
+            "only the idle panes may move, in cell order: {:?}",
+            driver.move_calls
+        );
+        assert_eq!(
+            splits[0].1,
+            &Target::Split {
+                tab: "w1:t3".to_string(),
+                anchor: "w1:t3:p9".to_string(),
+                direction: "right".to_string(),
+                ratio: 0.5,
+            }
+        );
+        assert_eq!(
+            splits[1].1,
+            &Target::Split {
+                tab: "w1:t3".to_string(),
+                anchor: "w1:t3:pA".to_string(),
+                direction: "down".to_string(),
+                ratio: 0.5,
+            }
+        );
+        assert!(
+            !driver.move_calls.iter().any(|(p, _)| p == "w1:t3:p9"),
+            "the working base pane must never be moved: {:?}",
+            driver.move_calls
+        );
+    }
+
+    #[test]
+    fn test_check_only_applies_prerequisites_of_the_scoped_worker() {
+        // `worker prompt pB` scopes the check with --only pB; pB can only land
+        // after pA moves right of p9, so the check must also apply pA's
+        // runnable move (same owner, tab and workspace) instead of waiting.
+        let mut driver = MockHerdrDriver {
+            snapshot: stacked_three_workers_snapshot(),
+            ..Default::default()
+        };
+        let opts = super::ReconcileOptions {
+            check: true,
+            repair: false,
+            tab: Some("quaqua-workers".to_string()),
+            only: Some("w1:t3:pB".to_string()),
+            owner: Some("cos".to_string()),
+            dry_run: false,
+            timeout_sec: Some(2),
+        };
+
+        run_reconcile(&mut driver, &opts, "quaqua-workers", None)
+            .expect("check must apply the scoped worker's runnable prerequisites");
+
+        let splits: Vec<&str> = driver
+            .move_calls
+            .iter()
+            .filter(|(_, t)| matches!(t, Target::Split { .. }))
+            .map(|(p, _)| p.as_str())
+            .collect();
+        assert_eq!(
+            splits,
+            vec!["w1:t3:pA", "w1:t3:pB"],
+            "the prerequisite pA must move before the scoped pB: {:?}",
+            driver.move_calls
+        );
+        assert!(
+            !driver.move_calls.iter().any(|(p, _)| p == "w1:t3:p9"),
+            "the working pane must never be moved: {:?}",
+            driver.move_calls
+        );
+    }
+
+    /// Six workers of one group: p1-p4 idly stacked (wrong shape) in the base
+    /// tab, p5/p6 not placed yet — the overflow chunk.
+    fn base_tab_with_overflow_snapshot() -> Snapshot {
+        let rect = |x, y, width, height| {
+            Some(Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        Snapshot {
+            tabs: vec![Tab {
+                tab_id: "w1:t3".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                label: Some("quaqua-workers".to_string()),
+                pane_count: Some(4),
+            }],
+            layouts: vec![Layout {
+                tab_id: "w1:t3".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                area: Some(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 100,
+                }),
+                panes: vec![
+                    PaneLayout {
+                        pane_id: "w1:t3:p1".to_string(),
+                        rect: rect(0, 0, 200, 25),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:p2".to_string(),
+                        rect: rect(0, 25, 200, 25),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:p3".to_string(),
+                        rect: rect(0, 50, 200, 25),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t3:p4".to_string(),
+                        rect: rect(0, 75, 200, 25),
+                    },
+                ],
+                zoomed: Some(false),
+            }],
+            panes: vec![
+                make_worker("w1:t3:p1", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:p2", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:p3", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:p4", "quaqua", Some("w1:t3"), Some("idle")),
+                make_worker("w1:t3:p5", "quaqua", None, Some("idle")),
+                make_worker("w1:t3:p6", "quaqua", None, Some("idle")),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn is_overflow_target(target: &Target) -> bool {
+        match target {
+            Target::NewTab { label } => label.ends_with("-workers-2"),
+            Target::Split { tab, .. } => tab == "@workers-2" || tab.ends_with("-workers-2"),
+        }
+    }
+
+    #[test]
+    fn test_check_scoped_to_the_base_tab_never_applies_overflow_ops() {
+        // `grid reconcile --check --tab quaqua-workers --only p2` heals p2's
+        // runnable prerequisites inside the base tab. p5/p6 belong to
+        // `quaqua-workers-2`; the old filter dropped chunk-1 ops only when the
+        // *requested* tab was the overflow one, so the scoped ops moved p5/p6
+        // into the overflow tab while checking the base tab.
+        let mut driver = MockHerdrDriver {
+            snapshot: base_tab_with_overflow_snapshot(),
+            ..Default::default()
+        };
+        let opts = super::ReconcileOptions {
+            check: true,
+            repair: false,
+            tab: Some("quaqua-workers".to_string()),
+            only: Some("w1:t3:p2".to_string()),
+            owner: Some("cos".to_string()),
+            dry_run: false,
+            timeout_sec: Some(2),
+        };
+
+        let res = run_reconcile(&mut driver, &opts, "quaqua-workers", None);
+
+        let overflow: Vec<&(String, Target)> = driver
+            .move_calls
+            .iter()
+            .filter(|(_, t)| is_overflow_target(t))
+            .collect();
+        assert!(
+            overflow.is_empty(),
+            "a check scoped to quaqua-workers must not apply overflow ops: {:?}",
+            driver.move_calls
+        );
+        assert!(
+            driver.move_calls.iter().any(|(p, _)| p == "w1:t3:p2"),
+            "the scoped worker's prerequisite must still move: {:?}",
+            driver.move_calls
+        );
+        res.expect("the check must converge inside the base tab");
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            EnvGuard { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn lockcase_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "quaqua-grid-lockcase-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Two idle workers stacked in the wrong shape: one runnable split.
+    fn two_stacked_workers_snapshot() -> Snapshot {
+        Snapshot {
+            tabs: vec![Tab {
+                tab_id: "w1:t1".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                label: Some("quaqua-workers".to_string()),
+                pane_count: Some(2),
+            }],
+            layouts: vec![Layout {
+                tab_id: "w1:t1".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                area: Some(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 100,
+                }),
+                panes: vec![
+                    PaneLayout {
+                        pane_id: "w1:t1:p1".to_string(),
+                        rect: Some(Rect {
+                            x: 0,
+                            y: 0,
+                            width: 200,
+                            height: 50,
+                        }),
+                    },
+                    PaneLayout {
+                        pane_id: "w1:t1:p2".to_string(),
+                        rect: Some(Rect {
+                            x: 0,
+                            y: 50,
+                            width: 200,
+                            height: 50,
+                        }),
+                    },
+                ],
+                zoomed: Some(false),
+            }],
+            panes: vec![
+                make_worker("w1:t1:p1", "quaqua", Some("w1:t1"), Some("idle")),
+                make_worker("w1:t1:p2", "quaqua", Some("w1:t1"), Some("idle")),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// Stub `herdr` for the live driver type: answers `api snapshot` from
+    /// `snap` and records every `pane move` into `calls` (one line per move).
+    fn stub_herdr(
+        dir: &std::path::Path,
+        snap: &Snapshot,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let snap_file = dir.join("snapshot.json");
+        let calls_file = dir.join("moves");
+        std::fs::write(&snap_file, serde_json::to_string(snap).unwrap()).unwrap();
+        let stub = dir.join("herdr");
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$1 $2" = "api snapshot" ]; then
+  cat "{snap}"
+  exit 0
+fi
+if [ "$1 $2" = "pane move" ]; then
+  printf '%s\n' "$3" >> "{calls}"
+  printf '{{"result":{{"move_result":{{"changed":true,"reason":"ok","pane":{{"pane_id":"%s","tab_id":"tab:moved"}}}}}}}}\n' "$3"
+  exit 0
+fi
+exit 0
+"#,
+            snap = snap_file.display(),
+            calls = calls_file.display()
+        );
+        std::fs::write(&stub, script).unwrap();
+        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&stub, perms).unwrap();
+        (stub, calls_file)
+    }
+
+    /// Another process takes the hook's lock directory and holds it: a live
+    /// `sleep` owns the pid in the lock file, exactly like a running hook.
+    fn hold_lock_in_child(state_dir: &std::path::Path, hold_secs: u64) -> std::process::Child {
+        let child = std::process::Command::new("sleep")
+            .arg(hold_secs.to_string())
+            .spawn()
+            .expect("spawn lock holder");
+        std::fs::create_dir_all(state_dir.join("lock")).expect("create lock dir");
+        std::fs::write(state_dir.join("lock/pid"), child.id().to_string())
+            .expect("write holder pid");
+        child
+    }
+
+    fn recorded_moves(calls: &std::path::Path) -> String {
+        std::fs::read_to_string(calls).unwrap_or_default()
+    }
+
+    #[test]
+    fn test_check_does_not_apply_while_the_hook_holds_the_lock() {
+        let _serial = crate::grid::lock::test_serial();
+        let dir = lockcase_dir("check-held");
+        let state = dir.join("state");
+        let (stub, calls) = stub_herdr(&dir, &two_stacked_workers_snapshot());
+        let _env = EnvGuard::set("HERDR_PLUGIN_STATE_DIR", state.to_str().unwrap());
+
+        let mut holder = hold_lock_in_child(&state, 2);
+
+        let mut driver = crate::herdr::Herdr {
+            bin: stub.to_string_lossy().to_string(),
+        };
+        let opts = super::ReconcileOptions {
+            check: true,
+            repair: false,
+            tab: Some("quaqua-workers".to_string()),
+            only: None,
+            owner: Some("cos".to_string()),
+            dry_run: false,
+            timeout_sec: Some(1),
+        };
+        let res = run_reconcile(&mut driver, &opts, "quaqua-workers", None);
+
+        assert!(
+            recorded_moves(&calls).is_empty(),
+            "the check applied ops while another process held the lock: {}",
+            recorded_moves(&calls)
+        );
+        assert!(
+            res.is_err(),
+            "a check that could not apply must report the pending op, not converge"
+        );
+
+        holder.wait().expect("lock holder exits");
+        let opts = super::ReconcileOptions {
+            timeout_sec: Some(3),
+            ..opts
+        };
+        // The second pass applies; it may still time out on the stub's static
+        // layout, so only the applied move is asserted.
+        let _ = run_reconcile(&mut driver, &opts, "quaqua-workers", None);
+        assert!(
+            !recorded_moves(&calls).is_empty(),
+            "the check must apply once the lock is free (res={res:?}, calls={:?})",
+            recorded_moves(&calls)
+        );
+    }
+
+    #[test]
+    fn test_repair_waits_for_the_hook_lock_instead_of_racing() {
+        let _serial = crate::grid::lock::test_serial();
+        let dir = lockcase_dir("repair-held");
+        let state = dir.join("state");
+        let (stub, calls) = stub_herdr(&dir, &two_stacked_workers_snapshot());
+        let _env = EnvGuard::set("HERDR_PLUGIN_STATE_DIR", state.to_str().unwrap());
+
+        let mut holder = hold_lock_in_child(&state, 1);
+
+        let bin = stub.to_string_lossy().to_string();
+        let calls_for_thread = calls.clone();
+        let repair = std::thread::spawn(move || {
+            let mut driver = crate::herdr::Herdr { bin };
+            let opts = super::ReconcileOptions {
+                check: false,
+                repair: true,
+                tab: Some("quaqua-workers".to_string()),
+                only: None,
+                owner: Some("cos".to_string()),
+                dry_run: false,
+                timeout_sec: None,
+            };
+            run_reconcile(&mut driver, &opts, "quaqua-workers", None)
+        });
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            recorded_moves(&calls_for_thread).is_empty(),
+            "the repair applied ops while another process held the lock: {}",
+            recorded_moves(&calls_for_thread)
+        );
+
+        holder.wait().expect("lock holder exits");
+        repair
+            .join()
+            .expect("repair thread")
+            .expect("the repair must wait for the lock, then apply");
+        assert!(
+            !recorded_moves(&calls).is_empty(),
+            "the repair must apply after the holder releases the lock"
+        );
+    }
+
     #[test]
     fn test_repair_rebuilds_the_mirror_column_after_cleanup() {
         // Issue #79 cleanup, 4->3 removing a right-column pane: the tab is left
         // with the left column stacked and the right column full (the mirror).
         // The repair must re-place the panes instead of reporting "in place".
-        let area = crate::grid::types::Rect { x: 0, y: 0, width: 200, height: 100 };
-        let rect = |x, y, width, height| Some(crate::grid::types::Rect { x, y, width, height });
-        let mut panes = vec![
-            Pane {
-                pane_id: "w1:p1".to_string(),
-                tab_id: Some("w1:t1".to_string()),
-                workspace_id: Some("ws1".to_string()),
-                agent: Some("cos".to_string()),
-                agent_status: Some("idle".to_string()),
-                tokens: Some(Tokens {
-                    grid_role: Some("cos".to_string()),
-                    grid_owner: Some("cos".to_string()),
-                    grid_group: None,
-                    grid_tab: None,
-                    grid_ready: None,
-                    grid_name: Some("cos".to_string()),
-                }),
-                label: Some("cos".to_string()),
-            },
-        ];
+        let area = crate::grid::types::Rect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 100,
+        };
+        let rect = |x, y, width, height| {
+            Some(crate::grid::types::Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        let mut panes = vec![Pane {
+            pane_id: "w1:p1".to_string(),
+            tab_id: Some("w1:t1".to_string()),
+            workspace_id: Some("ws1".to_string()),
+            agent: Some("cos".to_string()),
+            agent_status: Some("idle".to_string()),
+            tokens: Some(Tokens {
+                grid_role: Some("cos".to_string()),
+                grid_owner: Some("cos".to_string()),
+                grid_group: None,
+                grid_tab: None,
+                grid_ready: None,
+                grid_name: Some("cos".to_string()),
+            }),
+            label: Some("cos".to_string()),
+        }];
         panes.extend([
             make_worker("w1:p2", "grp", Some("tab:grp-workers"), None), // A
             make_worker("w1:p4", "grp", Some("tab:grp-workers"), None), // C
@@ -1369,11 +2341,30 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            crate::grid::plan::layout_wrong(3, &area, &[
-                Some(crate::grid::types::Rect { x: 0, y: 0, width: 100, height: 50 }),
-                Some(crate::grid::types::Rect { x: 0, y: 50, width: 100, height: 50 }),
-                Some(crate::grid::types::Rect { x: 100, y: 0, width: 100, height: 100 }),
-            ]),
+            crate::grid::plan::layout_wrong(
+                3,
+                &area,
+                &[
+                    Some(crate::grid::types::Rect {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 50
+                    }),
+                    Some(crate::grid::types::Rect {
+                        x: 0,
+                        y: 50,
+                        width: 100,
+                        height: 50
+                    }),
+                    Some(crate::grid::types::Rect {
+                        x: 100,
+                        y: 0,
+                        width: 100,
+                        height: 100
+                    }),
+                ]
+            ),
             "this layout must read as the mirror"
         );
 
@@ -1431,10 +2422,9 @@ mod tests {
             }
         );
         assert!(
-            driver
-                .move_calls
-                .iter()
-                .any(|(_, t)| matches!(t, Target::NewTab { label } if label.starts_with("grid-scratch-"))),
+            driver.move_calls.iter().any(
+                |(_, t)| matches!(t, Target::NewTab { label } if label.starts_with("grid-scratch-"))
+            ),
             "each in-tab move must park first: {:?}",
             driver.move_calls
         );
