@@ -1,5 +1,12 @@
 # Team event-driven monitor — quaqua watch + status (central log/metrics cho CoS & Lead)
 
+Related: [`plan.md`](plan.md) · [`design.md`](design.md) (§D, P2+P6) · [`metrics.md`](metrics.md) · [`README.md`](README.md)
+
+> **Folded into farm-layouts.** `quaqua watch` / `quaqua status` and the event consumers below are
+> absorbed by [`design.md`](design.md) §D (event-driven monitoring) and by its phases **P2** (bus
+> foundation: `farm_events` + `cursors`) and **P6** (consumers: digest, herdr notifications, plugin
+> hook, watchdog `agent wait`). This file is the original brainstorm, kept verbatim below.
+
 Status: **draft brainstorm** (chưa giao worker) · CoS 2026-10-17 · gom từ phiên CoS `985f4d82` + bằng chứng `runs/tieude-evtprobe.md`
 
 ## Vấn đề (retro audit, có số)
