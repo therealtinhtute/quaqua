@@ -39,6 +39,55 @@ pub fn matches_pipeline_reviewer(w: &str, task: &str) -> bool {
     false
 }
 
+/// True for an owner tag that names a project team's Lead (`<slug>-lead`).
+pub fn is_lead_owner(owner: &str) -> bool {
+    owner
+        .strip_suffix("-lead")
+        .map(|slug| !slug.is_empty())
+        .unwrap_or(false)
+}
+
+/// The most live worker slots `owner` may hold: a project Lead is held to
+/// `[roles.lead] max_peers` (default `DEFAULT_LEAD_MAX_PEERS`), every other
+/// owner — the CoS — to `[limits] max_workers_per_orchestrator`. A project
+/// override may tighten the global cap, so it tightens a Lead with it.
+pub fn owner_cap(cfg: &Config, owner: &str) -> i64 {
+    let global = cfg.limits.max_workers_per_orchestrator;
+    if !is_lead_owner(owner) {
+        return global;
+    }
+    let peers = cfg
+        .roles
+        .get("lead")
+        .and_then(|role| role.max_peers)
+        .unwrap_or(crate::config::DEFAULT_LEAD_MAX_PEERS);
+    peers.min(global)
+}
+
+/// Refuse a spawn that needs `weight` slots more than `owner` has left. This is
+/// the one gate every spawn path calls (worker, pipeline, taskforce), so the cap
+/// a Lead sees is the cap its Peers were counted against.
+pub fn check_owner_cap(
+    cfg: &Config,
+    owner: &str,
+    slots_used: i64,
+    weight: i64,
+    what: &str,
+) -> Result<(), String> {
+    let cap = owner_cap(cfg, owner);
+    if slots_used + weight <= cap {
+        return Ok(());
+    }
+    let source = if is_lead_owner(owner) {
+        "roles.lead.max_peers"
+    } else {
+        "limits.max_workers_per_orchestrator"
+    };
+    Err(format!(
+        "worker cap exceeded ({slots_used} live worker slots for owner '{owner}'; {what} needs {weight}, {source} is {cap})"
+    ))
+}
+
 /// Calculate the number of worker slots used by `owner` (defaults to "cos").
 pub fn count_owner_slots<H: HerdrOps>(
     runs_dir: &Path,

@@ -120,7 +120,7 @@ Read the leaf in full for any principle you cite. Each leaf lives under `princip
 
 Workers are spawned via `quaqua worker spawn <name> <kind> <repo>`.
 
-- **Match the kind to the job:** Assign worker kinds (`tieude`, `detu`, `sude`, `ni`, `suhuynh`, `truonglao`) strictly per `models.md`.
+- **Match the kind to the job:** Assign worker kinds (`tieude`, `sude`, `ni`, `suhuynh`, `truonglao`) strictly per `models.md`.
 - **Coordinator owns the outcome:** You own every worker's work. Review the diff and verify evidence yourself; never pass through unverified claims.
 - **Resume vs fresh:** Resume is the default for existing work. A half-done, stalled or killed worker resumes the same session (`quaqua worker prompt --resume`); a fresh spawn only when the goal changed or the worktree is unrecoverable (`AGENTS.md`). New work gets a fresh worker with consolidated scope (original brief, directives, prior report and branch).
 - **Worker boundary:** Never route inside a worker. Workers do not run `/poteto-mode`. Under S4, `quaqua worker prompt` injects the playbook's `## Worker` steps and cited principles, pinning `runs/.<name>.playbook`. A worker that loads this skill stops immediately.

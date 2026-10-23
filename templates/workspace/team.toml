@@ -27,6 +27,7 @@ can_prompt = ["lead", "peer"]
 can_spawn  = ["peer", "taskforce"]
 can_prompt = ["peer"]
 reports_to = "cos"
+max_peers = 4                     # SLP (AGENTS.md `## Roles`): a Lead spawns ≤4 Peers; the CoS keeps [limits]
 [roles.peer]
 can_spawn  = []
 can_prompt = []
@@ -36,12 +37,12 @@ reports_to = "owner"
 default_kind = "tieude"                   # anh iu, 2026-10-15
 lead_kind = "ni"                        # anh iu: Lead runs on claude · opus-5.5 · low
 default_reviewer = ["suhuynh"]           # first available wins (anh iu, 2026-10-16)
-builder_reviewer_differ = "kind"
+builder_reviewer_differ = "harness"      # SLP: sude (omp) builds → suhuynh (claude) reviews; validate checks the default pair
 
 [purposes]
 build = "sude"
 review = "suhuynh"
-research = "detu"
+research = "tieude"
 quick = "tieude"
 design = "truonglao"
 
@@ -49,17 +50,11 @@ design = "truonglao"
 "deepseek-v4.1-flash" = ["low", "high", "max"]
 
 [kinds.tieude]                    # harness · model · effort live here; models.md prose stays prose
-harness = "pi"                    # H3a: was opencode (still a supported fallback harness)
-model = "opencode-go/deepseek-v4.1-flash"
-effort = "high"                   # pi --thinking high (anh iu 2026-10-22: light tasks only)
-fallback = "detu"                 # one hop, only if agent start fails
-can_review = false                # true for ni, suhuynh, truonglao (reviewers: a worktree change voids the verdict)
-[kinds.detu]
 harness = "omp"
-model = "google-antigravity/gemini-3.8-flash"
-effort = "high"                   # anh iu, 2026-10-16
-fallback = "tieude"
-can_review = false
+model = "opencode-go/deepseek-v4.1-flash"
+effort = "high"                   # omp --thinking
+fallback = "sude"                 # one hop, only if agent start fails
+can_review = false                # reviewers: sude, ni, suhuynh, truonglao
 [kinds.sude]
 harness = "omp"
 model = "google-antigravity/gemini-3.8-flash"
@@ -72,9 +67,9 @@ model = "opus-5.5"
 effort = "low"
 can_review = true
 [kinds.suhuynh]
-harness = "pi"                    # H3a: was opencode; review adds --tools read,grep,find,ls,bash
-model = "opencode-go/deepseek-v4.1-flash"
-effort = "max"                    # pi --thinking max (claude opus-5.5 medium = alt)
+harness = "claude"
+model = "opus-5.5"
+effort = "medium"                 # reviewer on a different harness from the omp builders
 can_review = true
 [kinds.truonglao]
 harness = "claude"

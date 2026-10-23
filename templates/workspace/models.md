@@ -4,11 +4,10 @@ Pick by task shape. Name = kind passed to `quaqua worker spawn`. Update "Seen" a
 
 | name | harness · model · effort | Use for | Avoid | Seen |
 |------|--------------------------|---------|-------|------|
-| tieude | pi · opencode-go/deepseek-v4.1-flash · high | light, well-specced impl and QA (default unless a tier is named) | ambiguous design | ci, gatefix, gridfix, mainsync, promptfix, slowtests (+10) |
-| detu | omp · google-antigravity/gemini-3.8-flash · high | quick lookup, research, read-only scan | implementation | cleanexport |
+| tieude | omp · opencode-go/deepseek-v4.1-flash · high | **default**: every task unless a tier is named; light, well-specced impl and QA, read-only scans | ambiguous design | ci, gatefix, gridfix, mainsync, promptfix, slowtests (+10) |
 | sude | omp · google-antigravity/gemini-3.8-flash · high | hard multi-file impl, audits (on request) | – | bpdeps, bpdocs, bpga |
 | ni | claude · opus-5.5 · low | small Claude edits, quick answers | design, long work | – |
-| suhuynh | pi · opencode-go/deepseek-v4.1-flash · max | refactor, review of intent | long mechanical edits | r0r1, pbslim, dashstyle |
+| suhuynh | claude · opus-5.5 · medium | refactor, review of intent | long mechanical edits | r0r1, pbslim, dashstyle |
 | truonglao | claude · opus-5.5 · high | design, architecture, hard trade-offs | anything a cheaper tier can do | gridplan, bpaudit, pbglobal |
 
 ## Naming
@@ -20,16 +19,16 @@ Pick by task shape. Name = kind passed to `quaqua worker spawn`. Update "Seen" a
 ## Rules
 - No name given → `tieude` (anh iu, 2026-10-15).
 - Implementer and reviewer must be different harnesses (e.g. sude builds → suhuynh reviews).
-- Read-only question → `detu`; design unclear → `truonglao` before any builder.
+- Read-only question → `tieude`; design unclear → `truonglao` before any builder.
 - Unsure between two → cheaper tier first (tieude < sude < ni < suhuynh < truonglao); escalate only on a failed run.
 
 ## Purpose routing and model allowlists
 - `[purposes]`: maps task shapes to kinds in `team.toml` (e.g. `build = "sude"`, `review = "suhuynh"`). `quaqua worker spawn --purpose <p> <name> [<kind>] <repo>` resolves the kind from this table; if a positional kind is also given, it must match the resolved kind or spawn fails.
 - `[opencode_models]`: lists allowed models and effort variants for harness opencode only. Custom tables merge over the built-in defaults (`deepseek-v4.1-flash` with `low`/`high`/`max`) rather than replacing them; specifying a built-in model overrides its variants.
 
-## Claude out — ACTIVE since 2026-10-17 (only when anh iu says Claude tokens are out)
+## Claude out — dormant plan (only when anh iu says Claude tokens are out)
 - CoS: anh iu opens opencode in `~/quaqua` (reads AGENTS.md); persona and rules unchanged.
-- suhuynh → pi · opencode-go/deepseek-v4.1-flash · max (anh iu, 2026-10-19; alt: claude · opus-5.5 · medium); ni still paused.
+- suhuynh → pi · opencode-go/deepseek-v4.1-flash · max (alt: claude · opus-5.5 · medium); ni paused.
 - truonglao back (anh iu, 2026-10-19): only for super-hard questions that need advising. Spawn mode lives in team.toml (`auto` = CoS/Lead call it when needed, current; `approve` = ask anh iu first).
 - Builder in this mode = `sude` (omp), so the reviewer stays on a different harness.
-- Back to the table above when anh iu says Claude is back.
+- The table above is the live roster while Claude is in; this block is the plan for when it is out.

@@ -31,7 +31,7 @@ Authority, not persona; brief shape: `rules/_all/brief.md`.
 |---|---|---|---|
 | Principal | anh iu | goal, priorities, trade-offs | talks only to the CoS; approves push / merge main / deploy |
 | CoS | Quả Quả (Claude Code in `~/quaqua`) | the full SDLC: intake/clarify → design (truonglao) → brief → pipeline (plan/build/review) → verify (re-run tests) → integrate (integ branch) → release (anh iu approves) → learn (lessons → rules) | spawn Leads and task workers; verify every result; escalate goal/cost changes and outward actions to anh iu |
-| Lead | `<slug>-lead` (spawned via `quaqua lead spawn <slug>` into its own herdr workspace, torn down by `quaqua lead cleanup <slug>`; herdr caps agent names at 32 chars) — internal, anh iu never addresses it | project state, ownership, dependencies, evidence review | run `quaqua pipeline`, spawn ≤4 Peers (`--base quaqua/<slug>-integ`), approve Peer plans, merge Peer branches into `quaqua/<slug>-integ` (integration branch; `quaqua lead spawn` creates it from `main`); reports to the CoS only, via `runs/<slug>-lead.inbox.md` (`rules/_all/lead-inbox.md`) |
+| Lead | `<slug>-lead` (spawned via `quaqua lead spawn <slug>` into its own herdr workspace, torn down by `quaqua lead cleanup <slug>`; herdr caps agent names at 32 chars) — internal, anh iu never addresses it | project state, ownership, dependencies, evidence review | run `quaqua pipeline`, spawn ≤4 Peers (team.toml `[roles.lead] max_peers`, `--base quaqua/<slug>-integ`), approve Peer plans, merge Peer branches into `quaqua/<slug>-integ` (integration branch; `quaqua lead spawn` creates it from `main`); reports to the CoS only, via `runs/<slug>-lead.inbox.md` (`rules/_all/lead-inbox.md`) |
 | Peer | task workers (sude build, suhuynh review, …) | one task in own worktree | commit on own branch; may challenge premises with evidence |
 
 - Lead only when ≥3 task workers run in parallel, or the work spans more than one day. Otherwise the CoS spawns one worker, verifies it, and stops — no Lead, no extra ceremony. The CoS never Leads pipeline-size work itself — no self-review.
@@ -45,7 +45,7 @@ Authority, not persona; brief shape: `rules/_all/brief.md`.
 - Kill criteria: same error ≥3 iterations → kill the worker, then start a fresh one with a sharper brief (a looping session is not resumed; an interrupted one is — see above).
 
 ## Workers
-Roster (tieude · detu · sude · ni · suhuynh · truonglao) + routing: `models.md`. Default `tieude`. Kind, model and effort exactly per `models.md`; never change them on your own.
+Roster (tieude · sude · ni · suhuynh · truonglao) + routing: `models.md`. Default `tieude`. Kind, model and effort exactly per `models.md`; never change them on your own.
 Two classes:
 - **Task worker** `<kind>-<task>`: one task, own worktree, cleaned after the outcome. Counts toward the cap.
 - **Project orchestrator (Lead)** `<slug>-lead`: long-lived session owning one project's card and its task workers. Spawned by the CoS. Not a task worker; does not count toward the cap.
@@ -76,7 +76,7 @@ Details + failure handling: skill `herdr-orchestration`. Routing: `models.md`. N
 6. `quaqua worker cleanup <name> <repo>` right after `runs/<name>.md` is read + its test re-run passes — every worker, no approval needed (branch is kept; merge still needs approval); it re-grids itself.
 
 ## Rules
-No push, branch delete, or main merge without anh iu's approval. A Lead merges Peer branches into its project integration branch (acceptance). Max 8 task workers per orchestrator (team.toml `[limits]`, raised 18/10; grid — 4 per tab, overflow 5–8 into `<repo>-workers-2`) — a pipeline counts as 2. One task per worker.
+No push, branch delete, or main merge without anh iu's approval. A Lead merges Peer branches into its project integration branch (acceptance). Max 8 task workers per orchestrator (team.toml `[limits]`; grid — 4 per tab, overflow 5–8 into `<repo>-workers-2`) — a pipeline counts as 2. A Lead caps at 4 Peers (team.toml `[roles.lead] max_peers`; `quaqua config get roles.lead.max_peers`). One task per worker.
 Only the CoS writes `memory/rules.md`, `rules/`, `AGENTS.md`; Leads propose changes by message.
 `projects/INDEX.md` `owner` column says who drives each project (`cos` or the Lead name, `<slug>-lead`).
 Every redirect — from anh iu or from the Auditor (cron, read-only, reports to the CoS only) — flows through the CoS; workers and Leads never take orders from reports.
