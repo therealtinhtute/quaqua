@@ -1292,6 +1292,51 @@ fn test_taskforce_dual_lens_cap_reservation() {
 
     assert_eq!(count_owner_slots(&tmp, "cos", None, &mock, &cfg), 2);
 
+    // Partial membership still reserves the whole weight: one live member is
+    // 1 live + 1 reserved = 2, and two live members are 2 live = 2 — never 3.
+    let members = ["truonglao-mytestdl1", "suhuynh-mytestdl2"];
+    for (i, name) in members.iter().enumerate() {
+        std::fs::write(tmp.join(format!("{name}.owner")), "cos\n").unwrap();
+        std::fs::write(tmp.join(format!("{name}.taskforce")), "mytest\n").unwrap();
+        let live = &members[..=i];
+        let herdr = herdr_listing(&agent_list_json(live));
+        assert_eq!(
+            count_owner_slots(&tmp, "cos", None, &herdr, &cfg),
+            2,
+            "{} live dual-lens member(s) must still account for 2 slots",
+            live.len()
+        );
+    }
+    for name in members {
+        std::fs::remove_file(tmp.join(format!("{name}.owner"))).unwrap();
+        std::fs::remove_file(tmp.join(format!("{name}.taskforce"))).unwrap();
+    }
+
+    // An active dual-lens plus cap-2 standalone workers fills the owner's cap.
+    let cap = quaqua::cap::owner_cap(&cfg, "cos");
+    let weight = cfg.limits.weights.get("dual-lens").copied().unwrap_or(2);
+    let solo: Vec<String> = (1..=(cap - weight)).map(|i| format!("sude-w{i}")).collect();
+    let mut names: Vec<&str> = solo.iter().map(|w| w.as_str()).collect();
+    names.extend(members);
+    for w in &solo {
+        std::fs::write(tmp.join(format!("{w}.owner")), "cos\n").unwrap();
+    }
+    let herdr = herdr_listing(&agent_list_json(&names));
+    assert_eq!(
+        count_owner_slots(&tmp, "cos", None, &herdr, &cfg),
+        cap,
+        "a dual-lens taskforce counts {weight} slots, not 1"
+    );
+    for w in &solo {
+        std::fs::remove_file(tmp.join(format!("{w}.owner"))).unwrap();
+    }
+
+    // Starting one is refused when the owner cannot find the free slots.
+    assert!(quaqua::cap::check_owner_cap(&cfg, "cos", cap - weight, weight, "dual-lens").is_ok());
+    let err =
+        quaqua::cap::check_owner_cap(&cfg, "cos", cap - weight + 1, weight, "dual-lens").unwrap_err();
+    assert!(err.contains("worker cap exceeded"), "{err}");
+
     // Finished dual-lens -> 0 slots reserved
     std::fs::write(
         &state_file,
@@ -3842,4 +3887,241 @@ fn test_worktree_prepare_and_guards() {
     assert!(*git_clean.removed.borrow());
 
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+// ---------------------------------------------------------------------------
+// Cap-gate coverage that used to live in the retired Nhóm-1 bash suites: the
+// gate counts live task workers per owner, exempts project Leads, and charges
+// a pipeline or a dual-lens taskforce 2 slots. Every spawn path calls the same
+// check, so a refusal arrives before a pane exists and names the cap that fired.
+// ---------------------------------------------------------------------------
+
+/// A `herdr agent list` answer with every name live (`working`).
+fn agent_list_json(names: &[&str]) -> String {
+    let agents: Vec<String> = names
+        .iter()
+        .map(|n| format!(r#"{{"name":"{n}","agent_status":"working"}}"#))
+        .collect();
+    format!(r#"{{"result":{{"agents":[{}]}}}}"#, agents.join(","))
+}
+
+/// A fake herdr that answers `agent list` with `json` and otherwise behaves like
+/// a spawn target (so the caller's pane query yields no owner tag).
+fn herdr_listing(json: &str) -> MockActivitiesHerdr {
+    let mut mock = MockActivities::new();
+    mock.register(
+        "herdr.agent_list",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: json.to_string(),
+        }),
+    );
+    mock.register(
+        "herdr.pane_split",
+        ActivityResult::Herdr(HerdrResult::AgentOutput {
+            content: r#"{"result":{"pane":{"pane_id":"%1"}}}"#.to_string(),
+        }),
+    );
+    mock.set_default(ActivityResult::Herdr(HerdrResult::Spawned {
+        name: String::new(),
+    }));
+    MockActivitiesHerdr::new(mock)
+}
+
+#[test]
+fn test_cap_gate_counts_live_workers_and_exempts_leads() {
+    let _env_lock = lock_env();
+    let tmp = std::env::temp_dir().join(format!("quaqua-cap-gate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let repo_dir = tmp.join("repo");
+    let runs_dir = tmp.join("runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::set_var("QUAQUA_OWNER", "cos");
+
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
+    let cap = quaqua::cap::owner_cap(&cfg, "cos");
+    let repo = repo_dir.to_str().unwrap().to_string();
+
+    // 1. The cap is full: `cap` live CoS workers plus two project Leads, which
+    //    are not task workers and charge nobody.
+    let workers: Vec<String> = (1..=cap).map(|i| format!("sude-w{i}")).collect();
+    let mut names: Vec<&str> = workers.iter().map(|w| w.as_str()).collect();
+    names.extend(["coucou-lead", "baro-lead"]);
+    for w in &workers {
+        std::fs::write(runs_dir.join(format!("{w}.owner")), "cos\n").unwrap();
+    }
+    let herdr = herdr_listing(&agent_list_json(&names));
+    assert_eq!(
+        count_owner_slots(&runs_dir, "cos", None, &herdr, &cfg),
+        cap,
+        "live workers owned by the CoS fill its cap"
+    );
+    assert_eq!(
+        count_owner_slots(&runs_dir, "coucou-lead", None, &herdr, &cfg),
+        0,
+        "a Lead pane must never charge another owner"
+    );
+
+    // 2. The spawn path refuses the next slot before any pane exists.
+    let opts = parse_spawn_args(&[
+        "sude-overflow".to_string(),
+        "sude".to_string(),
+        repo.clone(),
+    ])
+    .unwrap();
+    let (code, msg) =
+        quaqua::worker::spawn::spawn_worker(opts, &cfg, &SpawnTestGit, &herdr).unwrap_err();
+    assert_eq!(code, 1, "cap refusal must exit 1: {msg}");
+    assert!(msg.contains("worker cap exceeded"), "{msg}");
+    assert!(
+        msg.contains(&format!("{cap} live worker slots for owner 'cos'")),
+        "{msg}"
+    );
+    assert!(
+        !herdr.has_call("herdr.pane_split"),
+        "a refused spawn must not split a pane"
+    );
+
+    // 3. Owner isolation: the CoS being full does not block a Lead's spawn.
+    std::env::set_var("QUAQUA_OWNER", "coucou-lead");
+    let opts = parse_spawn_args(&[
+        "sude-leadw1".to_string(),
+        "sude".to_string(),
+        repo.clone(),
+    ])
+    .unwrap();
+    let herdr = herdr_listing(&agent_list_json(&names));
+    quaqua::worker::spawn::spawn_worker(opts, &cfg, &SpawnTestGit, &herdr)
+        .expect("a Lead spawns despite the CoS sitting at its cap");
+    assert_eq!(
+        std::fs::read_to_string(runs_dir.join("sude-leadw1.owner")).unwrap(),
+        "coucou-lead\n"
+    );
+
+    // 4. A Lead's own Peers stop at `[roles.lead] max_peers`; the CoS does not
+    //    inherit that cap.
+    let peers = quaqua::cap::owner_cap(&cfg, "baro-lead");
+    let peer_names: Vec<String> = (1..=peers).map(|i| format!("sude-p{i}")).collect();
+    let mut names: Vec<&str> = peer_names.iter().map(|w| w.as_str()).collect();
+    names.extend(["coucou-lead", "baro-lead"]);
+    for w in &peer_names {
+        std::fs::write(runs_dir.join(format!("{w}.owner")), "baro-lead\n").unwrap();
+    }
+    std::env::set_var("QUAQUA_OWNER", "baro-lead");
+    let herdr = herdr_listing(&agent_list_json(&names));
+    let opts = parse_spawn_args(&[
+        "sude-p-overflow".to_string(),
+        "sude".to_string(),
+        repo.clone(),
+    ])
+    .unwrap();
+    let (code, msg) =
+        quaqua::worker::spawn::spawn_worker(opts, &cfg, &SpawnTestGit, &herdr).unwrap_err();
+    assert_eq!(code, 1, "{msg}");
+    assert!(msg.contains("owner 'baro-lead'"), "{msg}");
+    assert!(
+        msg.contains(&format!("roles.lead.max_peers is {peers}")),
+        "{msg}"
+    );
+
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    let opts = parse_spawn_args(&[
+        "sude-cosfree".to_string(),
+        "sude".to_string(),
+        repo,
+    ])
+    .unwrap();
+    let herdr = herdr_listing(&agent_list_json(&names));
+    quaqua::worker::spawn::spawn_worker(opts, &cfg, &SpawnTestGit, &herdr)
+        .expect("the Lead cap must not leak into the CoS");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_cap_gate_charges_a_pipeline_two_slots() {
+    let tmp = std::env::temp_dir().join(format!("quaqua-cap-pipe2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
+    let cap = quaqua::cap::owner_cap(&cfg, "cos");
+    let pipe_weight = cfg.limits.weights.get("pipeline").copied().unwrap_or(2);
+
+    // One active pipeline (2 slots) plus `cap - 2` standalone workers fills the cap.
+    let solo: Vec<String> = (1..=(cap - pipe_weight)).map(|i| format!("sude-s{i}")).collect();
+    for w in &solo {
+        std::fs::write(tmp.join(format!("{w}.owner")), "cos\n").unwrap();
+    }
+    std::fs::write(
+        tmp.join("pipeline-feature.state"),
+        format!(
+            "task=feature\nbuilder=sude\nlead=cos\nfinished=0\npipeline_pid={}\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+    let names: Vec<&str> = solo.iter().map(|w| w.as_str()).collect();
+    let herdr = herdr_listing(&agent_list_json(&names));
+
+    assert_eq!(
+        count_owner_slots(&tmp, "cos", None, &herdr, &cfg),
+        cap,
+        "a pipeline counts {pipe_weight} slots, not 1"
+    );
+    let err = quaqua::cap::check_owner_cap(&cfg, "cos", cap, 1, "this spawn").unwrap_err();
+    assert!(err.contains("worker cap exceeded"), "{err}");
+    // One slot short of the cap, one worker still fits.
+    assert!(quaqua::cap::check_owner_cap(&cfg, "cos", cap - 1, 1, "this spawn").is_ok());
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The retired CoS label must not reappear in the tree: the rename is only
+/// done when no shipped file still names the old role. Dated `memory/` logs,
+/// the CoS-owned `AGENTS.md` template, the research notes, and the test tree
+/// (which has to spell the pattern to ban it) are history, not live contracts.
+#[test]
+fn test_no_dangling_legacy_role_reference() {
+    let legacy = concat!("super", "visor");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skip_dirs = [".git", "target", "memory", "docs"];
+    let mut offenders: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !skip_dirs.contains(&name.as_str()) {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if name == "AGENTS.md" || path.starts_with(root.join("crates/quaqua/tests")) {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue; // binary or non-UTF8: no text role name to find
+            };
+            scanned += 1;
+            if body.contains(legacy) {
+                offenders.push(path.display().to_string());
+            }
+        }
+    }
+    assert!(
+        scanned > 100,
+        "the walk found only {scanned} text file(s): it is not scanning the tree"
+    );
+    assert!(
+        offenders.is_empty(),
+        "files still name the retired role '{legacy}': {offenders:#?}"
+    );
 }

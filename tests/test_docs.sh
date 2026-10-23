@@ -42,9 +42,10 @@ done
   || fail "stale 'quaqua-<slug>-orchestrator' role name survives"
 # rename leaves no dangling refs in tracked docs, scripts (incl. the auditor's
 # systemd/launchd units), or tests
-# (memory/ is tracked here but is dated history — excluded, as in test_worker_cap.sh)
+# (memory/ is tracked here but is dated history; the repo-wide guard, whose walk
+# covers crates/ too, lives in the Rust worker_unit suite)
 ! grep -rn 'super''visor' "$ws/scripts" "$root/tests" \
-    --exclude="test_docs.sh" --exclude="test_worker_cap.sh" \
+    --exclude="test_docs.sh" \
   || fail "dangling legacy references survive in docs/scripts"
 # acceptance authority: Lead merges into the integration branch, anh iu owns push
 grep -q 'quaqua/<slug>-integ' "$ws/AGENTS.md" || fail "integration-branch acceptance missing from AGENTS.md"
