@@ -119,9 +119,9 @@ Verify: `cargo test --locked -p quaqua prompt`
 
 Scope: one new function in `worker/prompt/`, called once after acceptance. `validate_report_content` and its 5 callers stay untouched.
 - Builder reports only (`expect_verdict = false`). Parses `1: done`, `1. done`, `1) done`, `- 1: done`, and the same for `skip: <reason>`, against the ids in `.playbook`.
-- Missing `## Playbook`, a missing step id, or `skip:` without a reason → a warning plus `playbook_gap {name, missing, unreasoned}`. Never an exit code. A db failure only warns.
+- Missing `## Playbook`, a missing step id, or `skip:` without a reason → a warning plus `playbook_gap {name, missing, unreasoned}`. Since S8 (2026-10-23, Phase 2 trigger met) this is exit 6 in `worker prompt` — a report the worker fixes before `--resume` accepts it; `quaqua pipeline` still warns and leaves its exit untouched. A db failure only warns.
 - A step the worker's harness cannot do is `<n>: skip: unsupported on <harness>, <reason>`, a valid skip.
-Acceptance: four line formats parsed · missing section / step / reason → warning + event, exit unchanged · `skip: unsupported on <harness>` accepted · report without `.playbook` behaves as today · `--resume` keeps the check
+Acceptance: four line formats parsed · missing section / step / reason → warning + event, exit 6 in `worker prompt`, exit unchanged in `pipeline` · `skip: unsupported on <harness>` accepted · report without `.playbook` behaves as today · `--resume` accepts the fixed report
 Verify: `cargo test --locked -p quaqua playbook_check`
 
 ## S6 — 3 playbooks + coordinator rules

@@ -1621,13 +1621,13 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                         // § S5 parity with `worker prompt`: an accepted builder
                         // report that does not account for the steps pinned in
                         // `runs/.<name>.playbook` warns and journals one
-                        // `playbook_gap`. Warn only — the pipeline exit stays
-                        // untouched. The report is read once here and the S5
-                        // check shares the acceptance predicate that records the
-                        // report. Reviewer reports are skipped inside the check
-                        // (they carry a `Verdict:` line, not a block); a plan
-                        // report is not checked because it does not claim the
-                        // steps ran.
+                        // `playbook_gap`. The pipeline stays warn-only — its
+                        // exit is untouched (S8 gates `worker prompt`). The
+                        // report is read once here and the S5 check shares the
+                        // acceptance predicate that records the report.
+                        // Reviewer reports are skipped inside the check (they
+                        // carry a `Verdict:` line, not a block); a plan report
+                        // is not checked because it does not claim the steps ran.
                         if is_reviewer
                             || kind == ChildKind::Build
                             || matches!(kind, ChildKind::Fix(_))
@@ -1644,13 +1644,21 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                                 report_is_unfinished(&rep_content).is_none()
                             };
                             if should_record {
-                                crate::worker::prompt::playbook_check::warn_playbook_gaps(
-                                    &mut journal,
-                                    &ctx.runs_dir,
-                                    &child_input.name,
-                                    &rep_content,
-                                    is_reviewer,
-                                );
+                                if let Some(gap) =
+                                    crate::worker::prompt::playbook_check::record_playbook_gaps(
+                                        &mut journal,
+                                        &ctx.runs_dir,
+                                        &child_input.name,
+                                        &rep_content,
+                                        is_reviewer,
+                                    )
+                                {
+                                    eprintln!(
+                                        "warning: playbook gap | name={} {}",
+                                        child_input.name,
+                                        gap.summary()
+                                    );
+                                }
                                 let _ = crate::state::WorkerMetadata::save_pipeline(
                                     &ctx.runs_dir,
                                     &child_input.name,
