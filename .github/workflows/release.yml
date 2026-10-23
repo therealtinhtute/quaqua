@@ -115,9 +115,16 @@ jobs:
       # Publishing converges: the first run creates the release with all six
       # assets; any later run for the same tag uploads over them with
       # `--clobber`, which also completes a release left half-uploaded.
+      #
+      # gh resolves the repository from the git remote of the working
+      # directory. This job downloads artifacts instead of checking out, so
+      # there is no worktree and every gh call would die with "failed to run
+      # git: fatal: not a git repository" before touching the API. GH_REPO
+      # gives gh the repository directly and skips that resolution.
       - name: gh release create
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
