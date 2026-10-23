@@ -790,12 +790,6 @@ mod tests {
                 }
             }
         }
-
-        fn rect_of(&self, pane: &str) -> Option<Rect> {
-            let mut all = Vec::new();
-            self.rects(AREA, &mut all);
-            all.into_iter().find(|(p, _)| p == pane).map(|(_, r)| r)
-        }
     }
 
     fn worker(id: &str, tab: &str) -> Pane {

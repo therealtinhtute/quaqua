@@ -842,6 +842,8 @@ pub(crate) mod metrics {
 
         let _env_home = TestEnvVarGuard::set("HOME", &tmp);
         let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
+        let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
         let db_path = runs_dir.join("quaqua.db");
         let mut journal = crate::engine::journal_sqlite::SqliteJournal::open(&db_path).unwrap();
 

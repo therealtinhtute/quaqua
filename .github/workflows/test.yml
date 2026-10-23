@@ -1,0 +1,77 @@
+name: Test
+
+# Every PR into main, and every push to main, runs the workspace test suite and
+# lints the workflow files. The check names are "Test / cargo test (workspace)"
+# and "Test / actionlint (workflows)"; both are required status checks in branch
+# protection, so a red lint blocks a merge exactly like a red test.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# The job only reads the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR supersedes the run in flight.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same pin as release.yml: the stable ref that carries toolchain 1.99.0,
+      # the toolchain the workspace is developed and tested against.
+      - uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7
+        with:
+          toolchain: 1.99.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The runner has neither herdr nor tmux. Every test that reaches for the
+      # daemon sets GRID_SKIP=1 + QUAQUA_TEST=1, so the whole suite runs here.
+      - name: cargo test --locked
+        run: cargo test --locked
+
+  # Lints .github/workflows/*.yml itself. Separate job so a lint failure never
+  # hides the test result, and the two are required independently.
+  #
+  # Pinned to a version *and* to the release tarball's SHA256 taken from that
+  # release's checksums file: a swapped or truncated asset fails the checksum
+  # instead of running, and a new actionlint release cannot turn the gate red
+  # on an unchanged workflow.
+  #
+  # actionlint also shellchecks every `run:` script when `shellcheck` is on
+  # PATH; ubuntu-latest ships one, so the scripts are covered too.
+  actionlint:
+    name: actionlint (workflows)
+    runs-on: ubuntu-latest
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint ${{ env.ACTIONLINT_VERSION }}
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          (
+            cd "$RUNNER_TEMP"
+            echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum -c -
+          )
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "$RUNNER_TEMP/bin" actionlint
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/actionlint" --version
+
+      - name: actionlint .github/workflows
+        run: actionlint -color .github/workflows/*.yml
