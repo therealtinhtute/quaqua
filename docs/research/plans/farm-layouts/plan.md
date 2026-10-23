@@ -1,5 +1,5 @@
 ---
-status: parked (kickoff after quaqua-tidy T1/T2; P1 needs PR #113 merged)
+status: ready (tidy done, #113 merged 2026-10-23; P0 brief: p0-kickoff.md)
 lane: high-risk
 ---
 # Farm layouts — layout manifest, runtime gate, mail, events
