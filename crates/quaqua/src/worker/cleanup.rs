@@ -409,6 +409,29 @@ pub(crate) mod metrics {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     use std::process::Output;
 
+    /// Serialises the tests below against process-global env and temp dirs. A
+    /// panicking test must not wedge the rest, so poisoning is ignored (same
+    /// rule as [`crate::test_env::lock_env`]).
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A test that panics while holding [`TEST_LOCK`] must not cascade into
+    /// every later test: acquiring the lock again still has to succeed.
+    #[test]
+    fn test_cleanup_lock_recovers_from_a_panicking_holder() {
+        let panicked = std::thread::spawn(|| {
+            let _lock = test_lock();
+            panic!("deliberate panic while holding TEST_LOCK (poison recovery test)");
+        })
+        .join();
+        assert!(panicked.is_err(), "holder thread should have panicked");
+
+        let _lock = test_lock();
+    }
+
     /// Restores an environment variable when dropped, including on panic.
     struct TestEnvVarGuard {
         key: &'static str,
@@ -576,7 +599,7 @@ pub(crate) mod metrics {
 
     #[test]
     fn test_cleanup_metrics_happy_path() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = test_lock();
         let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-metrics-happy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -660,7 +683,7 @@ pub(crate) mod metrics {
 
     #[test]
     fn test_cleanup_metrics_all_readers_failing() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = test_lock();
         let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-metrics-fail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -702,7 +725,7 @@ pub(crate) mod metrics {
 
     #[test]
     fn test_cleanup_metrics_second_lifecycle_excludes_first() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = test_lock();
         let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-metrics-reuse-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -785,7 +808,7 @@ pub(crate) mod metrics {
 
     #[test]
     fn test_cleanup_failure_retry_produces_single_row() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = test_lock();
         let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-fail-retry-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -827,7 +850,7 @@ pub(crate) mod metrics {
 
     #[test]
     fn test_cleanup_metrics_journal_fields() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = test_lock();
         let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-journal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -895,7 +918,7 @@ pub(crate) mod metrics {
 
     #[test]
     fn test_cleanup_metrics_failing_harness_readers() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = test_lock();
         let _env_lock = crate::test_env::lock_env();
         let tmp = std::env::temp_dir().join(format!("cleanup-failing-readers-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -956,7 +979,7 @@ pub(crate) mod metrics {
 
     #[test]
     fn test_format_repo_path_boundary() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = test_lock();
         let _env_lock = crate::test_env::lock_env();
         let _env_home = TestEnvVarGuard::set("HOME", "/mock/root/user");
 
