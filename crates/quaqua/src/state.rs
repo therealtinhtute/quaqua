@@ -65,6 +65,10 @@ impl WorkerMetadata {
         runs_dir.join(format!(".{name}.cost100"))
     }
 
+    pub fn cost200_path(runs_dir: &Path, name: &str) -> PathBuf {
+        runs_dir.join(format!(".{name}.cost200"))
+    }
+
     pub fn provider_retry_path(runs_dir: &Path, name: &str) -> PathBuf {
         runs_dir.join(format!(".{name}.provider_retry"))
     }
@@ -141,6 +145,14 @@ impl WorkerMetadata {
         atomic_write(&Self::cost100_path(runs_dir, name), format!("{cost}\n"))
     }
 
+    pub fn has_cost200(runs_dir: &Path, name: &str) -> bool {
+        Self::cost200_path(runs_dir, name).exists()
+    }
+
+    pub fn record_cost200(runs_dir: &Path, name: &str, cost: f64) -> io::Result<()> {
+        atomic_write(&Self::cost200_path(runs_dir, name), format!("{cost}\n"))
+    }
+
     pub fn has_provider_retry(runs_dir: &Path, name: &str) -> bool {
         Self::provider_retry_path(runs_dir, name).exists()
     }
@@ -204,10 +216,11 @@ impl WorkerMetadata {
         let _ = fs::remove_file(Self::provider_retry_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost80_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost100_path(runs_dir, name));
+        let _ = fs::remove_file(Self::cost200_path(runs_dir, name));
     }
 
     /// Clean up all metadata and transient state files for a worker.
-    /// Ensures `.cost80`, `.cost100`, `.owner`, `.grid`, `.pipeline`,
+    /// Ensures `.cost80`, `.cost100`, `.cost200`, `.owner`, `.grid`, `.pipeline`,
     /// `.provider_retry`, etc. are all deleted.
     pub fn cleanup_worker_files(runs_dir: &Path, name: &str) {
         let _ = fs::remove_file(Self::owner_path(runs_dir, name));
@@ -218,6 +231,7 @@ impl WorkerMetadata {
         let _ = fs::remove_file(Self::provider_retry_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost80_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost100_path(runs_dir, name));
+        let _ = fs::remove_file(Self::cost200_path(runs_dir, name));
         let _ = fs::remove_file(Self::progress_path(runs_dir, name));
         let _ = fs::remove_file(Self::elapsed_path(runs_dir, name));
         let _ = fs::remove_file(Self::nudged_path(runs_dir, name));

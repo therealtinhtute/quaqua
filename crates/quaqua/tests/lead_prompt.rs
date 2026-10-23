@@ -71,6 +71,14 @@ if [[ "$1 $2" == "agent get" ]]; then
   printf '{"result":{"agent":{"agent_status":"%s","pane_id":"%%p"}}}\n' "$status"
   exit 0
 fi
+if [[ "$1 $2" == "agent list" ]]; then
+  if [[ -f "$QUAQUA_TEST_STATE/listed" ]]; then
+    printf '%s\n' '{"result":{"agents":[{"name":"cos"},{"name":"baro-lead"}]}}'
+  else
+    printf '%s\n' '{"result":{"agents":[{"name":"cos"}]}}'
+  fi
+  exit 0
+fi
 if [[ "$1 $2" == "agent send-keys" ]]; then
   exit 0
 fi
@@ -143,6 +151,19 @@ fn a_missing_lead_is_nonzero_with_the_spawn_hint() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no live lead 'baro-lead'"), "{stderr}");
     assert!(stderr.contains("quaqua lead spawn"), "{stderr}");
+}
+
+#[test]
+fn a_not_found_lead_still_listed_is_unknown_and_not_prompted() {
+    let f = Fixture::new("listed");
+    fs::write(f.state_file("missing"), "").unwrap();
+    fs::write(f.state_file("listed"), "").unwrap();
+    let out = f.run();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot determine"), "{stderr}");
+    assert!(!stderr.contains("no live lead"), "{stderr}");
+    assert!(!f.calls().contains("agent prompt"), "{}", f.calls());
 }
 
 #[allow(dead_code)]

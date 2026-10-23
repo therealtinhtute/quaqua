@@ -5,9 +5,9 @@ pub mod cost;
 pub mod observer;
 pub mod playbook_check;
 pub mod readonly;
+pub mod verdict;
 pub mod watchdog;
 pub mod workflow;
-pub mod verdict;
 
 pub use crate::util::now_sec;
 pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
@@ -30,6 +30,7 @@ use crate::engine::journal_sqlite::SqliteJournal;
 use crate::engine::runner::RunnerOutcome;
 use crate::git::GitOps;
 use crate::herdr::{Herdr, HerdrOps};
+use crate::liveness::{liveness, Liveness};
 use crate::state::WorkerMetadata;
 use crate::worker::cleanup::default_runs_dir;
 use crate::worker::prompt::cost::CostTracker;
@@ -417,14 +418,16 @@ impl Activity for PromptActivities {
         let res = self.inner.execute(req);
         match req {
             ActivityRequest::Herdr(HerdrRequest::AgentWait { name, .. }) => {
-                if let Ok(ActivityResult::Herdr(crate::engine::activity::HerdrResult::AgentWait {
-                    status,
-                    err,
-                    session_value,
-                    harness,
-                    cwd,
-                    ..
-                })) = &res
+                if let Ok(ActivityResult::Herdr(
+                    crate::engine::activity::HerdrResult::AgentWait {
+                        status,
+                        err,
+                        session_value,
+                        harness,
+                        cwd,
+                        ..
+                    },
+                )) = &res
                 {
                     let now = now_sec();
                     self.cost_tracker.lock().unwrap().check(
@@ -461,9 +464,10 @@ impl Activity for PromptActivities {
                 res
             }
             ActivityRequest::Git(crate::engine::activity::GitRequest::DiffHash { .. }) => {
-                if let Ok(ActivityResult::Git(
-                    crate::engine::activity::GitResult::DiffHash { hash, stat },
-                )) = &res
+                if let Ok(ActivityResult::Git(crate::engine::activity::GitResult::DiffHash {
+                    hash,
+                    stat,
+                })) = &res
                 {
                     let mut prev = self.last_diff.lock().unwrap();
                     if *prev != *hash {
@@ -607,11 +611,30 @@ pub fn prompt_worker<G: GitOps>(
     let fallback_kind = crate::config::load_team_config()
         .ok()
         .and_then(|cfg| crate::config::kind_of_worker(&cfg, name).map(|s| s.to_string()))
-        .or_else(|| crate::config::load_team_config().ok().map(|c| c.strategy.default_kind))
+        .or_else(|| {
+            crate::config::load_team_config()
+                .ok()
+                .map(|c| c.strategy.default_kind)
+        })
         .unwrap_or_default();
 
     let fallback_repo = {
-        let (_ok, get_info) = herdr.agent_get(name).unwrap_or((false, String::new()));
+        // A fresh prompt needs a provably live worker: one failed lookup is
+        // unknown, not down (issue #69). `--resume` keeps the watchdog's own
+        // gone/exit-3 handling.
+        let get_info = match liveness(herdr, name) {
+            Liveness::Alive(body) => body,
+            Liveness::Down if !resume => {
+                return Err((1, format!("error: no live worker '{name}' — spawn it with `quaqua worker spawn`\n")))
+            }
+            Liveness::Unknown(why) if !resume => {
+                return Err((
+                    1,
+                    format!("error: cannot determine whether worker '{name}' is live ({why}); not prompting\n"),
+                ))
+            }
+            _ => String::new(),
+        };
         let mut cwd = String::new();
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&get_info) {
             if let Some(agent) = json.get("result").and_then(|r| r.get("agent")) {
@@ -691,35 +714,28 @@ pub fn prompt_worker<G: GitOps>(
 
         // Synchronous land check: herdr's own "the prompt reached the turn"
         // signal. A stalled submission gets exactly one enter + re-wait.
-        let prompt_body = brief::compose_prompt_body(
-            name,
-            task_str,
-            injection.as_ref().map(|i| i.text.as_str()),
-        );
-        let landed = match herdr.agent_prompt_wait(
-            name,
-            &prompt_body,
-            &["working", "blocked"],
-            10_000,
-        ) {
-            Ok(out) => {
-                let (ok, status, code) = parse_submit_output(&out);
-                let _ = std::fs::write(
-                    &submit_log,
-                    String::from_utf8_lossy(&out.stdout).as_bytes(),
-                );
-                if ok && (status == "working" || status == "blocked" || status.is_empty()) {
-                    // An empty successful payload is an older herdr without
-                    // the land-check fields: the prompt was accepted.
-                    true
-                } else if code == "agent_blocked" {
-                    return Err((5, String::new()));
-                } else {
-                    false
+        let prompt_body =
+            brief::compose_prompt_body(name, task_str, injection.as_ref().map(|i| i.text.as_str()));
+        let landed =
+            match herdr.agent_prompt_wait(name, &prompt_body, &["working", "blocked"], 10_000) {
+                Ok(out) => {
+                    let (ok, status, code) = parse_submit_output(&out);
+                    let _ = std::fs::write(
+                        &submit_log,
+                        String::from_utf8_lossy(&out.stdout).as_bytes(),
+                    );
+                    if ok && (status == "working" || status == "blocked" || status.is_empty()) {
+                        // An empty successful payload is an older herdr without
+                        // the land-check fields: the prompt was accepted.
+                        true
+                    } else if code == "agent_blocked" {
+                        return Err((5, String::new()));
+                    } else {
+                        false
+                    }
                 }
-            }
-            Err(_) => false,
-        };
+                Err(_) => false,
+            };
         if !landed {
             eprintln!(
                 "WATCHDOG prompt-not-landed | name={name} — sent enter once (input may be typed but unsubmitted)"

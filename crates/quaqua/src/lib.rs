@@ -14,6 +14,7 @@ pub mod launch;
 pub mod worker;
 pub mod grid;
 pub mod lead;
+pub mod liveness;
 pub mod taskforce;
 pub mod merge;
 pub mod pipeline;

@@ -8,6 +8,7 @@
 //! confirms the status and that the box is empty.
 
 use crate::herdr::HerdrOps;
+use crate::liveness::{liveness, Liveness};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
@@ -38,15 +39,28 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
     let name = format!("{slug}-lead");
 
     // The Lead must exist and expose a pane to read back.
-    let (ok, info) = herdr
-        .agent_get(&name)
-        .map_err(|e| (1, format!("error: cannot inspect lead '{name}': {e}\n")))?;
+    let info = match liveness(herdr, &name) {
+        Liveness::Alive(body) => body,
+        Liveness::Down => {
+            return Err((
+                1,
+                format!(
+                    "error: no live lead '{name}' — start it with `quaqua lead spawn {slug}`\n"
+                ),
+            ))
+        }
+        Liveness::Unknown(why) => {
+            return Err((
+                1,
+                format!(
+                "error: cannot determine whether lead '{name}' is live ({why}); not prompting\n"
+            ),
+            ))
+        }
+    };
     let fields = parse_agent(&info);
-    if !ok || fields.is_none() {
-        return Err((
-            1,
-            format!("error: no live lead '{name}' — start it with `quaqua lead spawn {slug}`\n"),
-        ));
+    if fields.is_none() {
+        return Err((1, format!("error: cannot parse lead '{name}' from herdr\n")));
     }
     let (_, pane) = fields.expect("checked above");
     if pane.is_empty() {
