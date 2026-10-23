@@ -91,6 +91,34 @@ refused untouched, and re-running is a no-op.
 
 ## Install
 
+### From a release (no Rust toolchain)
+
+Each release carries one `tar.gz` per target with a `.sha256` next to it:
+`x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` and `x86_64-apple-darwin`.
+Pick the tag to install and the target of this machine:
+
+```bash
+tag=v0.1.0                                  # the release tag, e.g. from the releases page
+target=x86_64-unknown-linux-gnu             # or aarch64-apple-darwin, x86_64-apple-darwin
+base="https://github.com/therealtinhtute/quaqua/releases/download/${tag}"
+curl -fsSLO "${base}/quaqua-${tag}-${target}.tar.gz"
+curl -fsSLO "${base}/quaqua-${tag}-${target}.tar.gz.sha256"
+sha256sum -c "quaqua-${tag}-${target}.tar.gz.sha256"   # macOS: shasum -a 256 -c "…"
+tar -xzf "quaqua-${tag}-${target}.tar.gz"               # quaqua, LICENSE, README.md
+install -m 755 quaqua ~/.local/bin/quaqua               # any directory on PATH
+quaqua --version
+```
+
+A `.sha256` that does not verify means a truncated download or a corrupted
+archive: delete both files and download again.
+
+Releasing is one tag push: `.github/workflows/release.yml` builds the three
+targets on a `v*` tag, checksums each archive, and publishes them to the GitHub
+release. Re-running the job for the same tag overwrites the assets instead of
+duplicating them, so a tag that failed halfway is repaired by re-running.
+
+### From source
+
 Requires a Rust toolchain (install `rustup` if `cargo --version` fails).
 
 ```bash
@@ -131,7 +159,9 @@ RUN_SLOW_TESTS=1 tests/run.sh   # also run the 2 slow suites (or: tests/run.sh -
 `tests/run.sh` skips the two slow suites (`test_prompt_worker.sh`, `test_pipeline.sh`)
 unless the change touches a script they cover, and prints which it skipped and why.
 
-Tests run locally only (no CI).
+Tests run locally only — there is no test CI. The one workflow,
+`.github/workflows/release.yml`, runs on a `v*` tag and only builds and
+publishes the release.
 
 Run CoS (Quả Quả) from `~/quaqua` inside Herdr (`HERDR_ENV=1`); it spawns project Leads with
 `quaqua lead spawn <slug>`.
