@@ -35,6 +35,11 @@ if [[ "$1" == agent && "$2" == get ]]; then
   echo '{"result":{"agent":{"pane_id":"pane-1"}}}'
   exit 0
 fi
+# liveness second check: agent_not_found counts only when the list omits it.
+if [[ "$1" == agent && "$2" == list ]]; then
+  echo '{"result":{"agents":[{"name":"cos"}]}}'
+  exit 0
+fi
 # grid check: in-process reconcile reads one snapshot. GRID_FAIL simulates an
 # unreachable herdr; GRID_SNAPSHOT serves a fixture; default = converged.
 if [[ "$1" == api && "$2" == snapshot ]]; then

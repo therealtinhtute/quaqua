@@ -1,6 +1,7 @@
 //! Project Lead cleanup logic (`quaqua lead cleanup <slug>`).
 
 use crate::herdr::HerdrOps;
+use crate::liveness::{liveness, Liveness};
 use crate::state::WorkerMetadata;
 use crate::workspace::workspace_root_checked;
 use serde_json::Value;
@@ -45,28 +46,19 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
     let name = format!("{slug}-lead");
 
     // Check Lead liveness
-    let (lead_ok, lead_body) = herdr.agent_get(&name).unwrap_or((false, String::new()));
-    let lead_json = serde_json::from_str::<Value>(&lead_body).ok();
-    let has_agent = lead_ok && lead_json.as_ref().and_then(|j| j.get("result")).and_then(|r| r.get("agent")).is_some();
-
-    if !has_agent {
-        let is_not_found = lead_body.contains("agent_not_found")
-            || lead_json.as_ref()
-                .and_then(|j| j.get("error"))
-                .and_then(|e| e.get("code"))
-                .and_then(|c| c.as_str())
-                == Some("agent_not_found");
-        if is_not_found {
-            return Err((1, format!("no live Lead '{name}'\n")));
-        } else {
+    let lead_body = match liveness(herdr, &name) {
+        Liveness::Alive(body) => body,
+        Liveness::Down => return Err((1, format!("no live Lead '{name}'\n"))),
+        Liveness::Unknown(why) => {
             return Err((
                 1,
                 format!(
-                    "cannot determine the state of Lead '{name}' (herdr agent get failed) — refusing to clean up\n"
+                    "cannot determine the state of Lead '{name}' ({why}) — refusing to clean up\n"
                 ),
-            ));
+            ))
         }
-    }
+    };
+    let lead_json = serde_json::from_str::<Value>(&lead_body).ok();
 
     let agent_obj = lead_json.as_ref().and_then(|j| j.get("result")).and_then(|r| r.get("agent")).unwrap();
     let pane = agent_obj.get("pane_id").and_then(|p| p.as_str()).unwrap_or("");
@@ -89,32 +81,19 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
             if path.extension().and_then(|e| e.to_str()) == Some("owner") {
                 let peer = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 if !peer.is_empty() && WorkerMetadata::load_owner(&runs_dir, peer) == name {
-                    let (peer_ok, peer_body) = herdr.agent_get(peer).unwrap_or((false, String::new()));
-                    let peer_json = serde_json::from_str::<Value>(&peer_body).ok();
-                    let peer_live = peer_ok
-                        && peer_json.as_ref()
-                            .and_then(|j| j.get("result"))
-                            .and_then(|r| r.get("agent"))
-                            .is_some();
-                    if peer_live {
-                        live_peers.push(peer.to_string());
-                    } else {
-                        let is_peer_not_found = peer_body.contains("agent_not_found")
-                            || peer_json.as_ref()
-                                .and_then(|j| j.get("error"))
-                                .and_then(|e| e.get("code"))
-                                .and_then(|c| c.as_str())
-                                == Some("agent_not_found");
-                                if !is_peer_not_found {
-                                    return Err((
-                                        1,
-                                        format!(
-                                            "cannot determine whether Peer '{peer}' is still live (herdr agent get failed) — refusing to clean up '{name}'; retry, or run cleanup-worker.sh if it is gone\n"
-                                        ),
-                                    ));
-                                }
-                            }
+                    match liveness(herdr, peer) {
+                        Liveness::Alive(_) => live_peers.push(peer.to_string()),
+                        Liveness::Down => {}
+                        Liveness::Unknown(why) => {
+                            return Err((
+                                1,
+                                format!(
+                                    "cannot determine whether Peer '{peer}' is still live ({why}) — refusing to clean up '{name}'; retry, or run quaqua worker cleanup if it is gone\n"
+                                ),
+                            ));
                         }
+                    }
+                }
             }
         }
     }

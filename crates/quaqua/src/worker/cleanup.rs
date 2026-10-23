@@ -3,6 +3,7 @@
 use crate::engine::journal::Journal;
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
+use crate::liveness::{liveness, Liveness};
 use crate::state::WorkerMetadata;
 use crate::worker::prompt::cost::Tokens;
 use serde::{Deserialize, Serialize};
@@ -151,7 +152,10 @@ pub fn append_worker_telemetry(
 
                     for ev in &events {
                         if ev.kind == "workflow_completed" {
-                            if let Ok(out) = serde_json::from_str::<crate::engine::child::SingleWorkerOutput>(&ev.payload_json) {
+                            if let Ok(out) = serde_json::from_str::<
+                                crate::engine::child::SingleWorkerOutput,
+                            >(&ev.payload_json)
+                            {
                                 last_exit = Some(out.exit);
                             }
                         } else if ev.kind == "workflow_failed" {
@@ -164,19 +168,22 @@ pub fn append_worker_telemetry(
                     }
 
                     if let Some(s) = snap {
-                        if let Ok(state) = serde_json::from_str::<crate::worker::prompt::workflow::SingleWorkerState>(&s.state_json) {
+                        if let Ok(state) = serde_json::from_str::<
+                            crate::worker::prompt::workflow::SingleWorkerState,
+                        >(&s.state_json)
+                        {
                             kind = Some(state.input.kind.clone());
                             budget_sec = Some(state.input.time_budget_sec);
                             usd_budget = state.input.cost_budget;
                             if harness.is_none() {
                                 harness = state.harness.clone();
+
                             }
                         }
                     }
                 }
             }
         }
-
 
         if kind.is_none() {
             if let Ok(cfg) = crate::config::load_team_config() {
@@ -266,13 +273,13 @@ pub fn home_quaqua_runs() -> PathBuf {
     crate::workspace::workspace_root().join("runs")
 }
 
+
 pub fn default_runs_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
         return PathBuf::from(dir);
     }
     home_quaqua_runs()
 }
-
 
 pub fn run_grid_hook(grid_tab: &str, owner: Option<&str>) -> Result<(), (i32, String)> {
     if std::env::var("GRID_SKIP").as_deref() == Ok("1") {
@@ -312,36 +319,24 @@ pub fn cleanup_worker_in<G: GitOps, H: HerdrOps>(
         None => PathBuf::from(".wt").join(name),
     };
 
-    let (_get_ok, agent_info) = herdr
-        .agent_get(name)
-        .map_err(|e| (1, format!("error: failed to inspect agent {name}: {e}")))?;
-
-    let parsed_json = serde_json::from_str::<Value>(&agent_info).ok();
-    let mut pane_to_close: Option<String> = None;
-    let mut inspect_ok = false;
-
-    if let Some(json) = &parsed_json {
-        if let Some(agent) = json.get("result").and_then(|r| r.get("agent")) {
-            inspect_ok = true;
-            if let Some(pane) = agent.get("pane_id").and_then(|p| p.as_str()) {
-                if !pane.is_empty() {
-                    pane_to_close = Some(pane.to_string());
-                }
-            }
-        } else if let Some(err) = json.get("error") {
-            if err.get("code").and_then(|c| c.as_str()) == Some("agent_not_found") {
-                inspect_ok = true; // agent already gone: no pane to close
-            }
+    // agent_not_found alone is not "gone": liveness confirms it with
+    // `agent list` before the worktree is removed (issue #69).
+    let parsed_json: Option<Value> = match liveness(herdr, name) {
+        Liveness::Alive(body) => serde_json::from_str::<Value>(&body).ok(),
+        Liveness::Down => None, // agent already gone: no pane to close
+        Liveness::Unknown(why) => {
+            return Err((
+                1,
+                format!("error: cannot determine whether agent {name} is still live ({why}) — refusing to clean up"),
+            ))
         }
-    }
-
-    if !inspect_ok && agent_info.contains("agent_not_found") {
-        inspect_ok = true;
-    }
-
-    if !inspect_ok {
-        return Err((1, format!("error: failed to inspect agent {name}: {agent_info}")));
-    }
+    };
+    let pane_to_close = parsed_json
+        .as_ref()
+        .and_then(|j| j.pointer("/result/agent/pane_id"))
+        .and_then(|p| p.as_str())
+        .filter(|p| !p.is_empty())
+        .map(str::to_string);
 
     if let Some(pane) = pane_to_close {
         let _ = herdr.pane_close(&pane);
@@ -523,8 +518,11 @@ pub(crate) mod metrics {
         }
     }
 
+    const LIST_COS: &str = r#"{"result":{"agents":[{"name":"cos"}]}}"#;
+
     struct MockHerdr {
         agent_get_response: String,
+        agent_list_response: String,
     }
 
     impl HerdrOps for MockHerdr {
@@ -532,7 +530,7 @@ pub(crate) mod metrics {
             unimplemented!()
         }
         fn agent_list(&self) -> std::io::Result<String> {
-            unimplemented!()
+            Ok(self.agent_list_response.clone())
         }
         fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
             Ok((true, self.agent_get_response.clone()))
@@ -646,12 +644,15 @@ pub(crate) mod metrics {
         WorkerMetadata::save_pipeline(&runs_dir, "tieude-clean1", "task-p74").unwrap();
 
         let herdr = MockHerdr {
+            agent_list_response: LIST_COS.to_string(),
             agent_get_response: format!(
                 r#"{{"result":{{"agent":{{"agent":"opencode","pane_id":"%1","cwd":"{}","agent_session":{{"value":"ses-1"}}}}}}}}"#,
                 wt.display()
             ),
         };
-        let git = MockGit { worktree_remove_ok: true };
+        let git = MockGit {
+            worktree_remove_ok: true,
+        };
 
         cleanup_worker_in("tieude-clean1", &repo, &git, &herdr, Some(&runs_dir)).unwrap();
 
@@ -682,6 +683,44 @@ pub(crate) mod metrics {
     }
 
     #[test]
+    fn test_cleanup_refuses_when_not_found_but_still_listed() {
+        let _lock = test_lock();
+        let _env_lock = crate::test_env::lock_env();
+        let tmp = std::env::temp_dir().join(format!("cleanup-listed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let runs_dir = tmp.join("runs");
+        let repo = tmp.join("repo");
+        let wt = tmp.join(".wt").join("worker-listed");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+
+        let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
+        let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+
+        let herdr = MockHerdr {
+            agent_list_response: r#"{"result":{"agents":[{"name":"worker-listed"}]}}"#.to_string(),
+            agent_get_response: r#"{"error":{"code":"agent_not_found"}}"#.to_string(),
+        };
+        let git = MockGit {
+            worktree_remove_ok: true,
+        };
+
+        let err =
+            cleanup_worker_in("worker-listed", &repo, &git, &herdr, Some(&runs_dir)).unwrap_err();
+        assert_eq!(err.0, 1);
+        assert!(err.1.contains("cannot determine"), "{}", err.1);
+        assert!(
+            wt.is_dir(),
+            "worktree must survive an unknown-liveness refusal"
+        );
+        assert!(!runs_dir.join("telemetry.jsonl").exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_cleanup_metrics_all_readers_failing() {
         let _lock = test_lock();
         let _env_lock = crate::test_env::lock_env();
@@ -699,9 +738,12 @@ pub(crate) mod metrics {
         let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
 
         let herdr = MockHerdr {
+            agent_list_response: LIST_COS.to_string(),
             agent_get_response: r#"{"error":{"code":"agent_not_found"}}"#.to_string(),
         };
-        let git = MockGit { worktree_remove_ok: true };
+        let git = MockGit {
+            worktree_remove_ok: true,
+        };
 
         // Even with no session DB, no owner, agent not found -> cleanup must succeed!
         cleanup_worker_in("worker-unknown", &repo, &git, &herdr, Some(&runs_dir)).unwrap();
@@ -781,12 +823,15 @@ pub(crate) mod metrics {
         ).unwrap();
 
         let herdr = MockHerdr {
+            agent_list_response: LIST_COS.to_string(),
             agent_get_response: format!(
                 r#"{{"result":{{"agent":{{"agent":"opencode","pane_id":"%1","cwd":"{}","agent_session":{{"value":"ses-new"}}}}}}}}"#,
                 wt.display()
             ),
         };
-        let git = MockGit { worktree_remove_ok: true };
+        let git = MockGit {
+            worktree_remove_ok: true,
+        };
 
         cleanup_worker_in("tieude-reused", &repo, &git, &herdr, Some(&runs_dir)).unwrap();
 
@@ -824,11 +869,14 @@ pub(crate) mod metrics {
         let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
 
         let herdr = MockHerdr {
+            agent_list_response: LIST_COS.to_string(),
             agent_get_response: r#"{"result":{"agent":{"agent":"opencode","pane_id":"%1","cwd":"","agent_session":{"value":"ses-1"}}}}"#.to_string(),
         };
 
         // 1. Initial attempt fails at worktree_remove
-        let failing_git = MockGit { worktree_remove_ok: false };
+        let failing_git = MockGit {
+            worktree_remove_ok: false,
+        };
         let err = cleanup_worker_in("tieude-retry", &repo, &failing_git, &herdr, Some(&runs_dir));
         assert!(err.is_err());
 
@@ -836,7 +884,9 @@ pub(crate) mod metrics {
         assert!(!tele_path.exists(), "no telemetry row must be written when cleanup fails");
 
         // 2. Retry succeeds
-        let success_git = MockGit { worktree_remove_ok: true };
+        let success_git = MockGit {
+            worktree_remove_ok: true,
+        };
         let res = cleanup_worker_in("tieude-retry", &repo, &success_git, &herdr, Some(&runs_dir));
         assert!(res.is_ok());
 
@@ -882,19 +932,47 @@ pub(crate) mod metrics {
         );
         state.harness = Some("opencode".to_string());
         let state_json = serde_json::to_string(&state).unwrap();
-        journal.append_snapshot("worker:tieude-journal#1", &crate::engine::journal::SnapshotRecord::new(1, state_json)).unwrap();
+        journal
+            .append_snapshot(
+                "worker:tieude-journal#1",
+                &crate::engine::journal::SnapshotRecord::new(1, state_json),
+            )
+            .unwrap();
 
         let now_ms = crate::util::now_sec() * 1000;
-        journal.append_event("worker:tieude-journal#1", &crate::engine::journal::EventRecord::new(1, now_ms.saturating_sub(60_000), "workflow_started".to_string(), "{}".to_string())).unwrap();
-        journal.append_event("worker:tieude-journal#1", &crate::engine::journal::EventRecord::new(2, now_ms.saturating_sub(10_000), "workflow_completed".to_string(), r#"{"exit":0,"report_path":"/tmp/r.md"}"#.to_string())).unwrap();
+        journal
+            .append_event(
+                "worker:tieude-journal#1",
+                &crate::engine::journal::EventRecord::new(
+                    1,
+                    now_ms.saturating_sub(60_000),
+                    "workflow_started".to_string(),
+                    "{}".to_string(),
+                ),
+            )
+            .unwrap();
+        journal
+            .append_event(
+                "worker:tieude-journal#1",
+                &crate::engine::journal::EventRecord::new(
+                    2,
+                    now_ms.saturating_sub(10_000),
+                    "workflow_completed".to_string(),
+                    r#"{"exit":0,"report_path":"/tmp/r.md"}"#.to_string(),
+                ),
+            )
+            .unwrap();
 
         let herdr = MockHerdr {
+            agent_list_response: LIST_COS.to_string(),
             agent_get_response: format!(
                 r#"{{"result":{{"agent":{{"agent":"opencode","pane_id":"%1","cwd":"{}","agent_session":{{"value":"ses-j1"}}}}}}}}"#,
                 wt.display()
             ),
         };
-        let git = MockGit { worktree_remove_ok: true };
+        let git = MockGit {
+            worktree_remove_ok: true,
+        };
 
         cleanup_worker_in("tieude-journal", &repo, &git, &herdr, Some(&runs_dir)).unwrap();
 
@@ -931,25 +1009,37 @@ pub(crate) mod metrics {
         let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
         let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
 
-        let git = MockGit { worktree_remove_ok: true };
+        let git = MockGit {
+            worktree_remove_ok: true,
+        };
 
         // 1. OMP failing reader (no session directory)
         let herdr_omp = MockHerdr {
+            agent_list_response: LIST_COS.to_string(),
             agent_get_response: r#"{"result":{"agent":{"agent":"omp","pane_id":"%1","cwd":"/nonexistent/wt/.wt/sude-fail","agent_session":{"value":"ses-omp"}}}}"#.to_string(),
         };
         cleanup_worker_in("sude-fail", &repo, &git, &herdr_omp, Some(&runs_dir)).unwrap();
 
         // 2. Opencode failing reader (no sqlite db)
         let herdr_open = MockHerdr {
+            agent_list_response: LIST_COS.to_string(),
             agent_get_response: r#"{"result":{"agent":{"agent":"opencode","pane_id":"%2","cwd":"/nonexistent/wt/.wt/tieude-fail","agent_session":{"value":"ses-open"}}}}"#.to_string(),
         };
         cleanup_worker_in("tieude-fail", &repo, &git, &herdr_open, Some(&runs_dir)).unwrap();
 
         // 3. Claude failing reader (no projects transcripts)
         let herdr_claude = MockHerdr {
+            agent_list_response: LIST_COS.to_string(),
             agent_get_response: r#"{"result":{"agent":{"agent":"claude","pane_id":"%3","cwd":"/nonexistent/wt/.wt/truonglao-fail","agent_session":{"value":"ses-claude"}}}}"#.to_string(),
         };
-        cleanup_worker_in("truonglao-fail", &repo, &git, &herdr_claude, Some(&runs_dir)).unwrap();
+        cleanup_worker_in(
+            "truonglao-fail",
+            &repo,
+            &git,
+            &herdr_claude,
+            Some(&runs_dir),
+        )
+        .unwrap();
 
         let tele_path = runs_dir.join("telemetry.jsonl");
         let content = std::fs::read_to_string(&tele_path).unwrap();

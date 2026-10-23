@@ -41,8 +41,14 @@ case "${1:-} ${2:-}" in
     echo '{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[]}}'
     exit 0 ;;
   "agent get")
+    if [ "${FAKE_GET:-}" = listed ]; then
+      echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1
+    fi
     printf '{"result":{"agent":{"agent_status":"%s","cwd":"%s","pane_id":"%s"}}}\n' \
       "${FAKE_STATUS:-working}" "${FAKE_CWD:-$HOME}" "${FAKE_WATCHER_PANE:-%1}"
+    exit 0 ;;
+  "agent list")
+    printf '{"result":{"agents":[{"name":"cos"},{"name":"%s"}]}}\n' "${FAKE_NAME:-}"
     exit 0 ;;
   "agent read")
     if [ "${FAKE_ROTATE:-0}" = 1 ]; then
@@ -346,6 +352,14 @@ Current design: fail" HERDR_STUB_SNAPSHOT="$(dirname "$here")/tests/fixtures/her
 grep -q 'grid check failed' "$T/err" || fail "failing grid check: no error message on stderr: $(cat "$T/err")"
 ! grep -q 'agent prompt' "$T/calls" || fail "failing grid check: worker prompted despite failure: $(cat "$T/calls")"
 echo "ok: pre-prompt grid check failure -> exit 1, no prompt sent"
+
+# absence != broken (#69): agent_not_found while agent list still names the
+# worker is unknown liveness -> refuse, never prompt or report it down.
+prompt sude-listed "$brief" FAKE_GET=listed
+[[ $rc -eq 1 ]] || fail "listed: exit $rc, want 1: $(cat "$T/err")"
+grep -q 'cannot determine' "$T/err" || fail "listed: unclear refusal: $(cat "$T/err")"
+! grep -q 'agent prompt' "$T/calls" || fail "listed: worker prompted: $(cat "$T/calls")"
+echo "ok: agent_not_found but still listed -> exit 1, no prompt sent"
 
 # The old pane-scraping cases (rotating pane resets idle, question strings) are
 # deleted with the pane-text contract: herdr `blocked` is the exit-5 signal and

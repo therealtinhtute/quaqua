@@ -49,6 +49,13 @@ case "${1:-} ${2:-}" in
     else
       echo '{"error":{"code":"agent_not_found"}}'; exit 1
     fi ;;
+  "agent list")
+    # Live names plus $HERDR_LISTED (listed although `agent get` says
+    # agent_not_found); "cos" keeps the list non-empty.
+    names="cos ${HERDR_LIVE:-} ${HERDR_LISTED:-}"
+    printf '{"result":{"agents":['; sep=
+    for n in $names; do printf '%s{"name":"%s"}' "$sep" "$n"; sep=,; done
+    printf ']}}\n' ;;
   "workspace get") printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"}}}\n' "$3" "${WS_LABEL:-baro}" ;;
 esac
 exit 0
@@ -118,6 +125,12 @@ run Bad_slug
 [[ ! -s $T/calls ]] || fail "bad slug: herdr called"
 echo "ok: missing Lead and bad slug -> refused"
 
+run baro HERDR_LISTED=baro-lead
+[[ $rc -eq 1 ]] && grep -q "cannot determine the state of Lead 'baro-lead'" "$T/err" \
+  || fail "lead listed: $(cat "$T/err")"
+! grep -q 'close' "$T/calls" || fail "lead listed: closed something"
+echo "ok: Lead agent_not_found but still in agent list -> abort"
+
 # ── Lead lookup failure is not "no Lead": abort, never a blind cleanup ──────
 run baro HERDR_ERR=baro-lead
 [[ $rc -eq 1 ]] || fail "lead err: exit $rc, want 1"
@@ -150,6 +163,13 @@ run baro HERDR_LIVE=baro-lead HERDR_GARBLE=sude-live
 ! grep -q 'close' "$T/calls" || fail "peer garble: closed something: $(cat "$T/calls")"
 cmp -s "$T/projects/INDEX.md" "$T/INDEX.orig" || fail "peer garble: INDEX touched"
 echo "ok: Peer get rc 0 with a non-JSON body -> abort"
+
+run baro HERDR_LIVE=baro-lead HERDR_LISTED=sude-live
+[[ $rc -eq 1 ]] || fail "peer listed: exit $rc, want 1"
+grep -q "cannot determine whether Peer 'sude-live' is still live" "$T/err" \
+  || fail "peer listed: unclear abort: $(cat "$T/err")"
+! grep -q 'close' "$T/calls" || fail "peer listed: closed something: $(cat "$T/calls")"
+echo "ok: Peer agent_not_found but still in agent list -> abort (absence != broken)"
 rm -f "$T/runs/sude-live.owner"
 
 # ── concurrent cleanups on different INDEX rows must not lose updates ────────

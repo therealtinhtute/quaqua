@@ -249,7 +249,11 @@ impl NewestModel {
 
 /// Reads omp spend from session transcripts in `root`.
 pub fn omp_spend_in(root: &Path, cwd: &str, home: &str, since_ms: Option<u64>) -> Option<Spend> {
-    session_dir_spend(&root.join(omp_session_dir_name(cwd, home)), since_ms, "omp-session")
+    session_dir_spend(
+        &root.join(omp_session_dir_name(cwd, home)),
+        since_ms,
+        "omp-session",
+    )
 }
 
 /// Sums spend over every `.jsonl` transcript in `dir` (omp and pi share the
@@ -431,8 +435,12 @@ pub fn claude_spend_in(
                 }
             }
 
-            let Some(msg) = v.get("message") else { continue };
-            let Some(msg_id) = msg.get("id").and_then(|id| id.as_str()) else { continue };
+            let Some(msg) = v.get("message") else {
+                continue;
+            };
+            let Some(msg_id) = msg.get("id").and_then(|id| id.as_str()) else {
+                continue;
+            };
             let Some(u) = msg.get("usage") else { continue };
 
             let in_tok = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -824,9 +832,8 @@ fn opencode_session_mtime(session_id: &str) -> Option<u64> {
         let Ok(mut stmt) = conn.prepare(query) else {
             continue;
         };
-        if let Ok(value) = stmt.query_row(rusqlite::params![session_id], |row| {
-            row.get::<_, i64>(0)
-        }) {
+        if let Ok(value) = stmt.query_row(rusqlite::params![session_id], |row| row.get::<_, i64>(0))
+        {
             if value > 0 {
                 return Some(value as u64);
             }
@@ -896,18 +903,25 @@ pub fn session_store_mtime(
                 Ok(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir),
                 _ => Path::new(&home).join(".omp/agent/sessions"),
             };
-            file_mtime_ms(&root.join(omp_session_dir_name(cwd, &home)).join(session_value))
+            file_mtime_ms(
+                &root
+                    .join(omp_session_dir_name(cwd, &home))
+                    .join(session_value),
+            )
         }
         Some(Harness::Pi) => pi_session_mtime(session_value),
         None => file_mtime_ms(Path::new(session_value)),
     }
 }
 
-/// Tracks cost budget warnings (80% and 100%) during watchdog execution.
+/// Tracks cost budget marks during watchdog execution: 80% and 100% warn,
+/// 200% escalates to the CoS. Each mark fires once per run, across restarts.
+/// The watchdog never kills a worker over cost.
 pub struct CostTracker {
     pub cost_cap: Option<f64>,
     pub cost80_warned: bool,
     pub cost100_warned: bool,
+    pub cost200_warned: bool,
 }
 
 impl CostTracker {
@@ -916,26 +930,58 @@ impl CostTracker {
             cost_cap,
             cost80_warned: WorkerMetadata::has_cost80(runs_dir, name),
             cost100_warned: WorkerMetadata::has_cost100(runs_dir, name),
+            cost200_warned: WorkerMetadata::has_cost200(runs_dir, name),
         }
     }
 
-    pub fn check(&mut self, runs_dir: &Path, name: &str, session_id: &str, cwd: &str, harness: &str) {
-        if let Some(budget_val) = self.cost_cap {
-            if !self.cost100_warned || !self.cost80_warned {
-                if let Some(current_cost) = read_worker_cost(name, session_id, cwd, harness) {
-                    if !self.cost80_warned && current_cost >= budget_val * 0.8 {
-                        let _ = WorkerMetadata::record_cost80(runs_dir, name, current_cost);
-                        self.cost80_warned = true;
-                        eprintln!("WATCHDOG cost 80% | name={name} cost=${current_cost:.4} budget=${budget_val:.4}");
-                    }
-                    if !self.cost100_warned && current_cost >= budget_val {
-                        let _ = WorkerMetadata::record_cost100(runs_dir, name, current_cost);
-                        self.cost100_warned = true;
-                        eprintln!("WATCHDOG cost 100% | name={name} cost=${current_cost:.4} budget=${budget_val:.4}");
-                    }
-                }
+    pub fn check(
+        &mut self,
+        runs_dir: &Path,
+        name: &str,
+        session_id: &str,
+        cwd: &str,
+        harness: &str,
+    ) {
+        if self.cost_cap.is_none()
+            || (self.cost80_warned && self.cost100_warned && self.cost200_warned)
+        {
+            return;
+        }
+        if let Some(current_cost) = read_worker_cost(name, session_id, cwd, harness) {
+            for line in self.observe(runs_dir, name, current_cost) {
+                eprintln!("{line}");
             }
         }
+    }
+
+    /// Records every mark `current_cost` newly crosses and returns its WATCHDOG lines.
+    pub fn observe(&mut self, runs_dir: &Path, name: &str, current_cost: f64) -> Vec<String> {
+        let Some(budget_val) = self.cost_cap else {
+            return Vec::new();
+        };
+        let mut lines = Vec::new();
+        if !self.cost80_warned && current_cost >= budget_val * 0.8 {
+            let _ = WorkerMetadata::record_cost80(runs_dir, name, current_cost);
+            self.cost80_warned = true;
+            lines.push(format!(
+                "WATCHDOG cost 80% | name={name} cost=${current_cost:.4} budget=${budget_val:.4}"
+            ));
+        }
+        if !self.cost100_warned && current_cost >= budget_val {
+            let _ = WorkerMetadata::record_cost100(runs_dir, name, current_cost);
+            self.cost100_warned = true;
+            lines.push(format!(
+                "WATCHDOG cost 100% | name={name} cost=${current_cost:.4} budget=${budget_val:.4}"
+            ));
+        }
+        if !self.cost200_warned && current_cost >= budget_val * 2.0 {
+            let _ = WorkerMetadata::record_cost200(runs_dir, name, current_cost);
+            self.cost200_warned = true;
+            lines.push(format!(
+                "WATCHDOG cost 200% | name={name} cost=${current_cost:.4} budget=${budget_val:.4} | ESCALATE"
+            ));
+        }
+        lines
     }
 }
 
@@ -1122,6 +1168,41 @@ mod tests {
     use super::*;
     use crate::engine::activity::{ActivityResult, CostResult, ReportFileResult};
 
+    fn cost_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("quaqua-cost200-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn test_cost200_escalates_once_and_survives_restart() {
+        let d = cost_dir("once");
+        let mut t = CostTracker::new(&d, "w", Some(1.0));
+        let below: Vec<_> = t
+            .observe(&d, "w", 1.99)
+            .into_iter()
+            .filter(|l| l.contains("200%"))
+            .collect();
+        assert!(below.is_empty(), "{below:?}");
+        let at: Vec<_> = t
+            .observe(&d, "w", 2.0)
+            .into_iter()
+            .filter(|l| l.contains("200%"))
+            .collect();
+        assert_eq!(at.len(), 1, "{at:?}");
+        assert_eq!(
+            at[0],
+            "WATCHDOG cost 200% | name=w cost=$2.0000 budget=$1.0000 | ESCALATE"
+        );
+        assert!(t.observe(&d, "w", 3.0).is_empty());
+        let mut restarted = CostTracker::new(&d, "w", Some(1.0));
+        assert!(restarted.observe(&d, "w", 3.0).is_empty());
+        WorkerMetadata::cleanup_worker_files(&d, "w");
+        assert!(!WorkerMetadata::has_cost200(&d, "w"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn test_cost_warning_below_threshold() {
         let mut state = CostState::new();
@@ -1300,6 +1381,7 @@ mod tests {
         let deep_heading = "# Run Summary\n\n### Lessons\nnone\n";
         let res2 = ReportFileResult::Content(deep_heading.to_string());
         assert_eq!(
+
             report_state(None, &res2, None),
             ReportState::Malformed("missing '## Lessons' section".to_string())
         );
@@ -1380,7 +1462,6 @@ mod tests {
         );
         assert_eq!(omp_session_dir_name("/tmp/x", ""), "-tmp-x");
     }
-
 
     #[test]
     fn test_pi_worker_reads_pi_session_dir_not_opencode_db() {
@@ -1679,8 +1760,7 @@ pub(crate) mod spend {
                 r#"{"message":{"id":"msg-2","model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":5}}}"#,
                 "\n",
             ),
-        )
-        .unwrap();
+        ).unwrap();
 
         let spend = claude_spend_in(&tmp, session_id, cwd, None).unwrap();
         assert_eq!(spend.model.as_deref(), Some("claude-haiku-4-5"));
@@ -1776,7 +1856,8 @@ pub(crate) mod spend {
         std::fs::write(
             dir.join("cost-only.jsonl"),
             r#"{"timestamp":"2026-10-21T10:00:00.000Z","message":{"cost":{"total":0.042}}}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let spend_cost = omp_spend_in(&root, cwd, "/path/to/worktree", None).unwrap();
         assert!((spend_cost.usd.unwrap() - 0.042).abs() < 1e-9);
