@@ -61,7 +61,7 @@ fn panes_in(driver: &FakeHerdrDriver, tab_id: &str) -> Vec<String> {
 }
 
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/herdr-grid")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/herdr-quaqua")
 }
 
 fn plan_jq_path() -> PathBuf {
