@@ -32,13 +32,17 @@ const CREDENTIAL_ENV_VARS: &[&str] = &[
 ];
 
 pub const USAGE: &str = "\
-# Usage: quaqua worker spawn [--base <ref>] [--review] [--approve-kind <kind>] [--purpose <purpose>] <name> [<kind>] <repo-path>
+# Usage: quaqua worker spawn [--base <ref>] [--review] [--approve-kind <kind>] [--purpose <purpose>] [--solo \"<reason>\"] <name> [<kind>] <repo-path>
 #   name = <kind>-<task>, ascii [a-z0-9-], <=20 chars, not ending in -lead
 #          (*-lead is the project Lead convention — quaqua lead spawn <slug>)
 #   --base <ref>  start branch quaqua/<name> at <ref> instead of <repo> HEAD
 #   --review      any kind with can_review = true: repo read-only, $HOME/quaqua/runs writable
 #   --purpose <p> resolve kind from [purposes] in team.toml
-#   --approve-kind <kind>  approve a spawn when kinds.<kind>.spawn = \"approve\" (repeatable)";
+#   --approve-kind <kind>  approve a spawn when kinds.<kind>.spawn = \"approve\" (repeatable)
+#   --solo \"<reason>\"  spawn on a cos-owned project without a Lead: needs a reason of
+#                 at least 10 chars, printed and recorded in memory/<today>.md.
+#                 The gate blocks at >= 2 topology signals (live build workers,
+#                 plan phases_left, multi-day memory, brief budget) — AGENTS.md '## Roles (SLP)'";
 
 pub struct SpawnOptions {
     pub base: Option<String>,
@@ -49,6 +53,8 @@ pub struct SpawnOptions {
     pub repo_path: PathBuf,
     /// Kinds the Principal approved with `--approve-kind`.
     pub approve_kinds: Vec<String>,
+    /// Reason given with `--solo`: spawn without a Lead, recorded in memory/.
+    pub solo: Option<String>,
 }
 
 pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> {
@@ -56,12 +62,27 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
     let mut review = false;
     let mut purpose: Option<String> = None;
     let mut approve_kinds: Vec<String> = Vec::new();
+    let mut solo: Option<String> = None;
     let mut pos = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
         if arg == "--review" {
             review = true;
+            i += 1;
+        } else if arg == "--solo" {
+            if i + 1 >= args.len() {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            let val = &args[i + 1];
+            crate::worker::leadgate::validate_solo(val)
+                .map_err(|(code, msg)| (code, format!("{msg}{USAGE}\n")))?;
+            solo = Some(val.clone());
+            i += 2;
+        } else if let Some(val) = arg.strip_prefix("--solo=") {
+            crate::worker::leadgate::validate_solo(val)
+                .map_err(|(code, msg)| (code, format!("{msg}{USAGE}\n")))?;
+            solo = Some(val.to_string());
             i += 1;
         } else if arg == "--approve-kind" {
             if i + 1 >= args.len() {
@@ -135,6 +156,7 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
         purpose,
         repo_path,
         approve_kinds,
+        solo,
     })
 }
 
@@ -355,6 +377,24 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let runs_dir = crate::worker::cleanup::default_runs_dir();
     let _ = std::fs::create_dir_all(&runs_dir);
 
+    // Lead gate (AGENTS.md '## Roles (SLP)'): a `cos`-owned project with two or
+    // more topology signals needs a Lead before another worker joins it.
+    let workspace_root = crate::workspace::workspace_root();
+    let pipeline_task = std::env::var("PIPELINE_TASK").ok();
+    crate::worker::leadgate::check_spawn(
+        crate::worker::leadgate::GateInput {
+            root: &workspace_root,
+            runs_dir: &runs_dir,
+            repo: &repo,
+            name: &opts.name,
+            brief: None,
+            solo: opts.solo.as_deref(),
+            pipeline: pipeline_task.as_deref(),
+        },
+        cfg,
+        herdr,
+    )?;
+
     if std::env::var("PIPELINE_TASK").is_err() {
         let slots_used = count_owner_slots(&runs_dir, &owner, Some(&opts.name), herdr, cfg);
         crate::cap::check_owner_cap(cfg, &owner, slots_used, 1, "this spawn")
@@ -412,6 +452,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         std::env::var("GRID_TAB").unwrap_or_else(|_| default_grid_tab(&owner, repo_name));
     let _ = WorkerMetadata::save_owner(&runs_dir, &opts.name, &owner);
     let _ = WorkerMetadata::save_grid(&runs_dir, &opts.name, &grid_tab);
+    let _ = WorkerMetadata::save_repo(&runs_dir, &opts.name, &repo);
     if let Ok(pt) = std::env::var("PIPELINE_TASK") {
         let _ = WorkerMetadata::save_pipeline(&runs_dir, &opts.name, &pt);
     }

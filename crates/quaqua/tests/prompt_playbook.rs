@@ -61,6 +61,7 @@ impl Drop for TempDir {
 
 /// A brief with neither of the two advisory headers (§ S4: it must still pass).
 const OLD_BRIEF: &str = "\
+Topology: solo — one engine task
 Goal: make the thing work
 Hard constraints: none
 Current design: the approach as it stands
