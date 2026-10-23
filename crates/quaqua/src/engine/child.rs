@@ -45,7 +45,8 @@ impl SingleWorkerInput {
 /// - `3`: Stall / idle / agent gone
 /// - `4`: Time budget exceeded
 /// - `5`: Blocked on question / permission
-/// - `6`: Malformed report
+/// - `6`: Malformed report (or a builder report that does not account for a
+///   pinned `## Playbook` step)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SingleWorkerOutput {
     pub exit: i32,

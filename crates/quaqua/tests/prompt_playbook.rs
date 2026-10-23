@@ -526,7 +526,9 @@ case "${1:-} ${2:-}" in
     exit 0 ;;
   "agent prompt")
     printf '%s' "$4" > "$STUB_CWD/prompt-$3.txt"
-    printf 'stub report\n\n## Lessons\nnone\n' > "$STUB_RUNS/$3.md"
+    # A compliant worker: feature pins 1,2,3 and bug-fix pins 1,2, so this
+    # block accounts for either (S8 rejects a report that skips a pinned step).
+    printf 'stub report\n\n## Playbook\n1: done\n2: done\n3: done\n\n## Lessons\nnone\n' > "$STUB_RUNS/$3.md"
     printf '{"result":{"agent":{"agent_status":"working"}}}\n'
     exit 0 ;;
   "agent wait")

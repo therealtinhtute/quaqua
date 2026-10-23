@@ -1,4 +1,4 @@
-//! Warn-only check of an accepted builder report's `## Playbook` block (§ S5).
+//! Check of a builder report's `## Playbook` block (§ S5, blocking § S8).
 //!
 //! A builder prompt pins the playbook name and the step ids the worker actually
 //! received in `runs/.<name>.playbook` (§ S4, written by `brief::pin_playbook`
@@ -7,22 +7,43 @@
 //! `<id>: skip: <reason>`; a step its harness cannot run is reported as
 //! `<id>: skip: unsupported on <harness>, <reason>` and counts as a valid skip.
 //!
-//! A gap warns and journals one `playbook_gap {name, missing, unreasoned}`
-//! event. It never changes an exit code, and a journal failure only warns: the
-//! report is already accepted by the time this runs.
+//! A gap journals one `playbook_gap {name, missing, unreasoned}` event and is
+//! returned to the caller: `quaqua worker prompt` exits 6 (a malformed report
+//! the worker fixes before `--resume` accepts it), while `quaqua pipeline`
+//! warns and leaves its exit untouched. A journal failure only warns: the
+//! report's acceptance does not depend on the journal.
 
 use std::collections::HashMap;
 use std::path::Path;
+
+use serde::{Deserialize, Serialize};
 
 use crate::engine::journal::{EventRecord, Journal};
 use crate::engine::journal_sqlite::SqliteJournal;
 use crate::util::now_sec;
 
 /// The pinned playbook: the name and the step ids the worker was given.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Pin {
-    name: String,
-    ids: Vec<u32>,
+///
+/// Also carried in `WatchdogConfig`, so the deterministic workflow rejects a
+/// builder report that does not account for a pinned step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaybookPin {
+    pub name: String,
+    pub ids: Vec<u32>,
+}
+
+impl PlaybookPin {
+    /// `runs/.<name>.playbook`, written by `brief::pin_playbook`:
+    /// `name=<n>\nids=1,2,3`. An absent, unreadable or id-less file means the
+    /// worker received no steps, so there is nothing to check.
+    pub fn read(runs_dir: &Path, name: &str) -> Option<Self> {
+        read_pin(&runs_dir.join(format!(".{name}.playbook")))
+    }
+
+    /// The gap of one report against this pin.
+    pub fn gap(&self, report: &str) -> PlaybookGap {
+        gap(report, self)
+    }
 }
 
 /// How one report line accounts for a step.
@@ -45,43 +66,47 @@ pub struct PlaybookGap {
 }
 
 impl PlaybookGap {
-    fn is_empty(&self) -> bool {
+    /// True when the report accounts for every pinned step.
+    pub fn is_empty(&self) -> bool {
         self.missing.is_empty() && self.unreasoned.is_empty()
+    }
+
+    /// `playbook=<name> missing=<ids|none> unreasoned=<ids|none>`, the fields
+    /// both callers report.
+    pub fn summary(&self) -> String {
+        format!(
+            "playbook={} missing={} unreasoned={}",
+            self.name,
+            id_list(&self.missing),
+            id_list(&self.unreasoned)
+        )
     }
 }
 
-/// § S5: check an accepted builder report against `runs/.<name>.playbook`.
+/// § S5: check an accepted builder report against `runs/.<name>.playbook` and
+/// journal one `playbook_gap` event when it does not account for a pinned step.
 ///
-/// Returns without a word when there is no pin (the worker was never given a
-/// playbook, or the pin write failed after the prompt landed), when the report
-/// accounts for every pinned step, and for reviewer reports. Otherwise prints
-/// one `warning: playbook gap` line and appends a `playbook_gap` event; the
-/// caller's exit code is untouched.
-pub fn warn_playbook_gaps(
+/// Returns `None` when there is no pin (the worker was never given a playbook,
+/// or the pin write failed after the prompt landed), when the report accounts
+/// for every pinned step, and for reviewer reports. The caller decides what a
+/// gap costs: `quaqua worker prompt` exits 6, `quaqua pipeline` warns.
+pub fn record_playbook_gaps(
     journal: &mut SqliteJournal,
     runs_dir: &Path,
     name: &str,
     report: &str,
     expect_verdict: bool,
-) {
+) -> Option<PlaybookGap> {
     // Reviewer reports carry a `Verdict:` line, not a `## Playbook` block, and
     // `worker prompt` never injects a playbook into them.
     if expect_verdict {
-        return;
+        return None;
     }
-    let Some(pin) = read_pin(&runs_dir.join(format!(".{name}.playbook"))) else {
-        return;
-    };
-    let gap = gap(report, &pin);
+    let pin = PlaybookPin::read(runs_dir, name)?;
+    let gap = pin.gap(report);
     if gap.is_empty() {
-        return;
+        return None;
     }
-    eprintln!(
-        "warning: playbook gap | name={name} playbook={} missing={} unreasoned={}",
-        gap.name,
-        id_list(&gap.missing),
-        id_list(&gap.unreasoned)
-    );
     let payload = serde_json::json!({
         "name": gap.name,
         "missing": gap.missing,
@@ -92,6 +117,7 @@ pub fn warn_playbook_gaps(
     if let Err(e) = journal.append_event(&format!("worker:{name}"), &event) {
         eprintln!("warning: cannot record playbook_gap in the journal: {e}");
     }
+    Some(gap)
 }
 
 fn id_list(ids: &[u32]) -> String {
@@ -105,10 +131,8 @@ fn id_list(ids: &[u32]) -> String {
     }
 }
 
-/// `runs/.<name>.playbook`, written by `brief::pin_playbook`: `name=<n>\nids=1,2,3`.
-/// An absent, unreadable or id-less file means the worker received no steps, so
-/// there is nothing to check.
-fn read_pin(path: &Path) -> Option<Pin> {
+/// File body of the pin; see [`PlaybookPin::read`].
+fn read_pin(path: &Path) -> Option<PlaybookPin> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut name = String::new();
     let mut ids: Vec<u32> = Vec::new();
@@ -128,11 +152,11 @@ fn read_pin(path: &Path) -> Option<Pin> {
     if ids.is_empty() {
         return None;
     }
-    Some(Pin { name, ids })
+    Some(PlaybookPin { name, ids })
 }
 
 /// The gap of one report against one pin.
-fn gap(report: &str, pin: &Pin) -> PlaybookGap {
+fn gap(report: &str, pin: &PlaybookPin) -> PlaybookGap {
     let mut seen: HashMap<u32, StepStatus> = HashMap::new();
     if let Some(lines) = playbook_block_lines(report) {
         for line in lines {
@@ -284,8 +308,8 @@ mod tests {
         }
     }
 
-    fn pin(name: &str, ids: &[u32]) -> Pin {
-        Pin {
+    fn pin(name: &str, ids: &[u32]) -> PlaybookPin {
+        PlaybookPin {
             name: name.to_string(),
             ids: ids.to_vec(),
         }
@@ -331,18 +355,23 @@ mod tests {
     }
 
     #[test]
-    fn playbook_check_missing_section_warns_and_records_the_event() {
+    fn playbook_check_missing_section_is_a_gap_and_records_the_event() {
         let tmp = TempDir::new("pbgap-section");
         let runs = tmp.path();
         let mut journal = SqliteJournal::open(&runs.join("quaqua.db")).unwrap();
         fs::write(runs.join(".sude-s5a.playbook"), "name=feature\nids=1,2,3\n").unwrap();
 
-        warn_playbook_gaps(
+        let gap = record_playbook_gaps(
             &mut journal,
             runs,
             "sude-s5a",
             "# Report\n\n## Lessons\nnone\n",
             false,
+        )
+        .expect("a missing `## Playbook` block is a gap");
+        assert_eq!(
+            gap.summary(),
+            "playbook=feature missing=1,2,3 unreasoned=none"
         );
 
         let recorded = events(&journal, "sude-s5a");
@@ -360,7 +389,7 @@ mod tests {
         let mut journal = SqliteJournal::open(&runs.join("quaqua.db")).unwrap();
         fs::write(runs.join(".sude-s5b.playbook"), "name=feature\nids=1,2,3\n").unwrap();
 
-        warn_playbook_gaps(
+        record_playbook_gaps(
             &mut journal,
             runs,
             "sude-s5b",
@@ -407,24 +436,28 @@ mod tests {
         let runs = tmp.path();
         let mut journal = SqliteJournal::open(&runs.join("quaqua.db")).unwrap();
 
-        warn_playbook_gaps(
-            &mut journal,
-            runs,
-            "sude-s5c",
-            "# Report\n\n## Lessons\nnone\n",
-            false,
+        assert!(
+            record_playbook_gaps(
+                &mut journal,
+                runs,
+                "sude-s5c",
+                "# Report\n\n## Lessons\nnone\n",
+                false,
+            )
+            .is_none(),
+            "no pin, no gap"
         );
-
         assert!(events(&journal, "sude-s5c").is_empty(), "no pin, no event");
         // An id-less pin is a pin the worker never got: also no check.
         fs::write(runs.join(".sude-s5c.playbook"), "name=feature\nids=\n").unwrap();
-        warn_playbook_gaps(
+        assert!(record_playbook_gaps(
             &mut journal,
             runs,
             "sude-s5c",
             "# Report\n\n## Lessons\nnone\n",
             false,
-        );
+        )
+        .is_none());
         assert!(events(&journal, "sude-s5c").is_empty());
     }
 
@@ -439,12 +472,16 @@ mod tests {
         )
         .unwrap();
 
-        warn_playbook_gaps(
-            &mut journal,
-            runs,
-            "suhuynh-s5d",
-            "# Review\n\nVerdict: clean 1 findings\n\n## Lessons\nnone\n",
-            true,
+        assert!(
+            record_playbook_gaps(
+                &mut journal,
+                runs,
+                "suhuynh-s5d",
+                "# Review\n\nVerdict: clean 1 findings\n\n## Lessons\nnone\n",
+                true,
+            )
+            .is_none(),
+            "reviewer reports are never checked"
         );
 
         assert!(events(&journal, "suhuynh-s5d").is_empty());
@@ -457,13 +494,14 @@ mod tests {
         let mut journal = SqliteJournal::open(&runs.join("quaqua.db")).unwrap();
         fs::write(runs.join(".sude-s5e.playbook"), "name=feature\nids=1,2\n").unwrap();
 
-        warn_playbook_gaps(
+        assert!(record_playbook_gaps(
             &mut journal,
             runs,
             "sude-s5e",
             &report("## Playbook\n1: done\n2: skip: unsupported on omp, no browser\n"),
             false,
-        );
+        )
+        .is_none());
         assert!(events(&journal, "sude-s5e").is_empty());
     }
 }

@@ -1,11 +1,11 @@
-//! Warn-only playbook gap check acceptance tests (§ S5).
+//! Blocking playbook gap check acceptance tests (§ S5 check, § S8 exit).
 //!
 //! Acceptance cases:
 //! 1. the four step line shapes are parsed (unit test in `playbook_check`)
-//! 2. missing section / step / reason → warning + `playbook_gap`, exit unchanged
+//! 2. missing section / step / reason → `playbook_gap` + exit 6 (builder)
 //! 3. `skip: unsupported on <harness>` is a valid skip
 //! 4. a report without `.playbook` behaves as today
-//! 5. `--resume` keeps the check
+//! 5. `--resume` accepts the report once the block is added
 //!
 //! Verify command: `cargo test --locked -p quaqua playbook_check`
 
@@ -245,9 +245,9 @@ fn brief_with_playbook() -> String {
 }
 
 /// Line 2: the report has no `## Playbook` section at all — every pinned id is
-/// missing, one event lands, and the acceptance exit is still 0.
+/// missing, one event lands, and the builder's report is rejected with exit 6.
 #[test]
-fn playbook_check_missing_section_warns_without_changing_the_exit() {
+fn playbook_check_missing_section_rejects_the_report() {
     let _lock = env_lock();
     let h = Harness::new("section");
     h.set_report("# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
@@ -259,7 +259,15 @@ fn playbook_check_missing_section_warns_without_changing_the_exit() {
 
     let res = h.prompt("sude-s5a", Some(&brief_with_playbook()), false);
 
-    assert_eq!(res, Ok(()), "a gap must not change the exit (warn only)");
+    assert_eq!(
+        res,
+        Err((6, String::new())),
+        "a gap rejects the report like a malformed one"
+    );
+    assert!(
+        !h.runs.join(".sude-s5a.read").exists(),
+        "a rejected report is not accepted"
+    );
     assert_eq!(
         fs::read_to_string(h.pin("sude-s5a")).unwrap(),
         "name=feature\nids=1,2,3\n",
@@ -273,7 +281,7 @@ fn playbook_check_missing_section_warns_without_changing_the_exit() {
 }
 
 /// Line 2: a step that is absent and a `skip:` without a reason are reported
-/// as separate facts, and the exit is still 0.
+/// as separate facts, and the report is rejected.
 #[test]
 fn playbook_check_missing_step_and_unreasoned_skip_report_a_gap() {
     let _lock = env_lock();
@@ -282,7 +290,7 @@ fn playbook_check_missing_step_and_unreasoned_skip_report_a_gap() {
 
     let res = h.prompt("sude-s5b", Some(&brief_with_playbook()), false);
 
-    assert_eq!(res, Ok(()), "a gap must not change the exit (warn only)");
+    assert_eq!(res, Err((6, String::new())));
     let events = h.gap_events("sude-s5b");
     assert_eq!(events.len(), 1, "one playbook_gap event: {events:?}");
     assert_eq!(events[0]["missing"], serde_json::json!([2]));
@@ -323,32 +331,41 @@ fn playbook_check_report_without_a_pin_behaves_as_today() {
     assert!(h.gap_events("sude-s5d").is_empty());
 }
 
-/// Line 5: acceptance reached through `--resume` runs the same check. The
-/// second acceptance over the same gappy report records a second event.
+/// Line 5: a rejected report is accepted by `--resume` once it accounts for
+/// every pinned step; the gap is journaled once, at the rejection.
 #[test]
-fn playbook_check_resume_keeps_the_check() {
+fn playbook_check_resume_accepts_the_fixed_report() {
     let _lock = env_lock();
     let h = Harness::new("resume");
     h.set_report("# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
 
     let res = h.prompt("sude-s5e", Some(&brief_with_playbook()), false);
-    assert_eq!(res, Ok(()));
+    assert_eq!(res, Err((6, String::new())));
     assert_eq!(h.gap_events("sude-s5e").len(), 1);
 
+    // The worker rewrites the run report atomically (temp file + rename).
+    let run_report = h.runs.join("sude-s5e.md");
+    let pending = h.runs.join(".sude-s5e.md.tmp");
+    fs::write(
+        &pending,
+        "# Report\n\n## Playbook\n\n1: done\n2: done\n3: done\n\n## Lessons\nnone\n",
+    )
+    .unwrap();
+    fs::rename(&pending, &run_report).unwrap();
     let res = h.prompt("sude-s5e", None, true);
 
-    assert_eq!(res, Ok(()), "--resume acceptance still exits 0");
+    assert_eq!(res, Ok(()), "--resume accepts the fixed report");
     assert_eq!(
         h.gap_events("sude-s5e").len(),
-        2,
-        "the resumed acceptance checks the report again"
+        1,
+        "the accepted resume journals no second gap"
     );
 }
 
-/// Line 2 through the real CLI: the warning is printed, the report path is the
-/// only stdout line, and the exit code is 0.
+/// Line 2 through the real CLI: a builder gap exits 6, prints the WATCHDOG
+/// line, and prints no report path.
 #[test]
-fn playbook_check_cli_warns_and_keeps_exit_zero() {
+fn playbook_check_cli_exits_6_for_a_builder_gap() {
     let _lock = env_lock();
     let h = Harness::new("cli");
     h.set_report("# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
@@ -359,17 +376,17 @@ fn playbook_check_cli_warns_and_keeps_exit_zero() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(out.status.code(), Some(6), "stderr: {stderr}");
     assert!(
         stderr.contains(
-            "warning: playbook gap | name=sude-s5f playbook=feature missing=1,2,3 unreasoned=none"
+            "WATCHDOG playbook-gap | name=sude-s5f playbook=feature missing=1,2,3 unreasoned=none"
         ),
         "{stderr}"
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
-        h.runs.join("sude-s5f.md").display().to_string(),
-        "stdout keeps only the report path"
+        "",
+        "a rejected report prints no path"
     );
     assert_eq!(h.gap_events("sude-s5f").len(), 1);
 }

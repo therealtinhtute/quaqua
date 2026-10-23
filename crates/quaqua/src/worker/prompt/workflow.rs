@@ -7,7 +7,9 @@
 //!   idle (120 s, 300 s fallback) / agent gone (60 s) / prompt never landed
 //! - Exit 4: Time budget exceeded (after one +25% grace and bounded auto-extensions up to +50% total)
 //! - Exit 5: Blocked on question / permission
-//! - Exit 6: Malformed report (stable, non-empty report missing `## Lessons` or `Verdict:`)
+//! - Exit 6: Malformed report (stable, non-empty report missing `## Lessons` or
+//!   `Verdict:`) or a builder report that does not account for a pinned
+//!   `## Playbook` step
 //!
 //! Signals and contracts:
 //! - One blocking `herdr agent wait` per wake; `timeout_ms == 0` is a plain `agent get`.
@@ -30,6 +32,7 @@ use crate::engine::activity::{
 };
 use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
 use crate::engine::workflow::{StepDecision, Workflow, WorkflowContext, WorkflowEvent};
+use crate::worker::prompt::playbook_check::PlaybookPin;
 use crate::worker::prompt::watchdog::validate_report_content;
 
 /// Pure configuration parameters for watchdog execution.
@@ -45,6 +48,10 @@ pub struct WatchdogConfig {
     pub hard_cap_sec: u64,
     pub is_fallback_idle: bool,
     pub expect_verdict: bool,
+    /// `runs/.<name>.playbook` for this prompt. `None` when the worker was
+    /// given no playbook; reviewer configs never carry one.
+    #[serde(default)]
+    pub playbook: Option<PlaybookPin>,
     #[serde(default)]
     pub land_sec: u64,
 }
@@ -61,6 +68,7 @@ impl Default for WatchdogConfig {
             hard_cap_sec: 7200,
             is_fallback_idle: false,
             expect_verdict: false,
+            playbook: None,
             land_sec: 0,
         }
     }
@@ -460,12 +468,26 @@ impl Workflow for SingleWorkerWorkflow {
                     if let ActivityResult::ReportFile(ReportFileResult::Content(content)) = result {
                         if content.trim().is_empty() {
                             state.report_ready = false;
-                            let t = wait_interval(state, ctx.now_ms(), ctx.now_ms() + state.config.poll_sec * 1000);
+                            let t = wait_interval(
+                                state,
+                                ctx.now_ms(),
+                                ctx.now_ms() + state.config.poll_sec * 1000,
+                            );
                             schedule_wake(state, ctx, index + 1, default_until(state), t);
                             return StepDecision::Continue;
                         }
-                        let valid = validate_report_content(&content, state.config.expect_verdict);
-                        let exit = if valid.is_ok() { 0 } else { 6 };
+                        let malformed =
+                            validate_report_content(&content, state.config.expect_verdict).is_err();
+                        // § S8: a builder report must account for every step
+                        // pinned for this prompt. Reviewer reports carry a
+                        // `Verdict:` line instead and never carry a pin.
+                        let playbook_gap = !state.config.expect_verdict
+                            && state
+                                .config
+                                .playbook
+                                .as_ref()
+                                .is_some_and(|pin| !pin.gap(&content).is_empty());
+                        let exit = if malformed || playbook_gap { 6 } else { 0 };
                         return complete_step(state, ctx.now_ms(), exit);
                     }
                     return StepDecision::Continue;
@@ -825,6 +847,72 @@ mod tests {
             }],
         );
         assert_eq!(out.exit, 6);
+    }
+
+    #[test]
+    fn exit_6_when_a_pinned_playbook_step_is_not_accounted_for() {
+        let mut cfg = config(30, 200);
+        cfg.playbook = Some(PlaybookPin {
+            name: "feature".into(),
+            ids: vec![1, 2],
+        });
+        let (out, _, _) = run(
+            "worker-gap",
+            1800,
+            cfg,
+            vec![Poll {
+                report_mtime: 1000,
+                report: Some("# Report\n\n## Lessons\nnone\n"),
+                ..Poll::default()
+            }],
+        );
+        assert_eq!(
+            out.exit, 6,
+            "a missing `## Playbook` block rejects the report"
+        );
+    }
+
+    #[test]
+    fn exit_0_when_every_pinned_playbook_step_is_accounted_for() {
+        let mut cfg = config(30, 200);
+        cfg.playbook = Some(PlaybookPin {
+            name: "feature".into(),
+            ids: vec![1, 2],
+        });
+        let (out, _, _) = run(
+            "worker-pinned",
+            1800,
+            cfg,
+            vec![Poll {
+                report_mtime: 1000,
+                report: Some(
+                    "# Report\n\n## Playbook\n1: done\n2: skip: unsupported on omp\n\n## Lessons\nnone\n",
+                ),
+                ..Poll::default()
+            }],
+        );
+        assert_eq!(out.exit, 0);
+    }
+
+    #[test]
+    fn exit_0_for_a_reviewer_report_even_with_a_pin() {
+        let mut cfg = config(30, 200);
+        cfg.expect_verdict = true;
+        cfg.playbook = Some(PlaybookPin {
+            name: "feature".into(),
+            ids: vec![1, 2],
+        });
+        let (out, _, _) = run(
+            "worker-review",
+            1800,
+            cfg,
+            vec![Poll {
+                report_mtime: 1000,
+                report: Some("# Review\n\nVerdict: clean\n\n## Lessons\nnone\n"),
+                ..Poll::default()
+            }],
+        );
+        assert_eq!(out.exit, 0, "reviewer reports are never checked");
     }
 
     #[test]

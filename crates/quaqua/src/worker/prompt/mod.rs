@@ -532,7 +532,7 @@ pub fn prompt_worker<G: GitOps>(
 
     let expect_verdict = WorkerMetadata::has_review(&runs_dir, name);
 
-    let config = WatchdogConfig {
+    let mut config = WatchdogConfig {
         poll_sec,
         stall_sec,
         idle_sec,
@@ -542,6 +542,10 @@ pub fn prompt_worker<G: GitOps>(
         hard_cap_sec: max,
         is_fallback_idle: false,
         expect_verdict,
+        // Read from the pin written for the prompt this session belongs to. A
+        // fresh run rewrites the pin below and refreshes this field; resume and
+        // `--extend` keep the pin the worker was given.
+        playbook: playbook_check::PlaybookPin::read(&runs_dir, name),
         land_sec,
     };
 
@@ -726,6 +730,8 @@ pub fn prompt_worker<G: GitOps>(
         // The worker only got the steps if the prompt landed, so the pin
         // (`runs/.<name>.playbook`) is written here, after the land check.
         brief::pin_playbook(&runs_dir, name, injection.as_ref());
+        // § S8: this session checks the report against the pin it was given.
+        config.playbook = playbook_check::PlaybookPin::read(&runs_dir, name);
 
         let next_k = k_max + 1;
         let wf_id = format!("worker:{name}#{next_k}");
@@ -995,6 +1001,28 @@ pub fn prompt_worker<G: GitOps>(
                 );
                 return Err((6, String::new()));
             }
+
+            // § S5/S8: a builder report must account for the steps pinned in
+            // `runs/.<name>.playbook`. A gap is a report the worker has to fix:
+            // exit 6, like a malformed report, so `--resume` re-checks it once
+            // the report is rewritten. Reviewer reports carry a `Verdict:` line
+            // instead and are skipped. This block is shared by a fresh run and
+            // by `--resume`, so both paths check.
+            if let Some(gap) = playbook_check::record_playbook_gaps(
+                &mut journal,
+                &runs_dir,
+                name,
+                &report_content,
+                expect_verdict,
+            ) {
+                eprintln!(
+                    "WATCHDOG playbook-gap | name={name} {} report={}",
+                    gap.summary(),
+                    out.display()
+                );
+                return Err((6, String::new()));
+            }
+
             let _ = verdict::record_verdict_on_acceptance(
                 &runs_dir,
                 name,
@@ -1002,18 +1030,6 @@ pub fn prompt_worker<G: GitOps>(
                 expect_verdict,
                 git,
                 Some(&repo_dir),
-            );
-
-            // § S5: warn-only. A builder report that does not account for the
-            // steps pinned in `runs/.<name>.playbook` prints a warning and
-            // journals a `playbook_gap`; the acceptance exit stays 0. This block
-            // is shared by a fresh run and by `--resume`, so both paths check.
-            playbook_check::warn_playbook_gaps(
-                &mut journal,
-                &runs_dir,
-                name,
-                &report_content,
-                expect_verdict,
             );
 
             let read_marker = runs_dir.join(format!(".{name}.read"));
@@ -1047,18 +1063,41 @@ pub fn prompt_worker<G: GitOps>(
             let reason = format!("time budget {}s exceeded", active_budget);
             Err(watchdog_exit(4, &reason))
         }
-        5 => {
-            Err(watchdog_exit(5, "agent blocked (question/permission pending)"))
-        }
+        5 => Err(watchdog_exit(
+            5,
+            "agent blocked (question/permission pending)",
+        )),
         6 => {
             let report_content = std::fs::read_to_string(&out).unwrap_or_default();
-            let missing = validate_report_content(&report_content, expect_verdict)
-                .err()
-                .unwrap_or("unknown section");
-            eprintln!(
-                "WATCHDOG malformed-report | name={name} missing={missing} report={}",
-                out.display()
-            );
+            match validate_report_content(&report_content, expect_verdict) {
+                Err(missing) => {
+                    eprintln!(
+                        "WATCHDOG malformed-report | name={name} missing={missing} report={}",
+                        out.display()
+                    );
+                }
+                Ok(()) => {
+                    // The workflow rejected the report for a pinned playbook
+                    // step it does not account for; journal the gap here.
+                    match playbook_check::record_playbook_gaps(
+                        &mut journal,
+                        &runs_dir,
+                        name,
+                        &report_content,
+                        expect_verdict,
+                    ) {
+                        Some(gap) => eprintln!(
+                            "WATCHDOG playbook-gap | name={name} {} report={}",
+                            gap.summary(),
+                            out.display()
+                        ),
+                        None => eprintln!(
+                            "WATCHDOG malformed-report | name={name} missing=unknown section report={}",
+                            out.display()
+                        ),
+                    }
+                }
+            }
             Err((6, String::new()))
         }
         other => Err((other, format!("unexpected exit code {other}\n"))),
@@ -1138,6 +1177,251 @@ esac
             );
         }
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A fresh, isolated runs dir for one prompt case.
+    fn temp_runs(tag: &str) -> std::path::PathBuf {
+        static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!("quaqua-wp-{tag}-{}-{id}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
+    /// Stub herdr: an idle agent. A fresh prompt writes `FAKE_REPORT` to
+    /// `FAKE_RUNS/<name>.md`, which is what the agent does before it yields.
+    fn stub_herdr(tmp: &std::path::Path) -> std::path::PathBuf {
+        let path = tmp.join("herdr-stub");
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+case "$1" in
+  agent)
+    case "$2" in
+      prompt)
+        if [ -n "$FAKE_REPORT" ]; then
+          printf '%s\n' "$FAKE_REPORT" > "$FAKE_RUNS/$3.md"
+        fi
+        echo '{"result": {}}'; exit 0 ;;
+      wait) echo '{"result": {"agent": {"agent_status": "idle", "state_change_seq": 1}}}'; exit 0 ;;
+      get) echo '{"result": {"agent": {"name": "'"$3"'", "agent_status": "idle"}}}'; exit 0 ;;
+      *) echo '{"result": {}}'; exit 0 ;;
+    esac ;;
+  *) echo '{"result": {}}'; exit 0 ;;
+esac
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    /// `(playbooks, principles)` holding one two-step `feature` playbook.
+    fn playbook_index(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let playbooks = tmp.join("playbooks");
+        let principles = tmp.join("principles");
+        fs::create_dir_all(&playbooks).unwrap();
+        fs::create_dir_all(&principles).unwrap();
+        fs::write(
+            playbooks.join("feature.md"),
+            "---\nname: feature\nwhen: test\n---\n\n## Orchestrator\n\n1. Orchestrate.\n\n## Worker\n\n1. First step.\n2. Second step.\n",
+        )
+        .unwrap();
+        (playbooks, principles)
+    }
+
+    const PINNED_BRIEF: &str = "Goal: build it\nHard constraints: none\nCurrent design (open to challenge): x\nPlaybook: feature\nContext: none, test";
+
+    /// `## Playbook` event kinds journaled for `session`.
+    fn journaled_gaps(tmp: &std::path::Path, session: &str) -> Vec<String> {
+        let journal = SqliteJournal::open(&tmp.join("quaqua.db")).unwrap();
+        journal
+            .load_events(session, 1)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.kind == "playbook_gap")
+            .map(|e| e.kind)
+            .collect()
+    }
+
+    #[test]
+    fn test_prompt_exits_6_for_a_builder_report_without_its_pinned_playbook() {
+        let _env_lock = lock_env();
+        let tmp = temp_runs("gap");
+        let (playbooks, principles) = playbook_index(&tmp);
+        let stub = stub_herdr(&tmp);
+        let _g_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _g_playbooks =
+            TestEnvVarGuard::set("QUAQUA_PLAYBOOKS_DIR", playbooks.to_str().unwrap());
+        let _g_principles =
+            TestEnvVarGuard::set("QUAQUA_PRINCIPLES_DIR", principles.to_str().unwrap());
+        let _g_report = TestEnvVarGuard::set("FAKE_REPORT", "# Report\n\n## Lessons\nnone\n");
+        let _g_fake_runs = TestEnvVarGuard::set("FAKE_RUNS", tmp.to_str().unwrap());
+        let _g_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _g_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _g_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _g_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub.to_str().unwrap());
+
+        let herdr = Herdr {
+            bin: stub.to_string_lossy().to_string(),
+        };
+        let res = prompt_worker(
+            "sude-gap",
+            Some(PINNED_BRIEF),
+            false,
+            None,
+            &crate::git::Git::new(),
+            &herdr,
+        );
+
+        assert_eq!(
+            res,
+            Err((6, String::new())),
+            "a missing `## Playbook` block must reject the report"
+        );
+        assert!(
+            tmp.join(".sude-gap.playbook").is_file(),
+            "the prompt pinned the playbook the worker received"
+        );
+        assert_eq!(
+            journaled_gaps(&tmp, "worker:sude-gap").len(),
+            1,
+            "the playbook_gap event is kept"
+        );
+        assert!(
+            !tmp.join(".sude-gap.read").exists(),
+            "a rejected report is not accepted"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_prompt_accepts_a_builder_report_that_accounts_for_every_step() {
+        let _env_lock = lock_env();
+        let tmp = temp_runs("pinned");
+        let (playbooks, principles) = playbook_index(&tmp);
+        let stub = stub_herdr(&tmp);
+        let _g_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _g_playbooks =
+            TestEnvVarGuard::set("QUAQUA_PLAYBOOKS_DIR", playbooks.to_str().unwrap());
+        let _g_principles =
+            TestEnvVarGuard::set("QUAQUA_PRINCIPLES_DIR", principles.to_str().unwrap());
+        let _g_report = TestEnvVarGuard::set(
+            "FAKE_REPORT",
+            "# Report\n\n## Playbook\n1: done\n2: skip: unsupported on stub\n\n## Lessons\nnone\n",
+        );
+        let _g_fake_runs = TestEnvVarGuard::set("FAKE_RUNS", tmp.to_str().unwrap());
+        let _g_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _g_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _g_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _g_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub.to_str().unwrap());
+
+        let herdr = Herdr {
+            bin: stub.to_string_lossy().to_string(),
+        };
+        let res = prompt_worker(
+            "sude-pinned",
+            Some(PINNED_BRIEF),
+            false,
+            None,
+            &crate::git::Git::new(),
+            &herdr,
+        );
+
+        assert_eq!(res, Ok(()), "every pinned step accounted for -> accepted");
+        assert!(journaled_gaps(&tmp, "worker:sude-pinned").is_empty());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_prompt_ignores_the_pin_for_a_reviewer_report() {
+        let _env_lock = lock_env();
+        let tmp = temp_runs("reviewer-pin");
+        let stub = stub_herdr(&tmp);
+        let _g_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _g_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _g_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _g_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _g_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub.to_str().unwrap());
+        let name = "suhuynh-rpin1";
+        WorkerMetadata::mark_review(&tmp, name).unwrap();
+        fs::write(
+            tmp.join(format!("{name}.md")),
+            "# Review\n\nVerdict: clean\n\n## Lessons\nnone\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join(format!(".{name}.playbook")),
+            "name=feature\nids=1,2\n",
+        )
+        .unwrap();
+
+        let herdr = Herdr {
+            bin: stub.to_string_lossy().to_string(),
+        };
+        let res = prompt_worker(name, None, true, None, &crate::git::Git::new(), &herdr);
+
+        assert_eq!(
+            res,
+            Ok(()),
+            "reviewer reports are never checked against a playbook"
+        );
+        assert!(journaled_gaps(&tmp, &format!("worker:{name}")).is_empty());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_prompt_resume_accepts_the_report_after_the_playbook_block_is_added() {
+        let _env_lock = lock_env();
+        let tmp = temp_runs("gap-resume");
+        let stub = stub_herdr(&tmp);
+        let _g_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _g_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _g_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _g_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _g_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub.to_str().unwrap());
+        let name = "sude-gapfix";
+        let report = tmp.join(format!("{name}.md"));
+        fs::write(&report, "# Report\n\n## Lessons\nnone\n").unwrap();
+        fs::write(
+            tmp.join(format!(".{name}.playbook")),
+            "name=feature\nids=1,2\n",
+        )
+        .unwrap();
+
+        let herdr = Herdr {
+            bin: stub.to_string_lossy().to_string(),
+        };
+        let git = crate::git::Git::new();
+        let first = prompt_worker(name, None, true, None, &git, &herdr);
+        assert_eq!(first, Err((6, String::new())), "the gap rejects the report");
+        assert_eq!(
+            journaled_gaps(&tmp, &format!("worker:{name}")).len(),
+            1,
+            "the rejection journals one playbook_gap"
+        );
+
+        // The worker rewrites the report atomically, then the CoS resumes.
+        let pending = tmp.join(format!(".{name}.md.tmp"));
+        fs::write(
+            &pending,
+            "# Report\n\n## Playbook\n1: done\n2: done\n\n## Lessons\nnone\n",
+        )
+        .unwrap();
+        fs::rename(&pending, &report).unwrap();
+
+        let second = prompt_worker(name, None, true, None, &git, &herdr);
+        assert_eq!(second, Ok(()), "--resume accepts the fixed report");
+        assert_eq!(
+            journaled_gaps(&tmp, &format!("worker:{name}")).len(),
+            1,
+            "the accepted resume journals no second gap"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 }
