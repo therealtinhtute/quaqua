@@ -81,6 +81,8 @@ case "${1:-} ${2:-}" in
   "agent get")
     gone_now && { printf '{"error":{"code":"agent_not_found"}}\n' >&2; exit 1; }
     agent_json "${FAKE_STATUS:-working}"; exit 0 ;;
+  "agent list")
+    printf '{"result":{"agents":[{"name":"cos"}]}}\n'; exit 0 ;;
   "agent wait")
     t=1000; prev=""
     for a in "$@"; do [ "$prev" = "--timeout" ] && t="$a"; prev="$a"; done
@@ -351,13 +353,20 @@ run sude-pblock FAKE_PROMPT=blocked
 [[ $rc -eq 5 ]] || fail "sude-pblock: exit $rc, want 5: $(cat "$T/err")"
 echo "ok: agent_blocked on submit -> exit 5"
 
-# ── agent gone -> exit 3 ────────────────────────────────────────────────────
-run sude-gone FAKE_GONE=1 PROMPT_WORKER_POLL_SEC=1 \
+# ── agent gone mid-run -> exit 3 ────────────────────────────────────────────
+run sude-gone FAKE_GONE_AFTER=1 PROMPT_WORKER_POLL_SEC=1 \
   PROMPT_WORKER_AGENT_GONE_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
   PROMPT_WORKER_BUDGET_SEC=9999
 [[ $rc -eq 3 ]] || fail "sude-gone: exit $rc, want 3: $(cat "$T/err")"
 grep -q 'agent gone' "$T/err" || fail "sude-gone: no gone reason"
-echo "ok: agent_not_found -> exit 3 agent gone"
+echo "ok: agent_not_found mid-run -> exit 3 agent gone"
+
+# ── confirmed down before prompting -> exit 1, nothing sent (#69) ──────────
+run sude-down FAKE_GONE=1
+[[ $rc -eq 1 ]] || fail "sude-down: exit $rc, want 1: $(cat "$T/err")"
+grep -q 'no live worker' "$T/err" || fail "sude-down: unclear refusal: $(cat "$T/err")"
+! grep -q '^herdr agent prompt' "$T/calls" || fail "sude-down: prompted: $(cat "$T/calls")"
+echo "ok: confirmed-down worker -> exit 1, no prompt"
 
 # ── WATCHDOG line carries status/quiet/diff (no pane ctx) ──────────────────
 run sude-stat PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=1 \
