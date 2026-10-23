@@ -14,7 +14,7 @@ Pick by task shape. Name = kind passed to `quaqua worker spawn`. Update "Seen" a
 ## Naming
 - Worker name = `<name>-<task>`, lowercase, no diacritics, ≤20 chars, e.g. `sude-fonts`, `suhuynh-fonts`.
 - Task must not end in `-lead` — `*-lead` names are project Leads (`quaqua lead spawn <slug>` → `<slug>-lead`, own `<slug>` workspace, no worktree); herdr caps agent names at 32 chars, so slugs are ≤27.
-- Spawn: `quaqua worker spawn [--base <ref>] [--purpose <p>] <name> [<kind>] <repo>` → branch `quaqua/<name>` (from <ref>, default HEAD), report `runs/<name>.md`. With `--purpose <p>`, kind resolves from `[purposes]` in `team.toml`.
+- Spawn: `quaqua worker spawn [--base <ref>] [--purpose <p>] [--solo "<reason>"] <name> [<kind>] <repo>` → branch `quaqua/<name>` (from <ref>, default HEAD), report `runs/<name>.md`. With `--purpose <p>`, kind resolves from `[purposes]` in `team.toml`. `--solo` (reason ≥ 10 chars, recorded in `memory/<today>.md`) bypasses the Lead gate on a `cos`-owned project (`rules/_all/lead-gate.md`).
 - Old names (`mdtree`, `mdqa`…) stay as-is.
 
 ## Rules

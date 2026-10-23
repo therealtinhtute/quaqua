@@ -1,8 +1,9 @@
 # Worker briefs
 
-Every worker brief starts with these two headers, then five parts, in this order (the headers are the leading lines, up to the first blank line; the three `Goal:`/`Hard constraints:`/`Current design` lines are machine-checked by `quaqua worker prompt --check-brief`):
+Every worker brief starts with these three headers, then five parts, in this order (the headers are the leading lines, up to the first blank line; the `Topology:` line and the three `Goal:`/`Hard constraints:`/`Current design` lines are machine-checked by `quaqua worker prompt --check-brief`):
 
 ```
+Topology: <solo|lead — why; see rules/_all/lead-gate.md>
 Playbook: <name from `quaqua playbook list`, or `none, <reason>` for a trivial one-command unit>
 Context: <files / PR pointers; when this unit depends on another, that unit's report pasted in full>
 Goal: <what must be true at the end>
@@ -14,6 +15,8 @@ Time budget: <N> min
 Cost budget: $<x>
 ```
 
+- `Topology:` is required (exit 1 without it). `solo — <reason>` for one worker with no Lead; `lead — <reason>` when the unit is part of a project Lead's plan. It is the coordinator's declaration, not a promise the engine can check on its own.
+- A brief over 240 min of `Time budget` or $10 of `Cost budget` also warns: that size is a Lead signal (`rules/_all/lead-gate.md`).
 - `Playbook:` and `Context:` warn when missing, on a `none` without a reason, or on an unfilled `<…>` placeholder; with the workspace's `playbooks/` and `principles/` index present, a playbook name that index cannot resolve is rejected (an absent or incomplete index only warns). No playbook fits, or the work is large and cross-cutting → `figure-it-out`, never a blank.
 - `worker prompt` appends the playbook's `## Worker` steps and each cited leaf to the submitted prompt, and pins the name + step ids in `runs/.<name>.playbook` once the prompt has landed; a missing pin means no check. The `## Orchestrator` section is the coordinator's and never reaches the worker.
 - `Context:` is a relay: an upstream unit's report pasted in full is exempt from brief sizing. Only the header block counts — a `Playbook:` line inside pasted text is prose, not this brief's header.

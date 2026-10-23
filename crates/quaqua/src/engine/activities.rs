@@ -316,6 +316,7 @@ impl SystemActivities {
                     purpose: None,
                     repo_path: PathBuf::from(repo),
                     approve_kinds: approve_kinds.clone(),
+                    solo: None,
                 };
 
                 crate::worker::spawn::spawn_worker(opts, &cfg, &self.git, &self.herdr).map_err(

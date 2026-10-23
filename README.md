@@ -164,4 +164,5 @@ and push to `main`; `.github/workflows/release.yml` runs on a `v*` tag and build
 publishes the release.
 
 Run CoS (Quả Quả) from `~/quaqua` inside Herdr (`HERDR_ENV=1`); it spawns project Leads with
-`quaqua lead spawn <slug>`.
+`quaqua lead spawn <slug> --task "<kickoff>"` (without `--task` the command prints the
+`herdr agent prompt` line to send, because a Lead left at `ready` starts nothing).

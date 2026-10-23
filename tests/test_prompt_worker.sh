@@ -124,7 +124,8 @@ malformed() {
   echo "ok: $label -> exit 6, WATCHDOG malformed-report, no path on stdout"
 }
 
-brief='Goal: do the thing
+brief='Topology: solo — one engine task
+Goal: do the thing
 Hard constraints: keep tests passing
 Current design (open to challenge): via the existing helper'
 
@@ -182,6 +183,13 @@ check_brief "fix the flaky test"
 [[ $rc -eq 1 ]] || fail "check-brief invalid: exit $rc, want 1"
 grep -q 'Goal.*Hard constraints.*Current design' "$T/err" \
   || fail "check-brief invalid: no brief error: $(cat "$T/err")"
+# The topology the coordinator chose is part of the contract (Lead gate).
+check_brief 'Goal: do the thing
+Hard constraints: keep tests passing
+Current design (open to challenge): via the existing helper'
+[[ $rc -eq 1 ]] || fail "check-brief no topology: exit $rc, want 1: $(cat "$T/err")"
+grep -q 'Topology: solo|lead' "$T/err" \
+  || fail "check-brief no topology: no Topology error: $(cat "$T/err")"
 rc=0; CALLS="$T/calls" HOME="$T/home" PATH="$T/bin:$PATH" \
   "${QUAQUA_BIN:-quaqua}" worker prompt --check-brief >"$T/out" 2>"$T/err" || rc=$?
 [[ $rc -eq 1 ]] || fail "check-brief no arg: exit $rc, want 1"

@@ -172,6 +172,7 @@ fn run_advisor(
         purpose: None,
         repo_path: args.repo.clone(),
         approve_kinds: args.approve_kinds.clone(),
+        solo: None,
     };
 
     // Set PIPELINE_TASK during inner spawn to prevent double-charging the reservation
@@ -258,6 +259,7 @@ fn run_dual_lens(
         purpose: None,
         repo_path: args.repo.clone(),
         approve_kinds: args.approve_kinds.clone(),
+        solo: None,
     };
 
     let opts2 = crate::worker::spawn::SpawnOptions {
@@ -268,6 +270,7 @@ fn run_dual_lens(
         purpose: None,
         repo_path: args.repo.clone(),
         approve_kinds: args.approve_kinds.clone(),
+        solo: None,
     };
 
     std::env::set_var("PIPELINE_TASK", &args.task);

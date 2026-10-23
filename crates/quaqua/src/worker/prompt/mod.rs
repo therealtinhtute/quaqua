@@ -161,10 +161,21 @@ pub fn do_check_brief(task: &str) -> Result<(), (i32, String)> {
             "error: task must be a brief with 'Goal:', 'Hard constraints:', 'Current design (open to challenge):' (rules/_all/brief.md)\n".to_string(),
         ));
     }
+    // The coordinator's topology choice is part of the contract: a brief that
+    // does not say solo or lead cannot be checked against AGENTS.md '## Roles (SLP)'.
+    crate::worker::leadgate::topology(task).map_err(|msg| (1, msg))?;
     brief::warn_brief_headers(task);
     // A name the present index cannot resolve or render is the one rejection
     // here; a missing or incomplete index only warns.
     brief::prepare_injection_in_workspace(task)?;
+    // Only the brief carries its budgets, so this is the one place the budget
+    // signal can be raised (rules/_all/brief.md).
+    for signal in crate::worker::leadgate::brief_signals(task) {
+        eprintln!(
+            "warning: topology: {} — this brief may need a project Lead (`quaqua lead spawn <slug>`)",
+            signal.describe()
+        );
+    }
     let (budget, src) = resolve_budget_sec(task);
     println!("budget={budget}s source={src}");
     Ok(())

@@ -64,9 +64,15 @@ cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
 case "${1:-} ${2:-}" in
+  "agent prompt")
+    # a submitted prompt puts the agent to work (see "agent get")
+    : > "$CALLS.prompted" ;;
   "agent get")
-    # names in $HERDR_LIVE exist; anything else is agent_not_found (rc 1)
-    if [[ " ${HERDR_LIVE:-} " == *" ${3:-} "* ]]; then
+    # names in $HERDR_LIVE exist; anything else is agent_not_found (rc 1).
+    # A prompted agent reports working, like the real one mid-turn.
+    if [[ -f "$CALLS.prompted" && " ${HERDR_LIVE:-} " != *" ${3:-} "* ]]; then
+      printf '{"result":{"agent":{"name":"%s","agent_status":"working","pane_id":"%%7","workspace_id":"w7"}}}\n' "$3"
+    elif [[ " ${HERDR_LIVE:-} " == *" ${3:-} "* ]]; then
       printf '{"result":{"agent":{"name":"%s","agent_status":"idle","pane_id":"%%7","workspace_id":"w7"}}}\n' "$3"
     else
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "${3:-}"
@@ -89,7 +95,7 @@ export PATH="$T/bin:$PATH"
 
 spawn() {  # spawn <slug> [VAR=val...]; sets rc and $T/{out,err,calls}
   local slug=$1; shift
-  : > "$T/calls"
+  : > "$T/calls"; rm -f "$T/calls.prompted"
   rc=0
   CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T" env "$@" \
     "$QUAQUA_BIN" lead spawn "$slug" >"$T/out" 2>"$T/err" || rc=$?
@@ -131,6 +137,7 @@ done
 ! grep -qF 'record steering from anh iu or CoS' "$T/calls" \
   || fail "happy: brief still routes steering from anh iu around the CoS"
 echo "ok: brief -> redirects reach the Lead through the CoS only"
+
 # integration-branch check happens before the workspace create; no worktree is made
 [[ $(ln 'agent get') -lt $(ln 'rev-parse --verify') ]] \
   && [[ $(ln 'rev-parse --verify') -lt $(ln 'workspace create') ]] \
@@ -274,10 +281,40 @@ grep -qF "git -C $amp/Lab/coucou-island rev-parse" "$T/calls" \
   || fail "tilde: a '~' survived expansion in a git path: $(grep 'git -C' "$T/calls")"
 echo "ok: INDEX '~/repo' expands to a literal HOME (no patsub_replacement corruption)"
 
+# ── --task <kickoff>: sent after the brief lands and the Lead is ready ──────
+spawn_task() {  # spawn_task <slug> <kickoff>
+  local slug=$1 task=$2
+  : > "$T/calls"; rm -f "$T/calls.prompted"
+  rc=0
+  CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T" \
+    "$QUAQUA_BIN" lead spawn "$slug" --task "$task" >"$T/out" 2>"$T/err" || rc=$?
+}
+cp "$T/INDEX.orig" "$T/projects/INDEX.md"
+spawn_task mono "start phase P7"
+[[ $rc -eq 0 ]] || fail "--task: exit $rc, want 0: $(cat "$T/err")"
+grep -qx 'kickoff=mono-lead' "$T/out" || fail "--task: no kickoff line: $(cat "$T/out")"
+grep -q 'herdr agent prompt mono-lead start phase P7' "$T/calls" \
+  || fail "--task: kickoff never sent to the Lead: $(cat "$T/calls")"
+[[ $(ln 'agent prompt mono-lead') -lt $(ln 'agent wait mono-lead --until idle') ]] \
+  && [[ $(ln 'agent wait mono-lead --until idle') -lt $(ln 'agent prompt mono-lead start phase P7') ]] \
+  || fail "--task: kickoff must follow the brief and the ready wait: $(cat "$T/calls")"
+echo "ok: --task -> kickoff sent after the brief lands and the Lead is ready"
+
+# ── no --task: print the exact NEXT instruction instead of a silent Lead ────
+cp "$T/INDEX.orig" "$T/projects/INDEX.md"
+spawn mono
+[[ $rc -eq 0 ]] || fail "no --task: exit $rc, want 0: $(cat "$T/err")"
+grep -qF 'NEXT: herdr agent prompt mono-lead "<kickoff>"' "$T/err" \
+  || fail "no --task: no NEXT line on stderr: $(cat "$T/err")"
+[[ $(grep -c 'herdr agent prompt mono-lead' "$T/calls") -eq 1 ]] \
+  || fail "no --task: only the brief may be sent: $(cat "$T/calls")"
+! grep -q 'kickoff=' "$T/out" || fail "no --task: nothing was kicked off: $(cat "$T/out")"
+echo "ok: no --task -> NEXT kickoff instruction on stderr, nothing sent"
+
 # ── concurrent spawn vs cleanup on different INDEX rows must not lose updates ─
 # Spawn and cleanup run concurrently on different rows. With the shared mkdir lock
 # (projects/INDEX.md.lock.d), writes serialize without data loss or file corruption.
-mkdir -p "$T/runs"; : > "$T/calls"
+mkdir -p "$T/runs"; : > "$T/calls"; rm -f "$T/calls.prompted"
 cp "$T/INDEX.orig" "$T/projects/INDEX.md"
 ce=(CALLS="$T/calls" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_SOCKET_PATH="$T/herdr.sock" QUAQUA_ROOT="$T")
 env "${ce[@]}" "$QUAQUA_BIN" lead spawn coucou-island >"$T/out.s" 2>"$T/err.s" & p1=$!

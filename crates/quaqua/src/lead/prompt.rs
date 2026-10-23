@@ -52,10 +52,21 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
     if pane.is_empty() {
         return Err((1, format!("error: lead '{name}' has no pane\n")));
     }
+    send_prompt(herdr, &name, &pane, &msg)
+}
 
+/// Clear the input box of `name`, submit `msg` with `--wait --until working`,
+/// and verify it landed. The one submit path for a Lead message: `lead prompt`
+/// and the kickoff `lead spawn --task` share it.
+pub fn send_prompt<H: HerdrOps>(
+    herdr: &H,
+    name: &str,
+    pane: &str,
+    msg: &str,
+) -> Result<(), (i32, String)> {
     // Clear any draft (Ctrl-U kills the line) so stale text cannot swallow the
     // Enter that submits this message.
-    let cleared = herdr.agent_send_keys(&name, "ctrl-u").map_err(|e| {
+    let cleared = herdr.agent_send_keys(name, "ctrl-u").map_err(|e| {
         (
             1,
             format!("error: cannot clear the input box of '{name}': {e}\n"),
@@ -77,8 +88,8 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
         .run(&[
             "agent",
             "prompt",
-            &name,
-            &msg,
+            name,
+            msg,
             "--wait",
             "--until",
             "working",
@@ -96,7 +107,7 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
         ));
     }
 
-    verify(herdr, &name, &pane, &msg, wait_ms)
+    verify(herdr, name, pane, msg, wait_ms)
 }
 
 /// Poll status and the input box; pass only when the agent is `working` and

@@ -31,6 +31,10 @@ impl WorkerMetadata {
         runs_dir.join(format!("{name}.grid"))
     }
 
+    pub fn repo_path(runs_dir: &Path, name: &str) -> PathBuf {
+        runs_dir.join(format!("{name}.repo"))
+    }
+
     pub fn pipeline_path(runs_dir: &Path, name: &str) -> PathBuf {
         runs_dir.join(format!("{name}.pipeline"))
     }
@@ -102,6 +106,23 @@ impl WorkerMetadata {
 
     pub fn save_grid(runs_dir: &Path, name: &str, grid: &str) -> io::Result<()> {
         atomic_write(&Self::grid_path(runs_dir, name), format!("{grid}\n"))
+    }
+
+    /// The repo a worker builds on, as recorded at spawn. Durable across a
+    /// herdr restart, unlike the agent's cwd.
+    pub fn load_repo(runs_dir: &Path, name: &str) -> Option<PathBuf> {
+        fs::read_to_string(Self::repo_path(runs_dir, name))
+            .map(|s| s.trim().to_string())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+    }
+
+    pub fn save_repo(runs_dir: &Path, name: &str, repo: &Path) -> io::Result<()> {
+        atomic_write(
+            &Self::repo_path(runs_dir, name),
+            format!("{}\n", repo.display()),
+        )
     }
 
     pub fn has_cost80(runs_dir: &Path, name: &str) -> bool {
@@ -191,6 +212,7 @@ impl WorkerMetadata {
     pub fn cleanup_worker_files(runs_dir: &Path, name: &str) {
         let _ = fs::remove_file(Self::owner_path(runs_dir, name));
         let _ = fs::remove_file(Self::grid_path(runs_dir, name));
+        let _ = fs::remove_file(Self::repo_path(runs_dir, name));
         let _ = fs::remove_file(Self::pipeline_path(runs_dir, name));
         let _ = fs::remove_file(Self::review_path(runs_dir, name));
         let _ = fs::remove_file(Self::provider_retry_path(runs_dir, name));

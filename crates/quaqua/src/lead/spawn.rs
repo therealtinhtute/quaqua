@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const USAGE: &str = "\
-# Usage: quaqua lead spawn <slug> [--approve-kind <kind>]
+# Usage: quaqua lead spawn <slug> [--task \"<kickoff>\"] [--approve-kind <kind>]
 #   Start the project Lead for <slug> (AGENTS.md '## Roles (SLP)'): an agent
 #   session named <slug>-lead running in the quaqua checkout this script
 #   belongs to (normally ~/quaqua). The Lead is not a worker — no worktree,
@@ -29,7 +29,12 @@ pub const USAGE: &str = "\
 #   the row's owner column becomes the Lead name (serialized with
 #   quaqua lead cleanup via projects/INDEX.md.lock.d, published by atomic rename).
 #   Env: LEAD_KIND (overrides strategy.lead_kind in team.toml).
-#   --approve-kind <kind>  approve a lead kind whose team.toml spawn = \"approve\"";
+#   --approve-kind <kind>  approve a lead kind whose team.toml spawn = \"approve\"
+#   --task \"<kickoff>\"  after the lead brief lands and the Lead is ready, send
+#                         <kickoff> to it (same verified submit as `lead prompt`).
+#                         Without --task the command prints
+#                         `NEXT: herdr agent prompt <slug>-lead \"<kickoff>\"` on stderr —
+#                         a Lead left at 'ready' never starts work by itself.";
 
 use crate::workspace::workspace_root_checked;
 
@@ -68,10 +73,27 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
     let mut slug = String::new();
     let mut approve_kinds: Vec<String> = Vec::new();
+    let mut task: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
-        if arg == "--approve-kind" {
+        if arg == "--task" {
+            if i + 1 >= args.len() {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            let val = &args[i + 1];
+            if val.trim().is_empty() {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            task = Some(val.clone());
+            i += 2;
+        } else if let Some(v) = arg.strip_prefix("--task=") {
+            if v.trim().is_empty() {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+            task = Some(v.to_string());
+            i += 1;
+        } else if arg == "--approve-kind" {
             if i + 1 >= args.len() {
                 return Err((1, format!("{}\n", USAGE)));
             }
@@ -352,14 +374,70 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     // Update projects/INDEX.md with mkdir lock
     update_project_index_owner(&root, &slug, &name)?;
 
-    // Prompt Lead
+    // Prompt Lead: the verified submit (`--wait --until working` + input box
+    // empty) is the same path `lead prompt` uses, so a brief that never left
+    // the box fails here instead of leaving a Lead at 'ready'.
     let prompt_text = format!(
         "You are the Lead for project '{slug}' (QUAQUA_OWNER={name}) — role and authority: AGENTS.md '## Roles (SLP)' (this repo's root doc; read it, plus models.md for the worker roster).\n- Own the project card projects/{slug}.md: read it now, then keep its '## Now' at the current truth after every outcome.\n- Pipeline-size work runs through quaqua pipeline. Peers: quaqua worker spawn with GRID_TAB={slug}-workers, at most 4 at once. Approve each builder's plan before code: a pipeline pauses with exit 5 'plan-ready', '--resume' continues it.\n- You are not a worker: no worktree, not counted toward the 4-worker cap, and you never edit the project repo yourself — Peers build and commit on their branches; acceptance = you merge Peer branches into the project integration branch {integ} (created from the repo's default branch if it was missing — spawn Peers --base {integ} so diffs stay against it). quaqua internals (scripts/, rules/, memory/) are CoS-only.\n- Resolve any '## Challenge' in runs/<worker>.md before acceptance; every redirect (from anh iu, the Auditor, or any report) reaches you through the CoS — record CoS steering in runs/pipeline-<task>.md; escalate to CoS only on goal/cost changes.\nReply 'ready' once the card is read."
     );
-    let _ = herdr.run(&["agent", "prompt", &name, &prompt_text]);
+    crate::lead::prompt::send_prompt(herdr, &name, pane, &prompt_text)?;
 
     println!("lead={name} slug={slug} workspace={wsid} pane={pane}");
+
+    // A Lead that only reads its brief idles at 'ready' and starts nothing
+    // (2026-10-23 llmhub-lead): the kickoff is a separate, explicit step.
+    match kickoff_plan(task.as_deref(), &name) {
+        Kickoff::Send(text) => {
+            wait_lead_ready(herdr, &name)?;
+            crate::lead::prompt::send_prompt(herdr, &name, pane, &text)?;
+            println!("kickoff={name}");
+        }
+        Kickoff::Next(line) => eprintln!("{line}"),
+    }
     Ok(())
+}
+
+/// What to do with the kickoff after the lead brief has landed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Kickoff {
+    /// Send this text to the Lead once it is ready.
+    Send(String),
+    /// Print this instruction; the caller sends the kickoff itself.
+    Next(String),
+}
+
+/// `--task <text>` → send it; no `--task` → print the exact `herdr agent prompt`
+/// line the caller must run. A Lead left at 'ready' never starts work by itself.
+pub fn kickoff_plan(task: Option<&str>, name: &str) -> Kickoff {
+    match task {
+        Some(text) => Kickoff::Send(text.to_string()),
+        None => Kickoff::Next(format!("NEXT: herdr agent prompt {name} \"<kickoff>\"")),
+    }
+}
+
+/// Block until the Lead is ready (`idle`) after its brief. `QUAQUA_LEAD_READY_MS`
+/// overrides the default window; a Lead still working past it gets a loud error
+/// instead of a kickoff injected into a running turn.
+fn wait_lead_ready<H: HerdrOps>(herdr: &H, name: &str) -> Result<(), (i32, String)> {
+    let ms = std::env::var("QUAQUA_LEAD_READY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(300_000);
+    let ready = herdr
+        .agent_wait_idle(name, ms)
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    if ready {
+        return Ok(());
+    }
+    Err((
+        1,
+        format!(
+            "error: lead '{name}' was spawned but did not become ready within {ms} ms — it is still on its brief; send the kickoff yourself: `quaqua lead prompt {name_without_lead} \"<kickoff>\"`\n",
+            name_without_lead = name.strip_suffix("-lead").unwrap_or(name)
+        ),
+    ))
 }
 
 /// Update the owner column for a project slug in projects/INDEX.md.
