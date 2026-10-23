@@ -1139,6 +1139,7 @@ impl MergeScan {
         self.scans.iter().any(|s| s.truncated)
     }
 
+    #[cfg(test)]
     pub fn from_commits(commits: Vec<MergeCommit>) -> Self {
         Self {
             commits,
