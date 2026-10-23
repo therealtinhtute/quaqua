@@ -175,7 +175,10 @@ fn init_writes_missing_files_with_modes_and_a_lock() {
     assert_eq!(agents["mode"].as_u64(), Some(0o644));
     assert!(files.contains_key("memory/rules.md"), "seed not recorded");
     assert!(
-        lock["engine"].as_str().unwrap_or("").starts_with("0.1.0+"),
+        lock["engine"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with(&format!("{}+", env!("CARGO_PKG_VERSION"))),
         "engine id missing: {lock}",
     );
 
