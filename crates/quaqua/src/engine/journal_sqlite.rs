@@ -741,6 +741,95 @@ mod tests {
         );
     }
 
+    /// Opening a rollback-journal database converts it to WAL, and that
+    /// conversion needs a write lock. SQLite does not run the busy handler for
+    /// `PRAGMA journal_mode`, so a concurrent writer used to fail the open with
+    /// `database is locked` — one watcher dying because another one was busy.
+    #[test]
+    fn test_open_waits_out_a_concurrent_writer_instead_of_failing_locked() {
+        let path = temp_db_path("open-busy");
+        let _cleaner = TempDbCleaner(path.clone());
+
+        // Create the schema without the WAL pragma so `open` must convert it.
+        let holder = rusqlite::Connection::open(&path).expect("open holder");
+        holder
+            .execute_batch(
+                r#"
+                CREATE TABLE events (
+                    workflow_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    ts_ms INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, seq)
+                );
+                CREATE TABLE snapshots (
+                    workflow_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    state_json TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, seq)
+                );
+                BEGIN IMMEDIATE;
+                INSERT INTO events VALUES ('wf-holder', 1, 0, 'k', '{}');
+                "#,
+            )
+            .expect("create schema and hold the write lock");
+
+        let release = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(200));
+            holder.execute_batch("COMMIT;").expect("commit holder tx");
+        });
+
+        let mut journal = SqliteJournal::open(&path)
+            .expect("open must wait for the concurrent writer instead of failing locked");
+        release.join().expect("holder thread");
+
+        let seq = journal
+            .append_event("wf-holder", &EventRecord::new(0, 1, "after", "{}"))
+            .expect("journal is usable after the concurrent open");
+        assert_eq!(seq, 2);
+    }
+
+    /// The watcher scenario: several runners opening the same database at once
+    /// must all get a working journal (the first one converts it to WAL, the
+    /// rest race that conversion).
+    #[test]
+    fn test_concurrent_opens_never_fail_locked() {
+        let path = temp_db_path("concurrent-opens");
+        let _cleaner = TempDbCleaner(path.clone());
+
+        let writers = 6;
+        let path_arc = Arc::new(path.clone());
+        let barrier = Arc::new(std::sync::Barrier::new(writers));
+        let mut handles = Vec::new();
+        for writer_id in 0..writers {
+            let p = Arc::clone(&path_arc);
+            let b = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                b.wait();
+                let mut journal = SqliteJournal::open(&p).expect("concurrent open");
+                for i in 0..10 {
+                    let ev = EventRecord::new(
+                        0,
+                        i as u64,
+                        "concurrent_open",
+                        format!(r#"{{"writer": {writer_id}, "i": {i}}}"#),
+                    );
+                    journal
+                        .append_event("wf-open", &ev)
+                        .expect("append after concurrent open");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread finished");
+        }
+
+        let reader = SqliteJournal::open(&path).expect("reopen reader");
+        let events = reader.load_events("wf-open", 1).expect("load events");
+        assert_eq!(events.len(), writers * 10);
+    }
+
     #[test]
     fn test_concurrent_writers_monotonic_seq() {
         let path = temp_db_path("concurrent");

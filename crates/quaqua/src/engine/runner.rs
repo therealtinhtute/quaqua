@@ -3294,4 +3294,67 @@ mod tests {
         assert_eq!(final_events[3].kind, "approval_resolved");
         assert_eq!(final_events[4].kind, "workflow_completed");
     }
+
+    /// A watcher killed before its first periodic snapshot still left events in
+    /// the journal. `resume` used to die with `NoInitialState` on that journal;
+    /// a run must persist its starting state so the resume has a replay base.
+    #[test]
+    fn test_resume_after_kill_before_first_snapshot_finds_the_starting_state() {
+        let workflow = MidrunKillWorkflow;
+        let initial_state = MidrunKillState {
+            act1_result: None,
+            act2_result: None,
+        };
+        let req1 = ActivityRequest::Cost(CostRequest::QuerySpend {
+            session_pattern: "session_1".to_string(),
+        });
+        let res1 = ActivityResult::Cost(CostResult::Spend(10.0));
+        let req2 = ActivityRequest::Cost(CostRequest::QuerySpend {
+            session_pattern: "session_2".to_string(),
+        });
+        let res2 = ActivityResult::Cost(CostResult::Spend(20.0));
+
+        // The run dies inside its first activity: the journal has the scheduled
+        // event but nothing has been checkpointed yet.
+        let mut journal = InMemoryJournal::new();
+        let mut dying_activities = MockActivityRegistry::new();
+        let mut clock = VirtualClock::new(5000);
+        let err = run(
+            &workflow,
+            "kill_before_snapshot",
+            initial_state.clone(),
+            &mut journal,
+            &mut dying_activities,
+            &mut clock,
+        )
+        .expect_err("the unregistered activity fails the run");
+        assert!(matches!(err, RunnerError::Activity(_)), "got {err:?}");
+        assert_eq!(
+            journal
+                .load_events("kill_before_snapshot", 1)
+                .expect("events")
+                .len(),
+            1,
+            "the kill point has one event and no checkpoint snapshot"
+        );
+
+        // Resume with no initial state, the way `resume` runs after a kill.
+        let mut activities = MockActivityRegistry::new();
+        activities.register(req1.clone(), res1);
+        activities.register(req2.clone(), res2);
+        let resumed = resume(
+            &workflow,
+            "kill_before_snapshot",
+            &mut journal,
+            &mut activities,
+            &mut clock,
+            Vec::new(),
+        )
+        .expect("resume must find the run's starting state instead of failing NoInitialState");
+        assert_eq!(
+            resumed,
+            RunnerOutcome::Completed("total: 30".to_string())
+        );
+        assert_eq!(activities.count_for(&req2), 1, "forward run executes act 2");
+    }
 }
