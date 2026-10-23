@@ -36,7 +36,10 @@ mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs"
 # FAKE_BASE_SHA/FAKE_HEAD_SHA/FAKE_HEAD2_SHA shape each; FAKE_PORCELAIN feeds
 # `status --porcelain` (empty = clean tree). No branch exists (show-ref fails)
 # unless FAKE_BRANCHES names it — spawn-worker.sh reuses a branch cleanup kept
-# only when it is really there.
+# only when it is really there. A worktree added at an explicit sha pins HEAD to
+# that commit for every later read: real git does not move a checkout between
+# two reads, and the read counter would fake a move on a reviewer's worktree
+# (baseline taken at spawn, compared at acceptance).
 cat > "$T/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
@@ -50,7 +53,19 @@ case " $* " in
   *"show-ref --verify"*)
     for b in ${FAKE_BRANCHES:-}; do case " $* " in *" refs/heads/$b "*) exit 0 ;; esac; done
     exit 1 ;;
+  *"worktree add "*)
+    wargs=(); wskip=0
+    for a in "$@"; do
+      if (( wskip )); then wskip=0; continue; fi
+      case "$a" in -C|-b) wskip=1 ;; -*) ;; *) wargs+=("$a") ;; esac
+    done
+    if [[ ${wargs[3]:-} =~ ^[0-9a-f]{7,40}$ ]]; then
+      printf '%s\n' "${wargs[3]}" > "$GITN-$(basename "${wargs[2]}").pin"
+    else
+      rm -f "$GITN-$(basename "${wargs[2]}").pin"
+    fi ;;
   *"rev-parse HEAD"*)
+    if [ -f "$cf.pin" ]; then cat "$cf.pin"; exit 0; fi
     n=$((n+1)); echo "$n" > "$cf"
     if (( n <= ${FAKE_BASECALLS:-1} )); then echo "${FAKE_BASE_SHA:-ba5eba5}";
     elif (( n == 2 )); then echo "${FAKE_HEAD_SHA:-c0ffee1deadbeef0000000000000000000000}";
@@ -624,14 +639,27 @@ grep -q 'fresh plan' "$runsdir/sude-cur.plan.md" || fail "cur: fresh report not 
 ! grep -q 'agent prompt' "$T/calls" || fail "cur: resumed wait re-prompted"
 echo "ok: resume consumes a fresh post-prompt report without archiving or re-prompting"
 
-# ── telemetry: every line valid jsonl with the lock §2 fields ────────────────
+# ── telemetry: one jsonl file, two record kinds ─────────────────────────────
+# Pipeline stop rows (no `rec`, or "pipeline") carry the lock §2 fields; a
+# worker row ("rec":"worker", appended by `worker cleanup`) carries its own
+# shape and links back to the task through `pipeline`. Both may appear, so the
+# §2 check is scoped to the pipeline rows rather than applied to every line.
 while IFS= read -r l; do
-  jq -e '.ts and .task and .repo and .builder and .reviewer and .review
-         and (.rounds|type=="number") and (.review_changed_outcome|type=="boolean")
-         and .status and (.minutes|type=="number")' <<<"$l" >/dev/null \
-    || fail "telemetry line malformed: $l"
+  jq -e . <<<"$l" >/dev/null || fail "telemetry line is not jsonl: $l"
+  if [[ $(jq -r '.rec // "pipeline"' <<<"$l") == worker ]]; then
+    jq -e '.ts and .name and .spend_src' <<<"$l" >/dev/null \
+      || fail "worker telemetry row malformed: $l"
+  else
+    jq -e '.ts and .task and .repo and .builder and .reviewer and .review
+           and (.rounds|type=="number") and (.review_changed_outcome|type=="boolean")
+           and .status and (.minutes|type=="number")' <<<"$l" >/dev/null \
+      || fail "pipeline telemetry row malformed: $l"
+  fi
 done < "$tele"
-echo "ok: telemetry -> every stop line is valid jsonl with all lock §2 fields"
+# The reviewer's cleanup row is what links a worker to the task it served.
+jq -e 'select(.rec=="worker" and .name=="suhuynh-islr1" and .pipeline=="isl")' \
+  "$tele" >/dev/null || fail "no worker telemetry row for the isl reviewer: $(cat "$tele")"
+echo "ok: telemetry -> jsonl, §2 fields on every pipeline row, worker rows linked"
 
 # ══ real-Git fixture: snapshot binding + spawn resume (F2/F4) ══════════════
 # Only herdr is stubbed; git is real, so worktrees, commits and SHAs behave
@@ -740,9 +768,14 @@ run_rg FAKE_BUILD_MD=$'checked\nOutcome: no changes\n\n## Lessons\n- none\n' -- 
 grep -q 'status=clean' "$T/out" || fail "rgp: declared no-op not clean: $(cat "$T/out")"
 echo "ok: real git — declared no-op finishes clean, no reviewer spawned"
 
-# F4: agent-start failure keeps the worktree; --resume finishes the startup
-run_rg FAKE_FAIL_START=sude-rsf -- rsf "$T/rg/repo" --brief "$T/brief.md"
+# F4: agent-start failure keeps the worktree; --resume finishes the startup.
+# A start failure now takes one configured fallback hop (sude→suhuynh, team.toml)
+# before it is a spawn failure, and a claude start timeout is answered with an
+# idle wait — so both the start and that wait must fail to reach exit 3.
+run_rg FAKE_FAIL_START=sude-rsf FAKE_FAIL_WAIT=sude-rsf -- rsf "$T/rg/repo" --brief "$T/brief.md"
 [[ $rc -eq 3 ]] || fail "rsf: exit $rc, want 3 (spawn failure): $(cat "$T/err")"
+grep -q 'fallback: sude->suhuynh\|fallback: sude→suhuynh' "$T/err" \
+  || fail "rsf: fallback hop not reported: $(cat "$T/err")"
 [[ -d $T/rg/.wt/sude-rsf ]] || fail "rsf: worktree should survive the failed start"
 run_rg -- --resume rsf "$T/rg/repo"
 [[ $rc -eq 5 ]] || fail "rsf resume: exit $rc, want 5 plan-ready: $(cat "$T/err")"
