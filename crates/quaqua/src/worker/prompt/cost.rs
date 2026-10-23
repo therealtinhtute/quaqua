@@ -916,12 +916,15 @@ pub fn session_store_mtime(
 
 /// Tracks cost budget marks during watchdog execution: 80% and 100% warn,
 /// 200% escalates to the CoS. Each mark fires once per run, across restarts.
-/// The watchdog never kills a worker over cost.
+/// A `kill` kind (`on_cost_cap`, issue #48) also requests one interrupt when it
+/// first crosses 100%; otherwise the watchdog never stops a worker over cost.
 pub struct CostTracker {
     pub cost_cap: Option<f64>,
     pub cost80_warned: bool,
     pub cost100_warned: bool,
     pub cost200_warned: bool,
+    pub kill_on_cap: bool,
+    stop_requested: bool,
 }
 
 impl CostTracker {
@@ -931,7 +934,19 @@ impl CostTracker {
             cost80_warned: WorkerMetadata::has_cost80(runs_dir, name),
             cost100_warned: WorkerMetadata::has_cost100(runs_dir, name),
             cost200_warned: WorkerMetadata::has_cost200(runs_dir, name),
+            kill_on_cap: false,
+            stop_requested: false,
         }
+    }
+
+    pub fn with_kill(mut self, kill_on_cap: bool) -> Self {
+        self.kill_on_cap = kill_on_cap;
+        self
+    }
+
+    /// True once after a `kill` kind first crosses 100%; the caller interrupts.
+    pub fn take_stop(&mut self) -> bool {
+        std::mem::take(&mut self.stop_requested)
     }
 
     pub fn check(
@@ -970,9 +985,14 @@ impl CostTracker {
         if !self.cost100_warned && current_cost >= budget_val {
             let _ = WorkerMetadata::record_cost100(runs_dir, name, current_cost);
             self.cost100_warned = true;
-            lines.push(format!(
+            let mut line = format!(
                 "WATCHDOG cost 100% | name={name} cost=${current_cost:.4} budget=${budget_val:.4}"
-            ));
+            );
+            if self.kill_on_cap {
+                self.stop_requested = true;
+                line.push_str(" | STOP");
+            }
+            lines.push(line);
         }
         if !self.cost200_warned && current_cost >= budget_val * 2.0 {
             let _ = WorkerMetadata::record_cost200(runs_dir, name, current_cost);
@@ -1173,6 +1193,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn test_kill_kind_requests_one_stop_at_100() {
+        let d = cost_dir("kill");
+        let mut t = CostTracker::new(&d, "k", Some(1.0)).with_kill(true);
+        assert!(t.observe(&d, "k", 0.99).iter().all(|l| !l.contains("STOP")));
+        assert!(!t.take_stop());
+        let lines = t.observe(&d, "k", 1.0);
+        assert!(lines.contains(&"WATCHDOG cost 100% | name=k cost=$1.0000 budget=$1.0000 | STOP".to_string()), "{lines:?}");
+        assert!(t.take_stop());
+        assert!(!t.take_stop());
+        t.observe(&d, "k", 1.5);
+        assert!(!t.take_stop());
+        let mut restarted = CostTracker::new(&d, "k", Some(1.0)).with_kill(true);
+        restarted.observe(&d, "k", 3.0);
+        assert!(!restarted.take_stop());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_warn_kind_never_requests_stop() {
+        let d = cost_dir("warn");
+        let mut t = CostTracker::new(&d, "w", Some(1.0));
+        let lines = t.observe(&d, "w", 2.5);
+        assert!(lines.iter().all(|l| !l.contains("STOP")), "{lines:?}");
+        assert!(!t.take_stop());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

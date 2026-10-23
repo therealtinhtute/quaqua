@@ -278,6 +278,20 @@ run_brief sude-cost "$cost_brief" FAKE_ADVANCE_COST=1 PROMPT_WORKER_COST_FILE="$
 [[ $(grep -c 'WATCHDOG cost 100%' "$T/err") -eq 1 ]] || fail "sude-cost: cost 100% not once"
 echo "ok: cost crossing 80% then 100% printed once each, report accepted"
 
+# ── on_cost_cap = "kill" (#48): one interrupt at 100%, exit 5, no cleanup ───
+sed 's/^\[kinds.sude\]$/[kinds.sude]\non_cost_cap = "kill"/' "$root/templates/workspace/team.toml" > "$T/team-kill.toml"
+grep -q 'on_cost_cap = "kill"' "$T/team-kill.toml" || fail "sude-costkill: team fixture not patched"
+echo "0.50" > "$T/cost"; echo 0 > "$T/home/.coststep"
+run_brief sude-costkill "$cost_brief" FAKE_ADVANCE_COST=1 PROMPT_WORKER_COST_FILE="$T/cost" \
+  FAKE_HARNESS=omp QUAQUA_TEAM_TOML="$T/team-kill.toml" PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
+[[ $rc -eq 5 ]] || fail "sude-costkill: exit $rc, want 5: $(cat "$T/err")"
+grep -q 'WATCHDOG cost 100%.*| STOP' "$T/err" || fail "sude-costkill: no STOP line: $(cat "$T/err")"
+grep -q 'cost cap reached' "$T/err" || fail "sude-costkill: unclear exit reason: $(cat "$T/err")"
+[[ $(grep -c '^herdr agent send-keys' "$T/calls") -ge 1 ]] || fail "sude-costkill: no interrupt sent: $(cat "$T/calls")"
+! grep -qE 'pane close|agent close|worktree remove' "$T/calls" || fail "sude-costkill: cleanup ran: $(cat "$T/calls")"
+[[ ! -s "$T/out" ]] || fail "sude-costkill: stdout not empty: $(cat "$T/out")"
+echo "ok: kill kind at 100% -> interrupt, STOP line, exit 5, pane kept"
+
 # ── --resume / --extend arithmetic ─────────────────────────────────────────
 run sude-noext PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 \
   PROMPT_WORKER_BUDGET_SEC=2 PROMPT_WORKER_MAX_SEC=60
