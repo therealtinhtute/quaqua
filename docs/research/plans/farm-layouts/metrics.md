@@ -1,7 +1,15 @@
 # Shared team metrics: one cost/time row per worker (issue #47 P3, #48)
 
+Related: [`plan.md`](plan.md) · [`design.md`](design.md) (§D `farm_events`) · [`event-monitor.md`](event-monitor.md) · [`README.md`](README.md)
+
+> **Folded into farm-layouts.** The per-worker metric row lands in `farm_events` in
+> `runs/quaqua.db` ([`design.md`](design.md) §D, phases P2 and P6). That overrides both the
+> `runs/telemetry.jsonl` pick in §Verdict and the "no table in `runs/quaqua.db`" rejection below.
+> The rest of this file — the offline spend readers in §Evidence and their traps — still applies.
+> See [`README.md`](README.md) for the milestone that builds it.
+
 Status: **design** (not built) · truonglao-metrics · 2026-10-21
-Inputs: `docs/research/plans/team-event-driven-monitor.md` §3, `docs/research/plans/watchdog-event-driven.md`,
+Inputs: `event-monitor.md` §3, `docs/research/plans/watchdog-event-driven.md`,
 issues #47 and #48 (with comments), `docs/research/plans/harness-effort-cost-audit.md`, live stores below.
 
 ## Verdict
@@ -128,7 +136,7 @@ M1 → M2 → M3 run in order and each lands on its own. M4 lands with M3.
   calls, and Leads sometimes prompt by hand, so there is no single "end".
 - **Wiring `engine/telemetry_otel.rs` (`traces.jsonl`).** That is per-span GenAI tracing, which is
   more than we need, and it needs a call per model request that quaqua cannot see.
-- **A daemon or service.** Rejected in `team-event-driven-monitor.md` §Rejected.
+- **A daemon or service.** Rejected in `event-monitor.md` §Rejected.
 
 ## Risks
 
