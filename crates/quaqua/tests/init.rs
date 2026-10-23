@@ -1442,3 +1442,324 @@ fn s6b_f4_skill_carries_agents_resume_first_rule() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The missing half of the hooks contract: not just "init installed a hook", but
+/// what the installed pre-commit does with a diff (rules/_all/portable-paths.md).
+/// A commit whose ADDED lines carry a machine-specific absolute path is refused
+/// and names the file, the line and the policy; the allowlist is exact; the
+/// portable spellings, a pure rename, binary content and existing violations all
+/// still commit.
+///
+/// Runs the hook `init --git-hooks` installed, against a throwaway repo — the
+/// real workspace index is never touched.
+#[test]
+fn pre_commit_hook_refuses_added_machine_paths() {
+    let Some(bash) = find_bash() else {
+        return; // the hook is a bash script; without bash there is nothing to run
+    };
+    let Some(git_bin) = find_git() else {
+        return;
+    };
+
+    let sb = Sandbox::new("precommit");
+    let repo = sb.target("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let bin = sb.target("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // `quaqua init --git-hooks` resolves git through PATH, so the sandbox bin dir
+    // offers exactly one real git; bash comes from the system PATH appended below.
+    std::os::unix::fs::symlink(&git_bin, bin.join("git")).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-C", repo.to_str().unwrap()])
+            .args(args)
+            .env("PATH", &path)
+            .output()
+            .expect("spawn git");
+        (out.status.success(), stdout(&out) + &stderr(&out))
+    };
+    // The fixtures must carry a machine-looking path, but this file may not
+    // spell one (the hook under test scans added lines, this repo's included),
+    // so `@HOME@` / `@USERS@` stand in for the machine-specific prefix.
+    let home = concat!("/", "home");
+    let users = concat!("/", "Users");
+    let write = |rel: &str, body: &str| {
+        let p = repo.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body.replace("@HOME@", home).replace("@USERS@", users)).unwrap();
+    };
+
+    assert!(git(&["init", "-q"]).0, "git init failed");
+    assert!(git(&["config", "user.email", "test@example.invalid"]).0);
+    assert!(git(&["config", "user.name", "test"]).0);
+
+    let out = sb
+        .cmd()
+        .env("PATH", &bin)
+        .args(["init", "--git-hooks", repo.to_str().unwrap()])
+        .output()
+        .expect("spawn quaqua init --git-hooks");
+    assert!(
+        out.status.success(),
+        "init --git-hooks failed: {}",
+        stderr(&out)
+    );
+
+    let hookdir = repo.join(".git/quaqua-hooks");
+    let hook = hookdir.join("pre-commit");
+    assert!(hook.is_file(), "no generated pre-commit at {hook:?}");
+
+    let hook_out = |dir: &Path| {
+        let out = Command::new(&bash)
+            .arg(&hook)
+            .current_dir(dir)
+            .env("PATH", &path)
+            .output()
+            .expect("run the pre-commit hook");
+        (
+            out.status.code().unwrap_or(-1),
+            stdout(&out) + &stderr(&out),
+        )
+    };
+    let hook_rc = || hook_out(&repo).0;
+    let stage = || assert!(git(&["add", "-A"]).0, "git add failed");
+    let commit_rc = || -> i32 {
+        let (ok, text) = git(&["commit", "-qm", "subject"]);
+        std::fs::write(sb.target("last-commit.out"), &text).unwrap();
+        if ok {
+            0
+        } else {
+            1
+        }
+    };
+    let last_commit = || read(&sb.target("last-commit.out"));
+    let reset = || {
+        let _ = git(&["reset", "-q", "--hard", "HEAD"]);
+        let _ = git(&["clean", "-qfd"]);
+    };
+
+    // baseline: the two allowlisted paths plus ordinary sources
+    write("rules/_all/portable-paths.md", "# portable paths\n");
+    write("tests/fixture.sh", "#!/usr/bin/env bash\necho baseline\n");
+    write("src/tool.sh", "#!/usr/bin/env bash\necho baseline\n");
+    write("README.md", "baseline\n");
+    stage();
+    assert_eq!(commit_rc(), 0, "baseline commit refused: {}", last_commit());
+
+    // 1. an added machine path in a script is refused, naming file/line/policy
+    write(
+        "src/tool.sh",
+        "#!/usr/bin/env bash\ncd @HOME@/alice/project\n",
+    );
+    stage();
+    assert_eq!(hook_rc(), 1, "added /home/<user>/ path was not refused");
+    let text = hook_out(&repo).1;
+    for want in ["src/tool.sh", "home/alice/project", "portable-paths"] {
+        assert!(text.contains(want), "hook output lacks {want:?}: {text}");
+    }
+    // and through a real commit, so the installed hook really fires
+    assert_ne!(commit_rc(), 0, "git commit accepted a machine path");
+    assert!(last_commit().contains("src/tool.sh"), "{}", last_commit());
+    reset();
+
+    // 2. the macOS form is refused too
+    write(
+        "src/tool.sh",
+        "#!/usr/bin/env bash\nopen @USERS@/bob/notes\n",
+    );
+    stage();
+    assert_eq!(hook_rc(), 1, "added /Users/<user>/ path was not refused");
+    assert!(hook_out(&repo).1.contains("Users/bob/notes"));
+    reset();
+
+    // 3. the allowlist is the two paths, and it is exact rather than a prefix
+    write(
+        "tests/fixture.sh",
+        "#!/usr/bin/env bash\ncd @HOME@/alice/project\n",
+    );
+    stage();
+    assert_eq!(hook_rc(), 0, "a tests/ fixture must be allowlisted");
+    write("rules/_all/portable-paths.md", "- never @HOME@/alice/\n");
+    stage();
+    assert_eq!(hook_rc(), 0, "the policy file naming the pattern must pass");
+    write(
+        "tests-helper.sh",
+        "#!/usr/bin/env bash\ncd @HOME@/alice/project\n",
+    );
+    stage();
+    assert_eq!(
+        hook_rc(),
+        1,
+        "tests-helper.sh is outside tests/ and must be checked"
+    );
+    reset(); // `clean -fd` drops the untracked tests-helper.sh again
+
+    // 4. portable spellings and placeholders pass
+    write(
+        "src/tool.sh",
+        "#!/usr/bin/env bash\n\
+         a=$HOME/thing\n\
+         b=~/thing\n\
+         c=$(dirname \"$0\")/thing\n\
+         d=/home/<user>/thing\n\
+         e=/Users/<name>/thing\n\
+         f=/etc/hosts\n\
+         g=/usr/local/bin\n",
+    );
+    stage();
+    assert_eq!(
+        hook_rc(),
+        0,
+        "portable spellings refused: {}",
+        hook_out(&repo).1
+    );
+    reset();
+
+    // 5. only added lines are judged: a legacy violation still commits, and a
+    //    clean edit to that file still passes
+    write(
+        "src/legacy.sh",
+        "#!/usr/bin/env bash\ncd @HOME@/legacy/project\n",
+    );
+    stage();
+    let (ok, text) = git(&["commit", "-q", "--no-verify", "-m", "legacy"]);
+    assert!(ok, "seeding the legacy violation failed: {text}");
+    write(
+        "src/legacy.sh",
+        "#!/usr/bin/env bash\ncd @HOME@/legacy/project\necho more\n",
+    );
+    stage();
+    assert_eq!(hook_rc(), 0, "a clean edit of a legacy file was refused");
+    assert!(read(&repo.join("src/legacy.sh")).contains("echo more"));
+    reset();
+
+    // 6. a pure rename re-judges nothing; rename + added lines is re-checked
+    //    under the new name
+    assert!(git(&["mv", "src/legacy.sh", "src/renamed.sh"]).0);
+    stage();
+    assert_eq!(hook_rc(), 0, "a pure rename re-judged existing content");
+    write(
+        "src/renamed.sh",
+        "#!/usr/bin/env bash\ncd @HOME@/legacy/project\ncd @HOME@/carol/other\n",
+    );
+    stage();
+    assert_eq!(hook_rc(), 1, "rename + added machine path was not refused");
+    assert!(
+        hook_out(&repo).1.contains("src/renamed.sh"),
+        "the new path was not named"
+    );
+    reset();
+
+    // 7. binary content carries no added lines and passes
+    let mut blob = vec![0u8, 1, 2];
+    blob.extend(format!("{home}/alice/inside").bytes());
+    blob.extend([0u8, 3]);
+    std::fs::write(repo.join("blob.bin"), &blob).unwrap();
+    stage();
+    assert_eq!(hook_rc(), 0, "a binary diff was refused");
+    reset(); // `clean -fd` drops the untracked blob.bin again
+
+    // 8. a clean index passes; an unborn branch's first commit is still judged
+    assert_eq!(hook_rc(), 0, "a clean index was refused");
+    let fresh = sb.target("fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    assert!(Command::new("git")
+        .args(["-C", fresh.to_str().unwrap(), "init", "-q"])
+        .env("PATH", &path)
+        .status()
+        .expect("git init")
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", fresh.to_str().unwrap(), "config", "core.hooksPath"])
+        .arg(&hookdir)
+        .env("PATH", &path)
+        .status()
+        .expect("git config")
+        .success());
+    std::fs::write(
+        fresh.join("first.sh"),
+        format!("#!/usr/bin/env bash\ncd {home}/dave/x\n"),
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["-C", fresh.to_str().unwrap(), "add", "-A"])
+        .env("PATH", &path)
+        .status()
+        .expect("git add")
+        .success());
+    let (code, text) = hook_out(&fresh);
+    assert_eq!(
+        code, 1,
+        "an unborn-branch first commit with a machine path was allowed"
+    );
+    assert!(
+        text.contains("first.sh"),
+        "the first commit did not name the file: {text}"
+    );
+
+    // 9. the shipped hook itself stays portable and executable
+    for line in read(&hook).lines() {
+        for marker in ["/home/", "/Users/"] {
+            for rest in line.split(marker).skip(1) {
+                let machine = rest
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                    .unwrap_or(false);
+                assert!(
+                    !machine,
+                    "the generated hook carries a machine path: {line}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        path_mode(&hook) & 0o111,
+        0o111,
+        "the hook is not executable"
+    );
+
+    // 10. a workspace init and `--git-hooks` install the same hook body: one
+    //     embedded template, not a second copy that can drift.
+    let ws = sb.target("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    assert!(Command::new("git")
+        .args(["-C", ws.to_str().unwrap(), "init", "-q"])
+        .env("PATH", &path)
+        .status()
+        .expect("git init")
+        .success());
+    let out = sb
+        .cmd()
+        .env("PATH", &bin)
+        .args(["init", ws.to_str().unwrap()])
+        .output()
+        .expect("spawn quaqua init");
+    assert!(
+        out.status.success(),
+        "workspace init failed: {}",
+        stderr(&out)
+    );
+    assert_eq!(
+        read(&ws.join(".git/quaqua-hooks/pre-commit")),
+        read(&hook),
+        "--git-hooks installed a different hook body than a workspace init"
+    );
+
+    let _ = std::fs::remove_dir_all(&sb.root);
+}
+
+fn find_bash() -> Option<PathBuf> {
+    let path = std::env::var("PATH").ok()?;
+    for dir in path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let cand = Path::new(dir).join("bash");
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}

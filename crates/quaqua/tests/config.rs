@@ -51,8 +51,55 @@ fn config_repo_kinds_carry_model_and_effort() {
     assert!(out.status.success(), "validate failed: {}", stderr(&out));
     let effort = run(&["config", "get", "kinds.tieude.effort", "--file", &repo_team()]);
     assert_eq!(stdout(&effort).trim(), "high");
-    let fallback = run(&["config", "get", "kinds.sude.fallback", "--file", &repo_team()]);
-    assert_eq!(stdout(&fallback).trim(), "suhuynh");
+    let fallback = run(&["config", "get", "kinds.tieude.fallback", "--file", &repo_team()]);
+    assert_eq!(stdout(&fallback).trim(), "sude");
+    let sude_fallback = run(&["config", "get", "kinds.sude.fallback", "--file", &repo_team()]);
+    assert_eq!(stdout(&sude_fallback).trim(), "suhuynh");
+}
+
+/// The migration plan's Rule -> key table is the record of which source rule
+/// became which `team.toml` key: one row per rule, per-source counts exact, and
+/// no row silently dropped (each maps to a key or says `prose`).
+#[test]
+fn config_rule_key_table_covers_every_source_rule() {
+    let plan = repo_root().join("docs/research/herdr-grid-rust-migration-plan.md");
+    let body = std::fs::read_to_string(&plan).expect("read the migration plan");
+    let table: Vec<&str> = body
+        .lines()
+        .skip_while(|l| !l.contains("rule-key-table:start"))
+        .skip(1)
+        .take_while(|l| !l.contains("rule-key-table:end"))
+        .filter(|l| l.starts_with("| "))
+        .collect();
+    // The header row starts with "| "; the |---| separator does not.
+    let rows = &table[1..];
+    assert_eq!(
+        rows.len(),
+        40,
+        "rule->key table has {} data rows, expected 40",
+        rows.len()
+    );
+
+    for (source, want) in [
+        ("| AGENTS.md", 13),           // 7 Rules + 6 Protocol
+        ("| `worker-cap.sh`", 4),
+        ("| `worker-timebox.md`", 11), // one per bullet
+        ("| `models.md`", 10),
+        ("| plan", 2),
+    ] {
+        let got = rows.iter().filter(|r| r.starts_with(source)).count();
+        assert_eq!(got, want, "rows from {source}");
+    }
+
+    let unmapped: Vec<&&str> = rows
+        .iter()
+        .filter(|r| !r.contains('`') && !r.contains("prose"))
+        .collect();
+    assert!(
+        unmapped.is_empty(),
+        "{} rule->key row(s) map to neither a key nor prose: {unmapped:?}",
+        unmapped.len()
+    );
 }
 
 #[test]
