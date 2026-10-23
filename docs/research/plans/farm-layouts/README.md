@@ -4,8 +4,8 @@
 its own layout (slp, lead-peer, advisor, dual-lens, council, user-defined), with
 `can_spawn` / `can_prompt` / depth enforced at the verbs quaqua mediates.
 
-**Status: parked.** Kickoff after `quaqua-tidy` T1/T2; **P1 needs PR #113 merged** (it touches
-`config.rs` and `cap.rs`). Phases P0–P8 ship independently, in order: P0 (identity + depth) → P1
+**Status: ready.** `quaqua-tidy` done and PR #113 merged (2026-10-23); P0 brief for a fresh
+session: [`p0-kickoff.md`](p0-kickoff.md). Phases P0–P8 ship independently, in order: P0 (identity + depth) → P1
 (`layout/` model, read-only `show`/`why`) → P2 (bus foundation) → P3 (gate in shadow) → P4 (gate
 enforced) → P5 (mail) → P6 (consumers) → P7 (freeze + `config migrate`) → P8 (user layouts,
 `council`). Model: 1 CoS per workspace, not per project; anh iu talks only to the CoS.
@@ -32,6 +32,7 @@ D2 and D5–D9 take the design's recommendation unless anh iu says otherwise at 
 
 | File | One line |
 | --- | --- |
+| [`p0-kickoff.md`](p0-kickoff.md) | P0 brief for a fresh session: identity + depth, `cos tag`, CoS pane protection, evidence, budgets. |
 | [`plan.md`](plan.md) | The plan: goal, D1/D3/D4, the P0 CoS-marker addendum (`quaqua cos tag`, sidebar chip, no silent herdr config edits). |
 | [`design.md`](design.md) | The design in full: `[layout]` in `team.toml` v3, one pure `layout::check` at every verb, `mail`/`farm_events` tables in `runs/quaqua.db`, per-verb events, P0–P8 with one proving test each. |
 | [`research-piggery.md`](research-piggery.md) | piggery vs quaqua source comparison: manifest schema, gate, mail, events; ranked borrow list, skips with reasons, migration path. Carries a CoS correction on the worker cap. |
