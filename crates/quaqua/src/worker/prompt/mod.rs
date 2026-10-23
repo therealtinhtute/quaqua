@@ -367,6 +367,7 @@ struct PromptActivities {
     heartbeat_sec: u64,
     start_sec: u64,
     cost_tracker: Mutex<CostTracker>,
+    cost_stopped: Mutex<bool>,
     last_wait: Mutex<Option<WaitSnapshot>>,
     last_progress: Mutex<u64>,
     last_diff: Mutex<String>,
@@ -415,9 +416,10 @@ impl Activity for PromptActivities {
             }
         }
 
-        let res = self.inner.execute(req);
+        let mut res = self.inner.execute(req);
         match req {
             ActivityRequest::Herdr(HerdrRequest::AgentWait { name, .. }) => {
+                let mut stop_now = false;
                 if let Ok(ActivityResult::Herdr(
                     crate::engine::activity::HerdrResult::AgentWait {
                         status,
@@ -430,13 +432,10 @@ impl Activity for PromptActivities {
                 )) = &res
                 {
                     let now = now_sec();
-                    self.cost_tracker.lock().unwrap().check(
-                        &self.runs_dir,
-                        name,
-                        session_value,
-                        cwd,
-                        harness,
-                    );
+                    let mut tracker = self.cost_tracker.lock().unwrap();
+                    tracker.check(&self.runs_dir, name, session_value, cwd, harness);
+                    stop_now = tracker.take_stop();
+                    drop(tracker);
                     let quiet = now.saturating_sub(*self.last_progress.lock().unwrap());
                     let diff = self.last_diff.lock().unwrap().clone();
                     let diffstat = if diff.is_empty() {
@@ -459,6 +458,22 @@ impl Activity for PromptActivities {
                         eprintln!(
                             "WATCHDOG heartbeat | name={name} elapsed={elapsed}s status={status} quiet={quiet}s | diff={diffstat}"
                         );
+                    }
+                }
+                if stop_now {
+                    // on_cost_cap = "kill" (issue #48): interrupt once, then end
+                    // the wait as blocked so the CoS decides; pane, worktree and
+                    // journal stay for `--resume`.
+                    match crate::worker::stop::interrupt_worker(name, &self.inner.herdr) {
+                        Ok(line) => eprintln!("WATCHDOG cost stop | {line}"),
+                        Err((_, e)) => eprint!("WATCHDOG cost stop failed | name={name} | {e}"),
+                    }
+                    *self.cost_stopped.lock().unwrap() = true;
+                    if let Ok(ActivityResult::Herdr(
+                        crate::engine::activity::HerdrResult::AgentWait { status, .. },
+                    )) = &mut res
+                    {
+                        *status = "blocked".to_string();
                     }
                 }
                 res
@@ -915,6 +930,13 @@ pub fn prompt_worker<G: GitOps>(
         max
     );
 
+    let kill_on_cap = crate::config::load_team_config()
+        .ok()
+        .and_then(|cfg| {
+            let kind = crate::config::kind_of_worker(&cfg, name)?.to_string();
+            cfg.kinds.get(&kind).map(|k| k.on_cost_cap == crate::config::COST_CAP_KILL)
+        })
+        .unwrap_or(false);
     let start_sec = now_sec();
     let sys_acts = SystemActivities::with_repo_dir(&repo_dir);
     let prompt_acts = PromptActivities {
@@ -924,7 +946,10 @@ pub fn prompt_worker<G: GitOps>(
         nudge_pct,
         heartbeat_sec,
         start_sec,
-        cost_tracker: Mutex::new(CostTracker::new(&runs_dir, name, cost_budget)),
+        cost_tracker: Mutex::new(
+            CostTracker::new(&runs_dir, name, cost_budget).with_kill(kill_on_cap),
+        ),
+        cost_stopped: Mutex::new(false),
         last_wait: Mutex::new(None),
         last_progress: Mutex::new(start_sec),
         last_diff: Mutex::new(String::new()),
@@ -1090,6 +1115,10 @@ pub fn prompt_worker<G: GitOps>(
             let reason = format!("time budget {}s exceeded", active_budget);
             Err(watchdog_exit(4, &reason))
         }
+        5 if *acts.cost_stopped.lock().unwrap() => Err(watchdog_exit(
+            5,
+            "cost cap reached (on_cost_cap=kill): worker interrupted; decide, then --resume",
+        )),
         5 => Err(watchdog_exit(
             5,
             "agent blocked (question/permission pending)",

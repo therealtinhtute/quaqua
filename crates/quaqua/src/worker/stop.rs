@@ -54,6 +54,13 @@ pub fn parse_stop_args(args: &[String]) -> Result<String, (i32, String)> {
 }
 
 pub fn stop_worker<H: HerdrOps>(name: &str, herdr: &H) -> Result<(), (i32, String)> {
+    println!("{}", interrupt_worker(name, herdr)?);
+    Ok(())
+}
+
+/// Send the interrupt keys and return the summary line instead of printing it,
+/// so callers that own stdout (the watchdog) keep it clean.
+pub fn interrupt_worker<H: HerdrOps>(name: &str, herdr: &H) -> Result<String, (i32, String)> {
     let (_ok, body) = herdr.agent_get(name).map_err(|e| {
         (
             1,
@@ -87,6 +94,5 @@ pub fn stop_worker<H: HerdrOps>(name: &str, herdr: &H) -> Result<(), (i32, Strin
         }
     }
 
-    println!("stopped {name} (harness={harness}, keys={})", keys.join(" "));
-    Ok(())
+    Ok(format!("stopped {name} (harness={harness}, keys={})", keys.join(" ")))
 }

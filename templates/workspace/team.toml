@@ -77,6 +77,7 @@ model = "opus-5.5"
 effort = "high"
 can_review = true
 spawn = "auto"                    # "auto" = spawn freely (anh iu, 2026-10-19); "approve" = needs --approve-kind truonglao
+# on_cost_cap = "warn"            # at 100% of the cost budget: "warn" (default) logs only; "kill" interrupts the worker once, watchdog exits 5
 [taskforce.advisor]
 members = ["suhuynh"]
 read_only = true

@@ -26,6 +26,16 @@ pub const SPAWN_POLICIES: [&str; 2] = [SPAWN_AUTO, SPAWN_APPROVE];
 fn default_spawn() -> String {
     SPAWN_AUTO.to_string()
 }
+/// `[kinds.<k>].on_cost_cap` values: what the watchdog does at 100% of the
+/// cost budget (issue #48). `warn` only logs; `kill` interrupts the worker
+/// once and stops waiting, keeping pane, worktree and journal.
+pub const COST_CAP_WARN: &str = "warn";
+pub const COST_CAP_KILL: &str = "kill";
+pub const COST_CAP_ACTIONS: [&str; 2] = [COST_CAP_WARN, COST_CAP_KILL];
+
+fn default_on_cost_cap() -> String {
+    COST_CAP_WARN.to_string()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -213,6 +223,9 @@ pub struct Kind {
     /// "auto" (spawn freely) or "approve" (require --approve-kind <kind>).
     #[serde(default = "default_spawn")]
     pub spawn: String,
+    /// "warn" (log only) or "kill" (interrupt at 100% of the cost budget).
+    #[serde(default = "default_on_cost_cap")]
+    pub on_cost_cap: String,
 }
 
 /// The effort values a harness accepts (`crate::harness::Harness::effort_allowed`);
@@ -600,6 +613,12 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
                 kind.spawn
             ));
         }
+        if !COST_CAP_ACTIONS.contains(&kind.on_cost_cap.as_str()) {
+            return Err(format!(
+                "kind '{name}': unknown on_cost_cap '{}' (want warn or kill)",
+                kind.on_cost_cap
+            ));
+        }
         if crate::harness::Harness::parse(&kind.harness).is_none() {
             return Err(format!(
                 "kind '{name}': unsupported harness '{}'",
@@ -931,6 +950,7 @@ workers_tab = "workers"
                 fallback: None,
                 can_review: false,
                 spawn: SPAWN_AUTO.to_string(),
+                on_cost_cap: COST_CAP_WARN.to_string(),
             },
         );
         assert!(validate(&c).is_ok());
@@ -953,6 +973,17 @@ workers_tab = "workers"
     fn spawn_policy_defaults_to_auto() {
         assert_eq!(base().kinds["tieude"].spawn, SPAWN_AUTO);
         assert_eq!(get(&base(), "kinds.tieude.spawn", None).unwrap(), SPAWN_AUTO);
+    }
+
+    #[test]
+    fn on_cost_cap_defaults_to_warn_and_rejects_unknown() {
+        assert_eq!(base().kinds["tieude"].on_cost_cap, COST_CAP_WARN);
+        let mut c = base();
+        c.kinds.get_mut("tieude").unwrap().on_cost_cap = COST_CAP_KILL.to_string();
+        validate(&c).unwrap();
+        c.kinds.get_mut("tieude").unwrap().on_cost_cap = "pause".to_string();
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("unknown on_cost_cap 'pause'"), "{err}");
     }
 
     #[test]
