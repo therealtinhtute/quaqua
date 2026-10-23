@@ -33,10 +33,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The runner has neither herdr nor tmux. The one test that reaches for
-      # herdr is skipped: test_cleanup_metrics_journal_fields lacks the
-      # GRID_SKIP/QUAQUA_TEST guards its sibling cleanup tests set, so its
-      # grid repair runs `herdr api snapshot`. Drop the skip once the test sets
-      # those guards.
+      # The runner has neither herdr nor tmux. Every test that reaches for the
+      # daemon sets GRID_SKIP=1 + QUAQUA_TEST=1, so the whole suite runs here.
       - name: cargo test --locked
-        run: cargo test --locked -- --skip test_cleanup_metrics_journal_fields
+        run: cargo test --locked
