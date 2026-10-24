@@ -126,6 +126,9 @@ fn default_idle() -> String {
 fn default_nudge_at() -> f64 {
     0.8
 }
+fn default_cost_buffer() -> f64 {
+    0.2
+}
 fn default_grace() -> f64 {
     0.25
 }
@@ -150,6 +153,10 @@ pub struct Timers {
     pub overrun_ratio: f64,
     #[serde(default = "default_pilot_budget")]
     pub pilot_budget: String,
+    /// Overspend allowed past 100% of the cost budget before the watchdog
+    /// escalates: 0.2 → ESCALATE at 120%.
+    #[serde(default = "default_cost_buffer")]
+    pub cost_buffer: f64,
 }
 
 impl Default for Timers {
@@ -162,6 +169,7 @@ impl Default for Timers {
             nudge_at: default_nudge_at(),
             overrun_ratio: default_grace(),
             pilot_budget: default_pilot_budget(),
+            cost_buffer: default_cost_buffer(),
         }
     }
 }
@@ -498,6 +506,12 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             cfg.timers.nudge_at
         ));
     }
+    if cfg.timers.cost_buffer <= 0.0 || cfg.timers.cost_buffer > 1.0 || cfg.timers.cost_buffer.is_nan() {
+        return Err(format!(
+            "timers.cost_buffer {} must be in (0, 1]",
+            cfg.timers.cost_buffer
+        ));
+    }
     if cfg.timers.overrun_ratio <= 0.0
         || cfg.timers.overrun_ratio >= 1.0
         || cfg.timers.overrun_ratio.is_nan()
@@ -732,6 +746,7 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
         ["timers", "nudge_at"] => cfg.timers.nudge_at.to_string(),
         ["timers", "grace"] => cfg.timers.overrun_ratio.to_string(),
         ["timers", "pilot_budget"] => cfg.timers.pilot_budget.clone(),
+        ["timers", "cost_buffer"] => cfg.timers.cost_buffer.to_string(),
         ["strategy", "default_kind"] => cfg.strategy.default_kind.clone(),
         ["strategy", "lead_kind"] => cfg
             .strategy
@@ -984,6 +999,20 @@ workers_tab = "workers"
         c.kinds.get_mut("tieude").unwrap().on_cost_cap = "pause".to_string();
         let err = validate(&c).unwrap_err();
         assert!(err.contains("unknown on_cost_cap 'pause'"), "{err}");
+    }
+
+    #[test]
+    fn cost_buffer_defaults_to_20pct_and_is_bounded() {
+        assert_eq!(base().timers.cost_buffer, 0.2);
+        assert_eq!(get(&base(), "timers.cost_buffer", None).unwrap(), "0.2");
+        let mut c = base();
+        c.timers.cost_buffer = 0.5;
+        validate(&c).unwrap();
+        for bad in [0.0, -0.1, 1.5, f64::NAN] {
+            c.timers.cost_buffer = bad;
+            let err = validate(&c).unwrap_err();
+            assert!(err.contains("timers.cost_buffer"), "{err}");
+        }
     }
 
     #[test]
