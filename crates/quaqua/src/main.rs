@@ -111,6 +111,11 @@ enum Command {
         #[command(subcommand)]
         cmd: PlaybookCmd,
     },
+    /// Chief of Staff operations: tag.
+    Cos {
+        #[command(subcommand)]
+        cmd: CosCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -150,6 +155,16 @@ enum GridCmd {
     /// Herdr event hook reconciler.
     Hook,
 }
+#[derive(Subcommand)]
+enum CosCmd {
+    /// Tag the CoS pane with metadata and label.
+    Tag {
+        /// Pane ID to tag (default: current pane).
+        #[arg(long)]
+        pane: Option<String>,
+    },
+}
+
 
 #[derive(Subcommand)]
 enum ConfigCmd {
@@ -459,6 +474,24 @@ fn main() {
                     println!("{value}");
                     0
                 }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            },
+        },
+        Some(Command::Cos { cmd }) => match cmd {
+            CosCmd::Tag { pane } => match quaqua::cos::resolve_cos_pane(&herdr, pane.as_deref()) {
+                Ok(p) => match quaqua::cos::tag_cos_pane(&herdr, &p) {
+                    Ok(msg) => {
+                        print!("{msg}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
+                },
                 Err(e) => {
                     eprintln!("error: {e}");
                     1

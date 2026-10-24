@@ -15,3 +15,10 @@ Watchdog exits 2–5: read the pane, act only within the brief's authority, then
 For a provider/stream error (`agent_blocked`), inspect the UI first. If the one safe recovery input cannot use `agent prompt`, use `herdr pane send-text <pane_id> "<message>"` followed by `herdr pane send-keys <pane_id> Enter`, then wait. Still stuck → escalate, never loop retries.
 
 Long answer not visible in read → ask the worker to publish a file atomically and reply with the path.
+
+## CoS pane protection & recovery
+
+`worker cleanup`, `grid reconcile`, and the PreToolUse `gate` refuse to close or move a pane carrying `grid_role=cos`. A manual close from the herdr UI cannot be intercepted or blocked by quaqua (herdr lacks pane pinning). Recovery if closed manually:
+1. Open a new shell in the checkout root.
+2. Run `claude --resume` to restore the CoS session.
+3. Run `quaqua cos tag` to reapply `grid_role=cos`, display agent, and pane title.

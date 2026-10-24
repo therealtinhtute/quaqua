@@ -662,7 +662,7 @@ fn init_resolves_herdr_through_herdr_bin_path_only() {
         "pane get w1:p1",
         "agent list",
         "pane report-metadata w1:p1 --source herdr-quaqua \
-         --token grid_role=orchestrator --token grid_owner=cos",
+         --token grid_role=cos --token grid_owner=cos",
     ] {
         assert!(
             calls.contains(want),

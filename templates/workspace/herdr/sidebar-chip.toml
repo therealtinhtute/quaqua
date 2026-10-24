@@ -1,0 +1,9 @@
+# Herdr sidebar chip template for quaqua CoS / grid roles
+# Opt-in: add to ~/.config/herdr/config.toml, then run `herdr server reload-config`.
+
+[ui.sidebar.agents]
+row_gap = 0
+rows = [
+  [{ token = "$grid_role", fg = "#888888", rules = [{ equals = "cos", fg = "#ff5fa2", bold = true }] }, "state_icon", "machine", "workspace", "tab"],
+  ["agent"],
+]
