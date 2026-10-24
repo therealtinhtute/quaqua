@@ -292,6 +292,71 @@ pub fn resolve_sender<H: HerdrOps>(
     Err("cannot determine sender identity from harness (unresolved caller)".to_string())
 }
 
+/// Escapes a single line of mail body so that lines starting with `## ` or `<!--`
+/// cannot be mistaken for markdown entry headers or metadata comments.
+pub fn escape_body_line(line: &str) -> String {
+    let backslashes = line.chars().take_while(|&c| c == '\\').count();
+    let after_slashes = &line[backslashes..];
+    if after_slashes.starts_with("## ") || after_slashes.starts_with("<!--") {
+        format!("\\{line}")
+    } else {
+        line.to_string()
+    }
+}
+
+/// Escapes a mail body for markdown inbox storage.
+pub fn escape_body(body: &str) -> String {
+    body.lines()
+        .map(escape_body_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Unescapes a single line of mail body imported from markdown storage.
+pub fn unescape_body_line(line: &str) -> &str {
+    let backslashes = line.chars().take_while(|&c| c == '\\').count();
+    let after_slashes = &line[backslashes..];
+    if backslashes > 0 && (after_slashes.starts_with("## ") || after_slashes.starts_with("<!--")) {
+        &line[1..]
+    } else {
+        line
+    }
+}
+
+/// Checks whether an entry in a markdown inbox already contains the given `msg_key`
+/// in its real marker position (the fixed metadata lines directly following a `## ` header).
+pub fn has_msg_key_at_marker_position(content: &str, target_key: &str) -> bool {
+    let mut after_header = false;
+    let mut metadata_checked = 0;
+
+    for line in content.lines() {
+        if line.starts_with("## ") {
+            after_header = true;
+            metadata_checked = 0;
+            continue;
+        }
+        if after_header {
+            if metadata_checked < 2 {
+                let trimmed = line.trim();
+                if trimmed.starts_with("<!-- msg_key:") && trimmed.ends_with("-->") {
+                    let key = trimmed["<!-- msg_key:".len()..trimmed.len() - "-->".len()].trim();
+                    if key == target_key {
+                        return true;
+                    }
+                    metadata_checked += 1;
+                    continue;
+                }
+                if trimmed.starts_with("<!-- to:") && trimmed.ends_with("-->") {
+                    metadata_checked += 1;
+                    continue;
+                }
+            }
+            after_header = false;
+        }
+    }
+    false
+}
+
 /// Appends an entry to `<runs_dir>/<target_inbox>.inbox.md`, ensuring idempotence via msg_key.
 pub fn append_to_markdown_inbox(
     runs_dir: &Path,
@@ -325,7 +390,7 @@ pub fn append_to_markdown_inbox(
 
     if inbox_path.exists() {
         if let Ok(existing) = std::fs::read_to_string(&inbox_path) {
-            if existing.contains(&key_marker) {
+            if has_msg_key_at_marker_position(&existing, msg_key) {
                 return Ok(());
             }
         }
@@ -347,7 +412,8 @@ pub fn append_to_markdown_inbox(
     let entry = if body.trim().is_empty() {
         format!("{header}\n{key_marker}\n{to_marker}\n\n")
     } else {
-        format!("{header}\n{key_marker}\n{to_marker}\n{}\n", body.trim_end())
+        let escaped = escape_body(body);
+        format!("{header}\n{key_marker}\n{to_marker}\n{}\n", escaped.trim_end())
     };
     file.write_all(entry.as_bytes())
         .map_err(|e| format!("cannot write to {}: {e}", inbox_path.display()))?;
@@ -837,28 +903,44 @@ pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResu
         .unwrap_or("");
 
     for (header, raw_body) in entries {
-        // Parse metadata comments from raw_body
+        // Parse metadata comments ONLY from fixed lines directly after header
         let mut msg_key_opt: Option<String> = None;
         let mut to_name_opt: Option<String> = None;
-        let mut clean_body_lines = Vec::new();
+        let mut body_lines = Vec::new();
+
+        let mut checking_metadata = true;
+        let mut metadata_count = 0;
 
         for line in raw_body.lines() {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("<!-- msg_key:") {
-                if let Some(key) = rest.strip_suffix("-->") {
-                    msg_key_opt = Some(key.trim().to_string());
+            if checking_metadata && metadata_count < 2 {
+                let trimmed = line.trim();
+                if msg_key_opt.is_none()
+                    && trimmed.starts_with("<!-- msg_key:")
+                    && trimmed.ends_with("-->")
+                {
+                    let key = trimmed["<!-- msg_key:".len()..trimmed.len() - "-->".len()].trim();
+                    msg_key_opt = Some(key.to_string());
+                    metadata_count += 1;
+                    continue;
+                }
+                if to_name_opt.is_none()
+                    && trimmed.starts_with("<!-- to:")
+                    && trimmed.ends_with("-->")
+                {
+                    let target = trimmed["<!-- to:".len()..trimmed.len() - "-->".len()].trim();
+                    to_name_opt = Some(target.to_string());
+                    metadata_count += 1;
                     continue;
                 }
             }
-            if let Some(rest) = trimmed.strip_prefix("<!-- to:") {
-                if let Some(target) = rest.strip_suffix("-->") {
-                    to_name_opt = Some(target.trim().to_string());
-                    continue;
-                }
-            }
-            clean_body_lines.push(line);
+            checking_metadata = false;
+            body_lines.push(line);
         }
-        let clean_body = clean_body_lines.join("\n");
+        let clean_body = body_lines
+            .into_iter()
+            .map(unescape_body_line)
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let msg_key = msg_key_opt.unwrap_or_else(|| sha256_hex(header.trim().as_bytes()));
 
@@ -870,7 +952,7 @@ pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResu
         let from_name = parts[1];
 
         let (to_name, kind) = if parts.len() >= 5 && parts[2] == "->" {
-            (to_name_opt.unwrap_or_else(|| parts[3].to_string()), parts[4])
+            (parts[3].to_string(), parts[4])
         } else {
             let default_to = if file_stem.ends_with("-lead") {
                 "cos".to_string()
