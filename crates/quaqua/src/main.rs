@@ -69,7 +69,11 @@ enum Command {
         args: Vec<String>,
     },
     /// PreToolUse(Bash) hook: block direct pane/workspace spawn/move calls.
-    Gate,
+    Gate {
+        /// Run as the SessionStart hook: record the rule baseline (issue #72).
+        #[arg(long)]
+        session_start: bool,
+    },
     /// Check the installed quaqua binary (missing, stale, shadowed).
     Doctor,
     /// Boot (or update) a workspace from the embedded template.
@@ -550,7 +554,8 @@ fn main() {
                 }
             },
         },
-        Some(Command::Gate) => quaqua::gate::run(),
+        Some(Command::Gate { session_start: false }) => quaqua::gate::run(),
+        Some(Command::Gate { session_start: true }) => quaqua::gate::run_session_start(),
         Some(Command::Doctor) => quaqua::doctor::run(),
         Some(Command::Init {
             dir,

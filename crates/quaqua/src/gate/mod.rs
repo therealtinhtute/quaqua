@@ -9,6 +9,7 @@
 //!   (`deny`) — AGENTS.md rule 3;
 //! - everything else: exit 0.
 
+pub mod drift;
 pub mod policy;
 pub mod tokenizer;
 
@@ -56,8 +57,57 @@ pub fn run() -> i32 {
             print_decision("deny", &reason);
             0
         }
-        Verdict::Allow => 0,
+        Verdict::Allow => {
+            warn_on_drift(&buf, &cmd);
+            0
+        }
     }
+}
+
+/// The hook's `session_id`, when present.
+fn session_id(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    v.get("session_id")?.as_str().map(String::from)
+}
+
+/// Allowed `quaqua worker|lead` call from a session whose rule files changed:
+/// tell the agent which files to re-read (issue #72). Never blocks.
+fn warn_on_drift(buf: &str, cmd: &str) {
+    if !drift::is_dispatch(&tokenizer::tokenize(cmd)) {
+        return;
+    }
+    let Some(sid) = session_id(buf) else { return };
+    let changed = drift::drift(&crate::workspace::workspace_root(), &sid);
+    if changed.is_empty() {
+        return;
+    }
+    let msg = drift::drift_message(&changed);
+    let out = serde_json::json!({
+        "systemMessage": msg,
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": msg,
+        }
+    });
+    println!("{out}");
+}
+
+/// `quaqua gate --session-start`: the SessionStart hook. Records the session's
+/// rule baseline; after a compaction prints the re-read list (stdout becomes
+/// session context). Always exits 0.
+pub fn run_session_start() -> i32 {
+    let mut buf = String::new();
+    {
+        use std::io::Read;
+        let _ = std::io::stdin().read_to_string(&mut buf);
+    }
+    let v: serde_json::Value = serde_json::from_str(&buf).unwrap_or_default();
+    let sid = v.get("session_id").and_then(|x| x.as_str()).unwrap_or("");
+    let source = v.get("source").and_then(|x| x.as_str()).unwrap_or("");
+    if let Some(text) = drift::session_start(&crate::workspace::workspace_root(), sid, source) {
+        println!("{text}");
+    }
+    0
 }
 
 /// The hook contract: `{"tool_name":"Bash","tool_input":{"command":"…"},"cwd":"…"}`.
