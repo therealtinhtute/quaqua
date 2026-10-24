@@ -4365,6 +4365,31 @@ fn lead_gate_passes_when_caller_is_project_lead_even_if_repo_has_cos_row() {
         "lead caller must not be blocked by leadgate"
     );
 }
+#[test]
+fn lead_gate_blocks_lead_on_foreign_cos_project() {
+    let _env_lock = lock_env();
+    let fx = GateFixture::new("foreignlead", "cos");
+    let herdr = fx.with_two_live_builders();
+    let repo = fx.repo();
+
+    let foreign_lead = quaqua::identity::Caller {
+        name: "foreign-lead".to_string(),
+        role: quaqua::identity::Role::Lead,
+        depth: quaqua::identity::CallerDepth::Resolved(1),
+        source: quaqua::identity::IdentitySource::PaneTokens,
+    };
+
+    let mut input = gate_input(&fx, &repo, "sude-gate", None);
+    input.caller = Some(&foreign_lead);
+
+    let facts = leadgate::gather_facts(&input, &gate_cfg(), &herdr);
+    assert!(facts.is_some(), "lead on foreign cos repo must gather facts");
+
+    let err = leadgate::check_spawn(input, &gate_cfg(), &herdr)
+        .expect_err("lead on foreign cos repo with 2 signals must be blocked");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("needs a Lead"), "{}", err.1);
+}
 
 #[test]
 fn lead_gate_solo_override_lets_the_spawn_through_and_records_it() {

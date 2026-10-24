@@ -848,6 +848,57 @@ mod tests {
         assert_eq!(gate_row(&rows, &repo, "/tmp/home", Some(&lead_caller)), None);
         let _ = std::fs::remove_dir_all(&tmp);
     }
+    #[test]
+    fn gate_row_gates_lead_on_foreign_cos_repo() {
+        let tmp = std::env::temp_dir().join(format!("quaqua-leadgate-foreign-{}", std::process::id()));
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let content = format!(
+            "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n{}{}",
+            row("foreign-cos", repo.to_str().unwrap(), "cos"),
+            row("my-proj", "~/Lab/my-proj", "my-lead"),
+        );
+        let rows = index_rows(&content);
+
+        // my-lead does NOT own a row on `repo`; it must be gated on foreign-cos
+        let foreign_lead = crate::identity::Caller {
+            name: "my-lead".to_string(),
+            role: crate::identity::Role::Lead,
+            depth: crate::identity::CallerDepth::Resolved(1),
+            source: crate::identity::IdentitySource::PaneTokens,
+        };
+        assert_eq!(
+            gate_row(&rows, &repo, "/tmp/home", Some(&foreign_lead)).map(|r| r.slug),
+            Some("foreign-cos".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn gate_row_skips_when_non_lead_owns_repo_row() {
+        let tmp = std::env::temp_dir().join(format!("quaqua-leadgate-nonlead-{}", std::process::id()));
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let content = format!(
+            "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n{}{}",
+            row("custom-proj", repo.to_str().unwrap(), "custom-agent"),
+            row("cos-proj", repo.to_str().unwrap(), "cos"),
+        );
+        let rows = index_rows(&content);
+
+        // Caller with Role::Unknown who owns custom-proj skips the gate
+        let non_lead = crate::identity::Caller {
+            name: "custom-agent".to_string(),
+            role: crate::identity::Role::Unknown,
+            depth: crate::identity::CallerDepth::Unknown,
+            source: crate::identity::IdentitySource::Unknown,
+        };
+        assert_eq!(
+            gate_row(&rows, &repo, "/tmp/home", Some(&non_lead)),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn phases_left_reads_frontmatter_only() {
