@@ -1039,6 +1039,30 @@ pub fn prompt_worker<G: GitOps>(
         );
         (code, String::new())
     };
+    let record_bus_event = |event_type: &str, incident_key: Option<String>, payload: serde_json::Value| {
+        let owner_str = crate::state::WorkerMetadata::load_owner(&runs_dir, name);
+        let owner = if owner_str.is_empty() { None } else { Some(owner_str) };
+        let project = repo_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(String::from);
+        let mut ev = crate::bus::FarmEvent::new(
+            event_type,
+            Some("watchdog"),
+            Some(name),
+            owner,
+            project,
+        );
+        if let Some(key) = incident_key {
+            ev = ev.with_incident_key(key);
+        }
+        let payload_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        if !payload_str.is_empty() && payload_str != "{}" {
+            ev = ev.with_payload_json(payload_str);
+        }
+        crate::bus::record_event_safely_in_runs(&runs_dir, &ev);
+    };
+
 
     match single_output.exit {
         0 => {
@@ -1048,12 +1072,22 @@ pub fn prompt_worker<G: GitOps>(
                     "WATCHDOG malformed-report | name={name} missing={missing} report={}",
                     out.display()
                 );
+                record_bus_event(
+                    "malformed",
+                    Some(format!("malformed:{name}:{start_sec}")),
+                    serde_json::json!({ "missing": missing }),
+                );
                 return Err((6, String::new()));
             }
             if let Err(why) = readonly::check(&runs_dir, name) {
                 eprintln!(
                     "WATCHDOG malformed-report | name={name} missing=read-only worktree ({why}) report={}",
                     out.display()
+                );
+                record_bus_event(
+                    "malformed",
+                    Some(format!("malformed:{name}:{start_sec}")),
+                    serde_json::json!({ "readonly": why }),
                 );
                 return Err((6, String::new()));
             }
@@ -1076,6 +1110,11 @@ pub fn prompt_worker<G: GitOps>(
                     gap.summary(),
                     out.display()
                 );
+                record_bus_event(
+                    "malformed",
+                    Some(format!("malformed:{name}:{start_sec}")),
+                    serde_json::json!({ "playbook_gap": gap.summary() }),
+                );
                 return Err((6, String::new()));
             }
 
@@ -1091,11 +1130,17 @@ pub fn prompt_worker<G: GitOps>(
             let read_marker = runs_dir.join(format!(".{name}.read"));
             let _ = std::fs::write(&read_marker, format!("{}\n", now_sec()));
 
+            record_bus_event("report_written", None, serde_json::json!({}));
             println!("{}", out.display());
             Ok(())
         }
         2 => {
             let reason = format!("error: no {} after {}s", out.display(), max);
+            record_bus_event(
+                "budget_exceeded",
+                Some(format!("budget_exceeded:{name}:{start_sec}")),
+                serde_json::json!({ "reason": reason }),
+            );
             Err(watchdog_exit(2, &reason))
         }
         3 => {
@@ -1113,20 +1158,44 @@ pub fn prompt_worker<G: GitOps>(
             } else {
                 format!("stall: no worktree diff or session write for {quiet}s")
             };
+            record_bus_event(
+                "stalled",
+                Some(format!("stall:{name}:{start_sec}")),
+                serde_json::json!({ "reason": reason }),
+            );
             Err(watchdog_exit(3, &reason))
         }
         4 => {
             let reason = format!("time budget {}s exceeded", active_budget);
+            record_bus_event(
+                "budget_exceeded",
+                Some(format!("budget_exceeded:{name}:{start_sec}")),
+                serde_json::json!({ "reason": reason }),
+            );
             Err(watchdog_exit(4, &reason))
         }
-        5 if *acts.cost_stopped.lock().unwrap() => Err(watchdog_exit(
-            5,
-            "cost cap reached (on_cost_cap=kill): worker interrupted; decide, then --resume",
-        )),
-        5 => Err(watchdog_exit(
-            5,
-            "agent blocked (question/permission pending)",
-        )),
+        5 if *acts.cost_stopped.lock().unwrap() => {
+            record_bus_event(
+                "blocked",
+                Some(format!("blocked:{name}:{start_sec}")),
+                serde_json::json!({ "reason": "cost cap reached" }),
+            );
+            Err(watchdog_exit(
+                5,
+                "cost cap reached (on_cost_cap=kill): worker interrupted; decide, then --resume",
+            ))
+        }
+        5 => {
+            record_bus_event(
+                "blocked",
+                Some(format!("blocked:{name}:{start_sec}")),
+                serde_json::json!({ "reason": "agent blocked" }),
+            );
+            Err(watchdog_exit(
+                5,
+                "agent blocked (question/permission pending)",
+            ))
+        }
         6 => {
             let report_content = std::fs::read_to_string(&out).unwrap_or_default();
             match validate_report_content(&report_content, expect_verdict) {
@@ -1158,6 +1227,11 @@ pub fn prompt_worker<G: GitOps>(
                     }
                 }
             }
+            record_bus_event(
+                "malformed",
+                Some(format!("malformed:{name}:{start_sec}")),
+                serde_json::json!({}),
+            );
             Err((6, String::new()))
         }
         other => Err((other, format!("unexpected exit code {other}\n"))),
@@ -1236,6 +1310,13 @@ esac
                 "unparseable report must not record verdict"
             );
         }
+        let bus = crate::bus::FarmBus::open(&db_path).expect("open bus");
+        let farm_events = bus.load_events(0).expect("load farm events");
+        assert!(
+            farm_events.iter().any(|e| e.event_type == "report_written" && e.subject.as_deref() == Some(name)),
+            "exit 0 must record report_written event in farm_events"
+        );
+
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1344,6 +1425,13 @@ esac
             Err((6, String::new())),
             "a missing `## Playbook` block must reject the report"
         );
+        let bus = crate::bus::FarmBus::open(&tmp.join("quaqua.db")).expect("open bus");
+        let farm_events = bus.load_events(0).expect("load farm events");
+        assert!(
+            farm_events.iter().any(|e| e.event_type == "malformed" && e.subject.as_deref() == Some("sude-gap")),
+            "exit 6 must record malformed event in farm_events"
+        );
+
         assert!(
             tmp.join(".sude-gap.playbook").is_file(),
             "the prompt pinned the playbook the worker received"
@@ -1482,6 +1570,53 @@ esac
             1,
             "the accepted resume journals no second gap"
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_watchdog_records_valid_json_payload_when_readonly_fails_with_special_chars() {
+        let _env_lock = lock_env();
+        let tmp = temp_runs("f2-readonly-json");
+        let stub = stub_herdr(&tmp);
+        let _g_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _g_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _g_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _g_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _g_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub.to_str().unwrap());
+        let name = "suhuynh-revtest";
+        WorkerMetadata::mark_review(&tmp, name).unwrap();
+
+        // Baseline pointing to a non-existent path containing double quotes and newlines:
+        // Git error output will contain quotes/special characters.
+        let bogus_wt = tmp.join("path\"with\"quotes\nand\\backslashes");
+        let baseline_file = readonly::baseline_path(&tmp, name);
+        fs::write(&baseline_file, format!("{}\nHEAD abc123\n", bogus_wt.display())).unwrap();
+
+        let report_file = tmp.join(format!("{name}.md"));
+        fs::write(
+            &report_file,
+            "# Review\nVerdict: clean\n## Lessons\nnone\n",
+        )
+        .unwrap();
+
+        let herdr = Herdr {
+            bin: stub.to_string_lossy().to_string(),
+        };
+        let git = crate::git::Git::new();
+
+        let res = prompt_worker(name, None, true, None, &git, &herdr);
+        assert_eq!(res, Err((6, String::new())));
+
+        let bus = crate::bus::FarmBus::open(&tmp.join("quaqua.db")).expect("open bus");
+        let events = bus.load_events(0).expect("load events");
+        let malformed_ev = events
+            .iter()
+            .find(|e| e.event_type == "malformed" && e.subject.as_deref() == Some(name))
+            .expect("malformed event recorded");
+
+        let parsed: serde_json::Value = serde_json::from_str(&malformed_ev.payload_json)
+            .expect("payload_json must be valid JSON even when error message contains special characters and newlines");
+        assert!(parsed.get("readonly").is_some());
         let _ = fs::remove_dir_all(&tmp);
     }
 }
