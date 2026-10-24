@@ -15,7 +15,7 @@ T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
 trap 'rm -rf "$T"' EXIT
 root="$(cd "$here/.." && pwd)"
 bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
-[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+(cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
 export QUAQUA_BIN="$bin"
 
 

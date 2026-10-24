@@ -14,7 +14,7 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 root="$(cd "$here/.." && pwd)"
 bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
-[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+(cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
 export QUAQUA_BIN="$bin"
 
 # ── sandbox: temp worker repo + fake herdr ──────────────────────────────────

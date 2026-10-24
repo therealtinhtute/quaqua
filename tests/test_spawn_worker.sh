@@ -18,7 +18,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 src="$(cd "$here/.." && pwd)/scripts"
 root="$(cd "$here/.." && pwd)"
 bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
-[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+(cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
 export QUAQUA_BIN="$bin"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-spawn-worker.XXXXXX")
 T=$(cd "$T" && pwd -P)  # normalize trailing slashes and macOS /tmp symlinks
