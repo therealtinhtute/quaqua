@@ -2017,6 +2017,16 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
     }
 }
 
+pub const REVIEWER_METHOD: &str = "\
+## Method\n\
+1. Read the plan/brief requirements first: Extract every acceptance criterion and hard constraint from the brief/plan. Threshold: 100% of explicit requirements itemized. Failure mode: evaluating diff without knowing requirements, missing unstated constraints, or assuming intent.\n\
+2. Map each requirement to diff + a test: Trace each requirement 1:1 to implementing code changes and automated test coverage. Threshold: zero unbacked requirements; every functional change must have a test. Failure mode: untested code paths, mock-only tautologies with zero assertion of real behavior.\n\
+3. Run the named checks yourself and paste output: Execute the targeted tests and checks named in the brief/plan in the foreground. Threshold: all named commands exit 0 in your worktree; report must paste exact command lines and execution output. Failure mode: trusting builder assertions without running, running background loops, or skipping check execution.\n\
+4. Look for scope creep and fmt-only churn: Inspect diff for out-of-scope additions, speculative abstractions, or formatting churn. Threshold: zero unrelated files modified; zero fmt-only whitespace changes in untouched code. Failure mode: diff pollution obscuring real changes, sneaking unrequested features or refactorings into the PR.\n\
+5. Check failure paths (errors, empty inputs, concurrency/flaky temp dirs): Audit edge cases, boundary conditions, error handling, and test isolation. Threshold: all fallible operations handle errors explicitly (no silent unwrap/expect or ignored Result); temp dirs must use unique isolated paths. Failure mode: happy-path-only coverage, silent panics, resource leaks, or race conditions.\n\
+6. Classify findings Spec vs Standards with severity: Categorize every issue under ## Findings into ### Spec Findings (unmet requirements, incorrect behavior, broken contracts, missing tests) or ### Standards Findings (code style, naming, dead code). Tag each with severity: High, Medium, or Low. Threshold: functional defects and test gaps are Spec (High/Medium); style notes are Standards (Low). Failure mode: vague unclassified complaints, missing line locations, or elevating cosmetic nits to blockers.\n\
+7. Verdict rule (any unmet requirement or failing check ⇒ REJECT; only Low standards notes ⇒ APPROVE_WITH_REQUESTS): Conclude with an unambiguous verdict. Threshold: any unmet requirement, failing check, or High/Medium finding => REJECT, ending 'Verdict: <N> findings' where N counts only blocking findings; only Low Standards notes => APPROVE_WITH_REQUESTS, list them as advisory and end 'Verdict: clean'; zero findings => 'Verdict: clean'. Failure mode: approving with failing tests or unmet requirements, or omitting the mandatory 'Verdict:' line.";
+
 /// Deterministic engine workflow implementing plan gate -> build child -> review child -> fix cycle.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PipelineWorkflow;
@@ -2116,7 +2126,7 @@ impl PipelineWorkflow {
             })
             .unwrap_or("HEAD");
         let review_prompt = format!(
-            "Goal: review changes for task '{}' (round {})\nHard constraints: review only diff between base {base_ref} and branch quaqua/{bname}; do not edit code; foreground tests only.\nCurrent design: brief in {}\nEvidence: runs file MUST end with exactly one line: 'Verdict: clean' or 'Verdict: <N> findings' (findings numbered under ## Findings; dispute with ## Challenge).\nPipeline phase: REVIEW (round {})",
+            "Goal: review changes for task '{}' (round {})\nHard constraints: review only diff between base {base_ref} and branch quaqua/{bname}; do not edit code; foreground tests only.\nCurrent design: brief in {}\nEvidence: runs file MUST end with exactly one line: 'Verdict: clean' or 'Verdict: <N> findings' (findings numbered under ## Findings; dispute with ## Challenge).\n{REVIEWER_METHOD}\nPipeline phase: REVIEW (round {})",
             state.input.task, state.round, state.input.brief_path, state.round
         );
         let worker_input = SingleWorkerInput::new(
@@ -4699,6 +4709,69 @@ esac
         assert!(
             !prompt_b.contains("base  and branch"),
             "review prompt must not contain empty base"
+        );
+    }
+
+    #[test]
+    fn test_review_prompt_carries_method_and_key_steps() {
+        let wf = PipelineWorkflow;
+        let input = PipelineInput::new("task-method", "/repo", "sude", "suhuynh", "sample brief");
+        let mut state = PipelineWorkflowState::new(input);
+        state.round = 1;
+
+        let (_id, val) = wf.build_review_child(&state);
+        let prompt = val["brief"].as_str().unwrap();
+
+        assert!(
+            prompt.contains("## Method"),
+            "prompt missing ## Method: {prompt}"
+        );
+        assert!(
+            prompt.contains("Read the plan/brief requirements first"),
+            "missing step 1"
+        );
+        assert!(
+            prompt.contains("Map each requirement to diff + a test"),
+            "missing step 2"
+        );
+        assert!(
+            prompt.contains("Run the named checks yourself and paste output"),
+            "missing step 3"
+        );
+        assert!(
+            prompt.contains("Look for scope creep and fmt-only churn"),
+            "missing step 4"
+        );
+        assert!(
+            prompt.contains(
+                "Check failure paths (errors, empty inputs, concurrency/flaky temp dirs)"
+            ),
+            "missing step 5"
+        );
+        assert!(
+            prompt.contains("Classify findings Spec vs Standards with severity"),
+            "missing step 6"
+        );
+        assert!(
+            prompt.contains("Verdict rule (any unmet requirement or failing check ⇒ REJECT; only Low standards notes ⇒ APPROVE_WITH_REQUESTS)"),
+            "missing step 7"
+        );
+        assert!(prompt.contains("Spec Findings"), "missing Spec Findings");
+        assert!(
+            prompt.contains("Standards Findings"),
+            "missing Standards Findings"
+        );
+        assert!(prompt.contains("Threshold:"), "missing Threshold");
+        assert!(prompt.contains("Failure mode:"), "missing Failure mode");
+        assert!(prompt.contains("REJECT"), "missing REJECT");
+        assert!(
+            prompt.contains("APPROVE_WITH_REQUESTS"),
+            "missing APPROVE_WITH_REQUESTS"
+        );
+        assert!(prompt.contains("Verdict: clean"), "missing Verdict: clean");
+        assert!(
+            prompt.contains("Verdict: <N> findings"),
+            "missing Verdict: <N> findings"
         );
     }
 
