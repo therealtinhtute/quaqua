@@ -591,42 +591,25 @@ pub fn opencode_spend_in(
     )
     .ok()?;
 
-    let has_tcw = conn
-        .prepare("SELECT tokens_cache_write FROM session_v2 LIMIT 0")
-        .is_ok();
-    let has_model = conn.prepare("SELECT model FROM session_v2 LIMIT 0").is_ok();
+    let query_dir = "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
+                     tokens_cache_write, model, time_created \
+                     FROM session_v2 WHERE directory = ?1 ORDER BY time_created ASC;";
 
-    let col_tcw = if has_tcw {
-        "tokens_cache_write"
-    } else {
-        "0"
-    };
-    let col_model = if has_model { "model" } else { "NULL" };
-
-    let query_dir = format!(
-        "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
-         {col_tcw}, {col_model}, time_created \
-         FROM session_v2 WHERE directory = ?1 ORDER BY time_created ASC;"
-    );
-
-    let query_id = format!(
-        "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
-         {col_tcw}, {col_model}, time_created \
-         FROM session_v2 WHERE id = ?1 ORDER BY time_created ASC;"
-    );
+    let query_id = "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
+                    tokens_cache_write, model, time_created \
+                    FROM session_v2 WHERE id = ?1 ORDER BY time_created ASC;";
 
     if !cwd.is_empty() {
-        if let Some(spend) = execute_opencode_query(&conn, &query_dir, cwd, since_ms) {
+        if let Some(spend) = execute_opencode_query(&conn, query_dir, cwd, since_ms) {
             return Some(spend);
         }
     }
 
     if !session_id.is_empty() {
-        if let Some(spend) = execute_opencode_query(&conn, &query_id, session_id, since_ms) {
+        if let Some(spend) = execute_opencode_query(&conn, query_id, session_id, since_ms) {
             return Some(spend);
         }
     }
-
     None
 }
 
@@ -663,24 +646,27 @@ pub fn read_worker_spend_with(
     since_ms: Option<u64>,
     custom_db: Option<&Path>,
     custom_runs: Option<&Path>,
+    allow_cost_file: bool,
 ) -> Spend {
-    if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
-        if let Ok(content) = std::fs::read_to_string(&cost_file) {
-            if let Ok(val) = content.trim().parse::<f64>() {
-                return Spend {
-                    usd: Some(val),
-                    tokens: None,
-                    spend_src: "cost-file".to_string(),
-                    model: None,
-                };
+    if allow_cost_file {
+        if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
+            if let Ok(content) = std::fs::read_to_string(&cost_file) {
+                if let Ok(val) = content.trim().parse::<f64>() {
+                    return Spend {
+                        usd: Some(val),
+                        tokens: None,
+                        spend_src: "cost-file".to_string(),
+                        model: None,
+                    };
+                }
             }
+            return Spend {
+                usd: None,
+                tokens: None,
+                spend_src: "cost-file-invalid".to_string(),
+                model: None,
+            };
         }
-        return Spend {
-            usd: None,
-            tokens: None,
-            spend_src: "cost-file-invalid".to_string(),
-            model: None,
-        };
     }
 
     if is_pi_worker(harness) {
@@ -750,6 +736,12 @@ pub fn read_worker_spend_with(
             if let Some(spend) = opencode_spend_in(db_path, session_id, cwd, since_ms) {
                 return spend;
             }
+            return Spend {
+                usd: None,
+                tokens: None,
+                spend_src: "opencode-db-not-found".to_string(),
+                model: None,
+            };
         }
         let candidates = opencode_db_candidates(name);
         for db_path in candidates {
@@ -785,7 +777,7 @@ pub fn read_worker_spend(
     harness: &str,
     since_ms: Option<u64>,
 ) -> Spend {
-    read_worker_spend_with(name, session_id, cwd, harness, since_ms, None, None)
+    read_worker_spend_with(name, session_id, cwd, harness, since_ms, None, None, true)
 }
 
 pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) -> Option<f64> {

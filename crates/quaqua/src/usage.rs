@@ -13,7 +13,10 @@ const PAGE_LIMIT: usize = 100;
 const VN_OFFSET_MS: i64 = 7 * 3600 * 1000;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "usage", about = "OpenCode usage audit (text-only)")]
+#[command(
+    name = "usage",
+    about = "OpenCode usage audit (text-only) — task cost = whole session (matches watchdog), day rows = window"
+)]
 pub struct UsageArgs {
     #[arg(long, default_value_t = 7, help = "number of VN calendar days (default 7)")]
     pub days: u32,
@@ -86,6 +89,7 @@ pub struct DayStat {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskStat {
     pub task: String,
+    pub spend_src: String,
     pub sessions: Vec<String>,
     pub requests: u64,
     pub cost: f64,
@@ -94,7 +98,6 @@ pub struct TaskStat {
     pub idle_min: u64,
     pub outcome: String,
 }
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SplitCategory {
@@ -815,11 +818,6 @@ pub fn task_from_directory(directory: Option<&str>) -> Option<String> {
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
     pub directory: Option<String>,
-    pub title: Option<String>,
-    pub cost: f64,
-    pub tokens: Tokens,
-    pub time_created: Option<i64>,
-    pub time_updated: Option<i64>,
     pub idle_outcome: Option<String>,
 }
 
@@ -831,7 +829,7 @@ pub fn read_sessions(db_path: &Path) -> Result<BTreeMap<String, SessionInfo>, St
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|e| format!("sqlite3 failed: {e}"))?;
+    .map_err(|e| format!("local db open failed: {e}"))?;
 
     let has_idle = conn
         .prepare("SELECT idle_outcome FROM session_v2 LIMIT 0")
@@ -840,7 +838,7 @@ pub fn read_sessions(db_path: &Path) -> Result<BTreeMap<String, SessionInfo>, St
     let query = format!("SELECT id, directory, {col_idle} FROM session_v2");
     let mut stmt = conn
         .prepare(&query)
-        .map_err(|e| format!("sqlite3 error: {e}"))?;
+        .map_err(|e| format!("db query failed: {e}"))?;
 
     let rows = stmt
         .query_map([], |row| {
@@ -851,16 +849,11 @@ pub fn read_sessions(db_path: &Path) -> Result<BTreeMap<String, SessionInfo>, St
                 id,
                 SessionInfo {
                     directory,
-                    title: None,
-                    cost: 0.0,
-                    tokens: Tokens::default(),
-                    time_created: None,
-                    time_updated: None,
                     idle_outcome,
                 },
             ))
         })
-        .map_err(|e| format!("sqlite3 error: {e}"))?;
+        .map_err(|e| format!("db query failed: {e}"))?;
 
     let mut sessions = BTreeMap::new();
     for r in rows {
@@ -1182,6 +1175,7 @@ pub fn build_report(args: &UsageArgs) -> UsageReport {
         }
         let e = tasks.entry(key.clone()).or_insert_with(|| InternalTaskEntry {
             task: key.clone(),
+            spend_src: "requests".to_string(),
             sessions: std::collections::BTreeSet::new(),
             requests: 0,
             cost: 0.0,
@@ -1346,62 +1340,19 @@ pub fn build_report(args: &UsageArgs) -> UsageReport {
         };
         let is_in_db = e.sessions.iter().any(|s| sessions.contains_key(s));
         let harness_hint = if is_in_db { "opencode" } else { "" };
-        let since_ms = if cutoff_ms > 0 {
-            Some(cutoff_ms as u64)
-        } else {
-            None
-        };
-        let mut spend = crate::worker::prompt::cost::read_worker_spend_with(
+        let spend = crate::worker::prompt::cost::read_worker_spend_with(
             &e.task,
             sid,
             cwd,
             harness_hint,
-            since_ms,
+            None,
             Some(&db_path),
             Some(&runs_dir),
+            false,
         );
-        if spend.usd.is_none() && cwd.is_empty() && e.sessions.len() > 1 {
-            let mut total_usd = 0.0;
-            let mut any_usd = false;
-            let mut total_toks = Tokens::default();
-            let mut any_toks = false;
-            for s in &e.sessions {
-                let s_spend = crate::worker::prompt::cost::read_worker_spend_with(
-                    &e.task,
-                    s,
-                    "",
-                    harness_hint,
-                    since_ms,
-                    Some(&db_path),
-                    Some(&runs_dir),
-                );
-                if let Some(u) = s_spend.usd {
-                    total_usd += u;
-                    any_usd = true;
-                }
-                if let Some(toks) = s_spend.tokens {
-                    total_toks.input += toks.in_tokens;
-                    total_toks.output += toks.out_tokens;
-                    total_toks.reasoning += toks.reasoning;
-                    total_toks.cache_read += toks.cache_read;
-                    any_toks = true;
-                }
-            }
-            if any_usd {
-                spend.usd = Some(total_usd);
-            }
-            if any_toks {
-                spend.tokens = Some(crate::worker::prompt::cost::Tokens {
-                    in_tokens: total_toks.input,
-                    out_tokens: total_toks.output,
-                    reasoning: total_toks.reasoning,
-                    cache_read: total_toks.cache_read,
-                    cache_write: 0,
-                });
-            }
-        }
         if let Some(usd) = spend.usd {
             e.cost = usd;
+            e.spend_src = "session".to_string();
         }
         if let Some(toks) = spend.tokens {
             e.tokens = Tokens {
@@ -1412,7 +1363,6 @@ pub fn build_report(args: &UsageArgs) -> UsageReport {
             };
         }
     }
-
 
     let mut sess_cost: BTreeMap<String, f64> = BTreeMap::new();
     for t in tasks.values() {
@@ -1579,6 +1529,7 @@ pub fn build_report(args: &UsageArgs) -> UsageReport {
         .into_values()
         .map(|t| TaskStat {
             task: t.task,
+            spend_src: t.spend_src,
             sessions: t.sessions.into_iter().collect(),
             requests: t.requests,
             cost: round4(t.cost),
@@ -1635,6 +1586,7 @@ pub fn build_report(args: &UsageArgs) -> UsageReport {
 
 struct InternalTaskEntry {
     task: String,
+    spend_src: String,
     sessions: std::collections::BTreeSet<String>,
     requests: u64,
     cost: f64,
@@ -1733,10 +1685,10 @@ pub fn render_text(rep: &UsageReport) -> Result<String, String> {
     }
 
     lines.push(String::new());
-    lines.push("== Per task ==".to_string());
+    lines.push("== Per task (task cost = whole session, matching watchdog; day rows = window) ==".to_string());
     lines.push(format!(
-        "{:<26} {:>5} {:>9} {:>7} {:>7} {:>6} {:>9} {:>6} {:<34} {}",
-        "task", "req", "$", "in", "out", "rsn", "cacheRead", "wall", "outcome", "flags"
+        "{:<26} {:<8} {:>5} {:>9} {:>7} {:>7} {:>6} {:>9} {:>6} {:<34} {}",
+        "task", "src", "req", "$", "in", "out", "rsn", "cacheRead", "wall", "outcome", "flags"
     ));
     for task in &rep.tasks {
         let mut flags = Vec::new();
@@ -1771,8 +1723,9 @@ pub fn render_text(rep: &UsageReport) -> Result<String, String> {
             &task.outcome
         };
         lines.push(format!(
-            "{:<26} {:>5} {:>9.4} {:>7} {:>7} {:>6} {:>9} {:>5}m {:<34} {}",
+            "{:<26} {:<8} {:>5} {:>9.4} {:>7} {:>7} {:>6} {:>9} {:>5}m {:<34} {}",
             t_display,
+            task.spend_src,
             task.requests,
             task.cost,
             kfmt(task.tokens.input),
