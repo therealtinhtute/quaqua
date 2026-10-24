@@ -22,3 +22,5 @@ Long answer not visible in read → ask the worker to publish a file atomically 
 1. Open a new shell in the checkout root.
 2. Run `claude --resume` to restore the CoS session.
 3. Run `quaqua cos tag` to reapply `grid_role=cos`, display agent, and pane title.
+
+Panes tagged by older `init` stay `grid_role=orchestrator` until `quaqua cos tag` runs.

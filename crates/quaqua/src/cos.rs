@@ -22,12 +22,13 @@ use crate::herdr::HerdrOps;
 pub const COS_DISPLAY_AGENT: &str = "🍑 CoS Quả Quả";
 pub const COS_PANE_TITLE: &str = "🍑 CoS";
 pub const COS_ROLE: &str = "cos";
+pub const COS_OWNER: &str = "cos";
 pub const COS_ROLE_TOKEN: &str = "grid_role=cos";
+pub const COS_OWNER_TOKEN: &str = "grid_owner=cos";
 
-/// Check whether a role token string indicates a CoS pane.
-/// Matches either "cos" or "grid_role=cos".
+/// Check whether a role token value indicates a CoS pane (`"cos"`).
 pub fn is_cos_pane_token(role: &str) -> bool {
-    role == COS_ROLE || role == COS_ROLE_TOKEN
+    role == COS_ROLE
 }
 
 /// Check whether a JSON object of tokens indicates a CoS pane (`grid_role=cos`).
@@ -39,13 +40,22 @@ pub fn is_cos_tokens(tokens: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Check whether a structured `Tokens` object indicates a CoS pane.
-pub fn is_cos_tokens_struct(tokens: &crate::grid::types::Tokens) -> bool {
-    tokens
-        .grid_role
-        .as_deref()
-        .map(is_cos_pane_token)
-        .unwrap_or(false)
+/// Shared helper for cleanup and gate: query `herdr pane get <pane>` and check
+/// whether its tokens have `grid_role=cos`.
+pub fn pane_is_cos<H: HerdrOps>(herdr: &H, pane: &str) -> bool {
+    if pane.is_empty() {
+        return false;
+    }
+    if let Ok(out) = herdr.run(&["pane", "get", pane]) {
+        if out.status.success() {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                if let Some(tokens) = v.pointer("/result/pane/tokens") {
+                    return is_cos_tokens(tokens);
+                }
+            }
+        }
+    }
+    false
 }
 
 /// The opt-in sidebar chip template snippet for ~/.config/herdr/config.toml.
@@ -62,7 +72,10 @@ rows = [
 /// 1. Explicit pane if given.
 /// 2. `$HERDR_PANE_ID` environment variable if set and non-empty.
 /// 3. Query `herdr pane current` via HerdrOps.
-pub fn resolve_cos_pane<H: HerdrOps>(herdr: &H, explicit_pane: Option<&str>) -> Result<String, String> {
+pub fn resolve_cos_pane<H: HerdrOps>(
+    herdr: &H,
+    explicit_pane: Option<&str>,
+) -> Result<String, String> {
     if let Some(p) = explicit_pane {
         let trimmed = p.trim();
         if !trimmed.is_empty() {
@@ -94,7 +107,9 @@ pub fn resolve_cos_pane<H: HerdrOps>(herdr: &H, explicit_pane: Option<&str>) -> 
     val.pointer("/result/pane/pane_id")
         .and_then(|p| p.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| "cannot determine pane: missing /result/pane/pane_id in herdr output".to_string())
+        .ok_or_else(|| {
+            "cannot determine pane: missing /result/pane/pane_id in herdr output".to_string()
+        })
 }
 
 /// Tag the specified pane as the CoS pane:
@@ -114,6 +129,8 @@ pub fn tag_cos_pane<H: HerdrOps>(herdr: &H, pane: &str) -> Result<String, String
             "herdr-quaqua",
             "--token",
             COS_ROLE_TOKEN,
+            "--token",
+            COS_OWNER_TOKEN,
             "--display-agent",
             COS_DISPLAY_AGENT,
         ])
@@ -121,7 +138,9 @@ pub fn tag_cos_pane<H: HerdrOps>(herdr: &H, pane: &str) -> Result<String, String
 
     if !report_out.status.success() {
         let err = String::from_utf8_lossy(&report_out.stderr);
-        return Err(format!("herdr pane report-metadata failed for {pane}: {err}"));
+        return Err(format!(
+            "herdr pane report-metadata failed for {pane}: {err}"
+        ));
     }
 
     // 2. Rename pane

@@ -917,7 +917,10 @@ fn tag_cos_pane(root: &Path) {
     if !is_cos_pane(&pane, root) {
         return;
     }
-    let _ = Herdr::new().pane_report_metadata(&pane, &["grid_role=cos", "grid_owner=cos"]);
+    let _ = Herdr::new().pane_report_metadata(
+        &pane,
+        &[crate::cos::COS_ROLE_TOKEN, crate::cos::COS_OWNER_TOKEN],
+    );
 }
 
 /// is_cos_pane <pane>: true only for the CoS pane itself — a `claude` agent, in

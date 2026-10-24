@@ -165,7 +165,6 @@ enum CosCmd {
     },
 }
 
-
 #[derive(Subcommand)]
 enum ConfigCmd {
     /// Validate team.toml (exit 0 = ok, non-zero = rejected with a clear error).
@@ -587,8 +586,12 @@ fn main() {
                 }
             },
         },
-        Some(Command::Gate { session_start: false }) => quaqua::gate::run(),
-        Some(Command::Gate { session_start: true }) => quaqua::gate::run_session_start(),
+        Some(Command::Gate {
+            session_start: false,
+        }) => quaqua::gate::run(),
+        Some(Command::Gate {
+            session_start: true,
+        }) => quaqua::gate::run_session_start(),
         Some(Command::Doctor) => quaqua::doctor::run(),
         Some(Command::Init {
             dir,

@@ -62,24 +62,28 @@ const NO_PANE_LOOKUP: OfflinePaneLookup = OfflinePaneLookup;
 /// Real herdr lookup: `herdr pane get <pane>`, reads tokens to detect `grid_role=cos`.
 pub struct RealHerdrPaneLookup {
     pub bin: String,
+    pub timeout: Duration,
 }
 
 impl RealHerdrPaneLookup {
     pub fn from_env() -> Self {
         let bin = crate::herdr::bin_path();
-        RealHerdrPaneLookup { bin }
+        let timeout = std::env::var("QUAQUA_GATE_HERDR_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_millis(1000));
+        RealHerdrPaneLookup { bin, timeout }
     }
 
     fn resolve_current(&self) -> String {
-        let out = Command::new(&self.bin)
-            .args(["pane", "current"])
-            .output();
-        if let Ok(out) = out {
-            if out.status.success() {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                    if let Some(pid) = v.pointer("/result/pane/pane_id").and_then(|p| p.as_str()) {
-                        return pid.to_string();
-                    }
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["pane", "current"]);
+        if let Ok(out) = run_with_timeout(cmd, self.timeout, &self.bin) {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                if let Some(pid) = v.pointer("/result/pane/pane_id").and_then(|p| p.as_str()) {
+                    return pid.to_string();
                 }
             }
         }
@@ -89,6 +93,13 @@ impl RealHerdrPaneLookup {
 
 impl PaneLookup for RealHerdrPaneLookup {
     fn is_cos_pane(&self, pane: &str) -> bool {
+        if std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
+            && self.bin == "herdr"
+            && std::env::var("HERDR_BIN_PATH").is_err()
+        {
+            return false;
+        }
+
         let target_pane = if pane.is_empty() || pane == "--current" || pane == "-c" {
             if let Ok(env_p) = std::env::var("HERDR_PANE_ID") {
                 let trimmed = env_p.trim();
@@ -108,15 +119,12 @@ impl PaneLookup for RealHerdrPaneLookup {
             return false;
         }
 
-        let out = Command::new(&self.bin)
-            .args(["pane", "get", &target_pane])
-            .output();
-        if let Ok(out) = out {
-            if out.status.success() {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                    if let Some(tokens) = v.pointer("/result/pane/tokens") {
-                        return crate::cos::is_cos_tokens(tokens);
-                    }
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["pane", "get", &target_pane]);
+        if let Ok(out) = run_with_timeout(cmd, self.timeout, &self.bin) {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                if let Some(tokens) = v.pointer("/result/pane/tokens") {
+                    return crate::cos::is_cos_tokens(tokens);
                 }
             }
         }
@@ -320,7 +328,6 @@ impl<'a> Ctx<'a> {
         }
     }
 
-
     fn with_lookups(cwd: Option<&'a str>, pr: &'a dyn PrLookup, pane: &'a dyn PaneLookup) -> Self {
         Ctx {
             cwd,
@@ -329,7 +336,6 @@ impl<'a> Ctx<'a> {
             pane,
         }
     }
-
 
     /// The checked-out branch of `dir` (or of the hook's cwd), `None` when it
     /// cannot be determined (no cwd, detached HEAD, not a repository).
@@ -620,9 +626,9 @@ fn check_herdr(a: &[String], ctx: &Ctx) -> Verdict {
         return Verdict::Allow;
     }
 
-    // CoS pane protection: refuse to close or move a pane carrying grid_role=cos.
-    let is_move = a[first] == "pane" && a[first + 1] == "move";
-    if is_close || is_move {
+    // CoS pane protection: refuse to close a pane carrying grid_role=cos.
+    // Lookup is performed only for `pane close`; `pane move` is already Blocked by guarded_pair.
+    if is_close {
         let mut target_pane = "";
         let mut idx = first + 2;
         while idx < a.len() {
@@ -638,17 +644,14 @@ fn check_herdr(a: &[String], ctx: &Ctx) -> Verdict {
         }
 
         if ctx.pane.is_cos_pane(target_pane) {
-            let verb_str = if is_close { "close" } else { "move" };
-            return Verdict::Deny(format!("refusing to {verb_str} CoS pane '{target_pane}' (grid_role=cos)"));
+            return Verdict::Deny(format!(
+                "refusing to close CoS pane '{target_pane}' (grid_role=cos)"
+            ));
         }
+        return Verdict::Allow;
     }
 
-    if is_close {
-        // pane close on non-CoS pane is allowed
-        Verdict::Allow
-    } else {
-        Verdict::Block
-    }
+    Verdict::Block
 }
 
 /// `git` arm: only `push` is outward. Every other verb (status, fetch, log,

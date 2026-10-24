@@ -339,19 +339,11 @@ pub fn cleanup_worker_in<G: GitOps, H: HerdrOps>(
         .map(str::to_string);
 
     if let Some(pane) = &pane_to_close {
-        if let Ok(out) = herdr.run(&["pane", "get", pane]) {
-            if out.status.success() {
-                if let Ok(val) = serde_json::from_slice::<Value>(&out.stdout) {
-                    if let Some(tokens) = val.pointer("/result/pane/tokens") {
-                        if crate::cos::is_cos_tokens(tokens) {
-                            return Err((
-                                1,
-                                format!("error: refusing to close CoS pane '{pane}' (grid_role=cos)\n"),
-                            ));
-                        }
-                    }
-                }
-            }
+        if crate::cos::pane_is_cos(herdr, pane) {
+            return Err((
+                1,
+                format!("error: refusing to close CoS pane '{pane}' (grid_role=cos)\n"),
+            ));
         }
         let _ = herdr.pane_close(pane);
     }

@@ -128,7 +128,12 @@ pub fn apply_ops<D: HerdrDriver>(
         };
 
         if let Some(tokens) = &pane_obj.tokens {
-            if crate::cos::is_cos_tokens_struct(tokens) {
+            if tokens
+                .grid_role
+                .as_deref()
+                .map(crate::cos::is_cos_pane_token)
+                .unwrap_or(false)
+            {
                 return Err(format!("refusing to move CoS pane '{actual_pane}' (grid_role=cos)"));
             }
         }

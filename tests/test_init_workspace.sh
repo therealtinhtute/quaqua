@@ -294,7 +294,7 @@ echo "ok: legacy core.hooksPath -> migrated to .git/quaqua-hooks"
 # Regression this covers (2026-10-14): an opencode pane came out of here tagged
 # grid_role=orchestrator/grid_owner=cos while the real CoS pane had no token, so
 # grid-workers.sh anchored the grid beside the wrong pane and timed out.
-tag='herdr pane report-metadata w1:p1 --source herdr-quaqua --token grid_role=orchestrator --token grid_owner=cos'
+tag='herdr pane report-metadata w1:p1 --source herdr-quaqua --token grid_role=cos --token grid_owner=cos'
 mkdir -p "$T/wt" "$T/elsewhere"   # a worker worktree and a non-workspace cwd
 
 # tag_as <pane> <agent> <cwd> <agent-name>: run init as if called from <pane>,
@@ -314,7 +314,7 @@ out=$(tag_as w1:p1 claude "$ws" "")
 grep -qF "$tag" <<<"$out" \
   || fail "the CoS pane (claude, unregistered, in the workspace) was not tagged: $out"
 ! grep -q 'grid_ready' <<<"$out" || fail "CoS pane should not have grid_ready token"
-echo "ok: herdr-quaqua -> the CoS pane is tagged orchestrator/owner=cos, no grid_ready"
+echo "ok: herdr-quaqua -> the CoS pane is tagged cos/owner=cos, no grid_ready"
 
 # every other caller stays untagged: a stray orchestrator token anchors the grid
 # beside the wrong pane
