@@ -318,7 +318,7 @@ run
 calls=$(cat "$T/calls")
 for want in \
   'expired rule: rules/_all/sample-expiry.md:1: - Old rule [expires: 2020-01-01]' \
-  'expired rule: rules/_all/sample-expiry.md:3: - Bad rule [expires: not-a-date]' \
+  'malformed expiry: rules/_all/sample-expiry.md:3: - Bad rule [expires: not-a-date]' \
   'recurring failure (2x/14d, no rule): crash on bad input'; do
   grep -qF "$want" <<<"$calls" || fail "rule-expiry/casebook: prompt missing '$want'"
 done

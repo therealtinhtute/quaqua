@@ -171,7 +171,11 @@ pub fn run_auditor(opts: AuditorRunOptions) -> Result<i32, (i32, String)> {
         let mut report = String::from("## Drift\n- none\n\n## Stale docs\n");
         let stale_flags: Vec<&str> = flags
             .iter()
-            .filter(|f| f.contains("doc-rot risk") || f.contains("expired rule"))
+            .filter(|f| {
+                f.contains("doc-rot risk")
+                    || f.contains("expired rule")
+                    || f.contains("malformed expiry")
+            })
             .map(|s| s.as_str())
             .collect();
         if stale_flags.is_empty() {
@@ -465,45 +469,13 @@ fn format_epoch_secs_date_minute(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
 }
 
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970;
-    loop {
-        let leap = is_leap_year(year);
-        let ydays = if leap { 366 } else { 365 };
-        if days < ydays {
-            break;
-        }
-        days -= ydays;
-        year += 1;
-    }
-    let leap = is_leap_year(year);
-    let mdays = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1;
-    for &m in &mdays {
-        if days < m {
-            break;
-        }
-        days -= m;
-        month += 1;
-    }
-    (year, month, days + 1)
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    let (y, m, d) = crate::usage::civil_from_days(days as i64);
+    (y as u64, m as u64, d as u64)
 }
 
-fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+fn ymd_to_days(year: u64, month: u64, day: u64) -> u64 {
+    crate::usage::days_from_civil(year as i32, month as u32, day as u32) as u64
 }
 
 fn mem_mentions(root: &Path, needles: &[&str]) -> bool {
@@ -539,20 +511,11 @@ fn git_verify_commit(repo: &Path, sha: &str) -> bool {
 
 pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
     let now_secs = crate::util::now_sec();
-    let today = if let Ok(output) = Command::new("date").arg("+%Y-%m-%d").output() {
-        if output.status.success() {
-            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            parse_ymd(&s).unwrap_or_else(|| days_to_ymd(now_secs / 86400))
-        } else {
-            days_to_ymd(now_secs / 86400)
-        }
-    } else {
-        days_to_ymd(now_secs / 86400)
-    };
+    let today = days_to_ymd(now_secs / 86400);
     run_deterministic_prechecks_at(root, today, now_secs)
 }
 
-pub fn parse_ymd(s: &str) -> Option<(u64, u64, u64)> {
+fn parse_ymd(s: &str) -> Option<(u64, u64, u64)> {
     if s.len() != 10 {
         return None;
     }
@@ -560,61 +523,27 @@ pub fn parse_ymd(s: &str) -> Option<(u64, u64, u64)> {
     if b[4] != b'-' || b[7] != b'-' {
         return None;
     }
-    let y: u64 = s[0..4].parse().ok()?;
-    let m: u64 = s[5..7].parse().ok()?;
-    let d: u64 = s[8..10].parse().ok()?;
-    if !(1970..=9999).contains(&y) || !(1..=12).contains(&m) {
+    let y: i32 = s[0..4].parse().ok()?;
+    let m: u32 = s[5..7].parse().ok()?;
+    let d: u32 = s[8..10].parse().ok()?;
+    if !(1970..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return None;
     }
-    let leap = is_leap_year(y);
-    let mdays = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let max_d = mdays[(m - 1) as usize];
-    if d < 1 || d > max_d {
-        return None;
+    let days = crate::usage::days_from_civil(y, m, d);
+    if crate::usage::civil_from_days(days) == (y, m, d) {
+        Some((y as u64, m as u64, d as u64))
+    } else {
+        None
     }
-    Some((y, m, d))
 }
 
-pub fn ymd_to_days(year: u64, month: u64, day: u64) -> u64 {
-    let mut days = 0;
-    for y in 1970..year {
-        days += if is_leap_year(y) { 366 } else { 365 };
-    }
-    let leap = is_leap_year(year);
-    let mdays = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    for m in 1..month {
-        days += mdays[(m - 1) as usize];
-    }
-    days + day - 1
+#[derive(Debug, PartialEq, Eq)]
+enum ExpiryStatus {
+    ValidExpired,
+    Malformed,
 }
 
-pub fn check_line_expiry(line: &str, today: (u64, u64, u64)) -> Option<bool> {
+fn check_line_expiry(line: &str, today: (u64, u64, u64)) -> Option<ExpiryStatus> {
     let trimmed = line.trim_end_matches(['\r', '\n']).trim_end();
     if !trimmed.ends_with(']') {
         return None;
@@ -626,20 +555,29 @@ pub fn check_line_expiry(line: &str, today: (u64, u64, u64)) -> Option<bool> {
     }
     let date_str = tag["[expires:".len()..tag.len() - 1].trim();
     match parse_ymd(date_str) {
-        Some(exp_ymd) => Some(exp_ymd < today),
-        None => Some(true),
+        Some(exp_ymd) => {
+            if exp_ymd < today {
+                Some(ExpiryStatus::ValidExpired)
+            } else {
+                None
+            }
+        }
+        None => Some(ExpiryStatus::Malformed),
     }
 }
 
 fn collect_rules_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rules_md_files(&path, out);
-            } else if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
-            {
-                out.push(path);
+            if let Ok(ft) = entry.file_type() {
+                let path = entry.path();
+                if ft.is_dir() {
+                    collect_rules_md_files(&path, out);
+                } else if ft.is_file()
+                    && path.extension().and_then(|ext| ext.to_str()) == Some("md")
+                {
+                    out.push(path);
+                }
             }
         }
     }
@@ -952,13 +890,24 @@ pub fn run_deterministic_prechecks_at(
         if let Ok(content) = std::fs::read_to_string(&f) {
             let rel = f.strip_prefix(root).unwrap_or(&f);
             for (idx, line) in content.lines().enumerate() {
-                if let Some(true) = check_line_expiry(line, today) {
-                    flags.push(format!(
-                        "- expired rule: {}:{}: {}",
-                        rel.display(),
-                        idx + 1,
-                        line.trim_end_matches(['\r', '\n'])
-                    ));
+                match check_line_expiry(line, today) {
+                    Some(ExpiryStatus::ValidExpired) => {
+                        flags.push(format!(
+                            "- expired rule: {}:{}: {}",
+                            rel.display(),
+                            idx + 1,
+                            line.trim_end_matches(['\r', '\n'])
+                        ));
+                    }
+                    Some(ExpiryStatus::Malformed) => {
+                        flags.push(format!(
+                            "- malformed expiry: {}:{}: {}",
+                            rel.display(),
+                            idx + 1,
+                            line.trim_end_matches(['\r', '\n'])
+                        ));
+                    }
+                    None => {}
                 }
             }
         }
@@ -1007,10 +956,13 @@ pub fn run_deterministic_prechecks_at(
                     } else if in_lessons {
                         break;
                     }
+                } else if in_lessons && trimmed.starts_with("Verdict:") {
+                    break;
                 }
                 if in_lessons {
                     let clean = trimmed.trim_start_matches('-').trim();
-                    if !clean.is_empty() && clean != "none" && clean != "none." {
+                    let lower = clean.to_lowercase();
+                    if !lower.is_empty() && lower != "none" && lower != "none." {
                         has_unpromoted = true;
                         break;
                     }
@@ -1144,14 +1096,32 @@ mod tests {
         assert!(PROMPT_TEMPLATE.contains("runs/*.md from the last 7 days"));
         assert!(!PROMPT_TEMPLATE.contains("runs/*.md from the last 2 days"));
     }
-    fn test_temp_dir(tag: &str) -> PathBuf {
+    struct TestDir(PathBuf);
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    impl std::ops::Deref for TestDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    fn test_temp_dir(tag: &str) -> TestDir {
         static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir =
             std::env::temp_dir().join(format!("quaqua-auditor-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        TestDir(dir)
     }
 
     #[test]
@@ -1200,14 +1170,14 @@ mod tests {
 
         assert!(
             flags.iter().any(|f| f.contains(
-                "expired rule: rules/_all/sample.md:1: - Malformed date rule [expires: 2026-99-99]"
+                "malformed expiry: rules/_all/sample.md:1: - Malformed date rule [expires: 2026-99-99]"
             )),
-            "malformed date rule on line 1 must be flagged: {:?}",
+            "malformed date rule on line 1 must be flagged with 'malformed expiry:': {:?}",
             flags
         );
         assert!(
-            flags.iter().any(|f| f.contains("expired rule: rules/_all/sample.md:2: - Malformed text date rule [expires: not-a-date]")),
-            "malformed text date rule on line 2 must be flagged: {:?}",
+            flags.iter().any(|f| f.contains("malformed expiry: rules/_all/sample.md:2: - Malformed text date rule [expires: not-a-date]")),
+            "malformed text date rule on line 2 must be flagged with 'malformed expiry:': {:?}",
             flags
         );
         assert!(
@@ -1304,6 +1274,81 @@ mod tests {
     }
 
     #[test]
+    fn test_unpromoted_lessons_stops_at_verdict_and_case_insensitive_none() {
+        let root = test_temp_dir("verdict");
+        let runs_dir = root.join("runs");
+        let rules_dir = root.join("rules").join("_all");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        std::fs::create_dir_all(&rules_dir).unwrap();
+
+        let now_secs = ymd_to_days(2026, 10, 24) * 86400 + 43200;
+        let today = (2026, 10, 24);
+
+        // Reviewer report: ## Lessons\nnone\n\nVerdict: clean (within 7 days) -> MUST NOT be flagged
+        let p_rev_clean = runs_dir.join("rev-clean.md");
+        std::fs::write(
+            &p_rev_clean,
+            "# Review\n\n## Lessons\nnone\n\nVerdict: clean\n",
+        )
+        .unwrap();
+        let f_rev_clean = std::fs::File::open(&p_rev_clean).unwrap();
+        let mut times = std::fs::FileTimes::new();
+        times = times.set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now_secs - 3 * 86400),
+        );
+        f_rev_clean.set_times(times).unwrap();
+
+        // Reviewer report: ## Lessons\nNone\n\nVerdict: 1 findings (within 7 days) -> MUST NOT be flagged
+        let p_rev_cap = runs_dir.join("rev-cap.md");
+        std::fs::write(
+            &p_rev_cap,
+            "# Review\n\n## Lessons\nNone\n\nVerdict: 1 findings\n",
+        )
+        .unwrap();
+        let f_rev_cap = std::fs::File::open(&p_rev_cap).unwrap();
+        let mut times = std::fs::FileTimes::new();
+        times = times.set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now_secs - 3 * 86400),
+        );
+        f_rev_cap.set_times(times).unwrap();
+
+        // Reviewer report: ## Lessons\n- real lesson\n\nVerdict: clean (within 7 days) -> MUST be flagged
+        let p_rev_lesson = runs_dir.join("rev-lesson.md");
+        std::fs::write(
+            &p_rev_lesson,
+            "# Review\n\n## Lessons\n- real lesson\n\nVerdict: clean\n",
+        )
+        .unwrap();
+        let f_rev_lesson = std::fs::File::open(&p_rev_lesson).unwrap();
+        let mut times = std::fs::FileTimes::new();
+        times = times.set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now_secs - 3 * 86400),
+        );
+        f_rev_lesson.set_times(times).unwrap();
+
+        let flags = run_deterministic_prechecks_at(&root, today, now_secs);
+
+        assert!(
+            !flags.iter().any(|f| f.contains("rev-clean.md")),
+            "rev-clean.md must NOT be flagged: {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("rev-cap.md")),
+            "rev-cap.md must NOT be flagged: {:?}",
+            flags
+        );
+        assert!(
+            flags.iter().any(|f| f.contains("rev-lesson.md")),
+            "rev-lesson.md with real lesson must be flagged: {:?}",
+            flags
+        );
+    }
+
+    #[test]
     fn test_casebook_recurring_failures_1x_vs_2x_and_cited() {
         let root = test_temp_dir("casebook");
         let mem_dir = root.join("memory");
@@ -1363,5 +1408,22 @@ mod tests {
             "ancient failure (>14d) must NOT be flagged: {:?}",
             flags
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_rules_md_files_avoids_symlink_loop() {
+        let root = test_temp_dir("symlink_loop");
+        let rules_dir = root.join("rules");
+        let sub = rules_dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(rules_dir.join("rule.md"), "# Rule\n").unwrap();
+        let loop_link = sub.join("loop");
+        let _ = std::os::unix::fs::symlink(&rules_dir, &loop_link);
+
+        let mut out = Vec::new();
+        collect_rules_md_files(&rules_dir, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], rules_dir.join("rule.md"));
     }
 }
