@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 lane: normal
 ---
 # Per-kind cost-cap action (issue #48)
