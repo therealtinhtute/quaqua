@@ -642,6 +642,7 @@ fn test_unknown_harness_rejected_before_split_n4() {
             fallback: None,
             can_review: false,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
 
@@ -674,6 +675,7 @@ fn test_missing_effort_rejected_before_split() {
             fallback: None,
             can_review: false,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
 
@@ -705,6 +707,7 @@ fn test_unsupported_effort_rejected_before_split() {
             fallback: None,
             can_review: false,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
 
@@ -1649,6 +1652,7 @@ fn kind(harness: &str, model: &str, effort: Option<&str>) -> config::Kind {
         fallback: None,
         can_review: false,
         spawn: config::SPAWN_AUTO.to_string(),
+        on_cost_cap: config::COST_CAP_WARN.to_string(),
     }
 }
 
@@ -1959,6 +1963,7 @@ fn test_fallback_kind_resolution() {
             fallback: Some("detu".to_string()),
             can_review: false,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
     cfg.kinds.insert(
@@ -1970,6 +1975,7 @@ fn test_fallback_kind_resolution() {
             fallback: None,
             can_review: false,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
 
@@ -2069,6 +2075,7 @@ fn test_cfg_with_fallback() -> config::Config {
             fallback: Some("detu".to_string()),
             can_review: false,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
     cfg.kinds.insert(
@@ -2080,6 +2087,7 @@ fn test_cfg_with_fallback() -> config::Config {
             fallback: Some("tieude".to_string()),
             can_review: false,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
     cfg.kinds.insert(
@@ -2091,6 +2099,7 @@ fn test_cfg_with_fallback() -> config::Config {
             fallback: None,
             can_review: true,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
     cfg
@@ -2150,6 +2159,7 @@ fn test_spawn_worker_resolving_purpose() {
             fallback: None,
             can_review: true,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
     cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
@@ -2209,6 +2219,7 @@ fn test_spawn_worker_purpose_with_matching_positional_kind() {
             fallback: None,
             can_review: true,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
     cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
@@ -2262,6 +2273,7 @@ fn test_spawn_worker_purpose_with_mismatched_positional_kind_fails() {
             fallback: None,
             can_review: true,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
     cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
@@ -2311,6 +2323,7 @@ fn test_spawn_worker_purpose_with_colon_resolves_correctly() {
             fallback: None,
             can_review: false,
             spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
     cfg.purposes.insert("fix:ui".to_string(), "sude".to_string());
@@ -2758,6 +2771,7 @@ fn test_spawn_worker_approve_policy_gate() {
             fallback: None,
             can_review: true,
             spawn: config::SPAWN_APPROVE.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
 
