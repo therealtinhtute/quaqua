@@ -28,6 +28,7 @@ pub mod doctor;
 pub mod playbook;
 pub mod identity;
 pub mod cos;
+pub mod layout;
 pub mod bus;
 
 /// Process-global env is shared by every test in this binary; tests that
