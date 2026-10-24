@@ -148,6 +148,9 @@ fn default_grace() -> f64 {
 fn default_pilot_budget() -> String {
     "30m".to_string()
 }
+fn default_mail_ack() -> String {
+    "30m".to_string()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,6 +173,8 @@ pub struct Timers {
     /// escalates: 0.2 → ESCALATE at 120%.
     #[serde(default = "default_cost_buffer")]
     pub cost_buffer: f64,
+    #[serde(default = "default_mail_ack")]
+    pub mail_ack: String,
 }
 
 impl Default for Timers {
@@ -183,6 +188,7 @@ impl Default for Timers {
             overrun_ratio: default_grace(),
             pilot_budget: default_pilot_budget(),
             cost_buffer: default_cost_buffer(),
+            mail_ack: default_mail_ack(),
         }
     }
 }
@@ -546,6 +552,7 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     parse_duration(&cfg.timers.stall).map_err(|e| format!("timers.stall: {e}"))?;
     parse_duration(&cfg.timers.idle).map_err(|e| format!("timers.idle: {e}"))?;
     parse_duration(&cfg.timers.pilot_budget).map_err(|e| format!("timers.pilot_budget: {e}"))?;
+    parse_duration(&cfg.timers.mail_ack).map_err(|e| format!("timers.mail_ack: {e}"))?;
     if cfg.timers.nudge_at <= 0.0 || cfg.timers.nudge_at >= 1.0 || cfg.timers.nudge_at.is_nan() {
         return Err(format!(
             "timers.nudge_at {} must be in (0, 1)",
@@ -798,6 +805,7 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
         ["timers", "grace"] => cfg.timers.overrun_ratio.to_string(),
         ["timers", "pilot_budget"] => cfg.timers.pilot_budget.clone(),
         ["timers", "cost_buffer"] => cfg.timers.cost_buffer.to_string(),
+        ["timers", "mail_ack"] => cfg.timers.mail_ack.clone(),
         ["strategy", "default_kind"] => cfg.strategy.default_kind.clone(),
         ["strategy", "lead_kind"] => cfg
             .strategy
@@ -1064,6 +1072,18 @@ workers_tab = "workers"
             let err = validate(&c).unwrap_err();
             assert!(err.contains("timers.cost_buffer"), "{err}");
         }
+    }
+
+    #[test]
+    fn mail_ack_defaults_to_30m_and_validates_duration() {
+        assert_eq!(base().timers.mail_ack, "30m");
+        assert_eq!(get(&base(), "timers.mail_ack", None).unwrap(), "30m");
+        let mut c = base();
+        c.timers.mail_ack = "1h".to_string();
+        validate(&c).unwrap();
+        c.timers.mail_ack = "invalid".to_string();
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("timers.mail_ack"), "{err}");
     }
 
     #[test]

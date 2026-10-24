@@ -20,6 +20,7 @@ nudge_at = 0.8
 grace = 0.25
 pilot_budget = "30m"
 cost_buffer = 0.2                 # cost: ESCALATE + herdr notification at budget × (1 + cost_buffer) = 120%
+mail_ack = "30m"                   # unacked mail lazily triggers mail_unacked incident
 
 [roles.cos]
 can_spawn  = ["lead", "peer", "taskforce"]
