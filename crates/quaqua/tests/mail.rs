@@ -659,18 +659,28 @@ fn test_finding7_checked_in_fixtures_idempotent() {
     }
     assert!(total_imported >= 5, "must import all fixture rows");
 
-    // Verify bus-lead fixture with +07:00 offset and multibyte body was imported
+    // Verify beta-lead fixture with +07:00 offset and multibyte body was imported
     let bus = FarmBus::open(&runs.join("quaqua.db")).expect("open bus");
-    let bus_lead_body: String = bus
+    let beta_lead_body: String = bus
         .conn_for_test()
         .query_row(
-            "SELECT body FROM mail WHERE from_name = 'bus-lead' LIMIT 1",
+            "SELECT body FROM mail WHERE from_name = 'beta-lead' LIMIT 1",
             [],
             |r| r.get(0),
         )
-        .expect("query bus-lead body");
-    assert!(bus_lead_body.contains("Bàn giao P2 bus foundation"));
+        .expect("query beta-lead body");
+    assert!(beta_lead_body.contains("Đã xác nhận hoàn thành giai đoạn beta"));
 
+    // Verify delta-lead fixture with multibyte body > 4096 bytes was truncated on char boundary
+    let delta_lead_body: String = bus
+        .conn_for_test()
+        .query_row(
+            "SELECT body FROM mail WHERE from_name = 'delta-lead' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query delta-lead body");
+    assert!(delta_lead_body.chars().count() <= 4096);
     // Second import run: strictly idempotent (0 imported)
     let mut second_imported = 0;
     for path in &entries {
