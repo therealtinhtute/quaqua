@@ -20,16 +20,16 @@ fn build_test_db(path: &Path) {
 CREATE TABLE session_v2 (
     id TEXT PRIMARY KEY, directory TEXT, title TEXT,
     cost REAL, tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
-    tokens_cache_read INTEGER, time_created INTEGER, time_updated INTEGER, idle_outcome TEXT
+    tokens_cache_read INTEGER, tokens_cache_write INTEGER, model TEXT,
+    time_created INTEGER, time_updated INTEGER, idle_outcome TEXT
 );
 CREATE TABLE session_message (
     id TEXT, session_id TEXT, type TEXT, seq INTEGER,
     time_created INTEGER, time_updated INTEGER, data TEXT
 );
-INSERT INTO session_v2 VALUES ('ses_a', 'proj/.wt/tieude-alpha', 'alpha work', 0.5, 1, 1, 1, 1, 0, 0, 'succeeded');
-INSERT INTO session_v2 VALUES ('ses_b', 'proj/.wt/tieude-beta', 'beta work', 0.2, 1, 1, 1, 1, 0, 0, 'failed');
-INSERT INTO session_v2 VALUES ('ses_c', 'proj/.wt/tieude-gamma', 'no traffic', 0.0, 0, 0, 0, 0, 0, 0, NULL);
-
+INSERT INTO session_v2 VALUES ('ses_a', 'proj/.wt/tieude-alpha', 'alpha work', 0.33, 34000, 3300, 1360, 330000, 0, 'deepseek-v4.1-flash', 1791946800000, 1792141200000, 'succeeded');
+INSERT INTO session_v2 VALUES ('ses_b', 'proj/.wt/tieude-beta', 'beta work', 0.07, 8000, 600, 150, 60000, 0, 'deepseek-v4.1-flash', 1792058400000, 1792116000000, 'failed');
+INSERT INTO session_v2 VALUES ('ses_c', 'proj/.wt/tieude-gamma', 'no traffic', 0.0, 0, 0, 0, 0, 0, NULL, 0, 0, NULL);
 INSERT INTO session_message VALUES (
     'm0', 'ses_a', 'assistant', 0, 1792116000000, 1792116000000,
     '{"time":{"created":1792116000000},"type":"assistant","content":[{"type":"tool","name":"shell","state":{"input":{"command":"cargo test --locked -p quaqua"}}}]}'
@@ -375,4 +375,81 @@ fn test_token_tripwire_and_matching() {
     let days = quaqua::usage::days_from_civil(2026, 10, 18);
     let (y, m, d) = quaqua::usage::civil_from_days(days);
     assert_eq!((y, m, d), (2026, 10, 18));
+}
+
+#[test]
+fn test_usage_and_watchdog_share_spend_source() {
+    let tmp = TempDir::new("quaqua-usage-parity");
+    setup_fixture_env(&tmp.path);
+
+    let out = Command::new(bin())
+        .args([
+            "usage",
+            "--fixture-dir",
+            &tmp.path.to_string_lossy(),
+            "--local-version",
+            "2.0.32",
+            "--until",
+            UNTIL_MS,
+            "--days",
+            "3",
+            "--json",
+        ])
+        .output()
+        .expect("spawn quaqua usage --json");
+
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let rep: serde_json::Value =
+        serde_json::from_str(&stdout).expect("valid json report from quaqua usage");
+
+    let tasks = rep["tasks"].as_array().expect("tasks array");
+    let alpha = tasks
+        .iter()
+        .find(|t| t["task"] == "tieude-alpha")
+        .expect("tieude-alpha found");
+    let beta = tasks
+        .iter()
+        .find(|t| t["task"] == "tieude-beta")
+        .expect("tieude-beta found");
+
+    let alpha_usage_cost = alpha["cost"].as_f64().unwrap();
+    let beta_usage_cost = beta["cost"].as_f64().unwrap();
+
+    // Watchdog spend path on the same fixture run
+    let runs_dir = tmp.path.join("runs");
+    let db_path = tmp.path.join("opencode.db");
+    let alpha_watchdog = quaqua::worker::prompt::cost::read_worker_spend_with(
+        "tieude-alpha",
+        "ses_a",
+        "proj/.wt/tieude-alpha",
+        "opencode",
+        None,
+        Some(&db_path),
+        Some(&runs_dir),
+    );
+    let beta_watchdog = quaqua::worker::prompt::cost::read_worker_spend_with(
+        "tieude-beta",
+        "ses_b",
+        "proj/.wt/tieude-beta",
+        "opencode",
+        None,
+        Some(&db_path),
+        Some(&runs_dir),
+    );
+
+    let alpha_watchdog_cost = alpha_watchdog.usd.expect("alpha usd");
+    let beta_watchdog_cost = beta_watchdog.usd.expect("beta usd");
+
+    // Both paths MUST report the same number for the same run
+    assert_eq!(
+        alpha_usage_cost, alpha_watchdog_cost,
+        "tieude-alpha spend mismatch: usage={alpha_usage_cost}, watchdog={alpha_watchdog_cost}"
+    );
+    assert_eq!(
+        beta_usage_cost, beta_watchdog_cost,
+        "tieude-beta spend mismatch: usage={beta_usage_cost}, watchdog={beta_watchdog_cost}"
+    );
+    assert!((alpha_usage_cost - 0.33).abs() < 1e-4);
+    assert!((beta_usage_cost - 0.07).abs() < 1e-4);
 }

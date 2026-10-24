@@ -824,55 +824,48 @@ pub struct SessionInfo {
 }
 
 pub fn read_sessions(db_path: &Path) -> Result<BTreeMap<String, SessionInfo>, String> {
-    let uri = format!("file:{}?mode=ro", db_path.display());
-    let query = "SELECT id, directory, title, cost, tokens_input, tokens_output, \
-                 tokens_reasoning, tokens_cache_read, time_created, time_updated, \
-                 idle_outcome FROM session_v2";
-    let out = Command::new("sqlite3")
-        .args(["-json", &uri, query])
-        .output()
-        .map_err(|e| format!("sqlite3 failed: {e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("sqlite3 error: {}", err.trim()));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    if stdout.trim().is_empty() {
+    if !db_path.is_file() {
         return Ok(BTreeMap::new());
     }
-    let rows: Vec<serde_json::Value> =
-        serde_json::from_str(&stdout).map_err(|e| format!("bad JSON from sqlite3: {e}"))?;
-    let mut sessions = BTreeMap::new();
-    for r in rows {
-        if let Some(id) = r.get("id").and_then(|v| v.as_str()) {
-            let directory = r.get("directory").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let title = r.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let cost = r.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let tin = r.get("tokens_input").and_then(|v| v.as_u64()).unwrap_or(0);
-            let tout = r.get("tokens_output").and_then(|v| v.as_u64()).unwrap_or(0);
-            let trsn = r.get("tokens_reasoning").and_then(|v| v.as_u64()).unwrap_or(0);
-            let tcr = r.get("tokens_cache_read").and_then(|v| v.as_u64()).unwrap_or(0);
-            let tc = r.get("time_created").and_then(|v| v.as_i64());
-            let tu = r.get("time_updated").and_then(|v| v.as_i64());
-            let idle = r.get("idle_outcome").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("sqlite3 failed: {e}"))?;
 
-            sessions.insert(
-                id.to_string(),
+    let has_idle = conn
+        .prepare("SELECT idle_outcome FROM session_v2 LIMIT 0")
+        .is_ok();
+    let col_idle = if has_idle { "idle_outcome" } else { "NULL" };
+    let query = format!("SELECT id, directory, {col_idle} FROM session_v2");
+    let mut stmt = conn
+        .prepare(&query)
+        .map_err(|e| format!("sqlite3 error: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let directory: Option<String> = row.get(1)?;
+            let idle_outcome: Option<String> = row.get(2)?;
+            Ok((
+                id,
                 SessionInfo {
                     directory,
-                    title,
-                    cost,
-                    tokens: Tokens {
-                        input: tin,
-                        output: tout,
-                        reasoning: trsn,
-                        cache_read: tcr,
-                    },
-                    time_created: tc,
-                    time_updated: tu,
-                    idle_outcome: idle,
+                    title: None,
+                    cost: 0.0,
+                    tokens: Tokens::default(),
+                    time_created: None,
+                    time_updated: None,
+                    idle_outcome,
                 },
-            );
+            ))
+        })
+        .map_err(|e| format!("sqlite3 error: {e}"))?;
+
+    let mut sessions = BTreeMap::new();
+    for r in rows {
+        if let Ok((id, info)) = r {
+            sessions.insert(id, info);
         }
     }
     Ok(sessions)
@@ -1340,6 +1333,86 @@ pub fn build_report(args: &UsageArgs) -> UsageReport {
             }
         }
     }
+    for e in tasks.values_mut() {
+        let cwd = e
+            .sessions
+            .iter()
+            .find_map(|sid| sessions.get(sid).and_then(|info| info.directory.as_deref()))
+            .unwrap_or("");
+        let sid = if e.sessions.len() == 1 {
+            e.sessions.iter().next().map(|s| s.as_str()).unwrap_or("")
+        } else {
+            ""
+        };
+        let is_in_db = e.sessions.iter().any(|s| sessions.contains_key(s));
+        let harness_hint = if is_in_db { "opencode" } else { "" };
+        let since_ms = if cutoff_ms > 0 {
+            Some(cutoff_ms as u64)
+        } else {
+            None
+        };
+        let mut spend = crate::worker::prompt::cost::read_worker_spend_with(
+            &e.task,
+            sid,
+            cwd,
+            harness_hint,
+            since_ms,
+            Some(&db_path),
+            Some(&runs_dir),
+        );
+        if spend.usd.is_none() && cwd.is_empty() && e.sessions.len() > 1 {
+            let mut total_usd = 0.0;
+            let mut any_usd = false;
+            let mut total_toks = Tokens::default();
+            let mut any_toks = false;
+            for s in &e.sessions {
+                let s_spend = crate::worker::prompt::cost::read_worker_spend_with(
+                    &e.task,
+                    s,
+                    "",
+                    harness_hint,
+                    since_ms,
+                    Some(&db_path),
+                    Some(&runs_dir),
+                );
+                if let Some(u) = s_spend.usd {
+                    total_usd += u;
+                    any_usd = true;
+                }
+                if let Some(toks) = s_spend.tokens {
+                    total_toks.input += toks.in_tokens;
+                    total_toks.output += toks.out_tokens;
+                    total_toks.reasoning += toks.reasoning;
+                    total_toks.cache_read += toks.cache_read;
+                    any_toks = true;
+                }
+            }
+            if any_usd {
+                spend.usd = Some(total_usd);
+            }
+            if any_toks {
+                spend.tokens = Some(crate::worker::prompt::cost::Tokens {
+                    in_tokens: total_toks.input,
+                    out_tokens: total_toks.output,
+                    reasoning: total_toks.reasoning,
+                    cache_read: total_toks.cache_read,
+                    cache_write: 0,
+                });
+            }
+        }
+        if let Some(usd) = spend.usd {
+            e.cost = usd;
+        }
+        if let Some(toks) = spend.tokens {
+            e.tokens = Tokens {
+                input: toks.in_tokens,
+                output: toks.out_tokens,
+                reasoning: toks.reasoning,
+                cache_read: toks.cache_read,
+            };
+        }
+    }
+
 
     let mut sess_cost: BTreeMap<String, f64> = BTreeMap::new();
     for t in tasks.values() {
@@ -1827,4 +1900,45 @@ pub fn handle_usage(raw_args: &[String]) -> Result<i32, String> {
     }
 
     Ok(rep.exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read_sessions_rusqlite() {
+        let tmp = std::env::temp_dir().join(format!("read-sessions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = tmp.join("test.db");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                idle_outcome TEXT
+            );
+            INSERT INTO session_v2 VALUES ('s1', '/path/to/.wt/worker-a', 'succeeded');
+            INSERT INTO session_v2 VALUES ('s2', '/path/to/.wt/worker-b', 'failed');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let sessions = read_sessions(&db_path).expect("read sessions");
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions["s1"].directory.as_deref(),
+            Some("/path/to/.wt/worker-a")
+        );
+        assert_eq!(sessions["s1"].idle_outcome.as_deref(), Some("succeeded"));
+        assert_eq!(
+            sessions["s2"].directory.as_deref(),
+            Some("/path/to/.wt/worker-b")
+        );
+        assert_eq!(sessions["s2"].idle_outcome.as_deref(), Some("failed"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

@@ -591,22 +591,38 @@ pub fn opencode_spend_in(
     )
     .ok()?;
 
-    let query_dir = "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
-                     tokens_cache_write, model, time_created \
-                     FROM session_v2 WHERE directory = ?1 ORDER BY time_created ASC;";
+    let has_tcw = conn
+        .prepare("SELECT tokens_cache_write FROM session_v2 LIMIT 0")
+        .is_ok();
+    let has_model = conn.prepare("SELECT model FROM session_v2 LIMIT 0").is_ok();
 
-    let query_id = "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
-                    tokens_cache_write, model, time_created \
-                    FROM session_v2 WHERE id = ?1 ORDER BY time_created ASC;";
+    let col_tcw = if has_tcw {
+        "tokens_cache_write"
+    } else {
+        "0"
+    };
+    let col_model = if has_model { "model" } else { "NULL" };
+
+    let query_dir = format!(
+        "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
+         {col_tcw}, {col_model}, time_created \
+         FROM session_v2 WHERE directory = ?1 ORDER BY time_created ASC;"
+    );
+
+    let query_id = format!(
+        "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
+         {col_tcw}, {col_model}, time_created \
+         FROM session_v2 WHERE id = ?1 ORDER BY time_created ASC;"
+    );
 
     if !cwd.is_empty() {
-        if let Some(spend) = execute_opencode_query(&conn, query_dir, cwd, since_ms) {
+        if let Some(spend) = execute_opencode_query(&conn, &query_dir, cwd, since_ms) {
             return Some(spend);
         }
     }
 
     if !session_id.is_empty() {
-        if let Some(spend) = execute_opencode_query(&conn, query_id, session_id, since_ms) {
+        if let Some(spend) = execute_opencode_query(&conn, &query_id, session_id, since_ms) {
             return Some(spend);
         }
     }
@@ -638,13 +654,15 @@ fn opencode_db_candidates(name: &str) -> Vec<PathBuf> {
     db_candidates
 }
 
-/// Reads spend for a worker across opencode, omp, or claude.
-pub fn read_worker_spend(
+/// Reads spend for a worker across opencode, omp, claude, or pi, accepting custom db/runs overrides.
+pub fn read_worker_spend_with(
     name: &str,
     session_id: &str,
     cwd: &str,
     harness: &str,
     since_ms: Option<u64>,
+    custom_db: Option<&Path>,
+    custom_runs: Option<&Path>,
 ) -> Spend {
     if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
         if let Ok(content) = std::fs::read_to_string(&cost_file) {
@@ -666,7 +684,10 @@ pub fn read_worker_spend(
     }
 
     if is_pi_worker(harness) {
-        let dir = pi_session_dir(&default_runs_dir(), name);
+        let runs = custom_runs
+            .map(PathBuf::from)
+            .unwrap_or_else(default_runs_dir);
+        let dir = pi_session_dir(&runs, name);
         if let Some(spend) = session_dir_spend(&dir, since_ms, "pi-session") {
             return spend;
         }
@@ -724,7 +745,12 @@ pub fn read_worker_spend(
         };
     }
 
-    if is_opencode_worker(harness, name) {
+    if is_opencode_worker(harness, name) || custom_db.is_some() {
+        if let Some(db_path) = custom_db {
+            if let Some(spend) = opencode_spend_in(db_path, session_id, cwd, since_ms) {
+                return spend;
+            }
+        }
         let candidates = opencode_db_candidates(name);
         for db_path in candidates {
             if let Some(spend) = opencode_spend_in(&db_path, session_id, cwd, since_ms) {
@@ -749,6 +775,17 @@ pub fn read_worker_spend(
         },
         model: None,
     }
+}
+
+/// Reads spend for a worker across opencode, omp, or claude.
+pub fn read_worker_spend(
+    name: &str,
+    session_id: &str,
+    cwd: &str,
+    harness: &str,
+    since_ms: Option<u64>,
+) -> Spend {
+    read_worker_spend_with(name, session_id, cwd, harness, since_ms, None, None)
 }
 
 pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) -> Option<f64> {
