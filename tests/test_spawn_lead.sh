@@ -20,7 +20,7 @@ unset HERDR_PANE_ID
 
 root="$(cd "$here/.." && pwd)"
 bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
-[[ -x "$bin" ]] || (cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
+(cd "$root" && cargo build --locked --quiet) || fail "cannot build quaqua"
 [[ -x "$bin" ]] || fail "no quaqua binary at $bin"
 export QUAQUA_BIN="$bin"
 
