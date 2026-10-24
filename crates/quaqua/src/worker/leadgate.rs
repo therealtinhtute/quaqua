@@ -161,14 +161,32 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 /// The INDEX row the gate applies to: the first row for `repo` whose owner is
 /// `cos`. A repo with no row, or whose rows are all owned by a Lead, has none.
+/// When the resolved caller is a Lead, or when the caller owns a row for this
+/// repo, the gate skips (returns `None`).
 pub fn gate_row(
     rows: &[IndexRow],
     repo: &Path,
     home: &str,
-    _caller: Option<&crate::identity::Caller>,
+    caller: Option<&crate::identity::Caller>,
 ) -> Option<IndexRow> {
-    rows.iter()
+    if let Some(c) = caller {
+        if c.role == crate::identity::Role::Lead {
+            return None;
+        }
+    }
+    let matching_rows: Vec<&IndexRow> = rows
+        .iter()
         .filter(|r| same_path(&expand_home(&r.repo, home), repo))
+        .collect();
+
+    if let Some(c) = caller {
+        if c.name != "cos" && matching_rows.iter().any(|r| r.owner == c.name) {
+            return None;
+        }
+    }
+
+    matching_rows
+        .into_iter()
         .find(|r| r.owner == "cos")
         .cloned()
 }
@@ -621,9 +639,21 @@ pub struct Facts {
 /// Collect the spawn's signals for a `cos`-owned project. `None` when the repo
 /// is not in `projects/INDEX.md` or its row is owned by a Lead.
 pub fn gather_facts<H: HerdrOps>(input: &GateInput<'_>, cfg: &Config, herdr: &H) -> Option<Facts> {
+    let resolved_caller;
+    let caller = match input.caller {
+        Some(c) => c,
+        None => {
+            resolved_caller = crate::identity::resolve_caller(herdr, input.runs_dir);
+            &resolved_caller
+        }
+    };
+    if caller.role == crate::identity::Role::Lead {
+        return None;
+    }
+
     let index = std::fs::read_to_string(input.root.join("projects/INDEX.md")).ok()?;
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let row = gate_row(&index_rows(&index), input.repo, &home, input.caller)?;
+    let row = gate_row(&index_rows(&index), input.repo, &home, Some(caller))?;
 
     let mut signals = Vec::new();
 
