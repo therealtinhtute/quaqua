@@ -58,6 +58,22 @@ impl Fixture {
             .output()
             .expect("run quaqua doctor")
     }
+
+    /// [`Fixture::run`] with no `QUAQUA_CHECKOUT` and an empty `cwd`: nothing
+    /// in the environment can be mistaken for the engine checkout.
+    fn run_without_checkout(&self, path: &Path) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_quaqua"))
+            .arg("doctor")
+            .env("PATH", path)
+            .env("HOME", &self.home)
+            .env("QUAQUA_SHELL", &self.shell)
+            .env_remove("QUAQUA_CHECKOUT")
+            .env_remove("QUAQUA_HOME")
+            .env_remove("QUAQUA_ROOT")
+            .current_dir(&self.cwd)
+            .output()
+            .expect("run quaqua doctor")
+    }
 }
 
 impl Drop for Fixture {
@@ -111,6 +127,27 @@ fn a_healthy_setup_exits_zero() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("ok:"), "{stdout}");
+}
+
+#[test]
+fn a_missing_checkout_says_the_stale_check_was_skipped() {
+    let f = Fixture::new("no-checkout", "quaqua is /tmp/bin/quaqua");
+    f.install_binary();
+
+    // With a checkout the staleness claim is a real comparison.
+    let out = f.run(&f.bin_dir);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("not older than the checkout"), "{stdout}");
+
+    // Without one, the run must not claim that comparison...
+    let out = f.run_without_checkout(&f.bin_dir);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("not older than the checkout"), "{stdout}");
+    // ...and must say the check was skipped and how to enable it.
+    assert!(stdout.contains("skipped"), "{stdout}");
+    assert!(stdout.contains("QUAQUA_CHECKOUT"), "{stdout}");
 }
 
 #[test]
