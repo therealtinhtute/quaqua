@@ -173,6 +173,8 @@ enum CosCmd {
 enum LayoutCmd {
     /// Show effective topology layout.
     Show {
+        /// Optional project slug
+        slug: Option<String>,
         /// Project slug override
         #[arg(long)]
         project: Option<String>,
@@ -192,6 +194,11 @@ enum LayoutCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Refreeze project layout snapshot from live team.toml.
+    Refreeze {
+        /// Project slug
+        slug: String,
+    },
 }
 
 
@@ -206,8 +213,16 @@ enum ConfigCmd {
         #[command(flatten)]
         args: ConfigArgs,
     },
+    /// Migrate team.toml from schema_version 2 to 3.
+    Migrate {
+        /// Write changes in-place (keeps team.toml.bak). Default is dry-run diff.
+        #[arg(long)]
+        write: bool,
+        /// Path to team.toml (default: resolved team.toml).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
 }
-
 #[derive(Args)]
 struct ConfigArgs {
     /// Path to team.toml (default: $QUAQUA_TEAM_TOML, else ./team.toml, else
@@ -508,6 +523,18 @@ fn main() {
                     1
                 }
             },
+            ConfigCmd::Migrate { write, path } => {
+                match quaqua::layout::migrate::run_migrate(path.as_deref(), write) {
+                    Ok(out) => {
+                        print!("{out}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
+                }
+            }
         },
         Some(Command::Cos { cmd }) => match cmd {
             CosCmd::Tag { pane } => match quaqua::cos::resolve_cos_pane(&herdr, pane.as_deref()) {
@@ -726,8 +753,13 @@ fn main() {
             }
         },
         Some(Command::Layout { cmd }) => match cmd {
-            LayoutCmd::Show { project, json } => {
-                match quaqua::layout::run_show(project.as_deref(), json) {
+            LayoutCmd::Show {
+                slug,
+                project,
+                json,
+            } => {
+                let proj = slug.as_deref().or(project.as_deref());
+                match quaqua::layout::run_show(proj, json) {
                     Ok(out) => {
                         print!("{out}");
                         0
@@ -748,6 +780,18 @@ fn main() {
                 match quaqua::layout::run_why(&caller, &verb, &target, project.as_deref(), json) {
                     Ok(out) => {
                         print!("{out}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
+                }
+            }
+            LayoutCmd::Refreeze { slug } => {
+                match quaqua::layout::run_refreeze(&slug) {
+                    Ok(msg) => {
+                        println!("{msg}");
                         0
                     }
                     Err(e) => {

@@ -1,11 +1,16 @@
 pub mod builtin;
 pub mod gate;
 pub mod legacy;
+pub mod migrate;
 pub mod model;
-
+pub mod snapshot;
 pub use gate::{check, check_with_count, resolve_target_role, validate_layout};
 pub use model::{
     Decision, Layout, LayoutRole, Member, Naming, RoleClass, TraceStep, Verb,
+};
+pub use snapshot::{
+    find_lead_in_owner_chain, layout_sha256, read_layout_snapshot, resolve_effective_layout,
+    run_refreeze, write_layout_snapshot, LayoutOrigin, LayoutSnapshot,
 };
 
 use crate::config::Config;
@@ -152,9 +157,29 @@ pub fn why(
 pub fn run_show(project: Option<&str>, json: bool) -> Result<String, String> {
     let cfg = crate::config::load_team_config()
         .map_err(|(_, msg)| msg.trim().to_string())?;
-    let cfg = crate::config::resolve(cfg, project)?;
+    let cfg = crate::config::resolve(cfg.clone(), project).unwrap_or(cfg);
     crate::config::validate(&cfg)?;
-    let layout = resolve_layout(&cfg)?;
+
+    let runs_dir = crate::worker::cleanup::default_runs_dir();
+    let (layout, origin) = if let Some(slug) = project {
+        let lead_name = format!("{slug}-lead");
+        snapshot::resolve_effective_layout(&lead_name, &runs_dir, &cfg)?
+    } else {
+        snapshot::resolve_effective_layout("cos", &runs_dir, &cfg)?
+    };
+
+    let mut drift_warning = None;
+    if let Some(_slug) = project {
+        if let LayoutOrigin::Snapshot { sha256: ref frozen_sha, .. } = origin {
+            let live_layout = resolve_layout(&cfg)?;
+            let live_sha = snapshot::layout_sha256(&live_layout)?;
+            if *frozen_sha != live_sha {
+                drift_warning = Some(format!(
+                    "warning: frozen sha ≠ live sha (frozen {frozen_sha}, live {live_sha})\n"
+                ));
+            }
+        }
+    }
 
     if json {
         return serde_json::to_string_pretty(&layout)
@@ -162,12 +187,10 @@ pub fn run_show(project: Option<&str>, json: bool) -> Result<String, String> {
     }
 
     let mut out = String::new();
-    let source = if cfg.schema_version >= 3 && cfg.layout.is_some() {
-        "config"
-    } else {
-        "synthesized legacy"
-    };
-    let _ = writeln!(out, "Layout: {} (source: {source})", layout.name);
+    if let Some(warn) = drift_warning {
+        let _ = write!(out, "{warn}");
+    }
+    let _ = writeln!(out, "Layout: {} (source: {})", layout.name, origin.source_desc());
     let _ = writeln!(out, "Depth:  {}", layout.depth);
     let _ = writeln!(out, "\nRoles:");
     for (name, role) in &layout.roles {
@@ -212,14 +235,12 @@ pub fn run_why(
 ) -> Result<String, String> {
     let cfg = crate::config::load_team_config()
         .map_err(|(_, msg)| msg.trim().to_string())?;
-    let cfg = crate::config::resolve(cfg, project)?;
+    let cfg = crate::config::resolve(cfg.clone(), project).unwrap_or(cfg);
     crate::config::validate(&cfg)?;
-    let layout = resolve_layout(&cfg)?;
-
-    let verb: Verb = verb_str.parse()?;
     let runs_dir = crate::worker::cleanup::default_runs_dir();
     let caller = resolve_caller_by_name(caller_name, &runs_dir);
-
+    let (layout, _origin) = snapshot::resolve_effective_layout(caller_name, &runs_dir, &cfg)?;
+    let verb: Verb = verb_str.parse()?;
     let decision = check(&layout, &caller, verb, target);
 
     if json {

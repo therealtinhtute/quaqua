@@ -43,6 +43,10 @@ impl WorkerMetadata {
         runs_dir.join(format!("{name}.review"))
     }
 
+    pub fn layout_path(runs_dir: &Path, slug: &str) -> PathBuf {
+        runs_dir.join(format!("{slug}.layout.toml"))
+    }
+
     pub fn has_review(runs_dir: &Path, name: &str) -> bool {
         Self::review_path(runs_dir, name).is_file()
     }
