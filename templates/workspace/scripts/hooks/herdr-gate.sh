@@ -25,6 +25,8 @@ bin=${QUAQUA_BIN:-quaqua}
 if command -v "$bin" >/dev/null 2>&1; then
   exec "$bin" gate "$@"
 fi
+# SessionStart (stale-session baseline, issue #72) has nothing to fence.
+[[ ${1:-} == --session-start ]] && exit 0
 
 # pane split | pane move | tab create | workspace create | workspace close |
 # agent start — kept in step with policy.rs `guarded_pair`.

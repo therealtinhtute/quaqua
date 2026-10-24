@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 lane: normal
 ---
 # Blindside escalation + absence ≠ broken (issue #69)
