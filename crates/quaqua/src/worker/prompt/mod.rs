@@ -930,13 +930,15 @@ pub fn prompt_worker<G: GitOps>(
         max
     );
 
-    let kill_on_cap = crate::config::load_team_config()
-        .ok()
+    let team_cfg = crate::config::load_team_config().ok();
+    let kill_on_cap = team_cfg
+        .as_ref()
         .and_then(|cfg| {
-            let kind = crate::config::kind_of_worker(&cfg, name)?.to_string();
+            let kind = crate::config::kind_of_worker(cfg, name)?.to_string();
             cfg.kinds.get(&kind).map(|k| k.on_cost_cap == crate::config::COST_CAP_KILL)
         })
         .unwrap_or(false);
+    let cost_buffer = team_cfg.map_or(0.2, |cfg| cfg.timers.cost_buffer);
     let start_sec = now_sec();
     let sys_acts = SystemActivities::with_repo_dir(&repo_dir);
     let prompt_acts = PromptActivities {
@@ -947,7 +949,9 @@ pub fn prompt_worker<G: GitOps>(
         heartbeat_sec,
         start_sec,
         cost_tracker: Mutex::new(
-            CostTracker::new(&runs_dir, name, cost_budget).with_kill(kill_on_cap),
+            CostTracker::new(&runs_dir, name, cost_budget)
+                .with_kill(kill_on_cap)
+                .with_buffer(cost_buffer),
         ),
         cost_stopped: Mutex::new(false),
         last_wait: Mutex::new(None),

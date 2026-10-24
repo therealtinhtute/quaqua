@@ -278,13 +278,13 @@ run_brief sude-cost "$cost_brief" FAKE_ADVANCE_COST=1 PROMPT_WORKER_COST_FILE="$
 [[ $(grep -c 'WATCHDOG cost 100%' "$T/err") -eq 1 ]] || fail "sude-cost: cost 100% not once"
 echo "ok: cost crossing 80% then 100% printed once each, report accepted"
 
-# ── 200% (#69): ESCALATE line once + one herdr notification ────────────────
+# ── 100% + timers.cost_buffer (default 120%): ESCALATE once + one herdr notification ────────────────
 echo "2.50" > "$T/cost"
 run_brief sude-cost200 "$cost_brief" PROMPT_WORKER_COST_FILE="$T/cost" \
   PROMPT_WORKER_POLL_SEC=1 PROMPT_WORKER_STALL_SEC=9999 PROMPT_WORKER_BUDGET_SEC=9999
-[[ $(grep -c 'WATCHDOG cost 200%.*ESCALATE' "$T/err") -eq 1 ]] || fail "sude-cost200: ESCALATE not once: $(cat "$T/err")"
-[[ $(grep -c '^herdr notification show quaqua: sude-cost200 at 200% cost' "$T/calls") -eq 1 ]] || fail "sude-cost200: no single notification: $(cat "$T/calls")"
-echo "ok: 200% cost -> ESCALATE line and one herdr notification"
+[[ $(grep -c 'WATCHDOG cost 120%.*ESCALATE' "$T/err") -eq 1 ]] || fail "sude-cost200: ESCALATE not once: $(cat "$T/err")"
+[[ $(grep -c '^herdr notification show quaqua: sude-cost200 at 120% cost' "$T/calls") -eq 1 ]] || fail "sude-cost200: no single notification: $(cat "$T/calls")"
+echo "ok: 120% cost -> ESCALATE line and one herdr notification"
 
 # ── on_cost_cap = "kill" (#48): one interrupt at 100%, exit 5, no cleanup ───
 sed 's/^\[kinds.sude\]$/[kinds.sude]\non_cost_cap = "kill"/' "$root/templates/workspace/team.toml" > "$T/team-kill.toml"

@@ -915,7 +915,7 @@ pub fn session_store_mtime(
 }
 
 /// Tracks cost budget marks during watchdog execution: 80% and 100% warn,
-/// 200% escalates to the CoS. Each mark fires once per run, across restarts.
+/// 100% + `timers.cost_buffer` (default 120%) escalates to the CoS. Each mark fires once per run, across restarts.
 /// A `kill` kind (`on_cost_cap`, issue #48) also requests one interrupt when it
 /// first crosses 100%; otherwise the watchdog never stops a worker over cost.
 pub struct CostTracker {
@@ -924,6 +924,8 @@ pub struct CostTracker {
     pub cost100_warned: bool,
     pub cost200_warned: bool,
     pub kill_on_cap: bool,
+    /// Escalate at `budget * (1 + buffer)`.
+    pub buffer: f64,
     stop_requested: bool,
 }
 
@@ -935,12 +937,18 @@ impl CostTracker {
             cost100_warned: WorkerMetadata::has_cost100(runs_dir, name),
             cost200_warned: WorkerMetadata::has_cost200(runs_dir, name),
             kill_on_cap: false,
+            buffer: 0.2,
             stop_requested: false,
         }
     }
 
     pub fn with_kill(mut self, kill_on_cap: bool) -> Self {
         self.kill_on_cap = kill_on_cap;
+        self
+    }
+
+    pub fn with_buffer(mut self, buffer: f64) -> Self {
+        self.buffer = buffer;
         self
     }
 
@@ -994,26 +1002,28 @@ impl CostTracker {
             }
             lines.push(line);
         }
-        if !self.cost200_warned && current_cost >= budget_val * 2.0 {
+        // The escalate mark keeps the historical `.cost200` metadata file.
+        if !self.cost200_warned && current_cost >= budget_val * (1.0 + self.buffer) {
             let _ = WorkerMetadata::record_cost200(runs_dir, name, current_cost);
             self.cost200_warned = true;
+            let pct = ((1.0 + self.buffer) * 100.0).round() as u32;
             lines.push(format!(
-                "WATCHDOG cost 200% | name={name} cost=${current_cost:.4} budget=${budget_val:.4} | ESCALATE"
+                "WATCHDOG cost {pct}% | name={name} cost=${current_cost:.4} budget=${budget_val:.4} | ESCALATE"
             ));
-            notify_escalate(name, current_cost, budget_val);
+            notify_escalate(name, pct, current_cost, budget_val);
         }
         lines
     }
 }
 
-/// Pops a herdr notification for the 200% cost mark so anh iu sees it even
+/// Pops a herdr notification for the escalate cost mark so anh iu sees it even
 /// when the CoS pane is not focused. Best effort: failures are ignored.
-fn notify_escalate(name: &str, cost: f64, budget: f64) {
+fn notify_escalate(name: &str, pct: u32, cost: f64, budget: f64) {
     if cfg!(test) {
         return;
     }
     let _ = std::process::Command::new(crate::herdr::bin_path())
-        .args(["notification", "show", &format!("quaqua: {name} at 200% cost")])
+        .args(["notification", "show", &format!("quaqua: {name} at {pct}% cost")])
         .arg("--body")
         .arg(format!("spent ${cost:.2} of ${budget:.2} budget; decide: stop or extend"))
         .stdin(std::process::Stdio::null())
@@ -1241,30 +1251,34 @@ mod tests {
     }
 
     #[test]
-    fn test_cost200_escalates_once_and_survives_restart() {
+    fn test_escalate_at_buffer_once_and_survives_restart() {
         let d = cost_dir("once");
+        let esc = |lines: Vec<String>| -> Vec<String> {
+            lines.into_iter().filter(|l| l.contains("ESCALATE")).collect()
+        };
         let mut t = CostTracker::new(&d, "w", Some(1.0));
-        let below: Vec<_> = t
-            .observe(&d, "w", 1.99)
-            .into_iter()
-            .filter(|l| l.contains("200%"))
-            .collect();
-        assert!(below.is_empty(), "{below:?}");
-        let at: Vec<_> = t
-            .observe(&d, "w", 2.0)
-            .into_iter()
-            .filter(|l| l.contains("200%"))
-            .collect();
-        assert_eq!(at.len(), 1, "{at:?}");
+        assert!(esc(t.observe(&d, "w", 1.19)).is_empty());
+        let at = esc(t.observe(&d, "w", 1.2));
         assert_eq!(
-            at[0],
-            "WATCHDOG cost 200% | name=w cost=$2.0000 budget=$1.0000 | ESCALATE"
+            at,
+            vec!["WATCHDOG cost 120% | name=w cost=$1.2000 budget=$1.0000 | ESCALATE"]
         );
         assert!(t.observe(&d, "w", 3.0).is_empty());
         let mut restarted = CostTracker::new(&d, "w", Some(1.0));
         assert!(restarted.observe(&d, "w", 3.0).is_empty());
-        WorkerMetadata::cleanup_worker_files(&d, "w");
-        assert!(!WorkerMetadata::has_cost200(&d, "w"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_escalate_buffer_is_configurable() {
+        let d = cost_dir("buffer");
+        let mut t = CostTracker::new(&d, "w", Some(2.0)).with_buffer(0.5);
+        assert!(t.observe(&d, "w", 2.9).iter().all(|l| !l.contains("ESCALATE")));
+        let at = t.observe(&d, "w", 3.0);
+        assert!(
+            at.iter().any(|l| l.starts_with("WATCHDOG cost 150% |") && l.ends_with("| ESCALATE")),
+            "{at:?}"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
