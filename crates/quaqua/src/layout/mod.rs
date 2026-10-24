@@ -3,7 +3,7 @@ pub mod gate;
 pub mod legacy;
 pub mod model;
 
-pub use gate::{check, check_with_count, resolve_target_role};
+pub use gate::{check, check_with_count, resolve_target_role, validate_layout};
 pub use model::{
     Decision, Layout, LayoutRole, Member, Naming, RoleClass, TraceStep, Verb,
 };
@@ -19,25 +19,58 @@ use std::path::Path;
 /// or from `[layouts.<name>]`. If `[layout]` is omitted or config is v2,
 /// synthesizes the legacy SLP layout.
 pub fn resolve_layout(cfg: &Config) -> Result<Layout, String> {
-    if let Some(layout_ref) = &cfg.layout {
-        let name = &layout_ref.use_layout;
-        if let Some(builtin_layout) = builtin::get(name) {
-            return Ok(builtin_layout);
-        }
-        if let Some(custom) = cfg.layouts.get(name) {
-            let mut layout = custom.clone();
-            if layout.name.is_empty() {
-                layout.name = name.clone();
+    if cfg.schema_version >= 3 {
+        // Collisions between user layout names and built-in names are a hard error
+        for name in cfg.layouts.keys() {
+            if builtin::get(name).is_some() {
+                return Err(format!("user layout '{name}' collides with built-in layout"));
             }
-            return Ok(layout);
         }
-        return Err(format!("unknown layout '{name}'"));
+
+        if let Some(layout_ref) = &cfg.layout {
+            let name = &layout_ref.use_layout;
+            if let Some(mut builtin_layout) = builtin::get(name) {
+                if name == "slp" {
+                    // SLP topology keeps live caps and depth from config / project overrides
+                    builtin_layout.depth = cfg.limits.depth.max(0) as u32;
+                    if let Some(cos_role) = builtin_layout.roles.get_mut("cos") {
+                        cos_role.max_children = Some(cfg.limits.max_workers_per_orchestrator);
+                    }
+                    if let Some(lead_role) = builtin_layout.roles.get_mut("lead") {
+                        let peers = cfg
+                            .roles
+                            .get("lead")
+                            .and_then(|r| r.max_peers)
+                            .unwrap_or(crate::config::DEFAULT_LEAD_MAX_PEERS);
+                        lead_role.max_children = Some(peers);
+                    }
+                }
+                return Ok(builtin_layout);
+            }
+            if let Some(custom) = cfg.layouts.get(name) {
+                let mut layout = custom.clone();
+                if layout.name.is_empty() {
+                    layout.name = name.clone();
+                }
+                validate_layout(&layout)?;
+                return Ok(layout);
+            }
+            return Err(format!("unknown layout '{name}'"));
+        }
     }
 
     Ok(Layout::from_legacy(cfg))
 }
 
 /// Resolves a Caller struct given a caller identifier/name and runs_dir.
+///
+/// - "cos" resolves to Role::Cos at depth 0.
+/// - Generic "lead" resolves to Role::Lead at depth 1.
+/// - Generic "peer" resolves to Role::Peer at depth 2.
+/// - Named agents ending with "-lead" resolve to Role::Lead if runs/<name>.owner exists,
+///   walking depth via depth_walk and mapping DepthError to CallerDepth.
+/// - Named worker agents resolve to Role::Peer if runs/<name>.owner exists.
+/// - Unknown callers (no owner file, no tokens) resolve strictly to Role::Unknown.
 pub fn resolve_caller_by_name(caller_name: &str, runs_dir: &Path) -> Caller {
     let caller_trim = caller_name.trim();
     if caller_trim == "cos" {
@@ -49,39 +82,56 @@ pub fn resolve_caller_by_name(caller_name: &str, runs_dir: &Path) -> Caller {
         };
     }
 
-    if caller_trim.ends_with("-lead") || caller_trim == "lead" {
-        let depth = match depth_walk(runs_dir, caller_trim) {
-            Ok(d) => CallerDepth::Resolved(d),
-            Err(_) => CallerDepth::Resolved(1),
-        };
+    if caller_trim == "lead" {
         return Caller {
-            name: caller_trim.to_string(),
+            name: "lead".to_string(),
             role: Role::Lead,
-            depth,
+            depth: CallerDepth::Resolved(1),
+            source: IdentitySource::PaneTokens,
+        };
+    }
+
+    if caller_trim == "peer" {
+        return Caller {
+            name: "peer".to_string(),
+            role: Role::Peer,
+            depth: CallerDepth::Resolved(2),
             source: IdentitySource::PaneTokens,
         };
     }
 
     let owner_file = runs_dir.join(format!("{caller_trim}.owner"));
-    let depth = if owner_file.exists() {
+    if owner_file.exists() {
         if let Ok(owner) = std::fs::read_to_string(&owner_file) {
             let parent = owner.trim();
-            match depth_walk(runs_dir, parent) {
-                Ok(d) => CallerDepth::Resolved(d + 1),
-                Err(_) => CallerDepth::Resolved(2),
+            if caller_trim.ends_with("-lead") {
+                let depth = CallerDepth::from(depth_walk(runs_dir, caller_trim));
+                return Caller {
+                    name: caller_trim.to_string(),
+                    role: Role::Lead,
+                    depth,
+                    source: IdentitySource::PaneTokens,
+                };
+            } else {
+                let depth = match depth_walk(runs_dir, parent) {
+                    Ok(d) => CallerDepth::Resolved(d + 1),
+                    Err(e) => CallerDepth::from(Err(e)),
+                };
+                return Caller {
+                    name: caller_trim.to_string(),
+                    role: Role::Peer,
+                    depth,
+                    source: IdentitySource::PaneTokens,
+                };
             }
-        } else {
-            CallerDepth::Resolved(2)
         }
-    } else {
-        CallerDepth::Resolved(2)
-    };
+    }
 
     Caller {
         name: caller_trim.to_string(),
-        role: Role::Peer,
-        depth,
-        source: IdentitySource::PaneTokens,
+        role: Role::Unknown,
+        depth: CallerDepth::Unknown,
+        source: IdentitySource::Unknown,
     }
 }
 
@@ -112,7 +162,7 @@ pub fn run_show(project: Option<&str>, json: bool) -> Result<String, String> {
     }
 
     let mut out = String::new();
-    let source = if cfg.layout.is_some() {
+    let source = if cfg.schema_version >= 3 && cfg.layout.is_some() {
         "config"
     } else {
         "synthesized legacy"

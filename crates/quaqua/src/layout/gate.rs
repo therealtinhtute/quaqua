@@ -1,30 +1,80 @@
 use crate::identity::{Caller, CallerDepth, Role};
 use crate::layout::model::{Decision, Layout, TraceStep, Verb};
 
-/// Resolve the role name for a target string.
+/// Resolve the role name for a target string within a layout.
 ///
-/// If target matches a defined role in the layout or a known role class, use it directly.
-/// If target is an agent name ending with `-lead`, role is `lead`.
-/// If target is `cos`, role is `cos`.
-/// Otherwise, defaults to `peer`.
-pub fn resolve_target_role<'a>(layout: &'a Layout, target: &'a str) -> &'a str {
+/// If target matches a defined role in the layout, returns that role.
+/// If target is `cos` and `cos` is defined in the layout, returns `Some("cos")`.
+/// If target ends with `-lead` and `lead` is defined in the layout, returns `Some("lead")`.
+/// Otherwise returns `None` (unknown target). Never falls back to a default role.
+pub fn resolve_target_role<'a>(layout: &'a Layout, target: &'a str) -> Option<&'a str> {
     let target_trim = target.trim();
     if layout.roles.contains_key(target_trim) {
-        return target_trim;
+        return Some(target_trim);
     }
-    if target_trim == "cos" {
-        return "cos";
+    if target_trim == "cos" && layout.roles.contains_key("cos") {
+        return Some("cos");
     }
-    if target_trim.ends_with("-lead") {
-        return "lead";
+    if target_trim.ends_with("-lead") && layout.roles.contains_key("lead") {
+        return Some("lead");
     }
-    if target_trim == "taskforce" {
-        return "taskforce";
+    None
+}
+
+/// Validate a layout's internal consistency:
+/// - depth >= 1
+/// - at least one role defined
+/// - all can_spawn references exist in layout.roles
+/// - all can_prompt references exist in layout.roles
+/// - all reports_to references exist in layout.roles or equal "owner"
+/// - any max_children >= 1
+pub fn validate_layout(layout: &Layout) -> Result<(), String> {
+    if layout.depth < 1 {
+        return Err(format!("layout '{}' depth must be at least 1", layout.name));
     }
-    if crate::config::ROLE_CLASSES.contains(&target_trim) {
-        return target_trim;
+    if layout.roles.is_empty() {
+        return Err(format!(
+            "layout '{}' must define at least one role",
+            layout.name
+        ));
     }
-    "peer"
+
+    for (role_name, role) in &layout.roles {
+        for target in &role.can_spawn {
+            if !layout.roles.contains_key(target) {
+                return Err(format!(
+                    "layout '{}' role '{role_name}' can_spawn references unknown role '{target}'",
+                    layout.name
+                ));
+            }
+        }
+        for target in &role.can_prompt {
+            if !layout.roles.contains_key(target) {
+                return Err(format!(
+                    "layout '{}' role '{role_name}' can_prompt references unknown role '{target}'",
+                    layout.name
+                ));
+            }
+        }
+        if let Some(rep) = &role.reports_to {
+            if rep != "owner" && !layout.roles.contains_key(rep) {
+                return Err(format!(
+                    "layout '{}' role '{role_name}' reports_to references unknown role '{rep}'",
+                    layout.name
+                ));
+            }
+        }
+        if let Some(cap) = role.max_children {
+            if cap < 1 {
+                return Err(format!(
+                    "layout '{}' role '{role_name}' max_children {cap} must be >= 1",
+                    layout.name
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Pure layout gate check: layers identity -> role -> edge -> depth -> cap.
@@ -65,7 +115,7 @@ pub fn check_with_count(
         ),
     });
 
-    // 2. Role layer
+    // 2. Role layer (caller role and target role must exist in layout)
     let caller_role_name = caller.role.as_str();
     let role = match layout.roles.get(caller_role_name) {
         Some(r) => {
@@ -92,8 +142,22 @@ pub fn check_with_count(
         }
     };
 
+    let target_role = match resolve_target_role(layout, target) {
+        Some(r) => r,
+        None => {
+            trace.push(TraceStep {
+                layer: "role".to_string(),
+                passed: false,
+                detail: format!(
+                    "target role '{target}' is not defined in layout '{}'",
+                    layout.name
+                ),
+            });
+            return Decision::deny("role.unknown", trace);
+        }
+    };
+
     // 3. Edge layer
-    let target_role = resolve_target_role(layout, target);
     let mut reports_to_edge = false;
     let edge_allowed = match verb {
         Verb::Spawn => role.can_spawn.iter().any(|r| r == target_role),

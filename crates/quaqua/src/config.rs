@@ -494,12 +494,30 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         ));
     }
 
+    if cfg.schema_version == 2 && (cfg.layout.is_some() || !cfg.layouts.is_empty()) {
+        return Err(
+            "schema_version 2 does not support [layout] (requires schema_version = 3)".to_string(),
+        );
+    }
+
     if cfg.schema_version == 3 {
+        for name in cfg.layouts.keys() {
+            if crate::layout::builtin::get(name).is_some() {
+                return Err(format!("user layout '{name}' collides with built-in layout"));
+            }
+        }
         if let Some(layout_ref) = &cfg.layout {
             let name = &layout_ref.use_layout;
             if crate::layout::builtin::get(name).is_none() && !cfg.layouts.contains_key(name) {
                 return Err(format!("unknown layout '{name}'"));
             }
+        }
+        for (name, layout) in &cfg.layouts {
+            let mut l = layout.clone();
+            if l.name.is_empty() {
+                l.name = name.clone();
+            }
+            crate::layout::validate_layout(&l)?;
         }
     }
 

@@ -51,6 +51,20 @@ impl Layout {
             );
         }
 
+        // SLP also defines taskforce as a spawnable target with reports_to = "owner"
+        roles.insert(
+            "taskforce".to_string(),
+            LayoutRole {
+                class: RoleClass::Taskforce,
+                can_spawn: Vec::new(),
+                can_prompt: Vec::new(),
+                reports_to: Some("owner".to_string()),
+                max_children: None,
+                naming: Naming::KindTask,
+                members: Vec::new(),
+            },
+        );
+
         Self {
             name: "slp".to_string(),
             depth: cfg.limits.depth.max(0) as u32,

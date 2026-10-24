@@ -20,3 +20,9 @@ class = "peer"
 can_spawn = []
 can_prompt = []
 reports_to = "owner"
+
+[roles.taskforce]
+class = "taskforce"
+can_spawn = []
+can_prompt = []
+reports_to = "owner"
