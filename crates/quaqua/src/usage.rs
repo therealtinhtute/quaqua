@@ -13,7 +13,10 @@ const PAGE_LIMIT: usize = 100;
 const VN_OFFSET_MS: i64 = 7 * 3600 * 1000;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "usage", about = "OpenCode usage audit (text-only)")]
+#[command(
+    name = "usage",
+    about = "OpenCode usage audit (text-only) — task cost = whole session (matches watchdog), day rows = window"
+)]
 pub struct UsageArgs {
     #[arg(long, default_value_t = 7, help = "number of VN calendar days (default 7)")]
     pub days: u32,
@@ -86,6 +89,7 @@ pub struct DayStat {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskStat {
     pub task: String,
+    pub spend_src: String,
     pub sessions: Vec<String>,
     pub requests: u64,
     pub cost: f64,
@@ -94,7 +98,6 @@ pub struct TaskStat {
     pub idle_min: u64,
     pub outcome: String,
 }
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SplitCategory {
@@ -815,64 +818,47 @@ pub fn task_from_directory(directory: Option<&str>) -> Option<String> {
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
     pub directory: Option<String>,
-    pub title: Option<String>,
-    pub cost: f64,
-    pub tokens: Tokens,
-    pub time_created: Option<i64>,
-    pub time_updated: Option<i64>,
     pub idle_outcome: Option<String>,
 }
 
 pub fn read_sessions(db_path: &Path) -> Result<BTreeMap<String, SessionInfo>, String> {
-    let uri = format!("file:{}?mode=ro", db_path.display());
-    let query = "SELECT id, directory, title, cost, tokens_input, tokens_output, \
-                 tokens_reasoning, tokens_cache_read, time_created, time_updated, \
-                 idle_outcome FROM session_v2";
-    let out = Command::new("sqlite3")
-        .args(["-json", &uri, query])
-        .output()
-        .map_err(|e| format!("sqlite3 failed: {e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("sqlite3 error: {}", err.trim()));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    if stdout.trim().is_empty() {
+    if !db_path.is_file() {
         return Ok(BTreeMap::new());
     }
-    let rows: Vec<serde_json::Value> =
-        serde_json::from_str(&stdout).map_err(|e| format!("bad JSON from sqlite3: {e}"))?;
-    let mut sessions = BTreeMap::new();
-    for r in rows {
-        if let Some(id) = r.get("id").and_then(|v| v.as_str()) {
-            let directory = r.get("directory").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let title = r.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let cost = r.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let tin = r.get("tokens_input").and_then(|v| v.as_u64()).unwrap_or(0);
-            let tout = r.get("tokens_output").and_then(|v| v.as_u64()).unwrap_or(0);
-            let trsn = r.get("tokens_reasoning").and_then(|v| v.as_u64()).unwrap_or(0);
-            let tcr = r.get("tokens_cache_read").and_then(|v| v.as_u64()).unwrap_or(0);
-            let tc = r.get("time_created").and_then(|v| v.as_i64());
-            let tu = r.get("time_updated").and_then(|v| v.as_i64());
-            let idle = r.get("idle_outcome").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("local db open failed: {e}"))?;
 
-            sessions.insert(
-                id.to_string(),
+    let has_idle = conn
+        .prepare("SELECT idle_outcome FROM session_v2 LIMIT 0")
+        .is_ok();
+    let col_idle = if has_idle { "idle_outcome" } else { "NULL" };
+    let query = format!("SELECT id, directory, {col_idle} FROM session_v2");
+    let mut stmt = conn
+        .prepare(&query)
+        .map_err(|e| format!("db query failed: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let directory: Option<String> = row.get(1)?;
+            let idle_outcome: Option<String> = row.get(2)?;
+            Ok((
+                id,
                 SessionInfo {
                     directory,
-                    title,
-                    cost,
-                    tokens: Tokens {
-                        input: tin,
-                        output: tout,
-                        reasoning: trsn,
-                        cache_read: tcr,
-                    },
-                    time_created: tc,
-                    time_updated: tu,
-                    idle_outcome: idle,
+                    idle_outcome,
                 },
-            );
+            ))
+        })
+        .map_err(|e| format!("db query failed: {e}"))?;
+
+    let mut sessions = BTreeMap::new();
+    for r in rows {
+        if let Ok((id, info)) = r {
+            sessions.insert(id, info);
         }
     }
     Ok(sessions)
@@ -1189,6 +1175,7 @@ pub fn build_report(args: &UsageArgs) -> UsageReport {
         }
         let e = tasks.entry(key.clone()).or_insert_with(|| InternalTaskEntry {
             task: key.clone(),
+            spend_src: "requests".to_string(),
             sessions: std::collections::BTreeSet::new(),
             requests: 0,
             cost: 0.0,
@@ -1338,6 +1325,42 @@ pub fn build_report(args: &UsageArgs) -> UsageReport {
                 });
                 e.idle_min = idle_min;
             }
+        }
+    }
+    for e in tasks.values_mut() {
+        let cwd = e
+            .sessions
+            .iter()
+            .find_map(|sid| sessions.get(sid).and_then(|info| info.directory.as_deref()))
+            .unwrap_or("");
+        let sid = if e.sessions.len() == 1 {
+            e.sessions.iter().next().map(|s| s.as_str()).unwrap_or("")
+        } else {
+            ""
+        };
+        let is_in_db = e.sessions.iter().any(|s| sessions.contains_key(s));
+        let harness_hint = if is_in_db { "opencode" } else { "" };
+        let spend = crate::worker::prompt::cost::read_worker_spend_with(
+            &e.task,
+            sid,
+            cwd,
+            harness_hint,
+            None,
+            Some(&db_path),
+            Some(&runs_dir),
+            false,
+        );
+        if let Some(usd) = spend.usd {
+            e.cost = usd;
+            e.spend_src = "session".to_string();
+        }
+        if let Some(toks) = spend.tokens {
+            e.tokens = Tokens {
+                input: toks.in_tokens,
+                output: toks.out_tokens,
+                reasoning: toks.reasoning,
+                cache_read: toks.cache_read,
+            };
         }
     }
 
@@ -1506,6 +1529,7 @@ pub fn build_report(args: &UsageArgs) -> UsageReport {
         .into_values()
         .map(|t| TaskStat {
             task: t.task,
+            spend_src: t.spend_src,
             sessions: t.sessions.into_iter().collect(),
             requests: t.requests,
             cost: round4(t.cost),
@@ -1562,6 +1586,7 @@ pub fn build_report(args: &UsageArgs) -> UsageReport {
 
 struct InternalTaskEntry {
     task: String,
+    spend_src: String,
     sessions: std::collections::BTreeSet<String>,
     requests: u64,
     cost: f64,
@@ -1601,7 +1626,7 @@ pub fn render_text(rep: &UsageReport) -> Result<String, String> {
     }
     let t = &rep.totals;
     lines.push(format!(
-        "Local opencode: {} · {} requests · ${:.4} · in {} / out {} / rsn {} / cacheRead {}",
+        "Local opencode: {} · {} requests · ${:.4} (task-session $) · in {} / out {} / rsn {} / cacheRead {}",
         rep.local_version.as_deref().unwrap_or("?"),
         t.requests,
         t.cost,
@@ -1660,10 +1685,10 @@ pub fn render_text(rep: &UsageReport) -> Result<String, String> {
     }
 
     lines.push(String::new());
-    lines.push("== Per task ==".to_string());
+    lines.push("== Per task (task cost = whole session, matching watchdog; day rows = window) ==".to_string());
     lines.push(format!(
-        "{:<26} {:>5} {:>9} {:>7} {:>7} {:>6} {:>9} {:>6} {:<34} {}",
-        "task", "req", "$", "in", "out", "rsn", "cacheRead", "wall", "outcome", "flags"
+        "{:<26} {:<8} {:>5} {:>9} {:>7} {:>7} {:>6} {:>9} {:>6} {:<34} {}",
+        "task", "src", "req", "$", "in", "out", "rsn", "cacheRead", "wall", "outcome", "flags"
     ));
     for task in &rep.tasks {
         let mut flags = Vec::new();
@@ -1698,8 +1723,9 @@ pub fn render_text(rep: &UsageReport) -> Result<String, String> {
             &task.outcome
         };
         lines.push(format!(
-            "{:<26} {:>5} {:>9.4} {:>7} {:>7} {:>6} {:>9} {:>5}m {:<34} {}",
+            "{:<26} {:<8} {:>5} {:>9.4} {:>7} {:>7} {:>6} {:>9} {:>5}m {:<34} {}",
             t_display,
+            task.spend_src,
             task.requests,
             task.cost,
             kfmt(task.tokens.input),
@@ -1827,4 +1853,45 @@ pub fn handle_usage(raw_args: &[String]) -> Result<i32, String> {
     }
 
     Ok(rep.exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read_sessions_rusqlite() {
+        let tmp = std::env::temp_dir().join(format!("read-sessions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = tmp.join("test.db");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                idle_outcome TEXT
+            );
+            INSERT INTO session_v2 VALUES ('s1', '/path/to/.wt/worker-a', 'succeeded');
+            INSERT INTO session_v2 VALUES ('s2', '/path/to/.wt/worker-b', 'failed');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let sessions = read_sessions(&db_path).expect("read sessions");
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions["s1"].directory.as_deref(),
+            Some("/path/to/.wt/worker-a")
+        );
+        assert_eq!(sessions["s1"].idle_outcome.as_deref(), Some("succeeded"));
+        assert_eq!(
+            sessions["s2"].directory.as_deref(),
+            Some("/path/to/.wt/worker-b")
+        );
+        assert_eq!(sessions["s2"].idle_outcome.as_deref(), Some("failed"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

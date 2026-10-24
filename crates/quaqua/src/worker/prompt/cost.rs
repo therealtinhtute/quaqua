@@ -610,7 +610,6 @@ pub fn opencode_spend_in(
             return Some(spend);
         }
     }
-
     None
 }
 
@@ -638,35 +637,43 @@ fn opencode_db_candidates(name: &str) -> Vec<PathBuf> {
     db_candidates
 }
 
-/// Reads spend for a worker across opencode, omp, or claude.
-pub fn read_worker_spend(
+/// Reads spend for a worker across opencode, omp, claude, or pi, accepting custom db/runs overrides.
+pub fn read_worker_spend_with(
     name: &str,
     session_id: &str,
     cwd: &str,
     harness: &str,
     since_ms: Option<u64>,
+    custom_db: Option<&Path>,
+    custom_runs: Option<&Path>,
+    allow_cost_file: bool,
 ) -> Spend {
-    if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
-        if let Ok(content) = std::fs::read_to_string(&cost_file) {
-            if let Ok(val) = content.trim().parse::<f64>() {
-                return Spend {
-                    usd: Some(val),
-                    tokens: None,
-                    spend_src: "cost-file".to_string(),
-                    model: None,
-                };
+    if allow_cost_file {
+        if let Ok(cost_file) = std::env::var("PROMPT_WORKER_COST_FILE") {
+            if let Ok(content) = std::fs::read_to_string(&cost_file) {
+                if let Ok(val) = content.trim().parse::<f64>() {
+                    return Spend {
+                        usd: Some(val),
+                        tokens: None,
+                        spend_src: "cost-file".to_string(),
+                        model: None,
+                    };
+                }
             }
+            return Spend {
+                usd: None,
+                tokens: None,
+                spend_src: "cost-file-invalid".to_string(),
+                model: None,
+            };
         }
-        return Spend {
-            usd: None,
-            tokens: None,
-            spend_src: "cost-file-invalid".to_string(),
-            model: None,
-        };
     }
 
     if is_pi_worker(harness) {
-        let dir = pi_session_dir(&default_runs_dir(), name);
+        let runs = custom_runs
+            .map(PathBuf::from)
+            .unwrap_or_else(default_runs_dir);
+        let dir = pi_session_dir(&runs, name);
         if let Some(spend) = session_dir_spend(&dir, since_ms, "pi-session") {
             return spend;
         }
@@ -724,7 +731,18 @@ pub fn read_worker_spend(
         };
     }
 
-    if is_opencode_worker(harness, name) {
+    if is_opencode_worker(harness, name) || custom_db.is_some() {
+        if let Some(db_path) = custom_db {
+            if let Some(spend) = opencode_spend_in(db_path, session_id, cwd, since_ms) {
+                return spend;
+            }
+            return Spend {
+                usd: None,
+                tokens: None,
+                spend_src: "opencode-db-not-found".to_string(),
+                model: None,
+            };
+        }
         let candidates = opencode_db_candidates(name);
         for db_path in candidates {
             if let Some(spend) = opencode_spend_in(&db_path, session_id, cwd, since_ms) {
@@ -749,6 +767,17 @@ pub fn read_worker_spend(
         },
         model: None,
     }
+}
+
+/// Reads spend for a worker across opencode, omp, or claude.
+pub fn read_worker_spend(
+    name: &str,
+    session_id: &str,
+    cwd: &str,
+    harness: &str,
+    since_ms: Option<u64>,
+) -> Spend {
+    read_worker_spend_with(name, session_id, cwd, harness, since_ms, None, None, true)
 }
 
 pub fn read_worker_cost(name: &str, session_id: &str, cwd: &str, harness: &str) -> Option<f64> {
