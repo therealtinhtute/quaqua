@@ -413,3 +413,341 @@ fn test_cli_mail_send_inbox_ack_ls() {
 
     std::env::remove_var("QUAQUA_RUNS_DIR");
 }
+
+static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    vars: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn new(keys: &[&'static str]) -> Self {
+        let lock = TEST_ENV_LOCK.lock().unwrap();
+        let vars = keys.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+        Self { _lock: lock, vars }
+    }
+    fn set(&self, key: &'static str, val: &str) {
+        std::env::set_var(key, val);
+    }
+    fn remove(&self, key: &'static str) {
+        std::env::remove_var(key);
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in &self.vars {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
+
+#[test]
+fn test_finding1_ack_inbox_identity_fail_closed() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID", "QUAQUA_RUNS_DIR"]);
+    guard.remove("QUAQUA_TEST");
+    guard.remove("QUAQUA_OWNER");
+    guard.remove("HERDR_PANE_ID");
+
+    let runs = hermetic_temp_dir("finding1-identity");
+    guard.set("QUAQUA_RUNS_DIR", runs.to_str().unwrap());
+    let herdr = Herdr::new();
+
+    // 1. ack without identity must fail (not default to cos)
+    let res = mail::handle_mail(&["ack".to_string(), "1".to_string()], &herdr);
+    assert!(res.is_err(), "ack without caller identity must fail closed");
+
+    // 2. ack with --as must be refused (no forgeable override)
+    let res = mail::handle_mail(
+        &["ack".to_string(), "1".to_string(), "--as".to_string(), "cos".to_string()],
+        &herdr,
+    );
+    assert!(res.is_err(), "ack with --as override must be refused");
+
+    // 3. inbox without --for must fail closed when caller identity is unknown (no cos default)
+    let res = mail::handle_mail(&["inbox".to_string()], &herdr);
+    assert!(res.is_err(), "inbox without caller identity must fail closed without cos default");
+}
+
+#[test]
+fn test_finding2_sender_identity_fail_closed_no_from() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID", "QUAQUA_RUNS_DIR"]);
+    guard.remove("QUAQUA_TEST");
+    guard.remove("QUAQUA_OWNER");
+    guard.remove("HERDR_PANE_ID");
+
+    let runs = hermetic_temp_dir("finding2-sender");
+    guard.set("QUAQUA_RUNS_DIR", runs.to_str().unwrap());
+    let herdr = Herdr::new();
+
+    // 1. send with --from must be refused (cannot forge sender)
+    let res = mail::handle_mail(
+        &[
+            "send".to_string(),
+            "--to".to_string(),
+            "cos".to_string(),
+            "--kind".to_string(),
+            "accept".to_string(),
+            "--from".to_string(),
+            "mu-lead".to_string(),
+            "--body".to_string(),
+            "forged accept".to_string(),
+        ],
+        &herdr,
+    );
+    assert!(res.is_err(), "send with --from override must be refused");
+
+    // 2. send without harness identity must fail closed
+    let res = mail::handle_mail(
+        &[
+            "send".to_string(),
+            "--to".to_string(),
+            "cos".to_string(),
+            "--kind".to_string(),
+            "accept".to_string(),
+            "--body".to_string(),
+            "hello".to_string(),
+        ],
+        &herdr,
+    );
+    assert!(res.is_err(), "send without harness identity must fail closed");
+}
+
+#[test]
+fn test_finding3_path_traversal_refused() {
+    let runs = hermetic_temp_dir("finding3-traversal");
+    let outside_path = std::env::temp_dir().join("evil-traversal-probe.inbox.md");
+    if outside_path.exists() {
+        let _ = std::fs::remove_file(&outside_path);
+    }
+
+    let res = mail::append_to_markdown_inbox(
+        &runs,
+        "../../evil-traversal-probe",
+        "2026-10-24T00:00:00Z",
+        "accept",
+        "payload",
+    );
+    assert!(res.is_err(), "path traversal in sender name must be refused");
+    assert!(!outside_path.exists(), "must not create file outside runs_dir");
+}
+
+#[test]
+fn test_finding4_dual_write_and_import_deduplicated() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID", "QUAQUA_RUNS_DIR"]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "mu-lead");
+
+    let runs = hermetic_temp_dir("finding4-dedup");
+    let herdr = Herdr::new();
+
+    let opts = SendMailOpts {
+        to: "cos".to_string(),
+        kind: "accept".to_string(),
+        body: "dual write dedup check".to_string(),
+        from: Some("mu-lead".to_string()),
+        project: Some("mu".to_string()),
+        reply_to: None,
+        client_id: None,
+    };
+
+    let res1 = mail::send_mail(&runs, &opts, &herdr).expect("first send");
+    assert!(!res1.already_sent);
+
+    // Retried send across boundary
+    let res2 = mail::send_mail(&runs, &opts, &herdr).expect("retried send");
+    assert!(res2.already_sent);
+
+    // Verify markdown entry in mu-lead.inbox.md: must have exactly 1 entry
+    let md_path = runs.join("mu-lead.inbox.md");
+    assert!(md_path.exists(), "mu-lead.inbox.md must exist");
+    let md_content = std::fs::read_to_string(&md_path).expect("read md");
+    let header_count = md_content.lines().filter(|l| l.starts_with("## ")).count();
+    assert_eq!(header_count, 1, "retried send must write exactly 1 md entry");
+
+    // Import the markdown inbox file
+    let imp = mail::import_inbox_file(&runs, &md_path).expect("import inbox");
+    assert_eq!(imp.total, 1);
+    assert_eq!(imp.imported, 0, "already-sent dual-write mail must be skipped on import");
+
+    // Verify SQLite mail table has exactly 1 row
+    let bus = FarmBus::open(&runs.join("quaqua.db")).expect("open bus");
+    let count: i64 = bus
+        .conn_for_test()
+        .query_row("SELECT COUNT(*) FROM mail", [], |r| r.get(0))
+        .expect("count mail");
+    assert_eq!(count, 1, "lead send + import must yield exactly one row");
+}
+
+#[test]
+fn test_finding5_md_fallback_recipient_and_locked_db() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID", "QUAQUA_RUNS_DIR"]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "tieude-1");
+
+    let runs = hermetic_temp_dir("finding5-fallback");
+    let herdr = Herdr::new();
+
+    // 1. Locked db must return Err containing database path (exit 1), not silent fallback
+    let db_path = runs.join("quaqua.db");
+    {
+        let bus = FarmBus::open(&db_path).expect("create db");
+        // Hold exclusive lock
+        let conn = bus.conn_for_test();
+        conn.execute_batch("BEGIN EXCLUSIVE;").expect("begin exclusive lock");
+
+        let opts = SendMailOpts {
+            to: "mu-lead".to_string(),
+            kind: "accept".to_string(),
+            body: "locked db test".to_string(),
+            from: Some("tieude-1".to_string()),
+            project: Some("tieude".to_string()),
+            reply_to: None,
+            client_id: None,
+        };
+
+        // send_mail must fail with an error naming the db path
+        let err = mail::send_mail(&runs, &opts, &herdr).expect_err("locked db must return error");
+        assert!(
+            err.contains("quaqua.db") || err.contains("database locked"),
+            "error must include path and mention lock: {err}"
+        );
+    }
+
+    // 2. Fallback on corrupt DB: must keep recipient mu-lead
+    let corrupt_runs = hermetic_temp_dir("finding5-corrupt");
+    std::fs::write(corrupt_runs.join("quaqua.db"), b"not a valid sqlite file").unwrap();
+
+    let opts2 = SendMailOpts {
+        to: "mu-lead".to_string(),
+        kind: "handoff".to_string(),
+        body: "peer to lead handoff".to_string(),
+        from: Some("tieude-1".to_string()),
+        project: Some("tieude".to_string()),
+        reply_to: None,
+        client_id: None,
+    };
+    let res = mail::send_mail(&corrupt_runs, &opts2, &herdr).expect("send fallback");
+    assert_eq!(res.id, 0);
+
+    // Must be in mu-lead.inbox.md, NOT tieude-1.inbox.md
+    assert!(!corrupt_runs.join("tieude-1.inbox.md").exists(), "must not write to sender inbox");
+    let target_md = corrupt_runs.join("mu-lead.inbox.md");
+    assert!(target_md.exists(), "must write to recipient inbox mu-lead.inbox.md");
+
+    // Repair the db to test import
+    std::fs::remove_file(corrupt_runs.join("quaqua.db")).unwrap();
+    let imp = mail::import_inbox_file(&corrupt_runs, &target_md).expect("import fallback");
+    assert_eq!(imp.imported, 1);
+
+    let bus = FarmBus::open(&corrupt_runs.join("quaqua.db")).expect("open repaired bus");
+    let to_name: String = bus
+        .conn_for_test()
+        .query_row("SELECT to_name FROM mail LIMIT 1", [], |r| r.get(0))
+        .expect("query to_name");
+    assert_eq!(to_name, "mu-lead", "import must preserve recipient mu-lead, not default to cos");
+}
+
+#[test]
+fn test_finding6_import_multibyte_char_boundary_truncation() {
+    let runs = hermetic_temp_dir("finding6-utf8");
+    let inbox_file = runs.join("test-lead.inbox.md");
+
+    // 4095 ASCII bytes + 2-byte Vietnamese character 'ế' (starts at 4095, ends at 4097)
+    let mut body = "a".repeat(4095);
+    body.push_str("ế is multibyte UTF-8");
+
+    let content = format!("## 2026-10-24T00:00:00Z test-lead handoff\n{body}\n");
+    std::fs::write(&inbox_file, content).expect("write inbox file");
+
+    // Must not panic on char boundary
+    let res = mail::import_inbox_file(&runs, &inbox_file).expect("import must not panic");
+    assert_eq!(res.imported, 1);
+
+    let bus = FarmBus::open(&runs.join("quaqua.db")).expect("open bus");
+    let imported_body: String = bus
+        .conn_for_test()
+        .query_row("SELECT body FROM mail LIMIT 1", [], |r| r.get(0))
+        .expect("query body");
+    assert!(imported_body.chars().count() <= 4096);
+}
+
+#[test]
+fn test_finding7_checked_in_fixtures_idempotent() {
+    let runs = hermetic_temp_dir("finding7-fixtures");
+    let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inbox");
+    assert!(fixtures_dir.exists(), "fixtures dir must exist");
+
+    let entries: Vec<PathBuf> = std::fs::read_dir(&fixtures_dir)
+        .expect("read fixtures dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
+        .collect();
+    assert!(entries.len() >= 5, "must have at least 5 checked-in fixture files, got {}", entries.len());
+
+    // First import run
+    let mut total_imported = 0;
+    for path in &entries {
+        let res = mail::import_inbox_file(&runs, path).expect("import fixture");
+        total_imported += res.imported;
+    }
+    assert!(total_imported >= 5, "must import all fixture rows");
+
+    // Verify bus-lead fixture with +07:00 offset and multibyte body was imported
+    let bus = FarmBus::open(&runs.join("quaqua.db")).expect("open bus");
+    let bus_lead_body: String = bus
+        .conn_for_test()
+        .query_row(
+            "SELECT body FROM mail WHERE from_name = 'bus-lead' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query bus-lead body");
+    assert!(bus_lead_body.contains("Bàn giao P2 bus foundation"));
+
+    // Second import run: strictly idempotent (0 imported)
+    let mut second_imported = 0;
+    for path in &entries {
+        let res = mail::import_inbox_file(&runs, path).expect("re-import fixture");
+        second_imported += res.imported;
+    }
+    assert_eq!(second_imported, 0, "second import must be idempotent (0 new rows)");
+}
+
+#[test]
+fn test_finding8_mail_unacked_check_on_every_verb() {
+    let runs = hermetic_temp_dir("finding8-verbs");
+    let bus = FarmBus::open(&runs.join("quaqua.db")).expect("open bus");
+
+    // Insert an unacked mail from 35 minutes ago (ack timeout is 30m)
+    let old_ts = (quaqua::bus::now_ms()).saturating_sub(35 * 60 * 1000);
+    bus.conn_for_test()
+        .execute(
+            r#"
+            INSERT INTO mail (
+                msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to, body
+            ) VALUES ('test-key-f8', ?1, 'mu-lead', 'lead', 'cos', 'escalate', 'mu', NULL, 'urgent')
+            "#,
+            rusqlite::params![old_ts as i64],
+        )
+        .expect("insert old unacked mail");
+
+    // Call mail::list_mail
+    let _ = mail::list_mail(&runs, true, None, None, None).expect("list mail");
+
+    // Verify mail_unacked incident was inserted into farm_events
+    let count: i64 = bus
+        .conn_for_test()
+        .query_row(
+            "SELECT COUNT(*) FROM farm_events WHERE type = 'mail_unacked'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count unacked incidents");
+    assert_eq!(count, 1, "list_mail must trigger mail_unacked incident check");
+}
