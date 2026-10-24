@@ -1,0 +1,20 @@
+name = "advisor"
+depth = 1
+
+[roles.cos]
+class = "cos"
+can_spawn = ["advisor"]
+can_prompt = ["advisor"]
+
+[roles.lead]
+class = "lead"
+can_spawn = ["advisor"]
+can_prompt = ["advisor"]
+reports_to = "cos"
+
+[roles.advisor]
+class = "taskforce"
+reports_to = "owner"
+members = [
+    { kind = "suhuynh" },
+]

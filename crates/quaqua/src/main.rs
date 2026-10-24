@@ -116,6 +116,11 @@ enum Command {
         #[command(subcommand)]
         cmd: CosCmd,
     },
+    /// Topology layout operations: show, why.
+    Layout {
+        #[command(subcommand)]
+        cmd: LayoutCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -164,6 +169,31 @@ enum CosCmd {
         pane: Option<String>,
     },
 }
+#[derive(Subcommand)]
+enum LayoutCmd {
+    /// Show effective topology layout.
+    Show {
+        /// Project slug override
+        #[arg(long)]
+        project: Option<String>,
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explain layout decision for a caller, verb, and target.
+    Why {
+        caller: String,
+        verb: String,
+        target: String,
+        /// Project slug override
+        #[arg(long)]
+        project: Option<String>,
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 
 #[derive(Subcommand)]
 enum ConfigCmd {
@@ -689,6 +719,38 @@ fn main() {
                         }
                     }
                     (Err(e), _) | (_, Err(e)) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
+                }
+            }
+        },
+        Some(Command::Layout { cmd }) => match cmd {
+            LayoutCmd::Show { project, json } => {
+                match quaqua::layout::run_show(project.as_deref(), json) {
+                    Ok(out) => {
+                        print!("{out}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
+                }
+            }
+            LayoutCmd::Why {
+                caller,
+                verb,
+                target,
+                project,
+                json,
+            } => {
+                match quaqua::layout::run_why(&caller, &verb, &target, project.as_deref(), json) {
+                    Ok(out) => {
+                        print!("{out}");
+                        0
+                    }
+                    Err(e) => {
                         eprintln!("error: {e}");
                         1
                     }
