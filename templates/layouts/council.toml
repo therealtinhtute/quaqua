@@ -1,0 +1,22 @@
+name = "council"
+depth = 1
+
+[roles.cos]
+class = "cos"
+can_spawn = ["council"]
+can_prompt = ["council"]
+
+[roles.lead]
+class = "lead"
+can_spawn = ["council"]
+can_prompt = ["council"]
+reports_to = "cos"
+
+[roles.council]
+class = "taskforce"
+reports_to = "owner"
+members = [
+    { purpose = "review" },
+    { purpose = "review" },
+    { purpose = "advise" },
+]
