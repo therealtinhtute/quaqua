@@ -150,6 +150,7 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
 
     let rf = runs_dir.join(format!("{name}.rules.md"));
     let _ = std::fs::remove_file(rf);
+    let _ = std::fs::remove_file(WorkerMetadata::owner_path(&runs_dir, &name));
 
     let index = root.join("projects/INDEX.md");
     if index.is_file() {

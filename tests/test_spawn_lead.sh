@@ -108,6 +108,8 @@ spawn coucou-island
 [[ $rc -eq 0 ]] || fail "happy: exit $rc, want 0: $(cat "$T/err")"
 grep -qx 'lead=coucou-island-lead slug=coucou-island workspace=w7 pane=%7' "$T/out" \
   || fail "happy: no success line: $(cat "$T/out")"
+[[ -f "$T/runs/coucou-island-lead.owner" ]] || fail "happy: runs/coucou-island-lead.owner not written"
+[[ "$(cat "$T/runs/coucou-island-lead.owner")" == "cos" ]] || fail "happy: runs/coucou-island-lead.owner != cos"
 [[ $(ln 'agent get') -lt $(ln 'workspace create') ]] \
   && [[ $(ln 'workspace create') -lt $(ln 'pane report-metadata') ]] \
   && [[ $(ln 'pane report-metadata') -lt $(ln 'agent start') ]] \

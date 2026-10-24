@@ -275,6 +275,17 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
     let _ = std::fs::write(&rf, rules_content);
 
+    // Save owner file and log identity
+    let caller = crate::identity::resolve_caller(herdr, &runs_dir);
+    let caller_owner = if caller.role == crate::identity::Role::Unknown && caller.name == "unknown" {
+        "cos".to_string()
+    } else {
+        caller.name.clone()
+    };
+    crate::state::WorkerMetadata::save_owner(&runs_dir, &name, &caller_owner)
+        .map_err(|e| (1, format!("cannot write owner file for {name}: {e}\n")))?;
+    eprintln!("[identity] lead spawn: slug={slug} caller={caller}");
+
     // Load config and resolve lead launch
     let base_cfg = crate::config::load_team_config()?;
     let cfg = crate::config::resolve(base_cfg.clone(), Some(&slug)).unwrap_or(base_cfg);
@@ -520,4 +531,271 @@ pub fn update_index_content(content: &str, slug: &str, new_owner: &str) -> Strin
         out.push('\n');
     }
     out
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::fs;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Output;
+
+    struct DummyGit;
+    impl GitOps for DummyGit {
+        fn run_in(&self, _dir: &Path, _args: &[&str]) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn rev_parse_commit(&self, _repo: &Path, _base: &str) -> bool {
+            true
+        }
+        fn worktree_list_porcelain(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn worktree_add(
+            &self,
+            _repo: &Path,
+            _branch: &str,
+            _wt: &Path,
+            _base: Option<&str>,
+        ) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
+            true
+        }
+        fn worktree_add_existing(
+            &self,
+            _repo: &Path,
+            _branch: &str,
+            _wt: &Path,
+        ) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn worktree_remove(&self, _repo: &Path, _wt: &Path) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn remote_list(&self, _repo: &Path) -> std::io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn is_core_bare(&self, _repo: &Path) -> bool {
+            false
+        }
+        fn has_core_worktree(&self, _repo: &Path) -> bool {
+            false
+        }
+        fn enable_worktree_config(&self, _repo: &Path) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn set_worktree_pushurl_blocked(&self, _wt: &Path, _remote: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn is_git_dir(&self, _cwd: &Path) -> bool {
+            true
+        }
+        fn diff_and_status(&self, _cwd: &Path) -> (String, String) {
+            (String::new(), String::new())
+        }
+    }
+
+    struct DummyHerdr {
+        calls: RefCell<Vec<String>>,
+        started: std::cell::Cell<bool>,
+    }
+    impl DummyHerdr {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                started: std::cell::Cell::new(false),
+            }
+        }
+    }
+    impl HerdrOps for DummyHerdr {
+        fn run(&self, args: &[&str]) -> std::io::Result<Output> {
+            self.calls.borrow_mut().push(args.join(" "));
+            let stdout = if args.first() == Some(&"workspace") && args.get(1) == Some(&"create") {
+                r#"{"result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}"#
+            } else if args.first() == Some(&"agent") && args.get(1) == Some(&"start") {
+                self.started.set(true);
+                r#"{"result":{}}"#
+            } else {
+                r#"{"result":{}}"#
+            };
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+        fn agent_list(&self) -> std::io::Result<String> {
+            Ok(r#"{"result":{"agents":[]}}"#.to_string())
+        }
+        fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
+            if self.started.get() {
+                Ok((true, r#"{"result":{"agent":{"agent_status":"working","pane_id":"w1:p1"}}}"#.to_string()))
+            } else {
+                Ok((false, r#"{"error":{"code":"agent_not_found"}}"#.to_string()))
+            }
+        }
+        fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn agent_start(
+            &self,
+            _n: &str,
+            _k: &str,
+            _p: &str,
+            _t: u32,
+            _a: &[&str],
+        ) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn pane_split(&self, _c: &str, _o: &str, _e: &[(&str, &str)]) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_close(&self, _p: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
+            unimplemented!()
+        }
+        fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_wait_background(
+            &self,
+            _n: &str,
+            _p: &str,
+            _t: u32,
+            _f: std::fs::File,
+        ) -> std::io::Result<std::process::Child> {
+            unimplemented!()
+        }
+    }
+
+    struct CleanupDir(PathBuf);
+    impl Drop for CleanupDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_lead_spawn_writes_owner_file() {
+        let _lock = crate::test_env::lock_env();
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("quaqua-lead-spawn-test-{}-{nanos}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("projects")).unwrap();
+        fs::create_dir_all(root.join("rules/_all")).unwrap();
+        let _guard = CleanupDir(root.clone());
+
+        let index_content = "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| testslug | ~/Lab/testslug | cos | active | goal |\n";
+        fs::write(root.join("projects/INDEX.md"), index_content).unwrap();
+        fs::write(root.join("projects/testslug.md"), "# testslug card\n").unwrap();
+
+        let _root_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_ROOT", root.to_str().unwrap());
+        let _home_guard = crate::test_env::TestEnvVarGuard::set("HOME", root.to_str().unwrap());
+        let _owner_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+        let _pane_guard = crate::test_env::TestEnvVarGuard::set("HERDR_PANE_ID", "");
+
+        let git = DummyGit;
+        let herdr = DummyHerdr::new();
+
+        let res = spawn_lead(&["testslug".to_string()], &git, &herdr);
+        assert!(res.is_ok(), "spawn_lead failed: {:?}", res.err());
+
+        let owner_file = root.join("runs/testslug-lead.owner");
+        assert!(owner_file.is_file(), "runs/testslug-lead.owner must exist");
+        let owner_content = fs::read_to_string(&owner_file).unwrap();
+        assert_eq!(owner_content, "cos\n");
+    }
+
+    #[test]
+    fn test_lead_spawn_writes_caller_owner_when_set() {
+        let _lock = crate::test_env::lock_env();
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("quaqua-lead-spawn-caller-{}-{nanos}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("projects")).unwrap();
+        fs::create_dir_all(root.join("rules/_all")).unwrap();
+        let _guard = CleanupDir(root.clone());
+
+        let index_content = "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| child | ~/Lab/child | cos | active | goal |\n";
+        fs::write(root.join("projects/INDEX.md"), index_content).unwrap();
+        fs::write(root.join("projects/child.md"), "# child card\n").unwrap();
+
+        let _root_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_ROOT", root.to_str().unwrap());
+        let _home_guard = crate::test_env::TestEnvVarGuard::set("HOME", root.to_str().unwrap());
+        let _owner_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_OWNER", "parent-lead");
+        let _pane_guard = crate::test_env::TestEnvVarGuard::set("HERDR_PANE_ID", "");
+
+        let git = DummyGit;
+        let herdr = DummyHerdr::new();
+
+        let res = spawn_lead(&["child".to_string()], &git, &herdr);
+        assert!(res.is_ok(), "spawn_lead failed: {:?}", res.err());
+
+        let owner_file = root.join("runs/child-lead.owner");
+        assert!(owner_file.is_file(), "runs/child-lead.owner must exist");
+        let owner_content = fs::read_to_string(&owner_file).unwrap();
+        assert_eq!(owner_content, "parent-lead\n");
+    }
 }

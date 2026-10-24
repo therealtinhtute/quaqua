@@ -376,6 +376,8 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     let owner = resolve_owner(herdr);
     let runs_dir = crate::worker::cleanup::default_runs_dir();
     let _ = std::fs::create_dir_all(&runs_dir);
+    let caller = crate::identity::resolve_caller(herdr, &runs_dir);
+    eprintln!("[identity] worker spawn: name={} caller={caller}", opts.name);
 
     // Lead gate (AGENTS.md '## Roles (SLP)'): a `cos`-owned project with two or
     // more topology signals needs a Lead before another worker joins it.
