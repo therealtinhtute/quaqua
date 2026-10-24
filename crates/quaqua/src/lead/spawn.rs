@@ -777,5 +777,14 @@ mod tests {
         assert!(owner_file.is_file(), "runs/child-lead.owner must exist");
         let owner_content = fs::read_to_string(&owner_file).unwrap();
         assert_eq!(owner_content, "parent-lead\n");
+
+        let layout_file = root.join("runs/child.layout.toml");
+        assert!(layout_file.is_file(), "runs/child.layout.toml must exist");
+        let snap = crate::layout::snapshot::read_layout_snapshot(&root.join("runs"), "child")
+            .expect("read_layout_snapshot must succeed")
+            .expect("snapshot must be present");
+        assert_eq!(snap.layout.name, "slp");
+        assert_eq!(snap.sha256.len(), 64);
+        assert!(snap.source.starts_with("team.toml@"));
     }
 }

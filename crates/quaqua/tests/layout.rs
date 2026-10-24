@@ -3,9 +3,10 @@ use quaqua::identity::{Caller, CallerDepth, IdentitySource, Role};
 use quaqua::layout::{
     builtin, check, check_with_count, find_lead_in_owner_chain, layout_sha256,
     read_layout_snapshot, resolve_caller_by_name, resolve_effective_layout, resolve_layout,
-    run_refreeze, run_show, run_why, why, write_layout_snapshot, Layout, LayoutOrigin, Verb,
+    run_refreeze, run_show, run_why, why, write_layout_snapshot, Layout, LayoutOrigin, Naming,
+    RoleClass, Verb,
 };
-use quaqua::layout::migrate::{migrate_team_toml, MigrateResult};
+use quaqua::layout::migrate::{format_diff, migrate_team_toml, run_migrate, MigrateResult};
 use std::path::PathBuf;
 
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -634,13 +635,14 @@ max_workers_per_orchestrator = 4
 [merge]
 integ_branch = "quaqua/{slug}-integ"
 [roles.cos]
-can_spawn = ["lead"]
+can_spawn = ["lead", "taskforce"]
 can_prompt = ["lead"]
 
 [roles.lead]
-can_spawn = ["peer"]
+can_spawn = ["peer", "taskforce"]
 can_prompt = ["peer"]
 reports_to = "cos"
+max_peers = 3
 
 [roles.peer]
 can_spawn = []
@@ -671,12 +673,93 @@ can_review = true
     };
     assert!(migrated.contains("[layout]\nuse = \"custom\""));
     assert!(migrated.contains("[layouts.custom]"));
+    assert!(migrated.contains("depth = 2"));
     assert!(migrated.contains("[layouts.custom.roles.cos]"));
     assert!(migrated.contains("[layouts.custom.roles.lead]"));
     assert!(migrated.contains("[layouts.custom.roles.peer]"));
+    assert!(migrated.contains("[layouts.custom.roles.taskforce]"));
+    assert!(migrated.contains("max_children = 3"));
+    assert!(!migrated.contains("max_peers"));
 
-    let cfg: Config = toml::from_str(&migrated).expect("parse migrated custom TOML");
-    config::validate(&cfg).expect("validate migrated custom Config");
+    let v2_cfg: Config = toml::from_str(v2_custom).expect("parse v2 custom TOML");
+    let v2_legacy = Layout::from_legacy(&v2_cfg);
+
+    let migrated_cfg: Config = toml::from_str(&migrated).expect("parse migrated custom TOML");
+    config::validate(&migrated_cfg).expect("validate migrated custom Config");
+
+    let custom_layout = resolve_layout(&migrated_cfg).expect("resolve migrated layout");
+    assert_eq!(
+        custom_layout.edge_set(),
+        v2_legacy.edge_set(),
+        "migrated custom layout must preserve exact edge_set from legacy synthesis"
+    );
+    assert_eq!(
+        custom_layout.roles["lead"].max_children,
+        v2_legacy.roles["lead"].max_children
+    );
+    assert_eq!(
+        custom_layout.roles["cos"].max_children,
+        v2_legacy.roles["cos"].max_children
+    );
+    assert_eq!(custom_layout.roles["lead"].naming, Naming::SlugLead);
+    assert_eq!(
+        custom_layout.roles["taskforce"].class,
+        RoleClass::Taskforce
+    );
+}
+
+#[test]
+fn layout_p7_migrate_dry_run_unified_diff() {
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    let res = migrate_team_toml(template_toml).expect("migrate succeeds");
+    let migrated = match res {
+        MigrateResult::Migrated(s) => s,
+        _ => panic!("expected Migrated"),
+    };
+
+    let diff = format_diff(template_toml, &migrated, "team.toml");
+    assert!(diff.starts_with("--- team.toml\n+++ team.toml\n@@ -4,8 +4,11 @@\n"));
+    assert!(diff.contains("-schema_version = 2\n"));
+    assert!(diff.contains("+schema_version = 3\n"));
+    assert!(diff.contains("+[layout]\n+use = \"slp\"\n"));
+    // Crucial check from Finding 1: verify no false churn after the insertion
+    assert!(!diff.contains("-[limits]"));
+    assert!(!diff.contains("+[limits]"));
+    assert!(!diff.contains("-[timers]"));
+    assert!(!diff.contains("+[timers]"));
+}
+
+#[test]
+fn layout_p7_run_migrate_write_and_bak() {
+    let dir = hermetic_temp_dir("p7-bak");
+    let team_path = dir.join("team.toml");
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    std::fs::write(&team_path, template_toml).unwrap();
+
+    // Dry run first
+    let dry_out = run_migrate(Some(&team_path), false).expect("dry run succeeds");
+    assert!(dry_out.contains("-schema_version = 2\n"));
+    assert!(dry_out.contains("+schema_version = 3\n"));
+    assert!(!dir.join("team.toml.bak").exists());
+
+    // Write run
+    let write_out = run_migrate(Some(&team_path), true).expect("write run succeeds");
+    assert!(write_out.contains("backup at"));
+
+    // Verify backup created with original content
+    let bak_path = dir.join("team.toml.bak");
+    assert!(bak_path.is_file(), "backup file must exist");
+    let bak_content = std::fs::read_to_string(&bak_path).unwrap();
+    assert_eq!(bak_content, template_toml);
+
+    // Verify team.toml updated
+    let new_content = std::fs::read_to_string(&team_path).unwrap();
+    assert!(new_content.contains("schema_version = 3"));
+    assert!(new_content.contains("[layout]\nuse = \"slp\""));
+
+    // Subsequent run on already-v3 file is a no-op
+    let noop_out = run_migrate(Some(&team_path), false).expect("noop succeeds");
+    assert_eq!(noop_out, "already at schema_version 3\n");
 }
 
 #[test]

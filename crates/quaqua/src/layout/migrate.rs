@@ -3,11 +3,12 @@
 //! Performs line-by-line rewrite preserving comments and formatting:
 //! - Upgrades `schema_version = 2` to `3`.
 //! - Inserts `[layout] use = "slp"` when existing roles match the SLP built-in.
-//! - Otherwise moves `[roles.*]` tables to `[layouts.custom.roles.*]` with `[layouts.custom] depth = ...`.
+//! - Otherwise moves `[roles.*]` tables to `[layouts.custom.roles.*]` with `[layouts.custom] depth = ...`,
+//!   translating `max_peers` to `max_children` and preserving taskforce target synthesis.
 //! - Refuses `schema_version > 3` with an actionable hint.
 //! - No-op on already-v3 files with exit 0 ("already at schema_version 3").
 
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_LEAD_MAX_PEERS};
 use crate::layout::builtin;
 use crate::layout::model::Layout;
 use std::path::{Path, PathBuf};
@@ -70,11 +71,65 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
     // 3. Line-by-line rewrite preserving comments and formatting
     let mut out_lines = Vec::new();
     let lines: Vec<&str> = input.lines().collect();
-    let mut in_roles_table = false;
-    let mut current_role_has_class = false;
-    let mut current_role_name = String::new();
 
-    for (idx, line) in lines.iter().enumerate() {
+    let mut in_roles_table = false;
+    let mut current_role_name = String::new();
+    let mut current_role_has_class = false;
+    let mut current_role_has_naming = false;
+    let mut current_role_has_max_children = false;
+    let mut seen_roles = Vec::new();
+
+    let flush_role_metadata = |role_name: &str,
+                               has_class: bool,
+                               has_naming: bool,
+                               has_max_children: bool,
+                               out: &mut Vec<String>,
+                               config: &Config| {
+        if role_name.is_empty() {
+            return;
+        }
+        match role_name {
+            "cos" => {
+                if !has_class {
+                    out.push("class = \"cos\"".to_string());
+                }
+                if !has_max_children {
+                    out.push(format!(
+                        "max_children = {}",
+                        config.limits.max_workers_per_orchestrator
+                    ));
+                }
+            }
+            "lead" => {
+                if !has_class {
+                    out.push("class = \"lead\"".to_string());
+                }
+                if !has_naming {
+                    out.push("naming = \"slug-lead\"".to_string());
+                }
+                if !has_max_children {
+                    let peers = config
+                        .roles
+                        .get("lead")
+                        .and_then(|r| r.max_peers)
+                        .unwrap_or(DEFAULT_LEAD_MAX_PEERS);
+                    out.push(format!("max_children = {peers}"));
+                }
+            }
+            "peer" => {
+                if !has_class {
+                    out.push("class = \"peer\"".to_string());
+                }
+            }
+            other => {
+                if !has_class {
+                    out.push(format!("class = \"{other}\""));
+                }
+            }
+        }
+    };
+
+    for line in lines.iter() {
         let trimmed = line.trim();
 
         // Detect schema_version line
@@ -110,22 +165,28 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
         // For non-SLP roles: move [roles.<name>] to [layouts.custom.roles.<name>]
         if !matches_slp {
             if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                // If exiting a previous role table and class was missing, insert it before next table
-                if in_roles_table && !current_role_has_class && !current_role_name.is_empty() {
-                    let class_val = match current_role_name.as_str() {
-                        "cos" => "cos",
-                        "lead" => "lead",
-                        "peer" => "peer",
-                        _ => "peer",
-                    };
-                    out_lines.push(format!("class = \"{class_val}\""));
-                    current_role_has_class = true;
+                // If exiting a previous role table, flush missing metadata fields
+                if in_roles_table {
+                    flush_role_metadata(
+                        &current_role_name,
+                        current_role_has_class,
+                        current_role_has_naming,
+                        current_role_has_max_children,
+                        &mut out_lines,
+                        &cfg,
+                    );
                 }
 
-                if let Some(inner) = trimmed.strip_prefix("[roles.").and_then(|s| s.strip_suffix(']')) {
+                if let Some(inner) = trimmed
+                    .strip_prefix("[roles.")
+                    .and_then(|s| s.strip_suffix(']'))
+                {
                     in_roles_table = true;
                     current_role_has_class = false;
+                    current_role_has_naming = false;
+                    current_role_has_max_children = false;
                     current_role_name = inner.trim().to_string();
+                    seen_roles.push(current_role_name.clone());
                     let rewritten = line.replace("[roles.", "[layouts.custom.roles.");
                     out_lines.push(rewritten);
                     continue;
@@ -133,23 +194,46 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
                     in_roles_table = false;
                     current_role_name.clear();
                 }
-            } else if in_roles_table && trimmed.starts_with("class") && trimmed.contains('=') {
-                current_role_has_class = true;
+            } else if in_roles_table {
+                if trimmed.starts_with("class") && trimmed.contains('=') {
+                    current_role_has_class = true;
+                } else if trimmed.starts_with("naming") && trimmed.contains('=') {
+                    current_role_has_naming = true;
+                } else if trimmed.starts_with("max_children") && trimmed.contains('=') {
+                    current_role_has_max_children = true;
+                } else if trimmed.starts_with("max_peers") && trimmed.contains('=') {
+                    // Translate max_peers -> max_children preserving comments
+                    let rewritten = line.replace("max_peers", "max_children");
+                    out_lines.push(rewritten);
+                    current_role_has_max_children = true;
+                    continue;
+                }
             }
         }
 
         out_lines.push((*line).to_string());
+    }
 
-        // End of file check: if last table was a custom role without class
-        if !matches_slp && idx + 1 == lines.len() && in_roles_table && !current_role_has_class && !current_role_name.is_empty() {
-            let class_val = match current_role_name.as_str() {
-                "cos" => "cos",
-                "lead" => "lead",
-                "peer" => "peer",
-                _ => "peer",
-            };
-            out_lines.push(format!("class = \"{class_val}\""));
-        }
+    // Flush last role metadata if file ended inside a role table
+    if !matches_slp && in_roles_table {
+        flush_role_metadata(
+            &current_role_name,
+            current_role_has_class,
+            current_role_has_naming,
+            current_role_has_max_children,
+            &mut out_lines,
+            &cfg,
+        );
+    }
+
+    // For non-SLP migration, synthesize taskforce role if not explicitly defined
+    if !matches_slp && !seen_roles.iter().any(|r| r == "taskforce") {
+        out_lines.push(String::new());
+        out_lines.push("[layouts.custom.roles.taskforce]".to_string());
+        out_lines.push("class = \"taskforce\"".to_string());
+        out_lines.push("can_spawn = []".to_string());
+        out_lines.push("can_prompt = []".to_string());
+        out_lines.push("reports_to = \"owner\"".to_string());
     }
 
     let mut result = out_lines.join("\n");
@@ -166,35 +250,149 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
     Ok(MigrateResult::Migrated(result))
 }
 
-/// Compute a unified diff between old and new text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffOp<'a> {
+    Equal(&'a str),
+    Delete(&'a str),
+    Insert(&'a str),
+}
+
+/// Compute a unified diff between old and new text with standard `@@` hunks.
 pub fn format_diff(old_text: &str, new_text: &str, file_name: &str) -> String {
+    if old_text == new_text {
+        return String::new();
+    }
+
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
+    let n = old_lines.len();
+    let m = new_lines.len();
 
-    let mut out = String::new();
-    out.push_str(&format!("--- {}\n", file_name));
-    out.push_str(&format!("+++ {}\n", file_name));
-
-    // Simple line diff
-    let mut i = 0;
-    let mut j = 0;
-    while i < old_lines.len() || j < new_lines.len() {
-        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
-            out.push_str(&format!(" {}\n", old_lines[i]));
-            i += 1;
-            j += 1;
-        } else {
-            // Find next match or flush differences
-            if i < old_lines.len() && (j >= new_lines.len() || old_lines[i] != new_lines[j]) {
-                out.push_str(&format!("-{}\n", old_lines[i]));
-                i += 1;
-            }
-            if j < new_lines.len() && (i >= old_lines.len() || j < new_lines.len()) {
-                out.push_str(&format!("+{}\n", new_lines[j]));
-                j += 1;
+    // Standard LCS dynamic programming table
+    let mut dp = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            if old_lines[i] == new_lines[j] {
+                dp[i][j] = dp[i + 1][j + 1] + 1;
+            } else {
+                dp[i][j] = dp[i + 1][j].max(dp[i][j + 1]);
             }
         }
     }
+
+    let mut ops = Vec::new();
+    let mut i = 0;
+    let mut j = 0;
+    while i < n || j < m {
+        if i < n && j < m && old_lines[i] == new_lines[j] {
+            ops.push(DiffOp::Equal(old_lines[i]));
+            i += 1;
+            j += 1;
+        } else if i < n && (j == m || dp[i + 1][j] >= dp[i][j + 1]) {
+            ops.push(DiffOp::Delete(old_lines[i]));
+            i += 1;
+        } else {
+            ops.push(DiffOp::Insert(new_lines[j]));
+            j += 1;
+        }
+    }
+
+    // Collect changed positions
+    let mut change_indices = Vec::new();
+    for (idx, op) in ops.iter().enumerate() {
+        if !matches!(op, DiffOp::Equal(_)) {
+            change_indices.push(idx);
+        }
+    }
+
+    if change_indices.is_empty() {
+        return String::new();
+    }
+
+    const CONTEXT: usize = 3;
+    let mut hunk_ranges: Vec<(usize, usize)> = Vec::new();
+    for &ch in &change_indices {
+        let start = ch.saturating_sub(CONTEXT);
+        let end = (ch + CONTEXT + 1).min(ops.len());
+        if let Some(last) = hunk_ranges.last_mut() {
+            if start <= last.1 {
+                last.1 = end.max(last.1);
+                continue;
+            }
+        }
+        hunk_ranges.push((start, end));
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("--- {file_name}\n+++ {file_name}\n"));
+
+    let mut cur_old_line = 1usize;
+    let mut cur_new_line = 1usize;
+    let mut op_idx = 0usize;
+
+    for (hunk_start, hunk_end) in hunk_ranges {
+        // Advance line numbers up to hunk_start
+        while op_idx < hunk_start {
+            match ops[op_idx] {
+                DiffOp::Equal(_) => {
+                    cur_old_line += 1;
+                    cur_new_line += 1;
+                }
+                DiffOp::Delete(_) => {
+                    cur_old_line += 1;
+                }
+                DiffOp::Insert(_) => {
+                    cur_new_line += 1;
+                }
+            }
+            op_idx += 1;
+        }
+
+        let hunk_old_start = cur_old_line;
+        let hunk_new_start = cur_new_line;
+        let mut hunk_old_count = 0usize;
+        let mut hunk_new_count = 0usize;
+
+        for k in hunk_start..hunk_end {
+            match ops[k] {
+                DiffOp::Equal(_) => {
+                    hunk_old_count += 1;
+                    hunk_new_count += 1;
+                }
+                DiffOp::Delete(_) => {
+                    hunk_old_count += 1;
+                }
+                DiffOp::Insert(_) => {
+                    hunk_new_count += 1;
+                }
+            }
+        }
+
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            hunk_old_start, hunk_old_count, hunk_new_start, hunk_new_count
+        ));
+
+        while op_idx < hunk_end {
+            match ops[op_idx] {
+                DiffOp::Equal(line) => {
+                    out.push_str(&format!(" {line}\n"));
+                    cur_old_line += 1;
+                    cur_new_line += 1;
+                }
+                DiffOp::Delete(line) => {
+                    out.push_str(&format!("-{line}\n"));
+                    cur_old_line += 1;
+                }
+                DiffOp::Insert(line) => {
+                    out.push_str(&format!("+{line}\n"));
+                    cur_new_line += 1;
+                }
+            }
+            op_idx += 1;
+        }
+    }
+
     out
 }
 
