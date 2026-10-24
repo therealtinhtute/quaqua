@@ -80,6 +80,10 @@ if [[ "$1 $2" == "agent list" ]]; then
   exit 0
 fi
 if [[ "$1 $2" == "agent send-keys" ]]; then
+  if [[ "$3" == "ctrl-u" || "$4" == "ctrl-u" ]]; then
+    printf '%s\n' '{"code":"invalid_key","message":"unsupported key ctrl-u"}' >&2
+    exit 1
+  fi
   exit 0
 fi
 if [[ "$1 $2" == "agent prompt" ]]; then
@@ -111,7 +115,7 @@ fn a_landed_prompt_clears_then_submits_with_wait() {
     let calls = f.calls();
     assert_eq!(calls.lines().next(), Some("agent get baro-lead"));
     assert!(
-        calls.contains("agent send-keys baro-lead ctrl-u"),
+        calls.contains("agent send-keys baro-lead ctrl+u"),
         "{calls}"
     );
     assert!(

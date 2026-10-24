@@ -320,6 +320,12 @@ mod tests {
         }
         fn agent_send_keys(&self, _n: &str, key: &str) -> std::io::Result<Output> {
             self.calls.borrow_mut().push(format!("send-keys {key}"));
+            if key == "ctrl-u" {
+                return out(
+                    false,
+                    "{\"code\":\"invalid_key\",\"message\":\"unsupported key ctrl-u\"}",
+                );
+            }
             out(true, "")
         }
         fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<Output> {
@@ -352,7 +358,7 @@ mod tests {
         );
         prompt_lead(&args(), &fake).expect("landed");
         let calls = fake.calls.borrow();
-        assert_eq!(calls[0], "send-keys ctrl-u");
+        assert_eq!(calls[0], "send-keys ctrl+u");
         assert!(
             calls[1]
                 .starts_with("agent prompt baro-lead please fix the gate --wait --until working"),
