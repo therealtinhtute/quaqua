@@ -80,7 +80,7 @@ pub fn send_prompt<H: HerdrOps>(
 ) -> Result<(), (i32, String)> {
     // Clear any draft (Ctrl-U kills the line) so stale text cannot swallow the
     // Enter that submits this message.
-    let cleared = herdr.agent_send_keys(name, "ctrl-u").map_err(|e| {
+    let cleared = herdr.agent_send_keys(name, "ctrl+u").map_err(|e| {
         (
             1,
             format!("error: cannot clear the input box of '{name}': {e}\n"),
