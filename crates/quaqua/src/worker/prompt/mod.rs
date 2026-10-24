@@ -1039,7 +1039,7 @@ pub fn prompt_worker<G: GitOps>(
         );
         (code, String::new())
     };
-    let record_bus_event = |event_type: &str, incident_key: Option<String>, payload: &str| {
+    let record_bus_event = |event_type: &str, incident_key: Option<String>, payload: serde_json::Value| {
         let owner_str = crate::state::WorkerMetadata::load_owner(&runs_dir, name);
         let owner = if owner_str.is_empty() { None } else { Some(owner_str) };
         let project = repo_dir
@@ -1056,8 +1056,9 @@ pub fn prompt_worker<G: GitOps>(
         if let Some(key) = incident_key {
             ev = ev.with_incident_key(key);
         }
-        if !payload.is_empty() && payload != "{}" {
-            ev = ev.with_payload_json(payload);
+        let payload_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        if !payload_str.is_empty() && payload_str != "{}" {
+            ev = ev.with_payload_json(payload_str);
         }
         crate::bus::record_event_safely_in_runs(&runs_dir, &ev);
     };
@@ -1074,7 +1075,7 @@ pub fn prompt_worker<G: GitOps>(
                 record_bus_event(
                     "malformed",
                     Some(format!("malformed:{name}:{start_sec}")),
-                    &format!(r#"{{"missing":"{missing}"}}"#),
+                    serde_json::json!({ "missing": missing }),
                 );
                 return Err((6, String::new()));
             }
@@ -1086,7 +1087,7 @@ pub fn prompt_worker<G: GitOps>(
                 record_bus_event(
                     "malformed",
                     Some(format!("malformed:{name}:{start_sec}")),
-                    &format!(r#"{{"readonly":"{why}"}}"#),
+                    serde_json::json!({ "readonly": why }),
                 );
                 return Err((6, String::new()));
             }
@@ -1112,7 +1113,7 @@ pub fn prompt_worker<G: GitOps>(
                 record_bus_event(
                     "malformed",
                     Some(format!("malformed:{name}:{start_sec}")),
-                    &format!(r#"{{"playbook_gap":"{}"}}"#, gap.summary()),
+                    serde_json::json!({ "playbook_gap": gap.summary() }),
                 );
                 return Err((6, String::new()));
             }
@@ -1129,7 +1130,7 @@ pub fn prompt_worker<G: GitOps>(
             let read_marker = runs_dir.join(format!(".{name}.read"));
             let _ = std::fs::write(&read_marker, format!("{}\n", now_sec()));
 
-            record_bus_event("report_written", None, "{}");
+            record_bus_event("report_written", None, serde_json::json!({}));
             println!("{}", out.display());
             Ok(())
         }
@@ -1138,7 +1139,7 @@ pub fn prompt_worker<G: GitOps>(
             record_bus_event(
                 "budget_exceeded",
                 Some(format!("budget_exceeded:{name}:{start_sec}")),
-                &format!(r#"{{"reason":"{reason}"}}"#),
+                serde_json::json!({ "reason": reason }),
             );
             Err(watchdog_exit(2, &reason))
         }
@@ -1160,7 +1161,7 @@ pub fn prompt_worker<G: GitOps>(
             record_bus_event(
                 "stalled",
                 Some(format!("stall:{name}:{start_sec}")),
-                &format!(r#"{{"reason":"{reason}"}}"#),
+                serde_json::json!({ "reason": reason }),
             );
             Err(watchdog_exit(3, &reason))
         }
@@ -1169,7 +1170,7 @@ pub fn prompt_worker<G: GitOps>(
             record_bus_event(
                 "budget_exceeded",
                 Some(format!("budget_exceeded:{name}:{start_sec}")),
-                &format!(r#"{{"reason":"{reason}"}}"#),
+                serde_json::json!({ "reason": reason }),
             );
             Err(watchdog_exit(4, &reason))
         }
@@ -1177,7 +1178,7 @@ pub fn prompt_worker<G: GitOps>(
             record_bus_event(
                 "blocked",
                 Some(format!("blocked:{name}:{start_sec}")),
-                r#"{"reason":"cost cap reached"}"#,
+                serde_json::json!({ "reason": "cost cap reached" }),
             );
             Err(watchdog_exit(
                 5,
@@ -1188,7 +1189,7 @@ pub fn prompt_worker<G: GitOps>(
             record_bus_event(
                 "blocked",
                 Some(format!("blocked:{name}:{start_sec}")),
-                r#"{"reason":"agent blocked"}"#,
+                serde_json::json!({ "reason": "agent blocked" }),
             );
             Err(watchdog_exit(
                 5,
@@ -1229,7 +1230,7 @@ pub fn prompt_worker<G: GitOps>(
             record_bus_event(
                 "malformed",
                 Some(format!("malformed:{name}:{start_sec}")),
-                "{}",
+                serde_json::json!({}),
             );
             Err((6, String::new()))
         }
