@@ -64,6 +64,7 @@ impl WarningFlag {
 pub struct OrchestrationRow {
     pub name: String,
     pub owner: String,
+    pub team: String,
     pub agent_status: String,
     pub report_status: ReportStatus,
     pub phase: String,
@@ -418,6 +419,51 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
 ///
 /// `cfg` decides which names are task workers; callers resolve it once so this
 /// scan never reads process-global env.
+fn lead_slug(name: &str) -> Option<&str> {
+    name.strip_suffix("-lead").filter(|s| !s.is_empty())
+}
+
+/// Resolve the team for an entity by walking its owner chain starting from `name`.
+/// - The first `<slug>-lead` found in the chain gives `<slug>` (a Lead row is its own team).
+/// - Reaching `cos` with no lead in the chain yields `cos`.
+/// - A missing or cyclic chain yields `?`.
+pub fn resolve_team(runs_dir: &Path, name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "?".to_string();
+    }
+
+    let mut current = trimmed.to_string();
+    let mut visited: Vec<String> = Vec::new();
+
+    loop {
+        if let Some(slug) = lead_slug(&current) {
+            return slug.to_string();
+        }
+        if current == "cos" {
+            return "cos".to_string();
+        }
+        if visited.contains(&current) {
+            return "?".to_string();
+        }
+        visited.push(current.clone());
+
+        let owner_path = runs_dir.join(format!("{current}.owner"));
+        let content = match std::fs::read_to_string(&owner_path) {
+            Ok(c) => c,
+            Err(_) => return "?".to_string(),
+        };
+
+        let parent = content.trim();
+        if parent.is_empty() {
+            return "?".to_string();
+        }
+
+        current = parent.to_string();
+    }
+}
+
+
 pub fn scan_orchestration<H: HerdrOps>(
     runs_dir: &Path,
     herdr: &H,
@@ -605,8 +651,9 @@ pub fn scan_orchestration<H: HerdrOps>(
         flags.dedup();
 
         rows.push(OrchestrationRow {
-            name,
+            name: name.clone(),
             owner,
+            team: resolve_team(runs_dir, &name),
             agent_status,
             report_status,
             phase,
@@ -669,8 +716,8 @@ pub fn format_status_report(
         }
         Ok(orch_rows) => {
             out.push_str(&format!(
-                "{:<18} {:<16} {:<10} {:<8} {:<10} {:<8} {}\n",
-                "NAME", "OWNER", "STATUS", "REPORT", "PHASE", "WAIT", "WARNINGS"
+                "{:<18} {:<16} {:<12} {:<10} {:<8} {:<10} {:<8} {}\n",
+                "NAME", "OWNER", "TEAM", "STATUS", "REPORT", "PHASE", "WAIT", "WARNINGS"
             ));
             for r in orch_rows {
                 let rep_str = match r.report_status {
@@ -688,8 +735,8 @@ pub fn format_status_report(
                         .join(", ")
                 };
                 out.push_str(&format!(
-                    "{:<18} {:<16} {:<10} {:<8} {:<10} {:<8} {}\n",
-                    r.name, r.owner, r.agent_status, rep_str, r.phase, r.wait_time, flags_str
+                    "{:<18} {:<16} {:<12} {:<10} {:<8} {:<10} {:<8} {}\n",
+                    r.name, r.owner, r.team, r.agent_status, rep_str, r.phase, r.wait_time, flags_str
                 ));
             }
         }
@@ -2632,6 +2679,77 @@ mod tests {
         assert!(out.contains("arch-lead"));
         assert!(out.contains("sude-w1"));
         assert!(out.contains("WAIT"));
+        assert!(out.contains("TEAM"));
+    }
+
+    #[test]
+    fn test_status_orchestration_team_invariant() {
+        let tmp = temp_test_dir("team-invariant");
+        let _cleaner = TempDirCleaner(tmp.clone());
+
+        // 1. peer -> lead slug
+        fs::write(tmp.join("sude-peer.owner"), "gate-lead\n").unwrap();
+
+        // 2. lead -> own slug (even without owner file or with owner=cos)
+        fs::write(tmp.join("gate-lead.owner"), "cos\n").unwrap();
+
+        // 3. cos-owned -> cos
+        fs::write(tmp.join("sude-cos.owner"), "cos\n").unwrap();
+
+        // 4. cycle -> ?
+        fs::write(tmp.join("sude-c1.owner"), "sude-c2\n").unwrap();
+        fs::write(tmp.join("sude-c2.owner"), "sude-c1\n").unwrap();
+
+        // 5. missing -> ? (in live agents, no .owner file)
+
+        let mock_json = r#"{
+            "result": {
+                "agents": [
+                    {"name": "gate-lead", "agent_status": "working"},
+                    {"name": "sude-peer", "agent_status": "working"},
+                    {"name": "sude-cos", "agent_status": "working"},
+                    {"name": "sude-c1", "agent_status": "working"},
+                    {"name": "sude-missing", "agent_status": "working"}
+                ]
+            }
+        }"#;
+        let mock = MockHerdr::new(mock_json);
+
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
+
+        let find_team = |name: &str| -> String {
+            rows.iter()
+                .find(|r| r.name == name)
+                .map(|r| r.team.clone())
+                .unwrap_or_else(|| panic!("row '{name}' not found"))
+        };
+
+        // 1. peer -> lead slug
+        assert_eq!(find_team("sude-peer"), "gate");
+        // 2. lead -> own slug
+        assert_eq!(find_team("gate-lead"), "gate");
+        // 3. cos-owned -> cos
+        assert_eq!(find_team("sude-cos"), "cos");
+        // 4. cycle -> ?
+        assert_eq!(find_team("sude-c1"), "?");
+        // 5. missing -> ?
+
+        // Multi-hop: worker -> worker -> lead
+        fs::write(tmp.join("sude-sub.owner"), "sude-peer\n").unwrap();
+        assert_eq!(resolve_team(&tmp, "sude-sub"), "gate");
+
+        // Multi-hop: worker -> worker -> cos
+        fs::write(tmp.join("sude-subcos.owner"), "sude-cos\n").unwrap();
+        assert_eq!(resolve_team(&tmp, "sude-subcos"), "cos");
+
+        // Empty / nonexistent
+        assert_eq!(resolve_team(&tmp, ""), "?");
+        assert_eq!(resolve_team(&tmp, "sude-missing"), "?");
+
+        // Table format includes TEAM column
+        let report = format_status_report(Ok(&[]), Ok(&rows), Ok(&[]));
+        assert!(report.contains("TEAM"));
+        assert_eq!(find_team("sude-missing"), "?");
     }
 
     #[test]
