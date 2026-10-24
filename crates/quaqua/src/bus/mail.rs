@@ -236,7 +236,6 @@ pub struct SendMailOpts {
     pub to: String,
     pub kind: String,
     pub body: String,
-    pub from: Option<String>,
     pub project: Option<String>,
     pub reply_to: Option<u64>,
     pub client_id: Option<String>,
@@ -257,76 +256,76 @@ pub struct ImportResult {
     pub skipped: usize,
 }
 
-/// Resolves the sender identity (name, role).
+/// Returns true if `name` is a safe single-component path name that cannot escape `runs/`.
+pub fn is_safe_inbox_name(name: &str) -> bool {
+    let p = Path::new(name);
+    if p.components().count() != 1 {
+        return false;
+    }
+    match p.components().next() {
+        Some(std::path::Component::Normal(s)) => {
+            if let Some(s) = s.to_str() {
+                !s.is_empty()
+                    && !s.starts_with('.')
+                    && !s.contains('/')
+                    && !s.contains('\\')
+                    && !s.contains("..")
+                    && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Resolves the sender identity (name, role) strictly from harness (env only under QUAQUA_TEST=1).
 pub fn resolve_sender<H: HerdrOps>(
-    from_arg: Option<&str>,
     herdr: &H,
     runs_dir: &Path,
 ) -> Result<(String, String), String> {
-    if let Some(f) = from_arg {
-        let f = f.trim();
-        if !f.is_empty() {
-            let role = if f == "cos" {
-                "cos"
-            } else if f.ends_with("-lead") {
-                "lead"
-            } else {
-                "peer"
-            };
-            return Ok((f.to_string(), role.to_string()));
-        }
-    }
-
     let caller = crate::identity::resolve_caller(herdr, runs_dir);
     if caller.role != crate::identity::Role::Unknown {
         return Ok((caller.name, caller.role.to_string()));
     }
 
-    if let Ok(owner) = std::env::var("QUAQUA_OWNER") {
-        let o = owner.trim();
-        if !o.is_empty() {
-            let role = if o == "cos" {
-                "cos"
-            } else if o.ends_with("-lead") {
-                "lead"
-            } else {
-                "peer"
-            };
-            return Ok((o.to_string(), role.to_string()));
-        }
-    }
-
-    if let Ok(agent) = std::env::var("HERDR_AGENT_NAME") {
-        let a = agent.trim();
-        if !a.is_empty() {
-            let role = if a == "cos" {
-                "cos"
-            } else if a.ends_with("-lead") {
-                "lead"
-            } else {
-                "peer"
-            };
-            return Ok((a.to_string(), role.to_string()));
-        }
-    }
-
-    Err("cannot determine sender identity (not in a herdr pane and QUAQUA_OWNER is unset; use --from <name>)".to_string())
+    Err("cannot determine sender identity from harness (unresolved caller)".to_string())
 }
 
-/// Appends an entry to `<runs_dir>/<from_name>.inbox.md`, ensuring idempotence by checking for existing header.
+/// Appends an entry to `<runs_dir>/<target_inbox>.inbox.md`, ensuring idempotence via msg_key.
 pub fn append_to_markdown_inbox(
     runs_dir: &Path,
+    target_inbox: &str,
     from_name: &str,
+    to_name: &str,
     iso_time: &str,
     kind: &str,
     body: &str,
+    msg_key: &str,
 ) -> Result<(), String> {
-    let inbox_path = runs_dir.join(format!("{from_name}.inbox.md"));
-    let header = format!("## {iso_time} {from_name} {kind}");
+    if !is_safe_inbox_name(target_inbox) {
+        return Err(format!(
+            "invalid target inbox name '{target_inbox}': cannot escape runs/"
+        ));
+    }
+    if !is_safe_inbox_name(from_name) {
+        return Err(format!(
+            "invalid from_name '{from_name}': cannot escape runs/"
+        ));
+    }
+    if !is_safe_inbox_name(to_name) {
+        return Err(format!(
+            "invalid to_name '{to_name}': cannot escape runs/"
+        ));
+    }
+
+    let inbox_path = runs_dir.join(format!("{target_inbox}.inbox.md"));
+    let key_marker = format!("<!-- msg_key: {msg_key} -->");
+    let to_marker = format!("<!-- to: {to_name} -->");
 
     if inbox_path.exists() {
         if let Ok(existing) = std::fs::read_to_string(&inbox_path) {
-            if existing.contains(&header) {
+            if existing.contains(&key_marker) {
                 return Ok(());
             }
         }
@@ -338,11 +337,17 @@ pub fn append_to_markdown_inbox(
         .open(&inbox_path)
         .map_err(|e| format!("cannot open {}: {e}", inbox_path.display()))?;
 
+    let header = if to_name == "cos" {
+        format!("## {iso_time} {from_name} {kind}")
+    } else {
+        format!("## {iso_time} {from_name} -> {to_name} {kind}")
+    };
+
     use std::io::Write;
     let entry = if body.trim().is_empty() {
-        format!("{header}\n\n")
+        format!("{header}\n{key_marker}\n{to_marker}\n\n")
     } else {
-        format!("{header}\n{}\n", body.trim_end())
+        format!("{header}\n{key_marker}\n{to_marker}\n{}\n", body.trim_end())
     };
     file.write_all(entry.as_bytes())
         .map_err(|e| format!("cannot write to {}: {e}", inbox_path.display()))?;
@@ -430,15 +435,15 @@ pub fn send_mail<H: HerdrOps>(
     opts: &SendMailOpts,
     herdr: &H,
 ) -> Result<SendMailResult, String> {
-    if opts.body.len() > MAX_BODY_LEN {
+    if opts.body.chars().count() > MAX_BODY_LEN {
         return Err(format!(
-            "error: mail body exceeds {} bytes (length: {})",
+            "error: mail body exceeds {} characters (length: {})",
             MAX_BODY_LEN,
-            opts.body.len()
+            opts.body.chars().count()
         ));
     }
 
-    let (from_name, from_role) = resolve_sender(opts.from.as_deref(), herdr, runs_dir)?;
+    let (from_name, from_role) = resolve_sender(herdr, runs_dir)?;
     let now = crate::bus::now_ms();
     let iso_time = format_iso_timestamp(now);
 
@@ -457,17 +462,34 @@ pub fn send_mail<H: HerdrOps>(
     });
 
     let db_path = runs_dir.join("quaqua.db");
+    let fallback_target = if opts.to == "cos" && (from_role == "lead" || from_name.ends_with("-lead")) {
+        from_name.clone()
+    } else {
+        opts.to.clone()
+    };
 
-    // Try opening database; fallback to markdown append on failure
+    // Try opening database; fallback to markdown append on failure (unless locked)
     let bus = match FarmBus::open(&db_path) {
         Ok(b) => b,
         Err(e) => {
+            if crate::engine::sqlite::is_lock_error(&e) {
+                return Err(format!("database locked at {}: {e}", db_path.display()));
+            }
             eprintln!(
                 "warning: database unavailable at {}: {}; falling back to markdown append",
                 db_path.display(),
                 e
             );
-            append_to_markdown_inbox(runs_dir, &from_name, &iso_time, &opts.kind, &opts.body)?;
+            append_to_markdown_inbox(
+                runs_dir,
+                &fallback_target,
+                &from_name,
+                &opts.to,
+                &iso_time,
+                &opts.kind,
+                &opts.body,
+                &msg_key,
+            )?;
             return Ok(SendMailResult {
                 id: 0,
                 already_sent: false,
@@ -476,6 +498,10 @@ pub fn send_mail<H: HerdrOps>(
     };
 
     let mut conn = bus.conn.lock().unwrap();
+
+    // Check unacked incidents on every mail verb (Finding 8)
+    let timeout_ms = get_mail_ack_timeout_ms();
+    let _ = check_unacked_incidents(&conn, timeout_ms);
 
     let tx_res: rusqlite::Result<SendMailResult> = crate::engine::sqlite::retry_while_busy(|| {
         let tx = conn.transaction()?;
@@ -548,12 +574,24 @@ pub fn send_mail<H: HerdrOps>(
     let result = match tx_res {
         Ok(r) => r,
         Err(e) => {
+            if crate::engine::sqlite::is_lock_error(&e) {
+                return Err(format!("database locked at {}: {e}", db_path.display()));
+            }
             eprintln!(
                 "warning: database transaction failed at {}: {}; falling back to markdown append",
                 db_path.display(),
                 e
             );
-            append_to_markdown_inbox(runs_dir, &from_name, &iso_time, &opts.kind, &opts.body)?;
+            append_to_markdown_inbox(
+                runs_dir,
+                &fallback_target,
+                &from_name,
+                &opts.to,
+                &iso_time,
+                &opts.kind,
+                &opts.body,
+                &msg_key,
+            )?;
             return Ok(SendMailResult {
                 id: 0,
                 already_sent: false,
@@ -563,9 +601,21 @@ pub fn send_mail<H: HerdrOps>(
 
     // Dual-write to markdown for lead senders
     if from_role == "lead" || from_name.ends_with("-lead") {
-        if let Err(e) =
-            append_to_markdown_inbox(runs_dir, &from_name, &iso_time, &opts.kind, &opts.body)
-        {
+        let dual_write_target = if opts.to == "cos" {
+            &from_name
+        } else {
+            &opts.to
+        };
+        if let Err(e) = append_to_markdown_inbox(
+            runs_dir,
+            dual_write_target,
+            &from_name,
+            &opts.to,
+            &iso_time,
+            &opts.kind,
+            &opts.body,
+            &msg_key,
+        ) {
             eprintln!("warning: markdown dual-write failed: {e}");
         }
     }
@@ -671,6 +721,9 @@ pub fn ack_mail(runs_dir: &Path, caller_name: &str, mail_ids: &[u64]) -> Result<
     let bus = FarmBus::open(&db_path).map_err(|e| format!("cannot open database: {e}"))?;
     let conn = bus.conn.lock().unwrap();
 
+    let timeout_ms = get_mail_ack_timeout_ms();
+    let _ = check_unacked_incidents(&conn, timeout_ms);
+
     let now = crate::bus::now_ms();
     let mut acked_ids = Vec::new();
 
@@ -742,7 +795,7 @@ pub fn ack_mail(runs_dir: &Path, caller_name: &str, mail_ids: &[u64]) -> Result<
     Ok(acked_ids)
 }
 
-/// Imports markdown inbox file. Idempotent: msg_key = sha256(header_line).
+/// Imports markdown inbox file. Idempotent: msg_key = sha256(header_line) or metadata msg_key.
 pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResult, String> {
     let content = std::fs::read_to_string(file_path)
         .map_err(|e| format!("cannot read {}: {e}", file_path.display()))?;
@@ -750,6 +803,9 @@ pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResu
     let db_path = runs_dir.join("quaqua.db");
     let bus = FarmBus::open(&db_path).map_err(|e| format!("cannot open database: {e}"))?;
     let conn = bus.conn.lock().unwrap();
+
+    let timeout_ms = get_mail_ack_timeout_ms();
+    let _ = check_unacked_incidents(&conn, timeout_ms);
 
     let mut result = ImportResult::default();
 
@@ -774,8 +830,37 @@ pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResu
 
     result.total = entries.len();
 
-    for (header, body) in entries {
-        let msg_key = sha256_hex(header.trim().as_bytes());
+    let file_stem = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|s| s.strip_suffix(".inbox.md"))
+        .unwrap_or("");
+
+    for (header, raw_body) in entries {
+        // Parse metadata comments from raw_body
+        let mut msg_key_opt: Option<String> = None;
+        let mut to_name_opt: Option<String> = None;
+        let mut clean_body_lines = Vec::new();
+
+        for line in raw_body.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("<!-- msg_key:") {
+                if let Some(key) = rest.strip_suffix("-->") {
+                    msg_key_opt = Some(key.trim().to_string());
+                    continue;
+                }
+            }
+            if let Some(rest) = trimmed.strip_prefix("<!-- to:") {
+                if let Some(target) = rest.strip_suffix("-->") {
+                    to_name_opt = Some(target.trim().to_string());
+                    continue;
+                }
+            }
+            clean_body_lines.push(line);
+        }
+        let clean_body = clean_body_lines.join("\n");
+
+        let msg_key = msg_key_opt.unwrap_or_else(|| sha256_hex(header.trim().as_bytes()));
 
         let parts: Vec<&str> = header["## ".len()..].split_whitespace().collect();
         if parts.len() < 3 {
@@ -783,17 +868,41 @@ pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResu
         }
         let time_str = parts[0];
         let from_name = parts[1];
-        let kind = parts[2];
+
+        let (to_name, kind) = if parts.len() >= 5 && parts[2] == "->" {
+            (to_name_opt.unwrap_or_else(|| parts[3].to_string()), parts[4])
+        } else {
+            let default_to = if file_stem.ends_with("-lead") {
+                "cos".to_string()
+            } else if !file_stem.is_empty() {
+                file_stem.to_string()
+            } else {
+                "cos".to_string()
+            };
+            (to_name_opt.unwrap_or(default_to), parts[2])
+        };
+
+        let from_role = if from_name == "cos" {
+            "cos"
+        } else if from_name.ends_with("-lead") {
+            "lead"
+        } else {
+            "peer"
+        };
 
         let ts_ms = parse_iso_timestamp(time_str).unwrap_or_else(crate::bus::now_ms);
         let project = from_name
             .strip_suffix("-lead")
             .unwrap_or(from_name)
             .to_string();
-        let body_str = if body.len() > MAX_BODY_LEN {
-            body[..MAX_BODY_LEN].to_string()
+
+        let body_str = if clean_body.chars().count() > MAX_BODY_LEN {
+            match clean_body.char_indices().nth(MAX_BODY_LEN) {
+                Some((idx, _)) => &clean_body[..idx],
+                None => &clean_body,
+            }
         } else {
-            body
+            &clean_body
         };
 
         let mut stmt = conn
@@ -801,7 +910,7 @@ pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResu
                 r#"
                 INSERT INTO mail (
                     msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to, body
-                ) VALUES (?1, ?2, ?3, 'lead', 'cos', ?4, ?5, NULL, ?6)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)
                 ON CONFLICT(msg_key) DO NOTHING
                 "#,
             )
@@ -812,6 +921,8 @@ pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResu
                 msg_key,
                 ts_ms as i64,
                 from_name,
+                from_role,
+                to_name,
                 kind,
                 project,
                 body_str,
@@ -839,6 +950,9 @@ pub fn list_mail(
     let db_path = runs_dir.join("quaqua.db");
     let bus = FarmBus::open(&db_path).map_err(|e| format!("cannot open database: {e}"))?;
     let conn = bus.conn.lock().unwrap();
+
+    let timeout_ms = get_mail_ack_timeout_ms();
+    let _ = check_unacked_incidents(&conn, timeout_ms);
 
     let mut query = String::from(
         "SELECT id, msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to, body, deliveries, last_delivered_ms, acked_ms, acked_by FROM mail WHERE 1=1"
@@ -926,7 +1040,6 @@ pub fn handle_mail<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, Strin
         "send" => {
             let mut to = None;
             let mut kind = None;
-            let mut from = None;
             let mut project = None;
             let mut reply_to = None;
             let mut client_id = None;
@@ -949,10 +1062,7 @@ pub fn handle_mail<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, Strin
                         }
                     }
                     "--from" => {
-                        i += 1;
-                        if i < subargs.len() {
-                            from = Some(subargs[i].clone());
-                        }
+                        return Err("error: --from override is not permitted; sender identity is inferred from harness".to_string());
                     }
                     "--project" => {
                         i += 1;
@@ -1021,7 +1131,6 @@ pub fn handle_mail<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, Strin
                 to: to_name,
                 kind: kind_val,
                 body: body_content,
-                from,
                 project,
                 reply_to,
                 client_id,
@@ -1050,10 +1159,8 @@ pub fn handle_mail<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, Strin
                 let caller = crate::identity::resolve_caller(herdr, &runs_dir);
                 if caller.role != crate::identity::Role::Unknown {
                     caller.name
-                } else if let Ok(owner) = std::env::var("QUAQUA_OWNER") {
-                    owner
                 } else {
-                    "cos".to_string()
+                    return Err("cannot determine recipient identity from harness (unresolved caller)".to_string());
                 }
             };
 
@@ -1063,15 +1170,11 @@ pub fn handle_mail<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, Strin
         }
         "ack" => {
             let mut ids = Vec::new();
-            let mut as_user = None;
 
             let mut i = 0;
             while i < subargs.len() {
                 if subargs[i] == "--as" {
-                    i += 1;
-                    if i < subargs.len() {
-                        as_user = Some(subargs[i].clone());
-                    }
+                    return Err("error: --as override is not permitted; caller identity is inferred from harness".to_string());
                 } else if let Ok(id) = subargs[i].parse::<u64>() {
                     ids.push(id);
                 } else {
@@ -1084,16 +1187,12 @@ pub fn handle_mail<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, Strin
                 return Err("missing mail id(s) to ack".to_string());
             }
 
-            let caller = if let Some(u) = as_user {
-                u
-            } else {
+            let caller = {
                 let c = crate::identity::resolve_caller(herdr, &runs_dir);
                 if c.role != crate::identity::Role::Unknown {
                     c.name
-                } else if let Ok(owner) = std::env::var("QUAQUA_OWNER") {
-                    owner
                 } else {
-                    "cos".to_string()
+                    return Err("cannot determine caller identity from harness (unresolved caller)".to_string());
                 }
             };
 

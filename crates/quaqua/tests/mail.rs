@@ -15,9 +15,46 @@ fn hermetic_temp_dir(prefix: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("create hermetic temp dir");
     dir
 }
+static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    vars: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn new(keys: &[&'static str]) -> Self {
+        let lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let vars = keys.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+        Self { _lock: lock, vars }
+    }
+    fn set(&self, key: &'static str, val: &str) {
+        std::env::set_var(key, val);
+    }
+    fn remove(&self, key: &'static str) {
+        std::env::remove_var(key);
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in &self.vars {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
 
 #[test]
 fn test_retried_send_gives_one_row() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID"]);
+    guard.remove("HERDR_PANE_ID");
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "bus-lead");
     let runs = hermetic_temp_dir("retry-send");
     let herdr = Herdr::new();
 
@@ -25,7 +62,6 @@ fn test_retried_send_gives_one_row() {
         to: "cos".to_string(),
         kind: "accept".to_string(),
         body: "verdict: accepted".to_string(),
-        from: Some("bus-lead".to_string()),
         project: Some("bus".to_string()),
         reply_to: None,
         client_id: None,
@@ -74,6 +110,10 @@ fn test_retried_send_gives_one_row() {
 
 #[test]
 fn test_ack_by_non_recipient_refused() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID"]);
+    guard.remove("HERDR_PANE_ID");
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "bus-lead");
     let runs = hermetic_temp_dir("ack-refused");
     let herdr = Herdr::new();
 
@@ -81,7 +121,6 @@ fn test_ack_by_non_recipient_refused() {
         to: "cos".to_string(),
         kind: "accept".to_string(),
         body: "report for cos".to_string(),
-        from: Some("bus-lead".to_string()),
         project: Some("bus".to_string()),
         reply_to: None,
         client_id: None,
@@ -125,6 +164,10 @@ fn test_ack_by_non_recipient_refused() {
 
 #[test]
 fn test_unacked_mail_redelivered_with_count() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID"]);
+    guard.remove("HERDR_PANE_ID");
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "bus-lead");
     let runs = hermetic_temp_dir("redeliver-count");
     let herdr = Herdr::new();
 
@@ -132,7 +175,6 @@ fn test_unacked_mail_redelivered_with_count() {
         to: "cos".to_string(),
         kind: "handoff".to_string(),
         body: "handoff payload".to_string(),
-        from: Some("bus-lead".to_string()),
         project: Some("bus".to_string()),
         reply_to: None,
         client_id: None,
@@ -168,85 +210,30 @@ fn test_unacked_mail_redelivered_with_count() {
 #[test]
 fn test_import_live_inbox_files_idempotent() {
     let runs = hermetic_temp_dir("import-live");
-    let inbox_temp = hermetic_temp_dir("inbox-sources");
+    let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inbox");
 
-    // Find and copy live inbox files from ~/quaqua/runs/*.inbox.md
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let live_runs = Path::new(&home).join("quaqua").join("runs");
-
-    let mut copied_count = 0;
-    if let Ok(entries) = std::fs::read_dir(&live_runs) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map_or(false, |s| s.ends_with("-lead.inbox.md"))
-            {
-                let dest = inbox_temp.join(path.file_name().unwrap());
-                let _ = std::fs::copy(&path, &dest);
-                copied_count += 1;
-            }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(&fixtures_dir).expect("read fixtures").flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|s| s.to_str()) == Some("md") {
+            paths.push(p);
         }
     }
-
-    // Ensure we have 5 inbox files for testing by providing representative live-format inboxes if fewer
-    let extra_inboxes = [
-        (
-            "arch-lead.inbox.md",
-            "## 2026-10-19T14:00:00Z arch-lead handoff\nverdict: clean\n",
-        ),
-        (
-            "quaqua-rs-lead.inbox.md",
-            "## 2026-10-16T12:00:00+07:00 quaqua-rs-lead accept\nverdict: passed\n",
-        ),
-        (
-            "bus-sample-lead.inbox.md",
-            "## 2026-10-24T00:00:00+07:00 bus-sample-lead handoff\nP2 bus accepted\n",
-        ),
-        (
-            "gate-sample-lead.inbox.md",
-            "## 2026-10-24T10:49:42Z gate-sample-lead handoff\nP1 done\n",
-        ),
-        (
-            "mono-sample-lead.inbox.md",
-            "## 2026-10-20T14:51:41Z mono-sample-lead accept\nverdict: accepted\n",
-        ),
-    ];
-    let mut extra_idx = 0;
-    while copied_count < 5 && extra_idx < extra_inboxes.len() {
-        let (name, content) = extra_inboxes[extra_idx];
-        let dest = inbox_temp.join(name);
-        if !dest.exists() {
-            std::fs::write(&dest, content).expect("write extra inbox file");
-            copied_count += 1;
-        }
-        extra_idx += 1;
-    }
-    assert!(
-        copied_count >= 5,
-        "must have at least 5 inbox files for test, got {copied_count}"
-    );
+    assert!(paths.len() >= 5, "must have at least 5 fixture files");
 
     // First import run
     let mut total_imported = 0;
-    for entry in std::fs::read_dir(&inbox_temp).unwrap().flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            let res = mail::import_inbox_file(&runs, &path).expect("import inbox file");
-            total_imported += res.imported;
-        }
+    for path in &paths {
+        let res = mail::import_inbox_file(&runs, path).expect("import inbox file");
+        total_imported += res.imported;
     }
     assert!(total_imported > 0, "must import at least some rows");
 
     // Second import run: should be completely idempotent (0 new rows)
     let mut second_imported = 0;
-    for entry in std::fs::read_dir(&inbox_temp).unwrap().flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            let res = mail::import_inbox_file(&runs, &path).expect("re-import inbox file");
-            second_imported += res.imported;
-        }
+    for path in &paths {
+        let res = mail::import_inbox_file(&runs, path).expect("re-import inbox file");
+        second_imported += res.imported;
     }
     assert_eq!(
         second_imported, 0,
@@ -317,6 +304,10 @@ fn test_unacked_mail_lazily_inserts_incident() {
 
 #[test]
 fn test_missing_or_corrupt_db_falls_back_to_markdown() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID"]);
+    guard.remove("HERDR_PANE_ID");
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "bus-lead");
     let runs = hermetic_temp_dir("corrupt-db-fallback");
     let herdr = Herdr::new();
 
@@ -328,7 +319,6 @@ fn test_missing_or_corrupt_db_falls_back_to_markdown() {
         to: "cos".to_string(),
         kind: "blocked".to_string(),
         body: "critical failure report".to_string(),
-        from: Some("bus-lead".to_string()),
         project: Some("bus".to_string()),
         reply_to: None,
         client_id: None,
@@ -348,6 +338,10 @@ fn test_missing_or_corrupt_db_falls_back_to_markdown() {
 
 #[test]
 fn test_body_length_exceeded_error() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID"]);
+    guard.remove("HERDR_PANE_ID");
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "bus-lead");
     let runs = hermetic_temp_dir("body-len");
     let herdr = Herdr::new();
 
@@ -356,7 +350,6 @@ fn test_body_length_exceeded_error() {
         to: "cos".to_string(),
         kind: "accept".to_string(),
         body: long_body,
-        from: Some("bus-lead".to_string()),
         project: Some("bus".to_string()),
         reply_to: None,
         client_id: None,
@@ -371,20 +364,22 @@ fn test_body_length_exceeded_error() {
 
 #[test]
 fn test_cli_mail_send_inbox_ack_ls() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID", "QUAQUA_RUNS_DIR"]);
+    guard.remove("HERDR_PANE_ID");
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "bus-lead");
     let runs = hermetic_temp_dir("cli-mail");
     let herdr = Herdr::new();
 
-    std::env::set_var("QUAQUA_RUNS_DIR", runs.to_str().unwrap());
+    guard.set("QUAQUA_RUNS_DIR", runs.to_str().unwrap());
 
-    // 1. CLI send
+    // 1. CLI send (sender inferred from harness/env as bus-lead)
     let send_args = vec![
         "send".to_string(),
         "--to".to_string(),
         "cos".to_string(),
         "--kind".to_string(),
         "accept".to_string(),
-        "--from".to_string(),
-        "bus-lead".to_string(),
         "--body".to_string(),
         "cli send verification".to_string(),
     ];
@@ -401,51 +396,15 @@ fn test_cli_mail_send_inbox_ack_ls() {
     let rc_inbox = mail::handle_mail(&inbox_args, &herdr).expect("cli inbox");
     assert_eq!(rc_inbox, 0);
 
-    // 4. CLI ack 1 --as cos
+    // 4. CLI ack 1 (caller inferred as cos from harness/env)
+    guard.set("QUAQUA_OWNER", "cos");
     let ack_args = vec![
         "ack".to_string(),
         "1".to_string(),
-        "--as".to_string(),
-        "cos".to_string(),
     ];
     let rc_ack = mail::handle_mail(&ack_args, &herdr).expect("cli ack");
     assert_eq!(rc_ack, 0);
-
-    std::env::remove_var("QUAQUA_RUNS_DIR");
 }
-
-static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-struct EnvGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    vars: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvGuard {
-    fn new(keys: &[&'static str]) -> Self {
-        let lock = TEST_ENV_LOCK.lock().unwrap();
-        let vars = keys.iter().map(|&k| (k, std::env::var(k).ok())).collect();
-        Self { _lock: lock, vars }
-    }
-    fn set(&self, key: &'static str, val: &str) {
-        std::env::set_var(key, val);
-    }
-    fn remove(&self, key: &'static str) {
-        std::env::remove_var(key);
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (k, v) in &self.vars {
-            match v {
-                Some(val) => std::env::set_var(k, val),
-                None => std::env::remove_var(k),
-            }
-        }
-    }
-}
-
 #[test]
 fn test_finding1_ack_inbox_identity_fail_closed() {
     let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID", "QUAQUA_RUNS_DIR"]);
@@ -528,9 +487,12 @@ fn test_finding3_path_traversal_refused() {
     let res = mail::append_to_markdown_inbox(
         &runs,
         "../../evil-traversal-probe",
+        "../../evil-traversal-probe",
+        "cos",
         "2026-10-24T00:00:00Z",
         "accept",
         "payload",
+        "fake-key",
     );
     assert!(res.is_err(), "path traversal in sender name must be refused");
     assert!(!outside_path.exists(), "must not create file outside runs_dir");
@@ -539,6 +501,7 @@ fn test_finding3_path_traversal_refused() {
 #[test]
 fn test_finding4_dual_write_and_import_deduplicated() {
     let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID", "QUAQUA_RUNS_DIR"]);
+    guard.remove("HERDR_PANE_ID");
     guard.set("QUAQUA_TEST", "1");
     guard.set("QUAQUA_OWNER", "mu-lead");
 
@@ -549,7 +512,6 @@ fn test_finding4_dual_write_and_import_deduplicated() {
         to: "cos".to_string(),
         kind: "accept".to_string(),
         body: "dual write dedup check".to_string(),
-        from: Some("mu-lead".to_string()),
         project: Some("mu".to_string()),
         reply_to: None,
         client_id: None,
@@ -586,8 +548,9 @@ fn test_finding4_dual_write_and_import_deduplicated() {
 #[test]
 fn test_finding5_md_fallback_recipient_and_locked_db() {
     let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID", "QUAQUA_RUNS_DIR"]);
+    guard.remove("HERDR_PANE_ID");
     guard.set("QUAQUA_TEST", "1");
-    guard.set("QUAQUA_OWNER", "tieude-1");
+    guard.set("QUAQUA_OWNER", "arch-lead");
 
     let runs = hermetic_temp_dir("finding5-fallback");
     let herdr = Herdr::new();
@@ -604,7 +567,6 @@ fn test_finding5_md_fallback_recipient_and_locked_db() {
             to: "mu-lead".to_string(),
             kind: "accept".to_string(),
             body: "locked db test".to_string(),
-            from: Some("tieude-1".to_string()),
             project: Some("tieude".to_string()),
             reply_to: None,
             client_id: None,
@@ -626,7 +588,6 @@ fn test_finding5_md_fallback_recipient_and_locked_db() {
         to: "mu-lead".to_string(),
         kind: "handoff".to_string(),
         body: "peer to lead handoff".to_string(),
-        from: Some("tieude-1".to_string()),
         project: Some("tieude".to_string()),
         reply_to: None,
         client_id: None,
@@ -635,7 +596,7 @@ fn test_finding5_md_fallback_recipient_and_locked_db() {
     assert_eq!(res.id, 0);
 
     // Must be in mu-lead.inbox.md, NOT tieude-1.inbox.md
-    assert!(!corrupt_runs.join("tieude-1.inbox.md").exists(), "must not write to sender inbox");
+    assert!(!corrupt_runs.join("arch-lead.inbox.md").exists(), "must not write to sender inbox");
     let target_md = corrupt_runs.join("mu-lead.inbox.md");
     assert!(target_md.exists(), "must write to recipient inbox mu-lead.inbox.md");
 
