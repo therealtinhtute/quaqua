@@ -4269,6 +4269,7 @@ struct GateFixture {
     root: PathBuf,
     repo: PathBuf,
     runs: PathBuf,
+    caller: quaqua::identity::Caller,
 }
 
 impl GateFixture {
@@ -4298,6 +4299,12 @@ impl GateFixture {
             repo: root.join("repo"),
             runs: root.join("runs"),
             root,
+            caller: quaqua::identity::Caller {
+                name: "cos".to_string(),
+                role: quaqua::identity::Role::Cos,
+                depth: quaqua::identity::CallerDepth::Resolved(0),
+                source: quaqua::identity::IdentitySource::PaneTokens,
+            },
         }
     }
 
@@ -4399,6 +4406,7 @@ fn gate_input<'a>(
         brief: None,
         solo,
         pipeline: None,
+        caller: &fx.caller,
     }
 }
 
@@ -4444,6 +4452,65 @@ fn lead_gate_blocks_third_worker_on_a_multi_phase_cos_project() {
     assert!(err.1.contains("quaqua lead spawn q"), "{}", err.1);
     assert!(err.1.contains("phases_left 3"), "{}", err.1);
     assert!(err.1.contains("live build worker slots"), "{}", err.1);
+}
+#[test]
+fn lead_gate_passes_when_caller_is_project_lead_even_if_repo_has_cos_row() {
+    let _env_lock = lock_env();
+    let fx = GateFixture::new("leadcaller", "cos");
+    let herdr = fx.with_two_live_builders();
+    let repo = fx.repo();
+
+    // Add a row for the running lead on the same repo in INDEX.md
+    let index_path = fx.root.join("projects/INDEX.md");
+    let current_index = std::fs::read_to_string(&index_path).unwrap();
+    let updated_index = format!("{current_index}| gate | {} | gate-lead | active | gate goal |\n", repo.display());
+    std::fs::write(&index_path, updated_index).unwrap();
+
+    let lead_caller = quaqua::identity::Caller {
+        name: "gate-lead".to_string(),
+        role: quaqua::identity::Role::Lead,
+        depth: quaqua::identity::CallerDepth::Resolved(1),
+        source: quaqua::identity::IdentitySource::PaneTokens,
+    };
+
+    let mut input = gate_input(&fx, &repo, "sude-gate", None);
+    input.caller = &lead_caller;
+
+    assert_eq!(
+        leadgate::gather_facts(&input, &gate_cfg(), &herdr),
+        None,
+        "lead caller must not gather facts on a project"
+    );
+
+    assert!(
+        leadgate::check_spawn(input, &gate_cfg(), &herdr).is_ok(),
+        "lead caller must not be blocked by leadgate"
+    );
+}
+#[test]
+fn lead_gate_blocks_lead_on_foreign_cos_project() {
+    let _env_lock = lock_env();
+    let fx = GateFixture::new("foreignlead", "cos");
+    let herdr = fx.with_two_live_builders();
+    let repo = fx.repo();
+
+    let foreign_lead = quaqua::identity::Caller {
+        name: "foreign-lead".to_string(),
+        role: quaqua::identity::Role::Lead,
+        depth: quaqua::identity::CallerDepth::Resolved(1),
+        source: quaqua::identity::IdentitySource::PaneTokens,
+    };
+
+    let mut input = gate_input(&fx, &repo, "sude-gate", None);
+    input.caller = &foreign_lead;
+
+    let facts = leadgate::gather_facts(&input, &gate_cfg(), &herdr);
+    assert!(facts.is_some(), "lead on foreign cos repo must gather facts");
+
+    let err = leadgate::check_spawn(input, &gate_cfg(), &herdr)
+        .expect_err("lead on foreign cos repo with 2 signals must be blocked");
+    assert_eq!(err.0, 1);
+    assert!(err.1.contains("needs a Lead"), "{}", err.1);
 }
 
 #[test]

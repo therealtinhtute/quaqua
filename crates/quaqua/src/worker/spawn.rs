@@ -436,6 +436,7 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
             brief: None,
             solo: opts.solo.as_deref(),
             pipeline: pipeline_task.as_deref(),
+            caller: &caller,
         },
         cfg,
         herdr,

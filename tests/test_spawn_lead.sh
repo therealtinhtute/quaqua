@@ -64,6 +64,11 @@ cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"
 case "${1:-} ${2:-}" in
+  "agent send-keys")
+    if [[ "${3:-}" == "ctrl-u" || "${4:-}" == "ctrl-u" ]]; then
+      printf '{"error":{"code":"invalid_key","message":"unsupported key ctrl-u"}}\n' >&2
+      exit 1
+    fi ;;
   "agent prompt")
     # a submitted prompt puts the agent to work (see "agent get")
     : > "$CALLS.prompted" ;;
