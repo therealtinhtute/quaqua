@@ -4154,6 +4154,7 @@ struct GateFixture {
     root: PathBuf,
     repo: PathBuf,
     runs: PathBuf,
+    caller: quaqua::identity::Caller,
 }
 
 impl GateFixture {
@@ -4183,6 +4184,12 @@ impl GateFixture {
             repo: root.join("repo"),
             runs: root.join("runs"),
             root,
+            caller: quaqua::identity::Caller {
+                name: "cos".to_string(),
+                role: quaqua::identity::Role::Cos,
+                depth: quaqua::identity::CallerDepth::Resolved(0),
+                source: quaqua::identity::IdentitySource::PaneTokens,
+            },
         }
     }
 
@@ -4284,7 +4291,7 @@ fn gate_input<'a>(
         brief: None,
         solo,
         pipeline: None,
-        caller: None,
+        caller: &fx.caller,
     }
 }
 
@@ -4352,7 +4359,7 @@ fn lead_gate_passes_when_caller_is_project_lead_even_if_repo_has_cos_row() {
     };
 
     let mut input = gate_input(&fx, &repo, "sude-gate", None);
-    input.caller = Some(&lead_caller);
+    input.caller = &lead_caller;
 
     assert_eq!(
         leadgate::gather_facts(&input, &gate_cfg(), &herdr),
@@ -4380,7 +4387,7 @@ fn lead_gate_blocks_lead_on_foreign_cos_project() {
     };
 
     let mut input = gate_input(&fx, &repo, "sude-gate", None);
-    input.caller = Some(&foreign_lead);
+    input.caller = &foreign_lead;
 
     let facts = leadgate::gather_facts(&input, &gate_cfg(), &herdr);
     assert!(facts.is_some(), "lead on foreign cos repo must gather facts");

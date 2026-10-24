@@ -384,7 +384,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
             brief: None,
             solo: opts.solo.as_deref(),
             pipeline: pipeline_task.as_deref(),
-            caller: Some(&caller),
+            caller: &caller,
         },
         cfg,
         herdr,

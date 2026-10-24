@@ -161,28 +161,20 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 /// The INDEX row the gate applies to: the first row for `repo` whose owner is
 /// `cos`. A repo with no row, or whose rows are all owned by a Lead, has none.
-/// When the resolved caller is a Lead, or when the caller owns a row for this
-/// repo, the gate skips (returns `None`).
+/// When the caller owns a row for this repo, the gate skips (returns `None`).
 pub fn gate_row(
     rows: &[IndexRow],
     repo: &Path,
     home: &str,
-    caller: Option<&crate::identity::Caller>,
+    caller: &crate::identity::Caller,
 ) -> Option<IndexRow> {
-    if let Some(c) = caller {
-        if c.role == crate::identity::Role::Lead {
-            return None;
-        }
-    }
     let matching_rows: Vec<&IndexRow> = rows
         .iter()
         .filter(|r| same_path(&expand_home(&r.repo, home), repo))
         .collect();
 
-    if let Some(c) = caller {
-        if c.name != "cos" && matching_rows.iter().any(|r| r.owner == c.name) {
-            return None;
-        }
+    if caller.name != "cos" && matching_rows.iter().any(|r| r.owner == caller.name) {
+        return None;
     }
 
     matching_rows
@@ -625,8 +617,8 @@ pub struct GateInput<'a> {
     pub solo: Option<&'a str>,
     /// The pipeline this spawn belongs to (`PIPELINE_TASK`), if any.
     pub pipeline: Option<&'a str>,
-    /// Resolved caller identity, when known.
-    pub caller: Option<&'a crate::identity::Caller>,
+    /// Resolved caller identity.
+    pub caller: &'a crate::identity::Caller,
 }
 
 /// The signals a spawn carries, and the project it resolved to.
@@ -639,22 +631,9 @@ pub struct Facts {
 /// Collect the spawn's signals for a `cos`-owned project. `None` when the repo
 /// is not in `projects/INDEX.md` or its row is owned by a Lead.
 pub fn gather_facts<H: HerdrOps>(input: &GateInput<'_>, cfg: &Config, herdr: &H) -> Option<Facts> {
-    let resolved_caller;
-    let caller = match input.caller {
-        Some(c) => c,
-        None => {
-            resolved_caller = crate::identity::resolve_caller(herdr, input.runs_dir);
-            &resolved_caller
-        }
-    };
-    if caller.role == crate::identity::Role::Lead {
-        return None;
-    }
-
     let index = std::fs::read_to_string(input.root.join("projects/INDEX.md")).ok()?;
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let row = gate_row(&index_rows(&index), input.repo, &home, Some(caller))?;
-
+    let row = gate_row(&index_rows(&index), input.repo, &home, input.caller)?;
     let mut signals = Vec::new();
 
     let (workers, pipelines) = gather_live(input.runs_dir, input.name, cfg, herdr);
@@ -806,11 +785,17 @@ mod tests {
             row("gamma", "~/Lab/gamma", "cos"),
         );
         let rows = index_rows(&content);
+        let cos = crate::identity::Caller {
+            name: "cos".to_string(),
+            role: crate::identity::Role::Cos,
+            depth: crate::identity::CallerDepth::Resolved(0),
+            source: crate::identity::IdentitySource::PaneTokens,
+        };
         assert_eq!(
-            gate_row(&rows, &repo, "/tmp/home", None).map(|r| r.slug),
+            gate_row(&rows, &repo, "/tmp/home", &cos).map(|r| r.slug),
             Some("beta".to_string())
         );
-        assert_eq!(gate_row(&rows, &other, "/tmp/home", None), None);
+        assert_eq!(gate_row(&rows, &other, "/tmp/home", &cos), None);
         let _ = std::fs::remove_dir_all(&tmp);
     }
     #[test]
@@ -834,7 +819,7 @@ mod tests {
             source: crate::identity::IdentitySource::PaneTokens,
         };
         assert_eq!(
-            gate_row(&rows, &repo, "/tmp/home", Some(&cos_caller)).map(|r| r.slug),
+            gate_row(&rows, &repo, "/tmp/home", &cos_caller).map(|r| r.slug),
             Some("quaqua-rs".to_string())
         );
 
@@ -845,9 +830,10 @@ mod tests {
             depth: crate::identity::CallerDepth::Resolved(1),
             source: crate::identity::IdentitySource::PaneTokens,
         };
-        assert_eq!(gate_row(&rows, &repo, "/tmp/home", Some(&lead_caller)), None);
+        assert_eq!(gate_row(&rows, &repo, "/tmp/home", &lead_caller), None);
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
     #[test]
     fn gate_row_gates_lead_on_foreign_cos_repo() {
         let tmp = std::env::temp_dir().join(format!("quaqua-leadgate-foreign-{}", std::process::id()));
@@ -868,7 +854,7 @@ mod tests {
             source: crate::identity::IdentitySource::PaneTokens,
         };
         assert_eq!(
-            gate_row(&rows, &repo, "/tmp/home", Some(&foreign_lead)).map(|r| r.slug),
+            gate_row(&rows, &repo, "/tmp/home", &foreign_lead).map(|r| r.slug),
             Some("foreign-cos".to_string())
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -894,7 +880,7 @@ mod tests {
             source: crate::identity::IdentitySource::Unknown,
         };
         assert_eq!(
-            gate_row(&rows, &repo, "/tmp/home", Some(&non_lead)),
+            gate_row(&rows, &repo, "/tmp/home", &non_lead),
             None
         );
         let _ = std::fs::remove_dir_all(&tmp);
