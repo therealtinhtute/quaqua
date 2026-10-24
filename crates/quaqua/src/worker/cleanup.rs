@@ -338,8 +338,14 @@ pub fn cleanup_worker_in<G: GitOps, H: HerdrOps>(
         .filter(|p| !p.is_empty())
         .map(str::to_string);
 
-    if let Some(pane) = pane_to_close {
-        let _ = herdr.pane_close(&pane);
+    if let Some(pane) = &pane_to_close {
+        if crate::cos::pane_is_cos(herdr, pane) {
+            return Err((
+                1,
+                format!("error: refusing to close CoS pane '{pane}' (grid_role=cos)\n"),
+            ));
+        }
+        let _ = herdr.pane_close(pane);
     }
 
     let runs_dir = override_runs_dir
@@ -527,7 +533,11 @@ pub(crate) mod metrics {
 
     impl HerdrOps for MockHerdr {
         fn run(&self, _args: &[&str]) -> std::io::Result<Output> {
-            unimplemented!()
+            Ok(Output {
+                status: ExitStatusExt::from_raw(0),
+                stdout: vec![],
+                stderr: vec![],
+            })
         }
         fn agent_list(&self) -> std::io::Result<String> {
             Ok(self.agent_list_response.clone())

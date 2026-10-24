@@ -127,6 +127,17 @@ pub fn apply_ops<D: HerdrDriver>(
             None => return Err(format!("apply: pane {actual_pane} missing from snapshot")),
         };
 
+        if let Some(tokens) = &pane_obj.tokens {
+            if tokens
+                .grid_role
+                .as_deref()
+                .map(crate::cos::is_cos_pane_token)
+                .unwrap_or(false)
+            {
+                return Err(format!("refusing to move CoS pane '{actual_pane}' (grid_role=cos)"));
+            }
+        }
+
         if !is_candidate_worker(pane_obj) {
             return Err(format!("apply: pane {actual_pane} is not a candidate worker"));
         }
