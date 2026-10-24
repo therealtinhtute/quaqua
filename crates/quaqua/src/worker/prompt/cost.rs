@@ -1000,9 +1000,26 @@ impl CostTracker {
             lines.push(format!(
                 "WATCHDOG cost 200% | name={name} cost=${current_cost:.4} budget=${budget_val:.4} | ESCALATE"
             ));
+            notify_escalate(name, current_cost, budget_val);
         }
         lines
     }
+}
+
+/// Pops a herdr notification for the 200% cost mark so anh iu sees it even
+/// when the CoS pane is not focused. Best effort: failures are ignored.
+fn notify_escalate(name: &str, cost: f64, budget: f64) {
+    if cfg!(test) {
+        return;
+    }
+    let _ = std::process::Command::new(crate::herdr::bin_path())
+        .args(["notification", "show", &format!("quaqua: {name} at 200% cost")])
+        .arg("--body")
+        .arg(format!("spent ${cost:.2} of ${budget:.2} budget; decide: stop or extend"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// Budget warnings emitted during worker execution.
