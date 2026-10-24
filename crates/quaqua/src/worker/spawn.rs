@@ -295,7 +295,60 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
     git: &G,
     herdr: &H,
 ) -> Result<(), (i32, String)> {
-    let mut opts = opts;
+    let runs_dir = crate::worker::cleanup::default_runs_dir();
+    let name = opts.name.clone();
+    let repo_name = opts
+        .repo_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(String::from);
+
+    let res = spawn_worker_inner(opts, cfg, git, herdr, &runs_dir);
+
+    match &res {
+        Ok((caller, owner)) => {
+            crate::bus::record_event_safely_in_runs(
+                &runs_dir,
+                &crate::bus::FarmEvent::new(
+                    "spawned",
+                    Some(caller.clone()),
+                    Some(name),
+                    Some(owner.clone()),
+                    repo_name,
+                ),
+            );
+            Ok(())
+        }
+        Err((code, msg)) => {
+            let payload = if msg.trim().is_empty() {
+                "{}".to_string()
+            } else {
+                serde_json::to_string(&serde_json::json!({ "error": msg.trim() }))
+                    .unwrap_or_else(|_| "{}".to_string())
+            };
+            crate::bus::record_event_safely_in_runs(
+                &runs_dir,
+                &crate::bus::FarmEvent::new(
+                    "spawn_failed",
+                    None::<String>,
+                    if name.is_empty() { None } else { Some(name) },
+                    None::<String>,
+                    repo_name,
+                )
+                .with_payload_json(payload),
+            );
+            Err((*code, msg.clone()))
+        }
+    }
+}
+
+fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
+    mut opts: SpawnOptions,
+    cfg: &Config,
+    git: &G,
+    herdr: &H,
+    runs_dir: &std::path::Path,
+) -> Result<(String, String), (i32, String)> {
     let resolved_kind = match (&opts.purpose, &opts.kind) {
         (Some(p), Some(pos)) => {
             let resolved = crate::config::resolve_purpose(cfg, p)
@@ -366,9 +419,8 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
 
     let caller_tokens = crate::identity::caller_pane_tokens(herdr);
     let owner = resolve_owner_from_tokens(caller_tokens.as_ref());
-    let runs_dir = crate::worker::cleanup::default_runs_dir();
-    let _ = std::fs::create_dir_all(&runs_dir);
-    let caller = crate::identity::resolve_caller_from_tokens(caller_tokens.as_ref(), &runs_dir);
+    let caller = crate::identity::resolve_caller_from_tokens(caller_tokens.as_ref(), runs_dir);
+    let _ = std::fs::create_dir_all(runs_dir);
     eprintln!("[identity] worker spawn: name={} caller={caller}", opts.name);
 
     // Lead gate (AGENTS.md '## Roles (SLP)'): a `cos`-owned project with two or
@@ -644,7 +696,7 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         ));
     }
 
-    Ok(())
+    Ok((caller.to_string(), owner))
 }
 
 #[cfg(test)]

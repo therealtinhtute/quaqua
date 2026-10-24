@@ -629,6 +629,16 @@ impl GitOps for DummyGit {
 
 #[test]
 fn test_unknown_harness_rejected_before_split_n4() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-unknown-harness-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
     let spy = MockActivitiesHerdr::new(MockActivities::new());
     let dummy_git = DummyGit;
 
@@ -649,7 +659,7 @@ fn test_unknown_harness_rejected_before_split_n4() {
     let opts = parse_spawn_args(&[
         "badkind-task1".to_string(),
         "badkind".to_string(),
-        "/repo".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
     ])
     .unwrap();
 
@@ -658,10 +668,21 @@ fn test_unknown_harness_rejected_before_split_n4() {
     // N4: pane_split must NEVER have been called!
     assert!(!spy.has_call("herdr.pane_split"));
     assert_eq!(spy.call_count(), 0);
+    let _ = std::fs::remove_dir_all(&temp);
 }
 
 #[test]
 fn test_missing_effort_rejected_before_split() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-missing-effort-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
     let spy = MockActivitiesHerdr::new(MockActivities::new());
     let dummy_git = DummyGit;
 
@@ -682,7 +703,7 @@ fn test_missing_effort_rejected_before_split() {
     let opts = parse_spawn_args(&[
         "tieude-task1".to_string(),
         "tieude".to_string(),
-        "/repo".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
     ])
     .unwrap();
 
@@ -690,10 +711,21 @@ fn test_missing_effort_rejected_before_split() {
     assert!(res.is_err());
     assert!(!spy.has_call("herdr.pane_split"));
     assert_eq!(spy.call_count(), 0);
+    let _ = std::fs::remove_dir_all(&temp);
 }
 
 #[test]
 fn test_unsupported_effort_rejected_before_split() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-unsupported-effort-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
     let spy = MockActivitiesHerdr::new(MockActivities::new());
     let dummy_git = DummyGit;
 
@@ -714,7 +746,7 @@ fn test_unsupported_effort_rejected_before_split() {
     let opts = parse_spawn_args(&[
         "tieude-task1".to_string(),
         "tieude".to_string(),
-        "/repo".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
     ])
     .unwrap();
 
@@ -722,6 +754,77 @@ fn test_unsupported_effort_rejected_before_split() {
     assert!(res.is_err());
     assert!(!spy.has_call("herdr.pane_split"));
     assert_eq!(spy.call_count(), 0);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_repro_f1_early_rejection_tests_do_not_write_to_default_runs() {
+    let temp = std::env::temp_dir().join(format!("quaqua-f1-ambient-{}", std::process::id()));
+    let fake_ws = temp.join("ws");
+    let runs_dir = fake_ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    // When running early-rejection tests, they must be isolated with their own temp runs
+    // and must not touch or create fake_ws/runs/quaqua.db.
+    test_unknown_harness_rejected_before_split_n4();
+    test_missing_effort_rejected_before_split();
+    test_unsupported_effort_rejected_before_split();
+
+    assert!(
+        !runs_dir.join("quaqua.db").exists(),
+        "isolated tests must not write to ambient/default runs dir"
+    );
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_spawn_worker_records_spawn_failed_on_early_rejection_in_production() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-f1-realdk-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = config::Config::default();
+    cfg.kinds.insert(
+        "badkind".to_string(),
+        config::Kind {
+            harness: "unsupported_harness".to_string(),
+            model: "m".to_string(),
+            effort: None,
+            fallback: None,
+            can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
+        },
+    );
+
+    let opts = parse_spawn_args(&[
+        "badkind-task1".to_string(),
+        "badkind".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &DummyGit,
+        &MockActivitiesHerdr::new(MockActivities::new()),
+    );
+    assert!(res.is_err());
+
+    let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let events = bus.load_events(0).expect("load events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "spawn_failed");
+    assert_eq!(events[0].subject.as_deref(), Some("badkind-task1"));
+    assert!(events[0].payload_json.contains("unsupported harness"));
+    let _ = std::fs::remove_dir_all(&temp);
 }
 
 #[test]
@@ -2247,6 +2350,12 @@ fn test_spawn_worker_purpose_with_matching_positional_kind() {
     .unwrap();
     let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
     assert!(res.is_ok(), "spawn with matching kind should succeed: {:?}", res.err());
+    let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let events = bus.load_events(0).expect("load events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "spawned");
+    assert_eq!(events[0].subject.as_deref(), Some("suhuynh-purpmatch"));
+
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -2297,6 +2406,12 @@ fn test_spawn_worker_purpose_with_mismatched_positional_kind_fails() {
         msg.contains("suhuynh") && msg.contains("sude"),
         "error message should name both resolved kind 'suhuynh' and positional kind 'sude', got: {msg}"
     );
+    let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let events = bus.load_events(0).expect("load events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "spawn_failed");
+    assert_eq!(events[0].subject.as_deref(), Some("suhuynh-purpmismatch"));
+
 
     let _ = std::fs::remove_dir_all(&temp);
 }

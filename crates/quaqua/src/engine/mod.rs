@@ -16,6 +16,7 @@ pub mod child;
 pub mod clock;
 pub mod testkit;
 pub mod guard;
+pub mod sqlite;
 
 #[cfg(test)]
 mod tests;
