@@ -32,6 +32,7 @@ D2 and D5–D9 take the design's recommendation unless anh iu says otherwise at 
 
 | File | One line |
 | --- | --- |
+| [`roadmap.md`](roadmap.md) | Delivery roadmap: token key decision, lanes, Leads, checkpoints, per-phase gate. |
 | [`p0-kickoff.md`](p0-kickoff.md) | P0 brief for a fresh session: identity + depth, `cos tag`, CoS pane protection, evidence, budgets. |
 | [`plan.md`](plan.md) | The plan: goal, D1/D3/D4, the P0 CoS-marker addendum (`quaqua cos tag`, sidebar chip, no silent herdr config edits). |
 | [`design.md`](design.md) | The design in full: `[layout]` in `team.toml` v3, one pure `layout::check` at every verb, `mail`/`farm_events` tables in `runs/quaqua.db`, per-verb events, P0–P8 with one proving test each. |
