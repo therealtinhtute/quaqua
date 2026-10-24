@@ -121,6 +121,11 @@ enum Command {
         #[command(subcommand)]
         cmd: LayoutCmd,
     },
+    /// Inter-team and worker mail: send, inbox, ack, import, ls.
+    Mail {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -754,6 +759,17 @@ fn main() {
                         eprintln!("error: {e}");
                         1
                     }
+                }
+            }
+        },
+        Some(Command::Mail { args }) => {
+            match quaqua::bus::mail::handle_mail(&args, &Herdr::new()) {
+                Ok(code) => code,
+                Err(e) => {
+                    if !e.is_empty() {
+                        eprintln!("{e}");
+                    }
+                    1
                 }
             }
         },

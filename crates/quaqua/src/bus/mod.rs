@@ -3,6 +3,8 @@
 //! Stores `farm_events` and `cursors` in `runs/quaqua.db`.
 //! Uses shared SQLite connection opener with WAL mode, busy timeout, and retry_while_busy.
 
+pub mod mail;
+
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -87,11 +89,14 @@ pub struct FarmBus {
 }
 
 impl FarmBus {
-    /// Returns the default SQLite path at `<workspace_root>/runs/quaqua.db`.
     pub fn default_path() -> PathBuf {
-        crate::workspace::workspace_root()
-            .join("runs")
-            .join("quaqua.db")
+        if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
+            PathBuf::from(dir).join("quaqua.db")
+        } else {
+            crate::workspace::workspace_root()
+                .join("runs")
+                .join("quaqua.db")
+        }
     }
 
     /// Opens or creates the bus at the default path.
@@ -121,6 +126,23 @@ impl FarmBus {
                     consumer TEXT PRIMARY KEY,
                     seq INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS mail (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    msg_key     TEXT NOT NULL UNIQUE,
+                    ts_ms       INTEGER NOT NULL,
+                    from_name   TEXT NOT NULL,
+                    from_role   TEXT NOT NULL,
+                    to_name     TEXT NOT NULL,
+                    kind        TEXT NOT NULL,
+                    project     TEXT,
+                    reply_to    INTEGER REFERENCES mail(id),
+                    body        TEXT NOT NULL CHECK (length(body) <= 4096),
+                    deliveries  INTEGER NOT NULL DEFAULT 0,
+                    last_delivered_ms INTEGER,
+                    acked_ms    INTEGER,
+                    acked_by    TEXT
+                );
+                CREATE INDEX IF NOT EXISTS mail_unacked ON mail(to_name, acked_ms, id);
                 "#,
             )
         })?;
@@ -133,6 +155,10 @@ impl FarmBus {
     pub fn path(&self) -> &Path {
         &self.path
     }
+    pub fn conn_for_test(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+        self.conn.lock().unwrap()
+    }
+
 
     /// Records an event in `farm_events`.
     ///
