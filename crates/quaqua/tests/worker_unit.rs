@@ -2247,6 +2247,12 @@ fn test_spawn_worker_purpose_with_matching_positional_kind() {
     .unwrap();
     let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr);
     assert!(res.is_ok(), "spawn with matching kind should succeed: {:?}", res.err());
+    let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let events = bus.load_events(0).expect("load events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "spawned");
+    assert_eq!(events[0].subject.as_deref(), Some("suhuynh-purpmatch"));
+
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -2297,6 +2303,12 @@ fn test_spawn_worker_purpose_with_mismatched_positional_kind_fails() {
         msg.contains("suhuynh") && msg.contains("sude"),
         "error message should name both resolved kind 'suhuynh' and positional kind 'sude', got: {msg}"
     );
+    let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let events = bus.load_events(0).expect("load events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "spawn_failed");
+    assert_eq!(events[0].subject.as_deref(), Some("suhuynh-purpmismatch"));
+
 
     let _ = std::fs::remove_dir_all(&temp);
 }

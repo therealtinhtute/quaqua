@@ -207,35 +207,7 @@ pub struct SqliteJournal {
     path: PathBuf,
 }
 
-/// How long a journal operation waits for a competing connection, in ms.
-const BUSY_TIMEOUT_MS: u64 = 5000;
-
-/// True for SQLite's transient lock errors (`SQLITE_BUSY` / `SQLITE_LOCKED`).
-fn is_lock_error(err: &rusqlite::Error) -> bool {
-    matches!(
-        err.sqlite_error_code(),
-        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
-    )
-}
-
-/// Retries `op` while SQLite reports a transient lock, for up to [`BUSY_TIMEOUT_MS`].
-///
-/// `busy_timeout` covers the statements SQLite knows it can safely re-run, but
-/// not `PRAGMA journal_mode`: switching a rollback-journal database to WAL
-/// returns `SQLITE_BUSY` immediately when another connection holds the write
-/// lock, even with a timeout set. Opening the journal while another runner is
-/// writing is normal, so the retry lives here rather than at each caller.
-fn retry_while_busy<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(BUSY_TIMEOUT_MS);
-    loop {
-        match op() {
-            Err(err) if is_lock_error(&err) && std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            result => return result,
-        }
-    }
-}
+use crate::engine::sqlite::{open_conn, retry_while_busy};
 
 impl SqliteJournal {
     /// Returns the default SQLite journal path at `<workspace_root>/runs/quaqua.db`.
@@ -252,29 +224,7 @@ impl SqliteJournal {
 
     /// Opens or creates the SQLite journal at the specified path.
     pub fn open(path: &Path) -> Result<Self, JournalError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    JournalError::StorageError(format!(
-                        "failed to create directory {}: {e}",
-                        parent.display()
-                    ))
-                })?;
-            }
-        }
-
-        let conn = rusqlite::Connection::open(path)
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
-
-        // Set the timeout first so everything after it waits for a competing
-        // connection instead of failing immediately.
-        conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
-
-        // WAL mode is what makes concurrent readers and writers safe, but the
-        // mode change bypasses the busy handler (see `retry_while_busy`).
-        retry_while_busy(|| conn.pragma_update(None, "journal_mode", "WAL"))
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+        let conn = open_conn(path).map_err(|e| JournalError::StorageError(e.to_string()))?;
 
         // Initialize schema exactly per journal.rs specification.
         retry_while_busy(|| {
