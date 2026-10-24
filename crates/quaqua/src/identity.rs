@@ -79,12 +79,42 @@ impl fmt::Display for IdentitySource {
     }
 }
 
+/// Depth of a caller or an error encountered while resolving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallerDepth {
+    Resolved(u32),
+    Cycle(Vec<String>),
+    MissingOwner(String),
+    Unknown,
+}
+
+impl fmt::Display for CallerDepth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CallerDepth::Resolved(d) => write!(f, "{d}"),
+            CallerDepth::Cycle(c) => write!(f, "?(cycle {})", c.join("->")),
+            CallerDepth::MissingOwner(name) => write!(f, "?(missing {name})"),
+            CallerDepth::Unknown => write!(f, "?"),
+        }
+    }
+}
+
+impl From<Result<u32, DepthError>> for CallerDepth {
+    fn from(res: Result<u32, DepthError>) -> Self {
+        match res {
+            Ok(d) => CallerDepth::Resolved(d),
+            Err(DepthError::Cycle(c)) => CallerDepth::Cycle(c),
+            Err(DepthError::NotFound(n)) => CallerDepth::MissingOwner(n),
+        }
+    }
+}
+
 /// Resolved identity of a caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Caller {
     pub name: String,
     pub role: Role,
-    pub depth: u32,
+    pub depth: CallerDepth,
     pub source: IdentitySource,
 }
 
@@ -97,7 +127,6 @@ impl fmt::Display for Caller {
         )
     }
 }
-
 /// Positive resolution of role from a map of pane tokens.
 /// - `grid_role == "worker"` -> Role::Peer
 /// - `grid_role == "orchestrator"` -> Role::Lead
@@ -166,56 +195,8 @@ pub fn depth_walk(runs_dir: &Path, start: &str) -> Result<u32, DepthError> {
     }
 }
 
-pub use depth_walk as walk_depth;
-
-/// Resolves the caller identity from herdr pane tokens, environment fallback, and owner chains.
-pub fn resolve_caller<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Caller {
-    if let Some((name, role, tokens)) = caller_from_pane(herdr) {
-        let depth = match role {
-            Role::Cos => 0,
-            Role::Lead => depth_walk(runs_dir, &name).unwrap_or(1),
-            Role::Peer => {
-                let owner = tokens.get("grid_owner").map(|s| s.as_str()).unwrap_or("cos");
-                depth_walk(runs_dir, owner).map(|d| d + 1).unwrap_or(2)
-            }
-            Role::Unknown => 0,
-        };
-        return Caller {
-            name,
-            role,
-            depth,
-            source: IdentitySource::PaneTokens,
-        };
-    }
-
-    // Fallback: QUAQUA_OWNER environment variable
-    let env_owner = std::env::var("QUAQUA_OWNER").ok().filter(|s| !s.trim().is_empty());
-    if let Some(owner) = env_owner {
-        let role = if owner == "cos" {
-            Role::Cos
-        } else if crate::cap::is_lead_owner(&owner) {
-            Role::Lead
-        } else {
-            Role::Unknown
-        };
-        let depth = depth_walk(runs_dir, &owner).unwrap_or(if role == Role::Lead { 1 } else { 0 });
-        Caller {
-            name: owner,
-            role,
-            depth,
-            source: IdentitySource::EnvFallback,
-        }
-    } else {
-        Caller {
-            name: "unknown".to_string(),
-            role: Role::Unknown,
-            depth: 0,
-            source: IdentitySource::Unknown,
-        }
-    }
-}
-
-fn caller_from_pane<H: HerdrOps>(herdr: &H) -> Option<(String, Role, HashMap<String, String>)> {
+/// Query the current pane tokens once via herdr `pane get $HERDR_PANE_ID`.
+pub fn caller_pane_tokens<H: HerdrOps>(herdr: &H) -> Option<HashMap<String, String>> {
     let pane_id = std::env::var("HERDR_PANE_ID").ok()?;
     if pane_id.trim().is_empty() {
         return None;
@@ -232,18 +213,94 @@ fn caller_from_pane<H: HerdrOps>(herdr: &H) -> Option<(String, Role, HashMap<Str
             tokens.insert(k.clone(), s.to_string());
         }
     }
-    let role = resolve(&tokens);
-    let name = match role {
-        Role::Cos => "cos".to_string(),
-        Role::Lead => tokens.get("grid_owner").cloned().unwrap_or_else(|| "cos".to_string()),
-        Role::Peer => tokens
-            .get("grid_name")
-            .cloned()
-            .or_else(|| tokens.get("grid_owner").cloned())
-            .unwrap_or_else(|| "unknown".to_string()),
-        Role::Unknown => tokens.get("grid_owner").cloned().unwrap_or_else(|| "unknown".to_string()),
-    };
-    Some((name, role, tokens))
+    Some(tokens)
+}
+
+/// Resolves caller identity from an already-fetched tokens map (or None).
+pub fn resolve_caller_from_tokens(
+    tokens: Option<&HashMap<String, String>>,
+    runs_dir: &Path,
+) -> Caller {
+    if let Some(tokens) = tokens {
+        let role = resolve(tokens);
+        let name = match role {
+            Role::Cos => "cos".to_string(),
+            Role::Lead => tokens
+                .get("grid_owner")
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string()),
+            Role::Peer => tokens
+                .get("grid_name")
+                .cloned()
+                .or_else(|| tokens.get("grid_owner").cloned())
+                .unwrap_or_else(|| "unknown".to_string()),
+            Role::Unknown => tokens
+                .get("grid_owner")
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string()),
+        };
+        let depth = match role {
+            Role::Cos => CallerDepth::Resolved(0),
+            Role::Lead => CallerDepth::from(depth_walk(runs_dir, &name)),
+            Role::Peer => {
+                if let Some(owner) = tokens.get("grid_owner") {
+                    match depth_walk(runs_dir, owner) {
+                        Ok(d) => CallerDepth::Resolved(d + 1),
+                        Err(e) => CallerDepth::from(Err(e)),
+                    }
+                } else {
+                    CallerDepth::Unknown
+                }
+            }
+            Role::Unknown => CallerDepth::Unknown,
+        };
+        return Caller {
+            name,
+            role,
+            depth,
+            source: IdentitySource::PaneTokens,
+        };
+    }
+
+    // Fallback: QUAQUA_OWNER environment variable is ONLY allowed under QUAQUA_TEST=1
+    // (design.md:151; fail-closed in production, "never ambient env").
+    let is_test = std::env::var("QUAQUA_TEST").as_deref() == Ok("1");
+    if is_test {
+        let env_owner = std::env::var("QUAQUA_OWNER").ok().filter(|s| !s.trim().is_empty());
+        if let Some(owner) = env_owner {
+            let role = if owner == "cos" {
+                Role::Cos
+            } else if crate::cap::is_lead_owner(&owner) {
+                Role::Lead
+            } else {
+                Role::Unknown
+            };
+            let depth = match role {
+                Role::Cos => CallerDepth::Resolved(0),
+                Role::Lead => CallerDepth::from(depth_walk(runs_dir, &owner)),
+                Role::Unknown | Role::Peer => CallerDepth::Unknown,
+            };
+            return Caller {
+                name: owner,
+                role,
+                depth,
+                source: IdentitySource::EnvFallback,
+            };
+        }
+    }
+
+    Caller {
+        name: "unknown".to_string(),
+        role: Role::Unknown,
+        depth: CallerDepth::Unknown,
+        source: IdentitySource::Unknown,
+    }
+}
+
+/// Resolves the caller identity from herdr pane tokens, environment fallback, and owner chains.
+pub fn resolve_caller<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Caller {
+    let tokens = caller_pane_tokens(herdr);
+    resolve_caller_from_tokens(tokens.as_ref(), runs_dir)
 }
 
 #[cfg(test)]
@@ -393,8 +450,9 @@ mod tests {
         let caller = resolve_caller(&cos_herdr, &runs_dir);
         assert_eq!(caller.role, Role::Cos);
         assert_eq!(caller.name, "cos");
-        assert_eq!(caller.depth, 0);
+        assert_eq!(caller.depth, CallerDepth::Resolved(0));
         assert_eq!(caller.source, IdentitySource::PaneTokens);
+        assert_eq!(format!("{caller}"), "name=cos, role=cos, depth=0, source=tokens");
 
         // Lead pane
         let lead_herdr = MockHerdrWithTokens {
@@ -403,8 +461,9 @@ mod tests {
         let caller = resolve_caller(&lead_herdr, &runs_dir);
         assert_eq!(caller.role, Role::Lead);
         assert_eq!(caller.name, "my-lead");
-        assert_eq!(caller.depth, 1);
+        assert_eq!(caller.depth, CallerDepth::Resolved(1));
         assert_eq!(caller.source, IdentitySource::PaneTokens);
+        assert_eq!(format!("{caller}"), "name=my-lead, role=lead, depth=1, source=tokens");
 
         // Peer pane
         let peer_herdr = MockHerdrWithTokens {
@@ -413,8 +472,86 @@ mod tests {
         let caller = resolve_caller(&peer_herdr, &runs_dir);
         assert_eq!(caller.role, Role::Peer);
         assert_eq!(caller.name, "sude-task");
-        assert_eq!(caller.depth, 2);
+        assert_eq!(caller.depth, CallerDepth::Resolved(2));
         assert_eq!(caller.source, IdentitySource::PaneTokens);
+        assert_eq!(format!("{caller}"), "name=sude-task, role=peer, depth=2, source=tokens");
+
+        // R4: Orchestrator pane without grid_owner -> name is "unknown", never "cos"
+        let no_owner_lead = MockHerdrWithTokens {
+            tokens_json: r#"{"grid_role":"orchestrator"}"#.to_string(),
+        };
+        let caller = resolve_caller(&no_owner_lead, &runs_dir);
+        assert_eq!(caller.role, Role::Lead);
+        assert_eq!(caller.name, "unknown");
+
+        // R3: Cycle in depth walk logged as ?(cycle ...)
+        fs::write(runs_dir.join("cyc-lead.owner"), "cyc-lead\n").unwrap();
+        let cyc_herdr = MockHerdrWithTokens {
+            tokens_json: r#"{"grid_role":"orchestrator","grid_owner":"cyc-lead"}"#.to_string(),
+        };
+        let caller = resolve_caller(&cyc_herdr, &runs_dir);
+        assert_eq!(
+            caller.depth,
+            CallerDepth::Cycle(vec!["cyc-lead".into(), "cyc-lead".into()])
+        );
+        assert_eq!(
+            format!("{caller}"),
+            "name=cyc-lead, role=lead, depth=?(cycle cyc-lead->cyc-lead), source=tokens"
+        );
+
+        // R3: Missing owner file logged as ?(missing ...)
+        let missing_herdr = MockHerdrWithTokens {
+            tokens_json: r#"{"grid_role":"orchestrator","grid_owner":"ghost-lead"}"#.to_string(),
+        };
+        let caller = resolve_caller(&missing_herdr, &runs_dir);
+        assert_eq!(
+            caller.depth,
+            CallerDepth::MissingOwner("ghost-lead".to_string())
+        );
+        assert_eq!(
+            format!("{caller}"),
+            "name=ghost-lead, role=lead, depth=?(missing ghost-lead), source=tokens"
+        );
+        // Role::Unknown with grid_owner -> keeps grid_owner as name, depth=?
+        let unknown_with_owner = MockHerdrWithTokens {
+            tokens_json: r#"{"grid_role":"custom","grid_owner":"some-owner"}"#.to_string(),
+        };
+        let caller = resolve_caller(&unknown_with_owner, &runs_dir);
+        assert_eq!(caller.role, Role::Unknown);
+        assert_eq!(caller.name, "some-owner");
+        assert_eq!(caller.depth, CallerDepth::Unknown);
+        assert_eq!(caller.source, IdentitySource::PaneTokens);
+
+        // Failing herdr pane get -> returns fallback Unknown
+        struct FailingHerdr;
+        impl HerdrOps for FailingHerdr {
+            fn run(&self, _args: &[&str]) -> std::io::Result<std::process::Output> {
+                Ok(std::process::Output {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(1),
+                    stdout: Vec::new(),
+                    stderr: b"pane not found".to_vec(),
+                })
+            }
+            fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
+            fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> { unimplemented!() }
+            fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> { unimplemented!() }
+            fn agent_start(&self, _n: &str, _k: &str, _p: &str, _t: u32, _a: &[&str]) -> std::io::Result<std::process::Output> { unimplemented!() }
+            fn pane_split(&self, _c: &str, _o: &str, _e: &[(&str, &str)]) -> std::io::Result<std::process::Output> { unimplemented!() }
+            fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+            fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<std::process::Output> { unimplemented!() }
+            fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool { unimplemented!() }
+            fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> { unimplemented!() }
+            fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+            fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+            fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> { unimplemented!() }
+            fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+            fn agent_prompt_wait_background(&self, _n: &str, _p: &str, _t: u32, _f: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
+        }
+        let caller = resolve_caller(&FailingHerdr, &runs_dir);
+        assert_eq!(caller.role, Role::Unknown);
+        assert_eq!(caller.name, "unknown");
+        assert_eq!(caller.depth, CallerDepth::Unknown);
+        assert_eq!(caller.source, IdentitySource::Unknown);
     }
 
     #[test]
@@ -436,14 +573,30 @@ mod tests {
             tokens_json: "{}".to_string(),
         };
 
+        // Without QUAQUA_TEST=1, env fallback is forbidden (R2 fail-closed)
+        {
+            let _test_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_TEST");
+            let _owner_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+            let caller = resolve_caller(&dummy_herdr, &runs_dir);
+            assert_eq!(caller.role, Role::Unknown);
+            assert_eq!(caller.name, "unknown");
+            assert_eq!(caller.depth, CallerDepth::Unknown);
+            assert_eq!(caller.source, IdentitySource::Unknown);
+            assert_eq!(format!("{caller}"), "name=unknown, role=unknown, depth=?, source=unknown");
+        }
+
+        // Under QUAQUA_TEST=1, env fallback is active
+        let _test_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_TEST", "1");
+
         // QUAQUA_OWNER = "cos"
         {
             let _owner_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
             let caller = resolve_caller(&dummy_herdr, &runs_dir);
             assert_eq!(caller.role, Role::Cos);
             assert_eq!(caller.name, "cos");
-            assert_eq!(caller.depth, 0);
+            assert_eq!(caller.depth, CallerDepth::Resolved(0));
             assert_eq!(caller.source, IdentitySource::EnvFallback);
+            assert_eq!(format!("{caller}"), "name=cos, role=cos, depth=0, source=env");
         }
 
         // QUAQUA_OWNER = "env-lead"
@@ -452,8 +605,9 @@ mod tests {
             let caller = resolve_caller(&dummy_herdr, &runs_dir);
             assert_eq!(caller.role, Role::Lead);
             assert_eq!(caller.name, "env-lead");
-            assert_eq!(caller.depth, 1);
+            assert_eq!(caller.depth, CallerDepth::Resolved(1));
             assert_eq!(caller.source, IdentitySource::EnvFallback);
+            assert_eq!(format!("{caller}"), "name=env-lead, role=lead, depth=1, source=env");
         }
 
         // QUAQUA_OWNER unset
@@ -462,8 +616,9 @@ mod tests {
             let caller = resolve_caller(&dummy_herdr, &runs_dir);
             assert_eq!(caller.role, Role::Unknown);
             assert_eq!(caller.name, "unknown");
-            assert_eq!(caller.depth, 0);
+            assert_eq!(caller.depth, CallerDepth::Unknown);
             assert_eq!(caller.source, IdentitySource::Unknown);
+            assert_eq!(format!("{caller}"), "name=unknown, role=unknown, depth=?, source=unknown");
         }
     }
 

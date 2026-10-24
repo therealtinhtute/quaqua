@@ -275,15 +275,18 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
     let _ = std::fs::write(&rf, rules_content);
 
-    // Save owner file and log identity
+    // Resolve caller identity and log at spawn
     let caller = crate::identity::resolve_caller(herdr, &runs_dir);
     let caller_owner = if caller.role == crate::identity::Role::Unknown && caller.name == "unknown" {
-        "cos".to_string()
+        // The single default to QUAQUA_OWNER (or "cos" if unset) when caller identity
+        // has no pane tokens (parity with resolve_owner in worker/spawn.rs until P3 gate enforcement).
+        std::env::var("QUAQUA_OWNER")
+            .ok()
+            .filter(|o| !o.is_empty())
+            .unwrap_or_else(|| "cos".to_string())
     } else {
         caller.name.clone()
     };
-    crate::state::WorkerMetadata::save_owner(&runs_dir, &name, &caller_owner)
-        .map_err(|e| (1, format!("cannot write owner file for {name}: {e}\n")))?;
     eprintln!("[identity] lead spawn: slug={slug} caller={caller}");
 
     // Load config and resolve lead launch
@@ -382,6 +385,11 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     if !start_out.status.success() {
         return Err((1, String::from_utf8_lossy(&start_out.stderr).to_string()));
     }
+
+    // Record .owner file only after the Lead agent successfully starts, so failed
+    // spawns leave no phantom owner rows for status scanners (issue R1).
+    crate::state::WorkerMetadata::save_owner(&runs_dir, &name, &caller_owner)
+        .map_err(|e| (1, format!("cannot write owner file for {name}: {e}\n")))?;
     // Update projects/INDEX.md with mkdir lock
     update_project_index_owner(&root, &slug, &name)?;
 
@@ -730,43 +738,11 @@ mod tests {
     }
 
     #[test]
-    fn test_lead_spawn_writes_owner_file() {
-        let _lock = crate::test_env::lock_env();
-
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("quaqua-lead-spawn-test-{}-{nanos}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("projects")).unwrap();
-        fs::create_dir_all(root.join("rules/_all")).unwrap();
-        let _guard = CleanupDir(root.clone());
-
-        let index_content = "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| testslug | ~/Lab/testslug | cos | active | goal |\n";
-        fs::write(root.join("projects/INDEX.md"), index_content).unwrap();
-        fs::write(root.join("projects/testslug.md"), "# testslug card\n").unwrap();
-
-        let _root_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_ROOT", root.to_str().unwrap());
-        let _home_guard = crate::test_env::TestEnvVarGuard::set("HOME", root.to_str().unwrap());
-        let _owner_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
-        let _pane_guard = crate::test_env::TestEnvVarGuard::set("HERDR_PANE_ID", "");
-
-        let git = DummyGit;
-        let herdr = DummyHerdr::new();
-
-        let res = spawn_lead(&["testslug".to_string()], &git, &herdr);
-        assert!(res.is_ok(), "spawn_lead failed: {:?}", res.err());
-
-        let owner_file = root.join("runs/testslug-lead.owner");
-        assert!(owner_file.is_file(), "runs/testslug-lead.owner must exist");
-        let owner_content = fs::read_to_string(&owner_file).unwrap();
-        assert_eq!(owner_content, "cos\n");
-    }
-
-    #[test]
     fn test_lead_spawn_writes_caller_owner_when_set() {
         let _lock = crate::test_env::lock_env();
+        let _test_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _team_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_TEAM_TOML");
+        let _lead_guard = crate::test_env::TestEnvVarGuard::remove("LEAD_KIND");
 
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
