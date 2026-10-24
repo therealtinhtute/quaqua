@@ -4,7 +4,7 @@
 //! Resolution order is project override -> defaults, then validate. A validation
 //! failure is rejected with one clear message (first failure wins).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -37,6 +37,13 @@ fn default_on_cost_cap() -> String {
     COST_CAP_WARN.to_string()
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutRefConfig {
+    #[serde(rename = "use")]
+    pub use_layout: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -66,6 +73,10 @@ pub struct Config {
     pub grid: Grid,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectOverride>,
+    #[serde(default)]
+    pub layout: Option<LayoutRefConfig>,
+    #[serde(default)]
+    pub layouts: BTreeMap<String, crate::layout::Layout>,
 }
 
 impl Default for Config {
@@ -83,6 +94,8 @@ impl Default for Config {
             merge: Merge::default(),
             grid: Grid::default(),
             projects: BTreeMap::new(),
+            layout: None,
+            layouts: BTreeMap::new(),
         }
     }
 }
@@ -468,11 +481,26 @@ pub fn resolve(mut cfg: Config, project: Option<&str>) -> Result<Config, String>
 /// Validate the resolved config. team.toml is the only source of
 /// harness/model/effort, so every kind is checked here; models.md is prose.
 pub fn validate(cfg: &Config) -> Result<(), String> {
-    if cfg.schema_version != SCHEMA_VERSION {
+    if cfg.schema_version > 3 {
         return Err(format!(
-            "unsupported schema_version {} (want {SCHEMA_VERSION})",
+            "unsupported schema_version {} (max 3; run `quaqua config migrate` or upgrade quaqua)",
             cfg.schema_version
         ));
+    }
+    if cfg.schema_version < 2 {
+        return Err(format!(
+            "unsupported schema_version {} (want 2 or 3)",
+            cfg.schema_version
+        ));
+    }
+
+    if cfg.schema_version == 3 {
+        if let Some(layout_ref) = &cfg.layout {
+            let name = &layout_ref.use_layout;
+            if crate::layout::builtin::get(name).is_none() && !cfg.layouts.contains_key(name) {
+                return Err(format!("unknown layout '{name}'"));
+            }
+        }
     }
 
     let cap = cfg.limits.max_workers_per_orchestrator;
@@ -729,6 +757,11 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
     let parts: Vec<&str> = key.split('.').collect();
     let out = match parts.as_slice() {
         ["schema_version"] => cfg.schema_version.to_string(),
+        ["layout", "use"] => cfg
+            .layout
+            .as_ref()
+            .map(|l| l.use_layout.clone())
+            .ok_or_else(unknown)?,
         ["limits", "depth"] => cfg.limits.depth.to_string(),
         ["limits", "max_workers_per_orchestrator"] => {
             cfg.limits.max_workers_per_orchestrator.to_string()
