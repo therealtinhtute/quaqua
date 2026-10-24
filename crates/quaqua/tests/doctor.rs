@@ -54,6 +54,10 @@ impl Fixture {
             .env("HOME", &self.home)
             .env("QUAQUA_CHECKOUT", &self.checkout)
             .env("QUAQUA_SHELL", &self.shell)
+            // `workspace_root()` prefers these over `$HOME`; a caller that has
+            // them set must not redirect the fixture's workspace.
+            .env_remove("QUAQUA_HOME")
+            .env_remove("QUAQUA_ROOT")
             .current_dir(&self.cwd)
             .output()
             .expect("run quaqua doctor")

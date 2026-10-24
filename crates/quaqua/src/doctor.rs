@@ -1,6 +1,7 @@
 //! `quaqua doctor` — check that the `quaqua` a shell resolves is the binary
 //! worth using: installed on PATH, not older than the checkout it was built
-//! from, and not shadowed by a shell function/alias (issue #55 item 3).
+//! from (when one can be found), and not shadowed by a shell function/alias
+//! (issue #55 item 3).
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,9 @@ pub struct Report {
     pub problems: Vec<String>,
     pub warnings: Vec<String>,
     pub notes: Vec<String>,
+    /// Whether a binary was compared against a checkout: `run()` may only claim
+    /// the staleness check when this is true.
+    pub checkout_checked: bool,
 }
 
 /// `quaqua doctor`: print what was found, one `error:` per problem, and exit
@@ -28,7 +32,11 @@ pub fn run() -> i32 {
         eprintln!("warning: {line}");
     }
     if report.problems.is_empty() {
-        let ok = "ok: quaqua is installed, not older than the checkout, and not shadowed by a shell function/alias";
+        let ok = if report.checkout_checked {
+            "ok: quaqua is installed, not older than the checkout, and not shadowed by a shell function/alias"
+        } else {
+            "ok: quaqua is installed and not shadowed by a shell function/alias — the staleness check was skipped (no checkout found)"
+        };
         if report.warnings.is_empty() {
             println!("{ok}");
         } else {
@@ -70,12 +78,14 @@ pub fn evaluate(
         problems: Vec::new(),
         warnings: workspace_warnings(workspace),
         notes: Vec::new(),
+        checkout_checked: false,
     };
     match binary {
         Some(bin) => {
             report.notes.push(format!("binary: {}", bin.display()));
             if let Some(root) = checkout {
                 report.notes.push(format!("checkout: {}", root.display()));
+                report.checkout_checked = true;
                 if let Some(newest) = stale_against(bin, root) {
                     report.problems.push(format!(
                         "{} is older than the checkout ({}) — rebuild/install it: cargo install --path crates/quaqua --locked",
@@ -83,6 +93,11 @@ pub fn evaluate(
                         newest.display()
                     ));
                 }
+            } else {
+                report.notes.push(
+                    "checkout: not found — the staleness check was skipped (set QUAQUA_CHECKOUT=<engine checkout> or run inside one)"
+                        .to_string(),
+                );
             }
         }
         None => report.problems.push(
