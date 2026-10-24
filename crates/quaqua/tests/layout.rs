@@ -6,6 +6,16 @@ use quaqua::layout::{
 };
 use std::path::PathBuf;
 
+fn hermetic_temp_dir(prefix: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("quaqua-layout-test-{prefix}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create hermetic temp dir");
+    dir
+}
+
 #[test]
 fn layout_evidence_1_from_legacy_edge_set_equals_slp_builtin() {
     let template_toml = include_str!("../../../templates/workspace/team.toml");
@@ -17,21 +27,20 @@ fn layout_evidence_1_from_legacy_edge_set_equals_slp_builtin() {
 
 #[test]
 fn layout_evidence_2_v3_use_slp_equals_legacy() {
-    let v3_toml = r#"
-schema_version = 3
-[layout]
-use = "slp"
-"#;
-    let v3_cfg: Config = toml::from_str(v3_toml).expect("parse v3 config");
-    let v3_layout = resolve_layout(&v3_cfg).expect("resolve v3 layout");
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    let v3_toml = template_toml
+        .replace("schema_version = 2", "schema_version = 3\n[layout]\nuse = \"slp\"")
+        .replace("max_workers_per_orchestrator = 8", "max_workers_per_orchestrator = 3")
+        .replace("max_peers = 4", "max_peers = 2");
+    let cfg: Config = toml::from_str(&v3_toml).expect("parse v3 config");
+    let v3_layout = resolve_layout(&cfg).expect("resolve v3 layout");
+    let legacy_layout = Layout::from_legacy(&cfg);
 
-    let v2_toml = include_str!("../../../templates/workspace/team.toml");
-    let v2_cfg: Config = toml::from_str(v2_toml).expect("parse v2 template");
-    let v2_layout = Layout::from_legacy(&v2_cfg);
-
-    assert_eq!(v3_layout.edge_set(), v2_layout.edge_set());
-    assert_eq!(v3_layout.roles, v2_layout.roles);
-    assert_eq!(v3_layout.depth, v2_layout.depth);
+    assert_eq!(v3_layout.roles, legacy_layout.roles);
+    assert_eq!(v3_layout.roles["cos"].max_children, Some(3));
+    assert_eq!(v3_layout.roles["lead"].max_children, Some(2));
+    assert_eq!(v3_layout.edge_set(), legacy_layout.edge_set());
+    assert_eq!(v3_layout.depth, legacy_layout.depth);
 }
 
 #[test]
@@ -50,7 +59,8 @@ schema_version = 4
 #[test]
 fn layout_evidence_4_why_rule_id_equals_check_rule_id() {
     let slp = builtin::get("slp").expect("slp built-in");
-    let runs_dir = PathBuf::from("/tmp");
+    let runs_dir = hermetic_temp_dir("ev4");
+    std::fs::write(runs_dir.join("mu-lead.owner"), "cos\n").expect("write owner");
     let caller = resolve_caller_by_name("mu-lead", &runs_dir);
 
     // Case A: allowed edge
@@ -66,6 +76,8 @@ fn layout_evidence_4_why_rule_id_equals_check_rule_id() {
     assert_eq!(why_deny_rule_id, dec_deny.rule_id);
     assert_eq!(dec_deny.rule_id, "edge.none");
     assert!(!dec_deny.allow);
+
+    let _ = std::fs::remove_dir_all(&runs_dir);
 }
 
 #[test]
@@ -172,14 +184,15 @@ fn layout_check_all_layers() {
     assert!(!d1.allow);
     assert_eq!(d1.rule_id, "identity.unknown");
 
-    // 2. Role layer failure
-    let strange_caller = Caller {
-        name: "guest".to_string(),
+    // 2. Role layer failure: caller role defined in caller struct but absent from layout
+    // (Note: we test with a caller whose role as_str is not in layout.roles)
+    let unknown_role_caller = Caller {
+        name: "custom-agent".to_string(),
         role: Role::Unknown,
         depth: CallerDepth::Resolved(1),
         source: IdentitySource::PaneTokens,
     };
-    let d2 = check(&slp, &strange_caller, Verb::Spawn, "peer");
+    let d2 = check(&slp, &unknown_role_caller, Verb::Spawn, "peer");
     assert!(!d2.allow);
     assert_eq!(d2.rule_id, "identity.unknown");
 
@@ -261,6 +274,18 @@ fn layout_check_mail_rules() {
 
 #[test]
 fn layout_cli_show_and_why() {
+    let sandbox = hermetic_temp_dir("cli");
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    let cfg_path = sandbox.join("team.toml");
+    std::fs::write(&cfg_path, template_toml).expect("write team.toml");
+
+    let prev_team = std::env::var("QUAQUA_TEAM_TOML").ok();
+    let prev_runs = std::env::var("QUAQUA_RUNS_DIR").ok();
+    std::env::set_var("QUAQUA_TEAM_TOML", &cfg_path);
+    std::env::set_var("QUAQUA_RUNS_DIR", &sandbox);
+
+    std::fs::write(sandbox.join("mu-lead.owner"), "cos\n").expect("write mu-lead owner");
+
     // Show text format
     let show_text = run_show(None, false).expect("run_show text");
     assert!(show_text.contains("Layout: slp"));
@@ -292,4 +317,103 @@ fn layout_cli_show_and_why() {
     assert_eq!(json_why["rule_id"], "slp.lead.can_spawn.peer");
     assert_eq!(json_why["caller"], "mu-lead");
     assert_eq!(json_why["target"], "peer");
+
+    match prev_team {
+        Some(t) => std::env::set_var("QUAQUA_TEAM_TOML", t),
+        None => std::env::remove_var("QUAQUA_TEAM_TOML"),
+    }
+    match prev_runs {
+        Some(r) => std::env::set_var("QUAQUA_RUNS_DIR", r),
+        None => std::env::remove_var("QUAQUA_RUNS_DIR"),
+    }
+    let _ = std::fs::remove_dir_all(&sandbox);
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for review findings F1 - F7
+// ---------------------------------------------------------------------------
+
+#[test]
+fn layout_repro_f1_unknown_caller_resolves_to_identity_unknown() {
+    let sandbox = hermetic_temp_dir("f1");
+    let caller = resolve_caller_by_name("nobody-xyz", &sandbox);
+    assert_eq!(caller.role, Role::Unknown);
+    let slp = builtin::get("slp").expect("slp built-in");
+    let dec = check(&slp, &caller, Verb::Spawn, "peer");
+    assert!(!dec.allow);
+    assert_eq!(dec.rule_id, "identity.unknown");
+    let _ = std::fs::remove_dir_all(&sandbox);
+}
+
+#[test]
+fn layout_repro_f2_depth_cycle_error_reaches_gate() {
+    let sandbox = hermetic_temp_dir("f2");
+    std::fs::write(sandbox.join("cyc-lead.owner"), "cyc-lead\n").expect("write cycle owner");
+    let caller = resolve_caller_by_name("cyc-lead", &sandbox);
+    assert!(matches!(caller.depth, CallerDepth::Cycle(_)));
+    let slp = builtin::get("slp").expect("slp built-in");
+    let dec = check(&slp, &caller, Verb::Spawn, "peer");
+    assert!(!dec.allow);
+    assert_eq!(dec.rule_id, "depth.exceeded");
+    let _ = std::fs::remove_dir_all(&sandbox);
+}
+
+#[test]
+fn layout_repro_f3_v3_use_slp_retains_live_caps_and_depth() {
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    let v3_toml = template_toml
+        .replace("schema_version = 2", "schema_version = 3\n[layout]\nuse = \"slp\"")
+        .replace("max_workers_per_orchestrator = 8", "max_workers_per_orchestrator = 3")
+        .replace("max_peers = 4", "max_peers = 2");
+    let cfg: Config = toml::from_str(&v3_toml).expect("parse v3 config");
+    let resolved = resolve_layout(&cfg).expect("resolve v3 slp");
+    let legacy = Layout::from_legacy(&cfg);
+    assert_eq!(resolved.roles["cos"].max_children, Some(3));
+    assert_eq!(resolved.roles["lead"].max_children, Some(2));
+    assert_eq!(resolved.roles, legacy.roles);
+    assert_eq!(resolved.edge_set(), legacy.edge_set());
+    assert_eq!(resolved.depth, legacy.depth);
+}
+
+#[test]
+fn layout_repro_f4_v2_with_layout_refused() {
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    let v2_with_layout = format!("{template_toml}\n[layout]\nuse = \"nope\"\n");
+    let cfg: Config = toml::from_str(&v2_with_layout).expect("parse v2 with layout");
+    let err = config::validate(&cfg).expect_err("v2 with [layout] must be refused");
+    assert!(err.contains("schema_version") || err.contains("[layout]"));
+}
+
+#[test]
+fn layout_repro_f5_unknown_target_role_denied() {
+    let slp = builtin::get("slp").expect("slp built-in");
+    let cos = Caller {
+        name: "cos".to_string(),
+        role: Role::Cos,
+        depth: CallerDepth::Resolved(0),
+        source: IdentitySource::PaneTokens,
+    };
+    let dec = check(&slp, &cos, Verb::Spawn, "bogus");
+    assert!(!dec.allow);
+    assert_ne!(dec.rule_id, "slp.cos.can_spawn.peer");
+}
+
+#[test]
+fn layout_repro_f6_user_layout_colliding_with_builtin_refused() {
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    let v3_collision = template_toml
+        .replace("schema_version = 2", "schema_version = 3\n[layout]\nuse = \"slp\"\n[layouts.slp]\ndepth = 1\n[layouts.slp.roles.cos]\nclass = \"cos\"");
+    let cfg: Config = toml::from_str(&v3_collision).expect("parse collision config");
+    let err = config::validate(&cfg).expect_err("collision with built-in must be refused");
+    assert!(err.contains("collides"));
+}
+
+#[test]
+fn layout_repro_f7_v3_layout_invalid_role_refs_refused() {
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    let v3_bad_role = template_toml
+        .replace("schema_version = 2", "schema_version = 3\n[layout]\nuse = \"x\"\n[layouts.x]\ndepth = 2\n[layouts.x.roles.cos]\nclass = \"cos\"\ncan_spawn = [\"chiar\"]");
+    let cfg: Config = toml::from_str(&v3_bad_role).expect("parse invalid role config");
+    let err = config::validate(&cfg).expect_err("invalid role ref must be refused");
+    assert!(err.contains("unknown role") || err.contains("chiar"));
 }
