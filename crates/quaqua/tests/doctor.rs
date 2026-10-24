@@ -112,3 +112,38 @@ fn a_healthy_setup_exits_zero() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("ok:"), "{stdout}");
 }
+
+#[test]
+fn a_workspace_that_is_also_an_engine_checkout_warns_and_still_exits_zero() {
+    let f = Fixture::new("overlap", "quaqua is /tmp/bin/quaqua");
+    f.install_binary();
+    // `$HOME/quaqua` before the split: the workspace root held the engine
+    // sources and the engine `AGENTS.md`, so the persona never loaded.
+    let workspace = f.home.join("quaqua");
+    fs::create_dir_all(workspace.join("crates/quaqua/src")).unwrap();
+    fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(workspace.join("AGENTS.md"), "# quaqua engine\n").unwrap();
+
+    let out = f.run(&f.bin_dir);
+    // A broken layout warns; it never fails the run.
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("warning:"), "{stderr}");
+    assert!(stderr.contains("Cargo.toml"), "{stderr}");
+    assert!(stderr.contains("@identity.md"), "{stderr}");
+}
+
+#[test]
+fn a_split_workspace_is_quiet() {
+    let f = Fixture::new("split", "quaqua is /tmp/bin/quaqua");
+    f.install_binary();
+    let workspace = f.home.join("quaqua");
+    fs::create_dir_all(workspace.join("projects")).unwrap();
+    fs::write(workspace.join("projects/INDEX.md"), "").unwrap();
+    fs::write(workspace.join("AGENTS.md"), "@identity.md\n@SOUL.md\n").unwrap();
+
+    let out = f.run(&f.bin_dir);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("warning:"), "{stderr}");
+}

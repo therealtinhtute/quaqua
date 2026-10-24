@@ -13,6 +13,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(5000);
 
 pub struct Report {
     pub problems: Vec<String>,
+    pub warnings: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -23,10 +24,16 @@ pub fn run() -> i32 {
     for line in &report.notes {
         println!("{line}");
     }
+    for line in &report.warnings {
+        eprintln!("warning: {line}");
+    }
     if report.problems.is_empty() {
-        println!(
-            "ok: quaqua is installed, not older than the checkout, and not shadowed by a shell function/alias"
-        );
+        let ok = "ok: quaqua is installed, not older than the checkout, and not shadowed by a shell function/alias";
+        if report.warnings.is_empty() {
+            println!("{ok}");
+        } else {
+            println!("{ok} (layout warnings above)");
+        }
         0
     } else {
         for problem in &report.problems {
@@ -41,15 +48,27 @@ pub fn diagnose() -> Report {
     let path = std::env::var_os("PATH");
     let binary = find_on_path("quaqua", path.as_deref());
     let checkout = checkout_root();
+    let workspace = crate::workspace::workspace_root();
     let shell = shell_path();
-    evaluate(binary.as_deref(), checkout.as_deref(), shell.as_deref())
+    evaluate(
+        binary.as_deref(),
+        checkout.as_deref(),
+        Some(&workspace),
+        shell.as_deref(),
+    )
 }
 
 /// The check core with explicit inputs, so tests can drive every branch
 /// without changing PATH or the user's shell.
-pub fn evaluate(binary: Option<&Path>, checkout: Option<&Path>, shell: Option<&Path>) -> Report {
+pub fn evaluate(
+    binary: Option<&Path>,
+    checkout: Option<&Path>,
+    workspace: Option<&Path>,
+    shell: Option<&Path>,
+) -> Report {
     let mut report = Report {
         problems: Vec::new(),
+        warnings: workspace_warnings(workspace),
         notes: Vec::new(),
     };
     match binary {
@@ -117,26 +136,76 @@ fn is_executable(path: &Path) -> bool {
 }
 
 /// `QUAQUA_CHECKOUT`, else the current directory or an ancestor containing
-/// `crates/quaqua/src`, else `~/quaqua`.
+/// `crates/quaqua/src`, else nothing. There is no `$HOME` guess: the workspace
+/// root is not the engine checkout (`workspace_warnings` reports the overlap
+/// instead).
 pub fn checkout_root() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("QUAQUA_CHECKOUT") {
-        if !explicit.is_empty() {
-            return Some(PathBuf::from(explicit));
+    let explicit = std::env::var_os("QUAQUA_CHECKOUT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let cwd = std::env::current_dir().ok();
+    let workspace = crate::workspace::workspace_root();
+    checkout_root_from(explicit.as_deref(), cwd.as_deref(), Some(&workspace))
+}
+
+/// Layout warnings for the workspace `quaqua doctor` runs against: a workspace
+/// must not also be an engine checkout, and its root `AGENTS.md` must import
+/// the persona. Both are warnings — the run still exits 0.
+pub fn workspace_warnings(workspace: Option<&Path>) -> Vec<String> {
+    let Some(root) = workspace else {
+        return Vec::new();
+    };
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    let mut engine = Vec::new();
+    if root.join("Cargo.toml").is_file() {
+        engine.push("Cargo.toml");
+    }
+    if root.join("crates").is_dir() {
+        engine.push("crates/");
+    }
+    if !engine.is_empty() {
+        warnings.push(format!(
+            "{} is also an engine checkout ({}) — keep the workspace and the engine checkout apart, or the engine AGENTS.md replaces the workspace one",
+            root.display(),
+            engine.join(", ")
+        ));
+    }
+    let agents = root.join("AGENTS.md");
+    if let Ok(text) = std::fs::read_to_string(&agents) {
+        if !text.lines().any(|line| line.trim() == "@identity.md") {
+            warnings.push(format!(
+                "{} has no `@identity.md` import — the workspace persona will not load",
+                agents.display()
+            ));
         }
     }
-    if let Ok(mut dir) = std::env::current_dir() {
-        loop {
-            if is_checkout(&dir) {
-                return Some(dir);
-            }
-            if !dir.pop() {
-                break;
-            }
+    warnings
+}
+
+/// [`checkout_root`] with its process inputs passed in, so tests can prove a
+/// workspace root is never taken for the engine checkout.
+fn checkout_root_from(
+    explicit: Option<&Path>,
+    cwd: Option<&Path>,
+    workspace: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(explicit) = explicit {
+        return Some(explicit.to_path_buf());
+    }
+    let mut dir = cwd?.to_path_buf();
+    loop {
+        if is_checkout(&dir) {
+            // A workspace holding the engine sources is a broken layout, not a
+            // checkout to compare a binary against.
+            return (Some(dir.as_path()) != workspace).then_some(dir);
+        }
+        if !dir.pop() {
+            return None;
         }
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let candidate = home.join("quaqua");
-    is_checkout(&candidate).then_some(candidate)
 }
 
 fn is_checkout(path: &Path) -> bool {
@@ -272,7 +341,7 @@ mod tests {
 
     #[test]
     fn missing_binary_is_a_problem() {
-        let report = evaluate(None, None, None);
+        let report = evaluate(None, None, None, None);
         assert_eq!(report.problems.len(), 1);
         assert!(
             report.problems[0].contains("not on PATH"),
@@ -293,7 +362,7 @@ mod tests {
         let shell = stub_shell(&dir, "quaqua is a shell function");
         let bin = dir.join("quaqua");
         fs::write(&bin, "").unwrap();
-        let report = evaluate(Some(&bin), None, Some(&shell));
+        let report = evaluate(Some(&bin), None, None, Some(&shell));
         assert!(
             report.problems.iter().any(|p| p.contains("function/alias")),
             "{:?}",
@@ -314,7 +383,7 @@ mod tests {
         fs::write(src.join("main.rs"), "fn main() {}").unwrap();
         set_mtime(&bin, 1_000);
         set_mtime(&src.join("main.rs"), 2_000);
-        let report = evaluate(Some(&bin), Some(&checkout), None);
+        let report = evaluate(Some(&bin), Some(&checkout), None, None);
         assert!(
             report
                 .problems
@@ -328,8 +397,126 @@ mod tests {
         let fresh = dir.join("quaqua-fresh");
         fs::write(&fresh, "").unwrap();
         set_mtime(&fresh, 3_000);
-        let report = evaluate(Some(&fresh), Some(&checkout), None);
+        let report = evaluate(Some(&fresh), Some(&checkout), None, None);
         assert!(report.problems.is_empty(), "{:?}", report.problems);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A workspace dir with a project index and a persona-importing AGENTS.md:
+    /// the layout `quaqua init` is supposed to produce.
+    fn workspace_dir(dir: &Path) -> PathBuf {
+        let ws = dir.join("workspace");
+        fs::create_dir_all(ws.join("projects")).unwrap();
+        fs::write(ws.join("projects/INDEX.md"), "").unwrap();
+        fs::write(
+            ws.join("AGENTS.md"),
+            "# CoS workspace\n\n@identity.md\n@SOUL.md\n",
+        )
+        .unwrap();
+        ws
+    }
+
+    #[test]
+    fn a_workspace_that_also_holds_the_engine_checkout_is_a_warning_not_a_problem() {
+        let dir = temp_dir("overlap");
+        let ws = workspace_dir(&dir);
+
+        // A clean workspace is quiet (only the missing binary is a problem).
+        let report = evaluate(None, None, Some(&ws), None);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+
+        // `Cargo.toml` at the root: the workspace is also an engine checkout.
+        fs::write(ws.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let report = evaluate(None, None, Some(&ws), None);
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(
+            report.warnings[0].contains("Cargo.toml"),
+            "{:?}",
+            report.warnings
+        );
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+
+        // `crates/` alone is enough of a signal.
+        let other = dir.join("other");
+        fs::create_dir_all(other.join("crates/quaqua/src")).unwrap();
+        let report = evaluate(None, None, Some(&other), None);
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(
+            report.warnings[0].contains("crates/"),
+            "{:?}",
+            report.warnings
+        );
+
+        // Neither a missing workspace dir nor no workspace at all warns.
+        let report = evaluate(None, None, Some(&dir.join("absent")), None);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let report = evaluate(None, None, None, None);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_workspace_agents_md_without_the_persona_import_is_a_warning() {
+        let dir = temp_dir("agents");
+        let ws = workspace_dir(&dir);
+        let agents = ws.join("AGENTS.md");
+
+        // Importing the persona (the `quaqua init` layout) is quiet.
+        let report = evaluate(None, None, Some(&ws), None);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        // No AGENTS.md at all: nothing claims to import anything.
+        fs::remove_file(&agents).unwrap();
+        let report = evaluate(None, None, Some(&ws), None);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        // The engine AGENTS.md the workspace root used to carry: no persona.
+        fs::write(
+            &agents,
+            "# quaqua engine\n\nEngine-only: crates/, tests/.\n",
+        )
+        .unwrap();
+        let report = evaluate(None, None, Some(&ws), None);
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(
+            report.warnings[0].contains("@identity.md"),
+            "{:?}",
+            report.warnings
+        );
+        // A warning never fails the run.
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_checkout_is_the_engine_sources_never_the_workspace_root() {
+        let dir = temp_dir("checkout");
+        let engine = dir.join("Lab/quaqua");
+        fs::create_dir_all(engine.join("crates/quaqua/src")).unwrap();
+        let ws = dir.join("quaqua");
+        fs::create_dir_all(ws.join("projects")).unwrap();
+
+        // Running inside the engine checkout discovers it from the cwd.
+        assert_eq!(
+            checkout_root_from(None, Some(&engine.join("crates/quaqua")), Some(&ws)),
+            Some(engine.clone())
+        );
+        // An explicit QUAQUA_CHECKOUT wins.
+        assert_eq!(
+            checkout_root_from(Some(&engine), None, Some(&ws)),
+            Some(engine.clone())
+        );
+        // The workspace root is not the checkout, even when engine sources sit
+        // there (`~/quaqua` before the split): that layout is a warning instead.
+        let overlapping = dir.join("overlap");
+        fs::create_dir_all(overlapping.join("crates/quaqua/src")).unwrap();
+        assert_eq!(
+            checkout_root_from(None, Some(&overlapping), Some(&overlapping)),
+            None
+        );
+        // Outside any checkout nothing is assumed.
+        assert_eq!(checkout_root_from(None, Some(&ws), Some(&ws)), None);
         let _ = fs::remove_dir_all(&dir);
     }
 
