@@ -302,4 +302,31 @@ for absent in 'SHORT.md' 'memory/2026-10-11.md' 'raw/2026-10-11-x.md'; do
 done
 echo "ok: doc-rot -> >100-line instruction docs flagged; 100-line doc, logs, raw silent"
 
+# ── rule expiry & casebook pre-checks (#70, #71) ──────────────────────────
+cat > "$T/repo/rules/_all/sample-expiry.md" <<'RULES'
+- Old rule [expires: 2020-01-01]
+- Future rule [expires: 2099-01-01]
+- Bad rule [expires: not-a-date]
+RULES
+cat > "$T/repo/memory/$(date +%Y-%m-%d).md" <<'MEM'
+- [case] sude-fail exit 2: crash on bad input
+- [case] detu-fail exit 2: crash on bad input
+- [case] solo-fail kill: single incident
+MEM
+run
+[[ $rc -eq 0 ]] || fail "rule-expiry/casebook: exit $rc: $(cat "$T/err")"
+calls=$(cat "$T/calls")
+for want in \
+  'expired rule: rules/_all/sample-expiry.md:1: - Old rule [expires: 2020-01-01]' \
+  'malformed expiry: rules/_all/sample-expiry.md:3: - Bad rule [expires: not-a-date]' \
+  'recurring failure (2x/14d, no rule): crash on bad input'; do
+  grep -qF "$want" <<<"$calls" || fail "rule-expiry/casebook: prompt missing '$want'"
+done
+for absent in \
+  'sample-expiry.md:2' \
+  'single incident'; do
+  grep -qF "$absent" <<<"$calls" && fail "rule-expiry/casebook: false flag '$absent'"
+done
+echo "ok: rule expiry & casebook -> expired and malformed flagged, future silent; recurring failure flagged"
+
 echo "PASS"

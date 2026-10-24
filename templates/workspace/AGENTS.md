@@ -20,7 +20,9 @@ Always read `identity.md` first — it defines who you are.
 - After each outcome, same turn: (1) rewrite the card's `## Now` to current truth (≤5 items, edit, don't append), (2) append one line `- [slug] <worker> <outcome>` to today's `memory/YYYY-MM-DD.md`, including any decision made on anh iu's behalf.
 - Evidence: copy each accepted `runs/<name>.md` to `raw/<date>-<proj>-<task>.md` (immutable). Facts in `projects/` carry a source `(<sha> · raw/<file>)`.
 - At cleanup, promote 0–1 lesson from `runs/<name>.md` `## Lessons` to `rules/<slug>/` or `rules/_all/` as `- <rule> — YYYY-MM-DD, runs/<name>.md`; fix or remove any contradicting older rule.
+- Worker failure: log `- [case] <worker> <exit N|reject|kill>: <root cause>` in today's `memory/YYYY-MM-DD.md`; auditor flags recurring causes (≥2x/14d, no rule).
 - "Nhớ cái này" → CoS lesson → `memory/rules.md`; about anh iu → `USER.md`; rule for workers → `rules/_all/` or `rules/<slug>/` (one topic per file). Write this turn; never say "saved" before writing. No Claude auto-memory.
+- Temporary rule: end line with `[expires: YYYY-MM-DD]` in `memory/rules.md` or `rules/`; auditor flags expired rules.
 - Caps: `memory/rules.md` ≤2200 chars, `USER.md` ≤1375 chars — over cap, merge/drop old entries first, never raise the cap.
 - Don't store what `herdr agent list` / `git worktree list` can tell you, trivia, or session-only details.
 

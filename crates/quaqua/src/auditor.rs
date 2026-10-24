@@ -29,7 +29,7 @@ Audit five things:
 3. Unhandled memory. Flag: reports/audit-*.md with no
    `- [audit] <report file>:` line in any memory/YYYY-MM-DD.md (the
    handled marker CoS writes, see AGENTS.md); `## Lessons` lines (other than
-   `none`) in runs/*.md from the last 2 days that no rules/ file cites as
+   `none`) in runs/*.md from the last 7 days that no rules/ file cites as
    `runs/<name>.md`.
 4. Pipeline runs (runs/pipeline-*.md, written by `quaqua pipeline`; the
    last `- status:` line is the outcome). Flag:
@@ -171,7 +171,11 @@ pub fn run_auditor(opts: AuditorRunOptions) -> Result<i32, (i32, String)> {
         let mut report = String::from("## Drift\n- none\n\n## Stale docs\n");
         let stale_flags: Vec<&str> = flags
             .iter()
-            .filter(|f| f.contains("doc-rot risk"))
+            .filter(|f| {
+                f.contains("doc-rot risk")
+                    || f.contains("expired rule")
+                    || f.contains("malformed expiry")
+            })
             .map(|s| s.as_str())
             .collect();
         if stale_flags.is_empty() {
@@ -184,7 +188,23 @@ pub fn run_auditor(opts: AuditorRunOptions) -> Result<i32, (i32, String)> {
             report.push('\n');
         }
 
-        report.push_str("## Unhandled\n- none\n\n## Pipeline\n");
+        report.push_str("## Unhandled\n");
+        let unhandled_flags: Vec<&str> = flags
+            .iter()
+            .filter(|f| f.contains("unpromoted") || f.contains("recurring failure"))
+            .map(|s| s.as_str())
+            .collect();
+        if unhandled_flags.is_empty() {
+            report.push_str("- none\n\n");
+        } else {
+            for f in unhandled_flags {
+                report.push_str(f);
+                report.push('\n');
+            }
+            report.push('\n');
+        }
+
+        report.push_str("## Pipeline\n");
         let pipeline_flags: Vec<&str> = flags
             .iter()
             .filter(|f| {
@@ -449,45 +469,13 @@ fn format_epoch_secs_date_minute(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
 }
 
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970;
-    loop {
-        let leap = is_leap_year(year);
-        let ydays = if leap { 366 } else { 365 };
-        if days < ydays {
-            break;
-        }
-        days -= ydays;
-        year += 1;
-    }
-    let leap = is_leap_year(year);
-    let mdays = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1;
-    for &m in &mdays {
-        if days < m {
-            break;
-        }
-        days -= m;
-        month += 1;
-    }
-    (year, month, days + 1)
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    let (y, m, d) = crate::usage::civil_from_days(days as i64);
+    (y as u64, m as u64, d as u64)
 }
 
-fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+fn ymd_to_days(year: u64, month: u64, day: u64) -> u64 {
+    crate::usage::days_from_civil(year as i32, month as u32, day as u32) as u64
 }
 
 fn mem_mentions(root: &Path, needles: &[&str]) -> bool {
@@ -522,8 +510,85 @@ fn git_verify_commit(repo: &Path, sha: &str) -> bool {
 }
 
 pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
-    let mut flags: Vec<String> = Vec::new();
+    let now_secs = crate::util::now_sec();
+    let today = days_to_ymd(now_secs / 86400);
+    run_deterministic_prechecks_at(root, today, now_secs)
+}
 
+fn parse_ymd(s: &str) -> Option<(u64, u64, u64)> {
+    if s.len() != 10 {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i32 = s[0..4].parse().ok()?;
+    let m: u32 = s[5..7].parse().ok()?;
+    let d: u32 = s[8..10].parse().ok()?;
+    if !(1970..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let days = crate::usage::days_from_civil(y, m, d);
+    if crate::usage::civil_from_days(days) == (y, m, d) {
+        Some((y as u64, m as u64, d as u64))
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ExpiryStatus {
+    ValidExpired,
+    Malformed,
+}
+
+fn check_line_expiry(line: &str, today: (u64, u64, u64)) -> Option<ExpiryStatus> {
+    let trimmed = line.trim_end_matches(['\r', '\n']).trim_end();
+    if !trimmed.ends_with(']') {
+        return None;
+    }
+    let idx = trimmed.rfind("[expires:")?;
+    let tag = &trimmed[idx..];
+    if !tag.ends_with(']') {
+        return None;
+    }
+    let date_str = tag["[expires:".len()..tag.len() - 1].trim();
+    match parse_ymd(date_str) {
+        Some(exp_ymd) => {
+            if exp_ymd < today {
+                Some(ExpiryStatus::ValidExpired)
+            } else {
+                None
+            }
+        }
+        None => Some(ExpiryStatus::Malformed),
+    }
+}
+
+fn collect_rules_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(ft) = entry.file_type() {
+                let path = entry.path();
+                if ft.is_dir() {
+                    collect_rules_md_files(&path, out);
+                } else if ft.is_file()
+                    && path.extension().and_then(|ext| ext.to_str()) == Some("md")
+                {
+                    out.push(path);
+                }
+            }
+        }
+    }
+}
+
+pub fn run_deterministic_prechecks_at(
+    root: &Path,
+    today: (u64, u64, u64),
+    now_secs: u64,
+) -> Vec<String> {
+    let mut flags: Vec<String> = Vec::new();
     // ── 1. pipeline-run pre-checks (runs/pipeline-*.md) ──────────────────────
     let runs_dir = root.join("runs");
     if let Ok(entries) = std::fs::read_dir(&runs_dir) {
@@ -781,7 +846,7 @@ pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
     }
     let mem_rules = root.join("memory").join("rules.md");
     if mem_rules.is_file() {
-        doc_files.push(mem_rules);
+        doc_files.push(mem_rules.clone());
     }
 
     doc_files.sort();
@@ -795,6 +860,172 @@ pub fn run_deterministic_prechecks(root: &Path) -> Vec<String> {
                     "- {}: {} lines (>100) — doc-rot risk, trim or split",
                     rel.display(),
                     n
+                ));
+            }
+        }
+    }
+
+    // Collect rules/*.md files once for unpromoted lessons, casebook, and expiry
+    let mut rules_paths = Vec::new();
+    collect_rules_md_files(&rules_dir, &mut rules_paths);
+    rules_paths.sort();
+    let mut rules_contents = Vec::new();
+    for rp in &rules_paths {
+        if let Ok(c) = std::fs::read_to_string(rp) {
+            rules_contents.push(c);
+        }
+    }
+    let rules_contents_lower: Vec<String> =
+        rules_contents.iter().map(|c| c.to_lowercase()).collect();
+
+    // ── 4. rule expiry pre-checks (memory/rules.md, rules/**/*.md) ───────────
+    let mut expiry_files = Vec::new();
+    if mem_rules.is_file() {
+        expiry_files.push(mem_rules);
+    }
+    expiry_files.extend(rules_paths.clone());
+    expiry_files.sort();
+
+    for f in expiry_files {
+        if let Ok(content) = std::fs::read_to_string(&f) {
+            let rel = f.strip_prefix(root).unwrap_or(&f);
+            for (idx, line) in content.lines().enumerate() {
+                match check_line_expiry(line, today) {
+                    Some(ExpiryStatus::ValidExpired) => {
+                        flags.push(format!(
+                            "- expired rule: {}:{}: {}",
+                            rel.display(),
+                            idx + 1,
+                            line.trim_end_matches(['\r', '\n'])
+                        ));
+                    }
+                    Some(ExpiryStatus::Malformed) => {
+                        flags.push(format!(
+                            "- malformed expiry: {}:{}: {}",
+                            rel.display(),
+                            idx + 1,
+                            line.trim_end_matches(['\r', '\n'])
+                        ));
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+    // ── 5. unpromoted lessons pre-checks (runs/*.md) ─────────────────────────
+    if let Ok(entries) = std::fs::read_dir(&runs_dir) {
+        let mut r_files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|name| name.ends_with(".md") && !name.ends_with(".rules.md"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        r_files.sort();
+
+        for f in r_files {
+            let mtime_secs = match std::fs::metadata(&f).and_then(|m| m.modified()) {
+                Ok(t) => t
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                Err(_) => continue,
+            };
+            let age_secs = now_secs.saturating_sub(mtime_secs);
+            if age_secs >= 7 * 86_400 {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&f) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let mut in_lessons = false;
+            let mut has_unpromoted = false;
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("## ") {
+                    if trimmed.starts_with("## Lessons") {
+                        in_lessons = true;
+                        continue;
+                    } else if in_lessons {
+                        break;
+                    }
+                } else if in_lessons && trimmed.starts_with("Verdict:") {
+                    break;
+                }
+                if in_lessons {
+                    let clean = trimmed.trim_start_matches('-').trim();
+                    let lower = clean.to_lowercase();
+                    if !lower.is_empty() && lower != "none" && lower != "none." {
+                        has_unpromoted = true;
+                        break;
+                    }
+                }
+            }
+
+            if has_unpromoted {
+                let base = f.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let needle = format!("runs/{base}.md");
+                let cited = rules_contents.iter().any(|c| c.contains(&needle));
+                if !cited {
+                    flags.push(format!(
+                        "- runs/{base}.md: '## Lessons' unpromoted from the last 7 days — no rules/ file cites runs/{base}.md"
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── 6. casebook recurring failure pre-checks (memory/YYYY-MM-DD.md) ──────
+    let mem_dir = root.join("memory");
+    let mut mem_files: Vec<(u64, PathBuf)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&mem_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("md") {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    if let Some((y, m, d)) = parse_ymd(stem) {
+                        let f_days = ymd_to_days(y, m, d);
+                        mem_files.push((f_days, p));
+                    }
+                }
+            }
+        }
+    }
+
+    let today_days = ymd_to_days(today.0, today.1, today.2);
+    let mut cause_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for (f_days, path) in mem_files {
+        if f_days <= today_days && (today_days - f_days) < 14 {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("- [case] ") {
+                        if let Some((_prefix, cause_raw)) = rest.split_once(':') {
+                            let cause = cause_raw.trim().to_lowercase();
+                            if !cause.is_empty() {
+                                *cause_counts.entry(cause).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (cause, count) in cause_counts {
+        if count >= 2 {
+            let cited = rules_contents_lower.iter().any(|c| c.contains(&cause));
+            if !cited {
+                flags.push(format!(
+                    "- recurring failure ({count}x/14d, no rule): {cause}"
                 ));
             }
         }
@@ -858,5 +1089,341 @@ mod tests {
         assert!(PROMPT_TEMPLATE.contains("[audit]"));
         assert!(PROMPT_TEMPLATE.contains("## Lessons"));
         assert!(PROMPT_TEMPLATE.contains("runs/"));
+    }
+
+    #[test]
+    fn test_prompt_template_lessons_window_7_days() {
+        assert!(PROMPT_TEMPLATE.contains("runs/*.md from the last 7 days"));
+        assert!(!PROMPT_TEMPLATE.contains("runs/*.md from the last 2 days"));
+    }
+    struct TestDir(PathBuf);
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    impl std::ops::Deref for TestDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    fn test_temp_dir(tag: &str) -> TestDir {
+        static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("quaqua-auditor-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        TestDir(dir)
+    }
+
+    #[test]
+    fn test_rule_expiry_expired_not_expired_malformed() {
+        let root = test_temp_dir("expiry");
+        let mem_dir = root.join("memory");
+        let rules_dir = root.join("rules").join("_all");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        std::fs::create_dir_all(&rules_dir).unwrap();
+
+        let mem_rules = mem_dir.join("rules.md");
+        std::fs::write(
+            &mem_rules,
+            "- Valid expired rule [expires: 2026-10-23]\n- Valid future rule [expires: 2026-10-25]\n- Valid today rule [expires: 2026-10-24]\n",
+        )
+        .unwrap();
+
+        let sample_rules = rules_dir.join("sample.md");
+        std::fs::write(
+            &sample_rules,
+            "- Malformed date rule [expires: 2026-99-99]\n- Malformed text date rule [expires: not-a-date]\n- Normal permanent rule without expiry\n",
+        )
+        .unwrap();
+
+        let today = (2026, 10, 24);
+        let now_secs = ymd_to_days(2026, 10, 24) * 86400;
+        let flags = run_deterministic_prechecks_at(&root, today, now_secs);
+
+        assert!(
+            flags.iter().any(|f| f.contains(
+                "expired rule: memory/rules.md:1: - Valid expired rule [expires: 2026-10-23]"
+            )),
+            "expired rule on line 1 must be flagged: {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("memory/rules.md:2")),
+            "future rule on line 2 must NOT be flagged: {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("memory/rules.md:3")),
+            "today rule on line 3 must NOT be flagged: {:?}",
+            flags
+        );
+
+        assert!(
+            flags.iter().any(|f| f.contains(
+                "malformed expiry: rules/_all/sample.md:1: - Malformed date rule [expires: 2026-99-99]"
+            )),
+            "malformed date rule on line 1 must be flagged with 'malformed expiry:': {:?}",
+            flags
+        );
+        assert!(
+            flags.iter().any(|f| f.contains("malformed expiry: rules/_all/sample.md:2: - Malformed text date rule [expires: not-a-date]")),
+            "malformed text date rule on line 2 must be flagged with 'malformed expiry:': {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("rules/_all/sample.md:3")),
+            "permanent rule without tag must NOT be flagged: {:?}",
+            flags
+        );
+    }
+
+    #[test]
+    fn test_unpromoted_lessons_window_6_vs_8_days() {
+        let root = test_temp_dir("lessons");
+        let runs_dir = root.join("runs");
+        let rules_dir = root.join("rules").join("_all");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        std::fs::create_dir_all(&rules_dir).unwrap();
+
+        let now_secs = ymd_to_days(2026, 10, 24) * 86400 + 43200;
+        let today = (2026, 10, 24);
+
+        // 6 days ago (recent: within 7 days)
+        let p_recent = runs_dir.join("worker-recent.md");
+        std::fs::write(&p_recent, "# Report\n\n## Lessons\n- Lesson to promote\n").unwrap();
+        let f_recent = std::fs::File::open(&p_recent).unwrap();
+        let mut times = std::fs::FileTimes::new();
+        times = times.set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now_secs - 6 * 86400),
+        );
+        f_recent.set_times(times).unwrap();
+
+        // 8 days ago (old: older than 7 days)
+        let p_old = runs_dir.join("worker-old.md");
+        std::fs::write(&p_old, "# Report\n\n## Lessons\n- Old lesson to ignore\n").unwrap();
+        let f_old = std::fs::File::open(&p_old).unwrap();
+        let mut times = std::fs::FileTimes::new();
+        times = times.set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now_secs - 8 * 86400),
+        );
+        f_old.set_times(times).unwrap();
+
+        // 6 days ago, but cited in rules/_all/promoted.md
+        let p_cited = runs_dir.join("worker-cited.md");
+        std::fs::write(&p_cited, "# Report\n\n## Lessons\n- Cited lesson\n").unwrap();
+        let f_cited = std::fs::File::open(&p_cited).unwrap();
+        let mut times = std::fs::FileTimes::new();
+        times = times.set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now_secs - 6 * 86400),
+        );
+        f_cited.set_times(times).unwrap();
+        std::fs::write(
+            rules_dir.join("promoted.md"),
+            "- Promoted rule — 2026-10-18, runs/worker-cited.md\n",
+        )
+        .unwrap();
+
+        // 6 days ago, but lessons is none
+        let p_none = runs_dir.join("worker-none.md");
+        std::fs::write(&p_none, "# Report\n\n## Lessons\nnone\n").unwrap();
+        let f_none = std::fs::File::open(&p_none).unwrap();
+        let mut times = std::fs::FileTimes::new();
+        times = times.set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now_secs - 6 * 86400),
+        );
+        f_none.set_times(times).unwrap();
+
+        let flags = run_deterministic_prechecks_at(&root, today, now_secs);
+
+        assert!(
+            flags
+                .iter()
+                .any(|f| f.contains("worker-recent.md") && f.contains("Lessons")),
+            "worker-recent.md (6 days ago) must be flagged: {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("worker-old.md")),
+            "worker-old.md (8 days ago) must NOT be flagged: {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("worker-cited.md")),
+            "worker-cited.md (cited in rules) must NOT be flagged: {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("worker-none.md")),
+            "worker-none.md (lessons none) must NOT be flagged: {:?}",
+            flags
+        );
+    }
+
+    #[test]
+    fn test_unpromoted_lessons_stops_at_verdict_and_case_insensitive_none() {
+        let root = test_temp_dir("verdict");
+        let runs_dir = root.join("runs");
+        let rules_dir = root.join("rules").join("_all");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        std::fs::create_dir_all(&rules_dir).unwrap();
+
+        let now_secs = ymd_to_days(2026, 10, 24) * 86400 + 43200;
+        let today = (2026, 10, 24);
+
+        // Reviewer report: ## Lessons\nnone\n\nVerdict: clean (within 7 days) -> MUST NOT be flagged
+        let p_rev_clean = runs_dir.join("rev-clean.md");
+        std::fs::write(
+            &p_rev_clean,
+            "# Review\n\n## Lessons\nnone\n\nVerdict: clean\n",
+        )
+        .unwrap();
+        let f_rev_clean = std::fs::File::open(&p_rev_clean).unwrap();
+        let mut times = std::fs::FileTimes::new();
+        times = times.set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now_secs - 3 * 86400),
+        );
+        f_rev_clean.set_times(times).unwrap();
+
+        // Reviewer report: ## Lessons\nNone\n\nVerdict: 1 findings (within 7 days) -> MUST NOT be flagged
+        let p_rev_cap = runs_dir.join("rev-cap.md");
+        std::fs::write(
+            &p_rev_cap,
+            "# Review\n\n## Lessons\nNone\n\nVerdict: 1 findings\n",
+        )
+        .unwrap();
+        let f_rev_cap = std::fs::File::open(&p_rev_cap).unwrap();
+        let mut times = std::fs::FileTimes::new();
+        times = times.set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now_secs - 3 * 86400),
+        );
+        f_rev_cap.set_times(times).unwrap();
+
+        // Reviewer report: ## Lessons\n- real lesson\n\nVerdict: clean (within 7 days) -> MUST be flagged
+        let p_rev_lesson = runs_dir.join("rev-lesson.md");
+        std::fs::write(
+            &p_rev_lesson,
+            "# Review\n\n## Lessons\n- real lesson\n\nVerdict: clean\n",
+        )
+        .unwrap();
+        let f_rev_lesson = std::fs::File::open(&p_rev_lesson).unwrap();
+        let mut times = std::fs::FileTimes::new();
+        times = times.set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now_secs - 3 * 86400),
+        );
+        f_rev_lesson.set_times(times).unwrap();
+
+        let flags = run_deterministic_prechecks_at(&root, today, now_secs);
+
+        assert!(
+            !flags.iter().any(|f| f.contains("rev-clean.md")),
+            "rev-clean.md must NOT be flagged: {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("rev-cap.md")),
+            "rev-cap.md must NOT be flagged: {:?}",
+            flags
+        );
+        assert!(
+            flags.iter().any(|f| f.contains("rev-lesson.md")),
+            "rev-lesson.md with real lesson must be flagged: {:?}",
+            flags
+        );
+    }
+
+    #[test]
+    fn test_casebook_recurring_failures_1x_vs_2x_and_cited() {
+        let root = test_temp_dir("casebook");
+        let mem_dir = root.join("memory");
+        let rules_dir = root.join("rules").join("_all");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        std::fs::create_dir_all(&rules_dir).unwrap();
+
+        std::fs::write(
+            mem_dir.join("2026-10-20.md"),
+            "- [case] worker-a exit 2: oom on cargo build\n- [case] worker-b reject: unhandled syntax error\n- [case] worker-c kill: runaway loop\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            mem_dir.join("2026-10-22.md"),
+            "- [case] worker-d exit 2: oom on cargo build\n- [case] worker-e kill: runaway loop\n",
+        )
+        .unwrap();
+
+        // Older than 14 days (today is 2026-10-24, 2026-10-01 is 23 days ago)
+        std::fs::write(
+            mem_dir.join("2026-10-01.md"),
+            "- [case] worker-old exit 1: ancient failure\n",
+        )
+        .unwrap();
+
+        // A rule citing "runaway loop"
+        std::fs::write(
+            rules_dir.join("loop-prevention.md"),
+            "- Bound loop iterations to prevent runaway loop — 2026-10-15, runs/worker-c.md\n",
+        )
+        .unwrap();
+
+        let today = (2026, 10, 24);
+        let now_secs = ymd_to_days(2026, 10, 24) * 86400;
+        let flags = run_deterministic_prechecks_at(&root, today, now_secs);
+
+        assert!(
+            flags
+                .iter()
+                .any(|f| f.contains("recurring failure (2x/14d, no rule): oom on cargo build")),
+            "oom on cargo build (2x, no rule) must be flagged: {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("unhandled syntax error")),
+            "unhandled syntax error (1x) must NOT be flagged: {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("runaway loop")),
+            "runaway loop (cited in rules) must NOT be flagged: {:?}",
+            flags
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("ancient failure")),
+            "ancient failure (>14d) must NOT be flagged: {:?}",
+            flags
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_rules_md_files_avoids_symlink_loop() {
+        let root = test_temp_dir("symlink_loop");
+        let rules_dir = root.join("rules");
+        let sub = rules_dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(rules_dir.join("rule.md"), "# Rule\n").unwrap();
+        let loop_link = sub.join("loop");
+        let _ = std::os::unix::fs::symlink(&rules_dir, &loop_link);
+
+        let mut out = Vec::new();
+        collect_rules_md_files(&rules_dir, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], rules_dir.join("rule.md"));
     }
 }
