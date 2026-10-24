@@ -292,6 +292,10 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     // Load config and resolve lead launch
     let base_cfg = crate::config::load_team_config()?;
     let cfg = crate::config::resolve(base_cfg.clone(), Some(&slug)).unwrap_or(base_cfg);
+
+    // Freeze layout snapshot in runs/<slug>.layout.toml
+    crate::layout::snapshot::write_layout_snapshot(&runs_dir, &slug, &cfg)
+        .map_err(|e| (1, format!("cannot write layout snapshot for {slug}: {e}\n")))?;
     let lead_env = std::env::var("LEAD_KIND").ok();
     let (lead_kind, launch) = resolve_lead_launch(&cfg, lead_env.as_deref())?;
     let lead_kind_info = cfg.kinds.get(&lead_kind).ok_or_else(|| {
