@@ -77,8 +77,8 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
     let mut current_role_has_class = false;
     let mut current_role_has_naming = false;
     let mut current_role_has_max_children = false;
+    let mut lead_max_peers_line: Option<String> = None;
     let mut seen_roles = Vec::new();
-
     let flush_role_metadata = |role_name: &str,
                                has_class: bool,
                                has_naming: bool,
@@ -202,7 +202,8 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
                 } else if trimmed.starts_with("max_children") && trimmed.contains('=') {
                     current_role_has_max_children = true;
                 } else if trimmed.starts_with("max_peers") && trimmed.contains('=') {
-                    // Translate max_peers -> max_children preserving comments
+                    lead_max_peers_line = Some(line.to_string());
+                    // Translate max_peers -> max_children in custom layout role
                     let rewritten = line.replace("max_peers", "max_children");
                     out_lines.push(rewritten);
                     current_role_has_max_children = true;
@@ -234,6 +235,16 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
         out_lines.push("can_spawn = []".to_string());
         out_lines.push("can_prompt = []".to_string());
         out_lines.push("reports_to = \"owner\"".to_string());
+    }
+
+    // Keep max_peers in [roles.lead] so cap::owner_cap continues to read it
+    if !matches_slp {
+        if let Some(peers) = cfg.roles.get("lead").and_then(|r| r.max_peers) {
+            out_lines.push(String::new());
+            out_lines.push("[roles.lead]".to_string());
+            let line_to_use = lead_max_peers_line.unwrap_or_else(|| format!("max_peers = {peers}"));
+            out_lines.push(line_to_use);
+        }
     }
 
     let mut result = out_lines.join("\n");

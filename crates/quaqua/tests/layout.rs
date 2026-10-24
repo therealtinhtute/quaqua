@@ -679,7 +679,7 @@ can_review = true
     assert!(migrated.contains("[layouts.custom.roles.peer]"));
     assert!(migrated.contains("[layouts.custom.roles.taskforce]"));
     assert!(migrated.contains("max_children = 3"));
-    assert!(!migrated.contains("max_peers"));
+    assert!(migrated.contains("[roles.lead]\nmax_peers = 3"));
 
     let v2_cfg: Config = toml::from_str(v2_custom).expect("parse v2 custom TOML");
     let v2_legacy = Layout::from_legacy(&v2_cfg);
@@ -705,6 +705,11 @@ can_review = true
     assert_eq!(
         custom_layout.roles["taskforce"].class,
         RoleClass::Taskforce
+    );
+    assert_eq!(
+        quaqua::cap::owner_cap(&migrated_cfg, "x-lead"),
+        quaqua::cap::owner_cap(&v2_cfg, "x-lead"),
+        "migrated config must preserve live Lead Peer cap"
     );
 }
 
