@@ -779,6 +779,7 @@ fn layout_p7_find_lead_in_owner_chain_cycle_safe() {
 
     let found = find_lead_in_owner_chain(&runs_dir, "worker-a");
     assert_eq!(found, None, "cycles must terminate cleanly with None");
+}
 struct EnvGuard(Vec<(&'static str, Option<String>)>);
 
 impl EnvGuard {
@@ -807,8 +808,7 @@ impl Drop for EnvGuard {
 }
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn test_slp_cfg() -> Config {
@@ -1405,4 +1405,123 @@ fn layout_repro_finding1_missing_owner_and_cycle_have_distinct_rule_ids() {
     let dec_cycle = check(&slp, &lead_cycle, Verb::Spawn, "peer");
     assert!(!dec_cycle.allow);
     assert_eq!(dec_cycle.rule_id, "depth.cycle", "cycle in owner chain must deny depth.cycle, not depth.exceeded");
+}
+
+#[test]
+fn layout_shadow_evidence_lead_owned_peer_uses_frozen_snapshot_not_live_config() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("shadow-snapshot");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    // Lead-owned peer: frz-peer -> frz-lead -> cos
+    std::fs::write(runs_dir.join("frz-lead.owner"), "cos\n").unwrap();
+    std::fs::write(runs_dir.join("frz-peer.owner"), "frz-lead\n").unwrap();
+    std::fs::write(runs_dir.join("other-peer.owner"), "other-lead\n").unwrap();
+
+    // Base template config where peer cannot prompt peer
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    let base_cfg: Config = toml::from_str(template_toml).expect("parse template team.toml");
+
+    // Freeze snapshot from base_cfg (peer cannot prompt peer)
+    let snap_path = write_layout_snapshot(&runs_dir, "frz", &base_cfg).unwrap();
+    assert!(snap_path.is_file());
+
+    // Edit live config to allow peer to prompt peer
+    let mut live_cfg = base_cfg.clone();
+    live_cfg.roles.get_mut("peer").unwrap().can_prompt = vec!["peer".to_string()];
+
+    // Caller is frz-peer
+    let caller = resolve_caller_by_name("frz-peer", &runs_dir);
+
+    // Run shadow with the edited live config
+    let decision = quaqua::layout::shadow::<quaqua::herdr::Herdr>(
+        Some(&caller),
+        None,
+        Verb::Prompt,
+        "peer",
+        Some("other-peer"),
+        quaqua::layout::SpawnOrigin::Cli,
+        None,
+        None,
+        &runs_dir,
+        Some(&live_cfg),
+    );
+
+    // Decision must come from the frozen snapshot (which denies peer -> peer prompt),
+    // NOT from live_cfg (which allows it).
+    assert!(!decision.allow, "Lead-owned peer must resolve layout from frozen snapshot, denying prompt");
+    assert!(
+        decision.rule_id == "slp.peer.prompt.peer" || decision.rule_id == "edge.none",
+        "rule_id was {}",
+        decision.rule_id
+    );
+
+    let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let events = bus.load_events(0).expect("load events");
+    let would_denies: Vec<_> = events.iter().filter(|e| e.event_type == "would_deny").collect();
+    assert_eq!(would_denies.len(), 1, "expected 1 would_deny event from frozen snapshot");
+    assert_eq!(would_denies[0].actor.as_deref(), Some("frz-peer"));
+    assert_eq!(would_denies[0].subject.as_deref(), Some("other-peer"));
+    assert!(would_denies[0].payload_json.contains(&decision.rule_id));
+
+    // Contrast with a CoS-owned caller with the same live_cfg:
+    // CoS-owned work uses live config immediately, so peer prompt is allowed and no would_deny is emitted.
+    std::fs::write(runs_dir.join("cos-peer.owner"), "cos\n").unwrap();
+    let cos_caller = resolve_caller_by_name("cos-peer", &runs_dir);
+    let cos_decision = quaqua::layout::shadow::<quaqua::herdr::Herdr>(
+        Some(&cos_caller),
+        None,
+        Verb::Prompt,
+        "peer",
+        Some("other-peer"),
+        quaqua::layout::SpawnOrigin::Cli,
+        None,
+        None,
+        &runs_dir,
+        Some(&live_cfg),
+    );
+    assert!(cos_decision.allow, "CoS-owned caller must use live config immediately, allowing prompt");
+
+    let events_after = bus.load_events(0).expect("load events");
+    let would_denies_after: Vec<_> = events_after.iter().filter(|e| e.event_type == "would_deny").collect();
+    assert_eq!(would_denies_after.len(), 1, "no new would_deny event for CoS-owned caller");
+}
+
+#[test]
+fn layout_shadow_evidence_corrupt_snapshot_falls_back_to_live_layout() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("shadow-corrupt-snap");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    // Lead-owned peer: frz-peer -> frz-lead -> cos
+    std::fs::write(runs_dir.join("frz-lead.owner"), "cos\n").unwrap();
+    std::fs::write(runs_dir.join("frz-peer.owner"), "frz-lead\n").unwrap();
+
+    // Write a corrupt snapshot file for project "frz"
+    std::fs::write(runs_dir.join("frz.layout.toml"), "invalid [toml content :::\n").unwrap();
+
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    let base_cfg: Config = toml::from_str(template_toml).expect("parse template team.toml");
+
+    let caller = resolve_caller_by_name("frz-peer", &runs_dir);
+
+    // shadow must not panic, and must fall back to live config
+    let decision = quaqua::layout::shadow::<quaqua::herdr::Herdr>(
+        Some(&caller),
+        None,
+        Verb::Prompt,
+        "peer",
+        Some("other-peer"),
+        quaqua::layout::SpawnOrigin::Cli,
+        None,
+        None,
+        &runs_dir,
+        Some(&base_cfg),
+    );
+
+    // In base_cfg, peer cannot prompt peer, so it gets denied by the live fallback layout
+    assert!(!decision.allow);
+    assert_eq!(decision.rule_id, "edge.none");
 }

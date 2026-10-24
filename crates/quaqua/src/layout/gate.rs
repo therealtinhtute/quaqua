@@ -389,21 +389,6 @@ pub fn shadow<H: HerdrOps>(
     runs_dir: &Path,
     cfg: Option<&Config>,
 ) -> Decision {
-    let layout = match cfg {
-        Some(c) => crate::layout::resolve_layout(c),
-        None => match crate::config::load_team_config() {
-            Ok(c) => crate::layout::resolve_layout(&c),
-            Err((_, e)) => Err(format!("failed to load team config: {e}")),
-        },
-    };
-    let layout = match layout {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("warning: [layout shadow] cannot resolve layout: {e}");
-            return Decision::allow("shadow.skipped.layout_err", Vec::new());
-        }
-    };
-
     let caller_resolved;
     let effective_caller = match caller {
         Some(c) => c,
@@ -418,6 +403,35 @@ pub fn shadow<H: HerdrOps>(
                 },
             };
             &caller_resolved
+        }
+    };
+
+    let loaded_cfg;
+    let effective_cfg = match cfg {
+        Some(c) => c,
+        None => match crate::config::load_team_config() {
+            Ok(c) => {
+                loaded_cfg = c;
+                &loaded_cfg
+            }
+            Err((_, e)) => {
+                eprintln!("warning: [layout shadow] cannot resolve layout: failed to load team config: {e}");
+                return Decision::allow("shadow.skipped.layout_err", Vec::new());
+            }
+        },
+    };
+
+    let layout = match crate::layout::resolve_effective_layout(&effective_caller.name, runs_dir, effective_cfg) {
+        Ok((l, _)) => l,
+        Err(e) => {
+            eprintln!("warning: [layout shadow] effective layout failed, falling back to live: {e}");
+            match crate::layout::resolve_layout(effective_cfg) {
+                Ok(l) => l,
+                Err(live_err) => {
+                    eprintln!("warning: [layout shadow] cannot resolve layout: {live_err}");
+                    return Decision::allow("shadow.skipped.layout_err", Vec::new());
+                }
+            }
         }
     };
 
