@@ -43,6 +43,95 @@ impl PrLookup for OfflinePrLookup {
 
 const NO_PR_LOOKUP: OfflinePrLookup = OfflinePrLookup;
 
+/// The herdr pane metadata boundary for CoS pane protection.
+pub trait PaneLookup {
+    fn is_cos_pane(&self, pane: &str) -> bool;
+}
+
+/// In-process default: no pane lookup available, so CoS pane protection falls back to offline.
+pub struct OfflinePaneLookup;
+
+impl PaneLookup for OfflinePaneLookup {
+    fn is_cos_pane(&self, _pane: &str) -> bool {
+        false
+    }
+}
+
+const NO_PANE_LOOKUP: OfflinePaneLookup = OfflinePaneLookup;
+
+/// Real herdr lookup: `herdr pane get <pane>`, reads tokens to detect `grid_role=cos`.
+pub struct RealHerdrPaneLookup {
+    pub bin: String,
+    pub timeout: Duration,
+}
+
+impl RealHerdrPaneLookup {
+    pub fn from_env() -> Self {
+        let bin = crate::herdr::bin_path();
+        let timeout = std::env::var("QUAQUA_GATE_HERDR_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_millis(1000));
+        RealHerdrPaneLookup { bin, timeout }
+    }
+
+    fn resolve_current(&self) -> String {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["pane", "current"]);
+        if let Ok(out) = run_with_timeout(cmd, self.timeout, &self.bin) {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                if let Some(pid) = v.pointer("/result/pane/pane_id").and_then(|p| p.as_str()) {
+                    return pid.to_string();
+                }
+            }
+        }
+        String::new()
+    }
+}
+
+impl PaneLookup for RealHerdrPaneLookup {
+    fn is_cos_pane(&self, pane: &str) -> bool {
+        if std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
+            && self.bin == "herdr"
+            && std::env::var("HERDR_BIN_PATH").is_err()
+        {
+            return false;
+        }
+
+        let target_pane = if pane.is_empty() || pane == "--current" || pane == "-c" {
+            if let Ok(env_p) = std::env::var("HERDR_PANE_ID") {
+                let trimmed = env_p.trim();
+                if !trimmed.is_empty() {
+                    trimmed.to_string()
+                } else {
+                    self.resolve_current()
+                }
+            } else {
+                self.resolve_current()
+            }
+        } else {
+            pane.to_string()
+        };
+
+        if target_pane.is_empty() {
+            return false;
+        }
+
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["pane", "get", &target_pane]);
+        if let Ok(out) = run_with_timeout(cmd, self.timeout, &self.bin) {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                if let Some(tokens) = v.pointer("/result/pane/tokens") {
+                    return crate::cos::is_cos_tokens(tokens);
+                }
+            }
+        }
+        false
+    }
+}
+
 /// The real lookup: `gh pr view`, bounded by a timeout so a hung network call
 /// cannot hang the PreToolUse hook.
 pub struct RealGh {
@@ -181,19 +270,29 @@ fn worst(a: Verdict, b: Verdict) -> Verdict {
 /// Offline: a merge whose PR state would need `gh` asks instead of shelling out
 /// (the hook binary uses [`check_with_pr`] with the real lookup).
 pub fn check(command: &str) -> Verdict {
-    check_with_pr(command, None, &OfflinePrLookup)
+    check_with_lookups(command, None, &OfflinePrLookup, &OfflinePaneLookup)
 }
 
 /// `check_text` with the hook's `cwd`, needed only to resolve the branch a
 /// bare `git push` (no refspec in the command text) would push.
 pub fn check_ctx(command: &str, cwd: Option<&str>) -> Verdict {
-    check_with_pr(command, cwd, &OfflinePrLookup)
+    check_with_lookups(command, cwd, &OfflinePrLookup, &OfflinePaneLookup)
 }
 
 /// `check_text` with an explicit PR lookup — the hook passes the real `gh`
 /// one; tests pass a stub.
 pub fn check_with_pr(command: &str, cwd: Option<&str>, pr: &dyn PrLookup) -> Verdict {
-    let ctx = Ctx::with_cwd(cwd, pr);
+    check_with_lookups(command, cwd, pr, &OfflinePaneLookup)
+}
+
+/// `check_text` with explicit PR and pane lookups.
+pub fn check_with_lookups(
+    command: &str,
+    cwd: Option<&str>,
+    pr: &dyn PrLookup,
+    pane: &dyn PaneLookup,
+) -> Verdict {
+    let ctx = Ctx::with_lookups(cwd, pr, pane);
     check_segments_ctx(&tokenize(command), &ctx)
 }
 
@@ -216,6 +315,7 @@ struct Ctx<'a> {
     cwd: Option<&'a str>,
     branch: OnceCell<Option<String>>,
     pr: &'a dyn PrLookup,
+    pane: &'a dyn PaneLookup,
 }
 
 impl<'a> Ctx<'a> {
@@ -224,14 +324,16 @@ impl<'a> Ctx<'a> {
             cwd: None,
             branch: OnceCell::new(),
             pr: &NO_PR_LOOKUP,
+            pane: &NO_PANE_LOOKUP,
         }
     }
 
-    fn with_cwd(cwd: Option<&'a str>, pr: &'a dyn PrLookup) -> Self {
+    fn with_lookups(cwd: Option<&'a str>, pr: &'a dyn PrLookup, pane: &'a dyn PaneLookup) -> Self {
         Ctx {
             cwd,
             branch: OnceCell::new(),
             pr,
+            pane,
         }
     }
 
@@ -435,7 +537,7 @@ fn check_words(w: &[String], ctx: &Ctx) -> Verdict {
         return deny_removed(&w[i], replacement);
     }
     match base {
-        "herdr" => check_herdr(a),
+        "herdr" => check_herdr(a, ctx),
         "git" => check_git(a, ctx),
         "gh" => check_gh(a, ctx),
         "bash" | "sh" | "dash" | "zsh" => {
@@ -480,7 +582,7 @@ fn check_words(w: &[String], ctx: &Ctx) -> Verdict {
 }
 
 /// The `herdr` arm: help handling and the guarded verb pair.
-fn check_herdr(a: &[String]) -> Verdict {
+fn check_herdr(a: &[String], ctx: &Ctx) -> Verdict {
     // `herdr --help` / `herdr -h` (top-level help) exits before any verb runs.
     if let Some(first) = a.first() {
         if first == "--help" || first == "-h" {
@@ -488,8 +590,14 @@ fn check_herdr(a: &[String]) -> Verdict {
         }
     }
     let mut first: Option<usize> = None;
+    let mut is_close = false;
     let mut k = 0;
     while k + 1 < a.len() {
+        if a[k] == "pane" && a[k + 1] == "close" {
+            first = Some(k);
+            is_close = true;
+            break;
+        }
         if guarded_pair(&a[k], &a[k + 1]) {
             first = Some(k);
             break;
@@ -510,10 +618,39 @@ fn check_herdr(a: &[String]) -> Verdict {
             break;
         }
     }
-    // `herdr <verb> --help` / `-h` prints usage and exits before the verb runs.
-    if verb && first + 2 < a.len() && (a[first + 2] == "--help" || a[first + 2] == "-h") {
+    if !verb {
         return Verdict::Allow;
     }
+    // `herdr <verb> --help` / `-h` prints usage and exits before the verb runs.
+    if first + 2 < a.len() && (a[first + 2] == "--help" || a[first + 2] == "-h") {
+        return Verdict::Allow;
+    }
+
+    // CoS pane protection: refuse to close a pane carrying grid_role=cos.
+    // Lookup is performed only for `pane close`; `pane move` is already Blocked by guarded_pair.
+    if is_close {
+        let mut target_pane = "";
+        let mut idx = first + 2;
+        while idx < a.len() {
+            let arg = a[idx].as_str();
+            if !arg.starts_with('-') {
+                target_pane = arg;
+                break;
+            } else if arg == "--current" || arg == "-c" {
+                target_pane = "--current";
+                break;
+            }
+            idx += 1;
+        }
+
+        if ctx.pane.is_cos_pane(target_pane) {
+            return Verdict::Deny(format!(
+                "refusing to close CoS pane '{target_pane}' (grid_role=cos)"
+            ));
+        }
+        return Verdict::Allow;
+    }
+
     Verdict::Block
 }
 

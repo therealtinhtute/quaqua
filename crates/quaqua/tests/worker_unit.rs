@@ -3056,7 +3056,7 @@ fn test_cleanup_worker_grid_timeout_fails() {
             .iter()
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>(),
-        vec!["herdr.agent_get", "herdr.pane_close"]
+        vec!["herdr.agent_get", "herdr.run", "herdr.pane_close"]
     );
 
     let wt_exists = wt.exists();
@@ -3233,7 +3233,7 @@ fn test_cleanup_worker_removes_per_worker_opencode_state() {
             .iter()
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>(),
-        vec!["herdr.agent_get", "herdr.pane_close"]
+        vec!["herdr.agent_get", "herdr.run", "herdr.pane_close"]
     );
     assert!(
         !state_dir.exists(),
@@ -3380,7 +3380,7 @@ fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
             .iter()
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>(),
-        vec!["herdr.agent_get", "herdr.pane_close"]
+        vec!["herdr.agent_get", "herdr.run", "herdr.pane_close"]
     );
 
     for f in &files_to_create {

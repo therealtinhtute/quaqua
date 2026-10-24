@@ -4,6 +4,15 @@
 # Usage: tests/test_herdr_gate.sh   (exit 0 = pass)
 set -euo pipefail
 
+T=$(mktemp -d "${TMPDIR:-/tmp}/test-herdr-gate.XXXXXX")
+trap 'rm -rf "$T"' EXIT
+cat > "$T/herdr" << 'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$T/herdr"
+export HERDR_BIN_PATH="$T/herdr"
+
 here="$(cd "$(dirname "$0")" && pwd)"
 src="$(cd "$here/.." && pwd)/templates/workspace/scripts"
 fail() { echo "FAIL: $*" >&2; exit 1; }

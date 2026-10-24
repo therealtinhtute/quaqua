@@ -36,6 +36,12 @@ impl TestEnvVarGuard {
         std::env::set_var(key, val);
         Self { key, prev }
     }
+
+    pub(crate) fn remove(key: &'static str) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+        Self { key, prev }
+    }
 }
 
 impl Drop for TestEnvVarGuard {

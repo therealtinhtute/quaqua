@@ -78,6 +78,11 @@ case "${1:-} ${2:-}" in
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "${3:-}"
       exit 1
     fi ;;
+  "agent start")
+    if [[ "${HERDR_FAIL_START:-0}" == "1" ]]; then
+      echo "error: agent start failed" >&2
+      exit 1
+    fi ;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"w7","label":"x"},"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"%7"}}}' ;;
   "workspace get") printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"}}}\n' "$3" "${WS_LABEL:-$3}" ;;
 esac
@@ -108,6 +113,8 @@ spawn coucou-island
 [[ $rc -eq 0 ]] || fail "happy: exit $rc, want 0: $(cat "$T/err")"
 grep -qx 'lead=coucou-island-lead slug=coucou-island workspace=w7 pane=%7' "$T/out" \
   || fail "happy: no success line: $(cat "$T/out")"
+[[ -f "$T/runs/coucou-island-lead.owner" ]] || fail "happy: runs/coucou-island-lead.owner not written"
+[[ "$(cat "$T/runs/coucou-island-lead.owner")" == "cos" ]] || fail "happy: runs/coucou-island-lead.owner != cos"
 [[ $(ln 'agent get') -lt $(ln 'workspace create') ]] \
   && [[ $(ln 'workspace create') -lt $(ln 'pane report-metadata') ]] \
   && [[ $(ln 'pane report-metadata') -lt $(ln 'agent start') ]] \
@@ -197,8 +204,10 @@ grep -q 'agent start aaaaaaaaaaaaaaaaaaaaaaaaaaa-lead ' "$T/calls" \
 echo "ok: 32-char lead name (27-char slug) accepted"
 
 # ── INDEX update is exact-cell: 'mono' must not touch the mono-desk row ─────
-spawn mono
+spawn mono QUAQUA_OWNER=parent-lead
 [[ $rc -eq 0 ]] || fail "mono: exit $rc, want 0: $(cat "$T/err")"
+[[ -f "$T/runs/mono-lead.owner" ]] || fail "mono: runs/mono-lead.owner not written"
+[[ "$(cat "$T/runs/mono-lead.owner")" == "parent-lead" ]] || fail "mono: runs/mono-lead.owner != parent-lead"
 grep -qE '^\| mono \| ~/Lab/mono \| mono-lead \|' "$T/projects/INDEX.md" \
   || fail "mono: owner cell not updated: $(cat "$T/projects/INDEX.md")"
 grep -qE '^\| mono-desk \| ~/Lab/mono-desk \| quaqua-monodesk-orchestrator \|' "$T/projects/INDEX.md" \
@@ -253,10 +262,12 @@ expect_origin_head 'origin/HEAD stale' 'main' \
 echo "ok: origin/HEAD set -> integration branch created from it (precedence over main)"
 
 # no default branch at all -> refuse before any pane/agent side effect
+rm -f "$T/runs/coucou-island-lead.owner"
 spawn coucou-island GIT_INTEG_MISSING=1 GIT_MAIN_MISSING=1 GIT_MASTER_MISSING=1
 [[ $rc -eq 1 ]] || fail "no default: exit $rc, want 1: $(cat "$T/err")"
 grep -q 'no default branch' "$T/err" || fail "no default: unclear message: $(cat "$T/err")"
 ! grep -q 'workspace create' "$T/calls" || fail "no default: workspace create despite failure"
+[[ ! -f "$T/runs/coucou-island-lead.owner" ]] || fail "no default: owner file written despite failure"
 echo "ok: no default branch in the project repo -> refused before side effects"
 
 # ── a stale owner cell does not block respawn when no agent is registered ───
@@ -265,6 +276,13 @@ spawn mono-desk
 grep -q 'agent start mono-desk-lead' "$T/calls" \
   || fail "stale owner: start not called: $(cat "$T/calls")"
 echo "ok: stale owner cell -> respawn allowed (agent registry is the truth)"
+
+# ── failed agent start must leave no .owner file (R1) ───────────────────────
+rm -f "$T/runs/coucou-island-lead.owner"
+spawn coucou-island HERDR_FAIL_START=1
+[[ $rc -ne 0 ]] || fail "fail-start: exit 0, want non-zero"
+[[ ! -f "$T/runs/coucou-island-lead.owner" ]] || fail "fail-start: owner file left behind"
+echo "ok: agent start failure -> no .owner file left behind"
 
 # ── the INDEX '~/repo' cell expands against HOME verbatim ───────────────────
 # bash >= 5.2 patsub_replacement gives '&' in an unquoted replacement the

@@ -238,24 +238,25 @@ pub fn default_grid_tab(owner: &str, repo_name: &str) -> String {
 
 /// The owner of the pane this process runs in, when herdr can still see it:
 /// `grid_owner` of a pane that is not itself a worker.
-fn caller_pane_owner<H: HerdrOps>(herdr: &H) -> Option<String> {
-    let pane = std::env::var("HERDR_PANE_ID")
+fn resolve_owner_from_tokens(tokens: Option<&std::collections::HashMap<String, String>>) -> String {
+    let env_owner = std::env::var("QUAQUA_OWNER")
         .ok()
-        .filter(|s| !s.is_empty())?;
-    let out = herdr.run(&["pane", "get", &pane]).ok()?;
-    if !out.status.success() {
-        return None;
+        .filter(|o| !o.is_empty())
+        .unwrap_or_else(|| "cos".to_string());
+    let pane_owner = tokens.and_then(|t| {
+        if t.get("grid_role").map(|s| s.as_str()) == Some("worker") {
+            return None;
+        }
+        t.get("grid_owner").map(|o| o.trim().to_string()).filter(|o| !o.is_empty())
+    });
+    match pane_owner {
+        Some(pane)
+            if crate::cap::is_lead_owner(&pane) && !crate::cap::is_lead_owner(&env_owner) =>
+        {
+            pane
+        }
+        _ => env_owner,
     }
-    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
-    let tokens = v.pointer("/result/pane/tokens")?;
-    if tokens.get("grid_role").and_then(|r| r.as_str()) == Some("worker") {
-        return None;
-    }
-    let owner = tokens.get("grid_owner").and_then(|o| o.as_str())?.trim();
-    if owner.is_empty() {
-        return None;
-    }
-    Some(owner.to_string())
 }
 
 /// Resolve the owner a spawn belongs to.
@@ -268,19 +269,9 @@ fn caller_pane_owner<H: HerdrOps>(herdr: &H) -> Option<String> {
 /// pipeline spawning on behalf of its Lead): a project owner is specific, `cos`
 /// is the fallback. Workers spawned by such a Lead were tagged `grid_owner=cos`
 /// and landed in `quaqua-workers` instead of the project's tab, mixing projects.
-fn resolve_owner<H: HerdrOps>(herdr: &H) -> String {
-    let env_owner = std::env::var("QUAQUA_OWNER")
-        .ok()
-        .filter(|o| !o.is_empty())
-        .unwrap_or_else(|| "cos".to_string());
-    match caller_pane_owner(herdr) {
-        Some(pane)
-            if crate::cap::is_lead_owner(&pane) && !crate::cap::is_lead_owner(&env_owner) =>
-        {
-            pane
-        }
-        _ => env_owner,
-    }
+pub fn resolve_owner<H: HerdrOps>(herdr: &H) -> String {
+    let tokens = crate::identity::caller_pane_tokens(herdr);
+    resolve_owner_from_tokens(tokens.as_ref())
 }
 
 /// Pane env for a worker: the launch env plus blank copies of every credential
@@ -373,9 +364,12 @@ pub fn spawn_worker<G: GitOps, H: HerdrOps>(
         validate_base_ref(git, &repo, base_ref)?;
     }
 
-    let owner = resolve_owner(herdr);
+    let caller_tokens = crate::identity::caller_pane_tokens(herdr);
+    let owner = resolve_owner_from_tokens(caller_tokens.as_ref());
     let runs_dir = crate::worker::cleanup::default_runs_dir();
     let _ = std::fs::create_dir_all(&runs_dir);
+    let caller = crate::identity::resolve_caller_from_tokens(caller_tokens.as_ref(), &runs_dir);
+    eprintln!("[identity] worker spawn: name={} caller={caller}", opts.name);
 
     // Lead gate (AGENTS.md '## Roles (SLP)'): a `cos`-owned project with two or
     // more topology signals needs a Lead before another worker joins it.

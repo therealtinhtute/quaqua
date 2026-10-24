@@ -14,6 +14,13 @@ root="$(cd "$here/.." && pwd -P)"
 shim="$root/templates/workspace/scripts/hooks/herdr-gate.sh"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-gate-shim.XXXXXX")
 trap 'rm -rf "$T"' EXIT
+cat > "$T/herdr" << 'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$T/herdr"
+export HERDR_BIN_PATH="$T/herdr"
+
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 [[ -f $shim ]] || fail "missing shim at $shim"
