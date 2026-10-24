@@ -1571,4 +1571,51 @@ esac
         );
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn test_watchdog_records_valid_json_payload_when_readonly_fails_with_special_chars() {
+        let _env_lock = lock_env();
+        let tmp = temp_runs("f2-readonly-json");
+        let stub = stub_herdr(&tmp);
+        let _g_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _g_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _g_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _g_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _g_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub.to_str().unwrap());
+        let name = "suhuynh-revtest";
+        WorkerMetadata::mark_review(&tmp, name).unwrap();
+
+        // Baseline pointing to a non-existent path containing double quotes and newlines:
+        // Git error output will contain quotes/special characters.
+        let bogus_wt = tmp.join("path\"with\"quotes\nand\\backslashes");
+        let baseline_file = readonly::baseline_path(&tmp, name);
+        fs::write(&baseline_file, format!("{}\nHEAD abc123\n", bogus_wt.display())).unwrap();
+
+        let report_file = tmp.join(format!("{name}.md"));
+        fs::write(
+            &report_file,
+            "# Review\nVerdict: clean\n## Lessons\nnone\n",
+        )
+        .unwrap();
+
+        let herdr = Herdr {
+            bin: stub.to_string_lossy().to_string(),
+        };
+        let git = crate::git::Git::new();
+
+        let res = prompt_worker(name, None, true, None, &git, &herdr);
+        assert_eq!(res, Err((6, String::new())));
+
+        let bus = crate::bus::FarmBus::open(&tmp.join("quaqua.db")).expect("open bus");
+        let events = bus.load_events(0).expect("load events");
+        let malformed_ev = events
+            .iter()
+            .find(|e| e.event_type == "malformed" && e.subject.as_deref() == Some(name))
+            .expect("malformed event recorded");
+
+        let parsed: serde_json::Value = serde_json::from_str(&malformed_ev.payload_json)
+            .expect("payload_json must be valid JSON even when error message contains special characters and newlines");
+        assert!(parsed.get("readonly").is_some());
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

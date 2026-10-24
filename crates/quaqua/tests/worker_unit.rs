@@ -725,6 +725,80 @@ fn test_unsupported_effort_rejected_before_split() {
 }
 
 #[test]
+fn test_repro_f1_unisolated_early_rejection_pollutes_shared_bus() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-f1-ambient-{}", std::process::id()));
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+
+    // Call the unisolated early-rejection test:
+    test_unknown_harness_rejected_before_split_n4();
+
+    // If test_unknown_harness_rejected_before_split_n4 is properly isolated,
+    // the ambient runs_dir must NOT receive its spawn_failed event.
+    let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let events = bus.load_events(0).expect("load events");
+    assert_eq!(
+        events.len(),
+        0,
+        "early-rejection test without isolation pollutes the ambient runs db with {:?}",
+        events
+    );
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_spawn_worker_records_spawn_failed_on_early_rejection_in_production() {
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-f1-realdk-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let mut cfg = config::Config::default();
+    cfg.kinds.insert(
+        "badkind".to_string(),
+        config::Kind {
+            harness: "unsupported_harness".to_string(),
+            model: "m".to_string(),
+            effort: None,
+            fallback: None,
+            can_review: false,
+            spawn: config::SPAWN_AUTO.to_string(),
+            on_cost_cap: config::COST_CAP_WARN.to_string(),
+        },
+    );
+
+    let opts = parse_spawn_args(&[
+        "badkind-task1".to_string(),
+        "badkind".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &DummyGit,
+        &MockActivitiesHerdr::new(MockActivities::new()),
+    );
+    assert!(res.is_err());
+
+    let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let events = bus.load_events(0).expect("load events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "spawn_failed");
+    assert_eq!(events[0].subject.as_deref(), Some("badkind-task1"));
+    assert!(events[0].payload_json.contains("unsupported harness"));
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
 fn test_cap_pipeline_slot_reservation_mock() {
     let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
