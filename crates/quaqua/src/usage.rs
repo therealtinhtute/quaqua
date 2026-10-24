@@ -1626,7 +1626,7 @@ pub fn render_text(rep: &UsageReport) -> Result<String, String> {
     }
     let t = &rep.totals;
     lines.push(format!(
-        "Local opencode: {} · {} requests · ${:.4} · in {} / out {} / rsn {} / cacheRead {}",
+        "Local opencode: {} · {} requests · ${:.4} (task-session $) · in {} / out {} / rsn {} / cacheRead {}",
         rep.local_version.as_deref().unwrap_or("?"),
         t.requests,
         t.cost,
