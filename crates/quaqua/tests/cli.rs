@@ -57,6 +57,10 @@ fn doctor(path_dir: &Path, home: &Path, cwd: &Path, shell: &Path) -> Output {
         .env("HOME", home)
         .env("QUAQUA_SHELL", shell)
         .env_remove("QUAQUA_CHECKOUT")
+        // `workspace_root()` prefers these over `$HOME`; the caller's env must
+        // not decide which workspace doctor inspects.
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_ROOT")
         .current_dir(cwd)
         .output()
         .expect("failed to spawn quaqua doctor")
@@ -101,6 +105,8 @@ fn doctor_fails_when_a_shell_function_shadows_quaqua() {
         .env("HOME", &home)
         .env("QUAQUA_SHELL", &shell)
         .env("QUAQUA_CHECKOUT", &checkout)
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_ROOT")
         .current_dir(&cwd)
         .output()
         .expect("spawn doctor");
@@ -131,6 +137,8 @@ fn doctor_accepts_a_healthy_setup() {
         .env("HOME", &home)
         .env("QUAQUA_SHELL", &shell)
         .env("QUAQUA_CHECKOUT", &checkout)
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_ROOT")
         .current_dir(&cwd)
         .output()
         .expect("spawn doctor");
@@ -169,6 +177,8 @@ fn doctor_fails_when_the_binary_is_older_than_the_checkout() {
         .env("HOME", &home)
         .env("QUAQUA_SHELL", &shell)
         .env("QUAQUA_CHECKOUT", &checkout)
+        .env_remove("QUAQUA_HOME")
+        .env_remove("QUAQUA_ROOT")
         .current_dir(&cwd)
         .output()
         .expect("spawn doctor");

@@ -54,6 +54,26 @@ impl Fixture {
             .env("HOME", &self.home)
             .env("QUAQUA_CHECKOUT", &self.checkout)
             .env("QUAQUA_SHELL", &self.shell)
+            // `workspace_root()` prefers these over `$HOME`; a caller that has
+            // them set must not redirect the fixture's workspace.
+            .env_remove("QUAQUA_HOME")
+            .env_remove("QUAQUA_ROOT")
+            .current_dir(&self.cwd)
+            .output()
+            .expect("run quaqua doctor")
+    }
+
+    /// [`Fixture::run`] with no `QUAQUA_CHECKOUT` and an empty `cwd`: nothing
+    /// in the environment can be mistaken for the engine checkout.
+    fn run_without_checkout(&self, path: &Path) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_quaqua"))
+            .arg("doctor")
+            .env("PATH", path)
+            .env("HOME", &self.home)
+            .env("QUAQUA_SHELL", &self.shell)
+            .env_remove("QUAQUA_CHECKOUT")
+            .env_remove("QUAQUA_HOME")
+            .env_remove("QUAQUA_ROOT")
             .current_dir(&self.cwd)
             .output()
             .expect("run quaqua doctor")
@@ -111,4 +131,60 @@ fn a_healthy_setup_exits_zero() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("ok:"), "{stdout}");
+}
+
+#[test]
+fn a_missing_checkout_says_the_stale_check_was_skipped() {
+    let f = Fixture::new("no-checkout", "quaqua is /tmp/bin/quaqua");
+    f.install_binary();
+
+    // With a checkout the staleness claim is a real comparison.
+    let out = f.run(&f.bin_dir);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("not older than the checkout"), "{stdout}");
+
+    // Without one, the run must not claim that comparison...
+    let out = f.run_without_checkout(&f.bin_dir);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("not older than the checkout"), "{stdout}");
+    // ...and must say the check was skipped and how to enable it.
+    assert!(stdout.contains("skipped"), "{stdout}");
+    assert!(stdout.contains("QUAQUA_CHECKOUT"), "{stdout}");
+}
+
+#[test]
+fn a_workspace_that_is_also_an_engine_checkout_warns_and_still_exits_zero() {
+    let f = Fixture::new("overlap", "quaqua is /tmp/bin/quaqua");
+    f.install_binary();
+    // `$HOME/quaqua` before the split: the workspace root held the engine
+    // sources and the engine `AGENTS.md`, so the persona never loaded.
+    let workspace = f.home.join("quaqua");
+    fs::create_dir_all(workspace.join("crates/quaqua/src")).unwrap();
+    fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(workspace.join("AGENTS.md"), "# quaqua engine\n").unwrap();
+
+    let out = f.run(&f.bin_dir);
+    // A broken layout warns; it never fails the run.
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("warning:"), "{stderr}");
+    assert!(stderr.contains("Cargo.toml"), "{stderr}");
+    assert!(stderr.contains("@identity.md"), "{stderr}");
+}
+
+#[test]
+fn a_split_workspace_is_quiet() {
+    let f = Fixture::new("split", "quaqua is /tmp/bin/quaqua");
+    f.install_binary();
+    let workspace = f.home.join("quaqua");
+    fs::create_dir_all(workspace.join("projects")).unwrap();
+    fs::write(workspace.join("projects/INDEX.md"), "").unwrap();
+    fs::write(workspace.join("AGENTS.md"), "@identity.md\n@SOUL.md\n").unwrap();
+
+    let out = f.run(&f.bin_dir);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("warning:"), "{stderr}");
 }
