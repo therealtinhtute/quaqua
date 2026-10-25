@@ -56,6 +56,7 @@ none
 - `## Blockers` body: write `none` when there are none. Any other non-empty line is read as an unfinished-work blocker and the pipeline stops.
 - `## Lessons` may be numbered (`## 5. Lessons` passes) but must be an `##` heading (`###` fails). The watchdog checks that the heading exists, not where it sits; keep it last so the machine-read tail stays one block.
 - Pipeline reviewers end with exactly one `Verdict: clean` or `Verdict: <N> findings` line instead of `## Lessons`.
+- A builder's proof line is `Verified: <level> <sha>`, with the last commit's SHA: `<level>` is one of `unit-test-verified`, `type-check-only`, `review-clean`, `verifier-blocked`, `verifier-failed`, `inconclusive`. Any other word records `inconclusive` and prints a warning at accept naming these six, so this list is the only place the vocabulary is stated (`VerdictLevel::ALL`; a test fails if the two drift).
 - Brief names a playbook? The submitted prompt ends with a pre-filled `## Playbook` block — copy it into the report and mark every step id `1: done` or `1: skip: <reason>`.
 - Put any extra section before `## Blockers`, never after `## Lessons`, so the machine-read tail stays one block.
 

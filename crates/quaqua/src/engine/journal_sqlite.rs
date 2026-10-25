@@ -26,6 +26,18 @@ pub enum VerdictLevel {
 }
 
 impl VerdictLevel {
+    /// The six levels a report may name, in the order `rules/_all/brief.md`
+    /// documents them for builders. The report contract quotes this list
+    /// verbatim; a test fails if the two drift.
+    pub const ALL: [VerdictLevel; 6] = [
+        Self::UnitTestVerified,
+        Self::TypeCheckOnly,
+        Self::ReviewClean,
+        Self::VerifierBlocked,
+        Self::VerifierFailed,
+        Self::Inconclusive,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::UnitTestVerified => "unit-test-verified",
@@ -34,6 +46,31 @@ impl VerdictLevel {
             Self::VerifierBlocked => "verifier-blocked",
             Self::VerifierFailed => "verifier-failed",
             Self::Inconclusive => "inconclusive",
+        }
+    }
+
+    /// The recognised level tokens, backticked and comma-joined, exactly as the
+    /// worker-facing report contract lists them (`rules/_all/brief.md`).
+    pub fn vocabulary() -> String {
+        Self::ALL
+            .iter()
+            .map(|l| format!("`{}`", l.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Parses a level token, returning `None` when the token is not one of
+    /// [`Self::ALL`]. [`FromStr`] maps such a token to `Inconclusive`; callers
+    /// that want to warn about it use this instead.
+    pub fn parse_known(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "unit-test-verified" => Some(Self::UnitTestVerified),
+            "type-check-only" => Some(Self::TypeCheckOnly),
+            "review-clean" => Some(Self::ReviewClean),
+            "verifier-blocked" => Some(Self::VerifierBlocked),
+            "verifier-failed" => Some(Self::VerifierFailed),
+            "inconclusive" => Some(Self::Inconclusive),
+            _ => None,
         }
     }
 }
@@ -48,14 +85,7 @@ impl FromStr for VerdictLevel {
     type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_lowercase().as_str() {
-            "unit-test-verified" => Ok(Self::UnitTestVerified),
-            "type-check-only" => Ok(Self::TypeCheckOnly),
-            "review-clean" => Ok(Self::ReviewClean),
-            "verifier-blocked" => Ok(Self::VerifierBlocked),
-            "verifier-failed" => Ok(Self::VerifierFailed),
-            _ => Ok(Self::Inconclusive),
-        }
+        Ok(Self::parse_known(s).unwrap_or(Self::Inconclusive))
     }
 }
 
