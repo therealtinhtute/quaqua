@@ -605,16 +605,22 @@ pub fn send_mail<H: HerdrOps>(
             })
             .to_string();
 
+            let incident_key = if opts.kind == "escalate" || opts.kind == "blocked" {
+                Some(format!("mail:{id}"))
+            } else {
+                None
+            };
+
             {
                 let mut insert_event = tx.prepare_cached(
                     r#"
                     INSERT INTO farm_events (
                         ts_ms, type, actor, subject, owner, project, incident_key, payload_json
-                    ) VALUES (?1, 'mail_sent', ?2, ?3, ?4, ?5, NULL, ?6)
+                    ) VALUES (?1, 'mail_sent', ?2, ?3, ?4, ?5, ?6, ?7)
                     "#,
                 )?;
                 insert_event.execute(rusqlite::params![
-                    now as i64, from_name, opts.to, from_name, project, payload,
+                    now as i64, from_name, opts.to, from_name, project, incident_key, payload,
                 ])?;
             }
 
@@ -684,6 +690,11 @@ pub fn send_mail<H: HerdrOps>(
         ) {
             eprintln!("warning: markdown dual-write failed: {e}");
         }
+    }
+    if !result.already_sent && (opts.kind == "escalate" || opts.kind == "blocked") {
+        let title = format!("quaqua mail: {}", opts.kind);
+        let body = format!("{} -> {}: {}", from_name, opts.to, opts.kind);
+        let _ = herdr.notification_show(&title, &body, Some("request"));
     }
 
     Ok(result)

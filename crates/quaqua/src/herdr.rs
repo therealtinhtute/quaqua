@@ -69,6 +69,19 @@ pub trait HerdrOps {
         timeout_ms: u32,
         log_file: std::fs::File,
     ) -> std::io::Result<Child>;
+    fn notification_show(
+        &self,
+        title: &str,
+        body: &str,
+        sound: Option<&str>,
+    ) -> std::io::Result<Output> {
+        let mut args = vec!["notification", "show", title, "--body", body];
+        if let Some(s) = sound {
+            args.push("--sound");
+            args.push(s);
+        }
+        self.run(&args)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +140,20 @@ impl Herdr {
             cmd.args(["--until", state]);
         }
         cmd.args(["--timeout", &timeout]);
+        cmd.output()
+    }
+
+    pub fn notification_show(
+        &self,
+        title: &str,
+        body: &str,
+        sound: Option<&str>,
+    ) -> std::io::Result<Output> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["notification", "show", title, "--body", body]);
+        if let Some(s) = sound {
+            cmd.args(["--sound", s]);
+        }
         cmd.output()
     }
 }

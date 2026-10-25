@@ -126,6 +126,20 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Show unacked mail and incident digest for a consumer.
+    Inbox {
+        /// Recipient / consumer to read for (default: 'cos')
+        #[arg(long, default_value = "cos")]
+        r#for: String,
+        /// Continuously follow and print new items every 2 seconds
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Event bus operations: hook.
+    Events {
+        #[command(subcommand)]
+        cmd: EventsCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -204,6 +218,11 @@ enum LayoutCmd {
         /// Project slug
         slug: String,
     },
+}
+#[derive(Subcommand)]
+enum EventsCmd {
+    /// Herdr event hook for monitoring agent status changes and exits.
+    Hook,
 }
 
 
@@ -814,6 +833,57 @@ fn main() {
                         eprintln!("{e}");
                     }
                     1
+                }
+            }
+        },
+        Some(Command::Inbox { r#for, follow }) => {
+            let runs_dir = if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
+                PathBuf::from(dir)
+            } else {
+                quaqua::workspace::workspace_root().join("runs")
+            };
+            let db_path = runs_dir.join("quaqua.db");
+            match quaqua::bus::FarmBus::open(&db_path) {
+                Ok(bus) => {
+                    if follow {
+                        loop {
+                            match bus.inbox_digest(&runs_dir, &r#for) {
+                                Ok(digest) => {
+                                    if !digest.unacked_mail.is_empty() || !digest.incidents.is_empty() {
+                                        print!("{}", digest.render(&r#for));
+                                    }
+                                }
+                                Err(e) => eprintln!("inbox error: {e}"),
+                            }
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                    } else {
+                        match bus.inbox_digest(&runs_dir, &r#for) {
+                            Ok(digest) => {
+                                print!("{}", digest.render(&r#for));
+                                0
+                            }
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                1
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error opening bus at {}: {e}", db_path.display());
+                    1
+                }
+            }
+        },
+        Some(Command::Events { cmd }) => match cmd {
+            EventsCmd::Hook => {
+                match quaqua::bus::events::run_events_hook() {
+                    Ok(code) => code,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
                 }
             }
         },
