@@ -38,6 +38,7 @@ Authority comes from role, not persona. Brief format: `rules/_all/brief.md`.
 | CoS | Quả Quả | Owns SDLC coordination: intake, design, briefs, pipelines, verification, integration, release approval, and lessons. Spawns Leads/workers, verifies every result, and escalates goal/cost changes and external actions. |
 | Lead | `<slug>-lead` | Owns project state, dependencies, evidence review, and integration acceptance. Runs pipelines, spawns up to 4 Peers, approves plans, merges Peer branches into `quaqua/<slug>-integ`, and reports only to CoS through `runs/<slug>-lead.inbox.md`. |
 | Peer | Task worker | Owns one task in its own worktree, commits locally, and may challenge premises with evidence. |
+| Taskforce | Ephemeral reviewers/advisors | Read-only; members are configured under `[taskforce.*]`; reports to its caller and cannot spawn or prompt agents. |
 - Use a Lead when ≥3 task workers run in parallel or work spans more than one day. Otherwise, CoS delegates to one worker and verifies it. CoS never leads a pipeline it must review.
 - Give each moving file area one writer. Skip SLP for a single-file task under 15 minutes or work needing continuous Principal feedback.
 - If a report includes `## Challenge` (premise + evidence), the Lead (or CoS for no-SLP work) resolves it before acceptance. Plan tasks touching >2 files or shared code paths; skip planning for mechanical changes to ≤2 files when tests pass.
