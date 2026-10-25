@@ -1,45 +1,41 @@
-# quaqua team.toml — single source of truth for roles, limits, timers, kinds.
-# Rust migration plan R1: docs/research/herdr-grid-rust-migration-plan.md § `team.toml`.
-# [kinds.*] harness/model/effort/fallback are the single source of truth for a
-# spawn — models.md prose is descriptive only and is not checked.
-# effort is required for every kind and must be a value its harness accepts.
-# fallback = "<kind>" is optional: taken once, only when agent start fails.
 schema_version = 2
 
 [limits]
-depth = 2                         # CoS -> Lead -> Peer
-max_workers_per_orchestrator = 8  # anh iu 18/10: đẩy lên 8 + grid overflow (4/tab, 5-8 vào <repo>-workers-2)
+depth = 2
+max_workers_per_orchestrator = 8
 weights = { default = 1, pipeline = 2, "dual-lens" = 2 }
 
-[timers]                          # watchdog, rules/_all/worker-timebox.md
-budget_default = "45m"            # brief `Time budget:` wins
+[timers]
+budget_default = "45m"
 hard_cap = "120m"
 stall = "10m"
 idle = "2m"
 nudge_at = 0.8
 grace = 0.25
 pilot_budget = "30m"
-cost_buffer = 0.2                 # cost: ESCALATE + herdr notification at budget × (1 + cost_buffer) = 120%
-mail_ack = "30m"                   # unacked mail lazily triggers mail_unacked incident
+cost_buffer = 0.2
+mail_ack = "30m"
 
 [roles.cos]
-can_spawn  = ["lead", "peer", "taskforce"]
+can_spawn = ["lead", "peer", "taskforce"]
 can_prompt = ["lead", "peer"]
+
 [roles.lead]
-can_spawn  = ["peer", "taskforce"]
+can_spawn = ["peer", "taskforce"]
 can_prompt = ["peer"]
 reports_to = "cos"
-max_peers = 4                     # SLP (AGENTS.md `## Roles`): a Lead spawns ≤4 Peers; the CoS keeps [limits]
+max_peers = 4
+
 [roles.peer]
-can_spawn  = []
+can_spawn = []
 can_prompt = []
 reports_to = "owner"
 
 [strategy]
-default_kind = "tieude"                   # anh iu, 2026-10-15
-lead_kind = "ni"                        # anh iu: Lead runs on claude · opus-5.5 · low
-default_reviewer = ["suhuynh"]           # first available wins (anh iu, 2026-10-16)
-builder_reviewer_differ = "harness"      # SLP: sude (omp) builds → suhuynh (claude) reviews; validate checks the default pair
+default_kind = "tieude"
+lead_kind = "ni"
+default_reviewer = ["suhuynh"]
+builder_reviewer_differ = "harness"
 
 [purposes]
 build = "sude"
@@ -51,38 +47,43 @@ design = "truonglao"
 [opencode_models]
 "deepseek-v4.1-flash" = ["low", "high", "max"]
 
-[kinds.tieude]                    # harness · model · effort live here; models.md prose stays prose
+[kinds.tieude]
 harness = "omp"
 model = "opencode-go/deepseek-v4.1-flash"
-effort = "high"                   # omp --thinking
-fallback = "sude"                 # one hop, only if agent start fails
-can_review = false                # reviewers: sude, ni, suhuynh, truonglao
+effort = "high"
+fallback = "sude"
+can_review = false
+
 [kinds.sude]
 harness = "omp"
 model = "google-antigravity/gemini-3.8-flash"
 effort = "high"
 fallback = "suhuynh"
 can_review = true
+
 [kinds.ni]
 harness = "claude"
 model = "opus-5.5"
 effort = "low"
 can_review = true
+
 [kinds.suhuynh]
 harness = "claude"
 model = "opus-5.5"
-effort = "medium"                 # reviewer on a different harness from the omp builders
+effort = "medium"
 can_review = true
+
 [kinds.truonglao]
 harness = "claude"
 model = "opus-5.5"
 effort = "high"
 can_review = true
-spawn = "auto"                    # "auto" = spawn freely (anh iu, 2026-10-19); "approve" = needs --approve-kind truonglao
-# on_cost_cap = "warn"            # at 100% of the cost budget: "warn" (default) logs only; "kill" interrupts the worker once, watchdog exits 5
+spawn = "auto"
+
 [taskforce.advisor]
 members = ["suhuynh"]
 read_only = true
+
 [taskforce.dual-lens]
 members = ["truonglao", "suhuynh"]
 read_only = true
@@ -90,9 +91,9 @@ read_only = true
 [merge]
 integ_branch = "quaqua/{slug}-integ"
 
-[grid]                            # was M3: groups, tab names, deferred statuses
+[grid]
 workers_tab = "workers"
 deferred_statuses = ["working"]
 
-[projects.zimage]                 # optional per-project override, merged over defaults
+[projects.zimage]
 max_workers_per_orchestrator = 3
