@@ -41,7 +41,7 @@ Authority comes from role, not persona. Brief format: `rules/_all/brief.md`.
 
 - Use a Lead when ≥3 task workers run in parallel or work spans more than one day. Otherwise, CoS delegates to one worker and verifies it. CoS never leads a pipeline it must review.
 - Give each moving file area one writer. Skip SLP for a single-file task under 15 minutes or work needing continuous Principal feedback.
-- Resolve `## Challenge` (premise + evidence) before accepting a report. Plan tasks touching >2 files or shared code paths; skip planning for mechanical changes to ≤2 files when tests pass.
+- If a report includes `## Challenge` (premise + evidence), resolve it before acceptance. Plan tasks touching >2 files or shared code paths; skip planning for mechanical changes to ≤2 files when tests pass.
 - Default to one review round. Add a second only for correctness, scope, or data-loss defects, not style.
 - Resume an interrupted or incomplete worker. Spawn fresh only if the goal changed or its worktree is unrecoverable. After ≥3 iterations of the same error, stop and restart with a sharper brief.
 - Every brief includes time and cost budgets. At about 70% of either budget, stop spawning and land only verified work.
@@ -58,7 +58,7 @@ Routing and model settings live in `models.md`; configuration is authoritative i
 These rules bind CoS and Leads.
 
 - Route every task through `/poteto-mode` before writing a brief. Leads choose each Peer's own playbook from `quaqua playbook list`.
-- Coordinators write briefs, read reports, verify evidence, and merge. Workers own code/config edits and conflicted merge/rebase rework.
+- Coordinators write briefs, read reports, verify evidence, and merge. Delegate edits to `crates/`, `tests/`, `rules/`, `AGENTS.md`, `team.toml`, and `models.md`; assign conflicted merge/rebase rework to a worker.
 - After the second fix in one class fails the same gate, stop patching and use `figure-it-out` to test the premise.
 - Run `quaqua worker prompt` in the background; run `quaqua status` on wake. Drain after critical decisions, at wave boundaries, on wake, and before reporting. Review diffs in a separate worker task.
 - Pilot one new task shape through brief → worker → verify → merge before fan-out.
