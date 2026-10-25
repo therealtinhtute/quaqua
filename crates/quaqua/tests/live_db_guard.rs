@@ -94,3 +94,21 @@ fn test_live_db_open_refused_under_test() {
         "opening live workspace database at {live_db:?} must be refused under test"
     );
 }
+
+#[test]
+fn test_live_db_detected_even_when_home_is_overridden_first() {
+    let _guard = EnvGuard::new(&["HOME"]);
+    let original_home = std::env::var("HOME").map(PathBuf::from).expect("HOME must be set");
+    let live_db = original_home.join("quaqua/runs/quaqua.db");
+
+    // Override HOME to a fake temporary location first
+    std::env::set_var("HOME", "/tmp/fake-home-for-order-test");
+
+    // System user home must be independent of the mutated HOME environment variable
+    let sys_home = quaqua::workspace::system_user_home().expect("system user home must be available");
+    assert_eq!(sys_home, original_home, "system_user_home() must resolve real passwd home regardless of HOME env");
+    assert!(
+        quaqua::workspace::is_live_workspace_db(&live_db),
+        "live DB must still be recognized as live even when HOME was mutated to a temp directory"
+    );
+}
