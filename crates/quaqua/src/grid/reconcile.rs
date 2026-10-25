@@ -2432,6 +2432,8 @@ exit 0
 
     #[test]
     fn test_reconcile_activity_changed_when_moves_applied() {
+        let _lock = crate::test_env::lock_env();
+        let _env_owner = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let mock = MockHerdrDriver {
             snapshot: Snapshot {
                 panes: vec![
@@ -2522,6 +2524,8 @@ exit 0
 
     #[test]
     fn test_reconcile_activity_mixed_working_and_idle() {
+        let _lock = crate::test_env::lock_env();
+        let _env_owner = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let mock = MockHerdrDriver {
             snapshot: Snapshot {
                 panes: vec![
@@ -2612,6 +2616,8 @@ exit 0
 
     #[test]
     fn test_grid_activity_plan_json() {
+        let _lock = crate::test_env::lock_env();
+        let _env_owner = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let mock = MockHerdrDriver {
             snapshot: Snapshot {
                 panes: vec![

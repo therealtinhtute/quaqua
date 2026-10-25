@@ -18,26 +18,26 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Serialises tests that read or write process-global env vars. A panicking
 /// test must not wedge the rest, so poisoning is ignored.
-pub(crate) fn lock_env() -> MutexGuard<'static, ()> {
+pub fn lock_env() -> MutexGuard<'static, ()> {
     ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Restores an environment variable when dropped, including on panic.
-pub(crate) struct TestEnvVarGuard {
+pub struct TestEnvVarGuard {
     key: &'static str,
     prev: Option<String>,
 }
 
 impl TestEnvVarGuard {
-    pub(crate) fn set(key: &'static str, val: impl AsRef<OsStr>) -> Self {
+    pub fn set(key: &'static str, val: impl AsRef<OsStr>) -> Self {
         let prev = std::env::var(key).ok();
         std::env::set_var(key, val);
         Self { key, prev }
     }
 
-    pub(crate) fn remove(key: &'static str) -> Self {
+    pub fn remove(key: &'static str) -> Self {
         let prev = std::env::var(key).ok();
         std::env::remove_var(key);
         Self { key, prev }
@@ -50,5 +50,26 @@ impl Drop for TestEnvVarGuard {
             Some(val) => std::env::set_var(self.key, val),
             None => std::env::remove_var(self.key),
         }
+    }
+}
+
+/// Isolates a test by holding `lock_env`, scrubbing leaking parent shell variables,
+/// and setting `QUAQUA_TEST=1`.
+pub struct TestIsolation {
+    _lock: MutexGuard<'static, ()>,
+    _guards: Vec<TestEnvVarGuard>,
+}
+
+impl TestIsolation {
+    pub fn scrub() -> Self {
+        let lock = lock_env();
+        let guards = vec![
+            TestEnvVarGuard::remove("QUAQUA_OWNER"),
+            TestEnvVarGuard::remove("QUAQUA_HOME"),
+            TestEnvVarGuard::remove("QUAQUA_ROOT"),
+            TestEnvVarGuard::remove("HERDR_PANE_ID"),
+            TestEnvVarGuard::set("QUAQUA_TEST", "1"),
+        ];
+        Self { _lock: lock, _guards: guards }
     }
 }

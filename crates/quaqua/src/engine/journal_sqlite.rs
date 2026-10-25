@@ -212,9 +212,7 @@ use crate::engine::sqlite::{open_conn, retry_while_busy};
 impl SqliteJournal {
     /// Returns the default SQLite journal path at `<workspace_root>/runs/quaqua.db`.
     pub fn default_path() -> PathBuf {
-        crate::workspace::workspace_root()
-            .join("runs")
-            .join("quaqua.db")
+        crate::worker::cleanup::default_runs_dir().join("quaqua.db")
     }
 
     /// Opens or creates the SQLite journal at `<workspace_root>/runs/quaqua.db`.
@@ -224,6 +222,12 @@ impl SqliteJournal {
 
     /// Opens or creates the SQLite journal at the specified path.
     pub fn open(path: &Path) -> Result<Self, JournalError> {
+        if crate::workspace::is_test_environment() && crate::workspace::is_live_workspace_db(path) {
+            return Err(JournalError::StorageError(format!(
+                "refusing to open live workspace database at {} under test",
+                path.display()
+            )));
+        }
         let conn = open_conn(path).map_err(|e| JournalError::StorageError(e.to_string()))?;
 
         // Initialize schema exactly per journal.rs specification.
@@ -1006,9 +1010,7 @@ mod tests {
 
     #[test]
     fn test_sqlite_journal_default_path() {
-        let expected = crate::workspace::workspace_root()
-            .join("runs")
-            .join("quaqua.db");
+        let expected = crate::worker::cleanup::default_runs_dir().join("quaqua.db");
         assert_eq!(SqliteJournal::default_path(), expected);
     }
 

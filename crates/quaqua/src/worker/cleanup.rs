@@ -278,7 +278,11 @@ pub fn default_runs_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
         return PathBuf::from(dir);
     }
-    home_quaqua_runs()
+    let runs = home_quaqua_runs();
+    if crate::workspace::is_test_environment() && crate::workspace::is_live_workspace_runs(&runs) {
+        return crate::workspace::test_default_runs_dir();
+    }
+    runs
 }
 
 pub fn run_grid_hook(grid_tab: &str, owner: Option<&str>) -> Result<(), (i32, String)> {
@@ -443,6 +447,11 @@ pub(crate) mod metrics {
         fn set(key: &'static str, val: impl AsRef<std::ffi::OsStr>) -> Self {
             let prev = std::env::var(key).ok();
             std::env::set_var(key, val);
+            Self { key, prev }
+        }
+        fn remove(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
             Self { key, prev }
         }
     }
@@ -623,6 +632,7 @@ pub(crate) mod metrics {
         let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
         let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
         let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _env_owner = TestEnvVarGuard::remove("QUAQUA_OWNER");
 
         // Fixture opencode DB
         let state_dir = runs_dir.join(".opencode-state").join("tieude-clean1").join("opencode");

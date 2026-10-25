@@ -26,6 +26,7 @@ impl Fixture {
         let _ = fs::remove_dir_all(&root);
         let state = root.join("state");
         fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(root.join("runs")).unwrap();
         let herdr = root.join("herdr");
         fs::write(&herdr, SCRIPT).unwrap();
         fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
@@ -46,7 +47,12 @@ impl Fixture {
             .env("QUAQUA_TEST_STATE", &self.state)
             .env("QUAQUA_TEST_CALLS", &self.calls)
             .env("QUAQUA_LEAD_PROMPT_WAIT_MS", "300")
-            .env_remove("HERDR_PANE_ID");
+            .env("QUAQUA_RUNS_DIR", self.root.join("runs"))
+            .env("QUAQUA_HOME", &self.root)
+            .env("QUAQUA_TEST", "1")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("QUAQUA_OWNER")
+            .env_remove("QUAQUA_ROOT");
         for (k, _) in std::env::vars() {
             if k.starts_with("HERDR_") && k != "HERDR_BIN_PATH" {
                 cmd.env_remove(&k);
