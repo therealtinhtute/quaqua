@@ -165,7 +165,110 @@ impl FarmBus {
             new_cursor,
         })
     }
+    /// Queries the latest event type and incident key recorded for `subject`.
+    pub fn latest_event_for_subject(&self, subject: &str) -> Option<(String, Option<String>)> {
+        let conn = self.conn_for_test();
+        crate::engine::sqlite::retry_while_busy(|| {
+            conn.query_row(
+                "SELECT type, incident_key FROM farm_events WHERE subject = ?1 ORDER BY seq DESC LIMIT 1",
+                rusqlite::params![subject],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .ok()
+    }
+
+    /// Checks for new items for `consumer` during `quaqua inbox --follow`.
+    ///
+    /// Yields only unacked mail with id > `last_seen_mail_id` without bumping deliveries,
+    /// and new incidents since cursor.
+    pub fn follow_tick(
+        &self,
+        _runs_dir: &Path,
+        consumer: &str,
+        last_seen_mail_id: &mut u64,
+    ) -> Result<InboxDigest, String> {
+        let prev_cursor = self
+            .get_cursor(consumer)
+            .map_err(|e| format!("cannot get cursor: {e}"))?
+            .unwrap_or(0);
+
+        {
+            let conn = self.conn_for_test();
+            let timeout = crate::bus::mail::get_mail_ack_timeout_ms();
+            let _ = crate::bus::mail::check_unacked_incidents(&conn, timeout);
+        }
+
+        let new_mail = {
+            let conn = self.conn_for_test();
+            let mut stmt = conn
+                .prepare_cached(
+                    r#"
+                    SELECT id, msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to,
+                           body, deliveries, last_delivered_ms, acked_ms, acked_by
+                    FROM mail
+                    WHERE to_name = ?1 AND acked_ms IS NULL AND id > ?2
+                    ORDER BY id ASC
+                    "#,
+                )
+                .map_err(|e| e.to_string())?;
+
+            let rows = stmt
+                .query_map(rusqlite::params![consumer, *last_seen_mail_id as i64], |row| {
+                    Ok(MailMessage {
+                        id: row.get::<_, i64>(0)? as u64,
+                        msg_key: row.get(1)?,
+                        ts_ms: row.get::<_, i64>(2)? as u64,
+                        from_name: row.get(3)?,
+                        from_role: row.get(4)?,
+                        to_name: row.get(5)?,
+                        kind: row.get(6)?,
+                        project: row.get(7)?,
+                        reply_to: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                        body: row.get(9)?,
+                        deliveries: row.get::<_, i64>(10)? as u64,
+                        last_delivered_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+                        acked_ms: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
+                        acked_by: row.get(13)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+
+            let mut msgs = Vec::new();
+            for r in rows {
+                msgs.push(r.map_err(|e| e.to_string())?);
+            }
+            msgs
+        };
+
+        if let Some(max_mail_id) = new_mail.iter().map(|m| m.id).max() {
+            *last_seen_mail_id = max_mail_id;
+        }
+
+        let incidents = self
+            .load_incidents(prev_cursor, consumer)
+            .map_err(|e| format!("cannot load incidents: {e}"))?;
+
+        let new_cursor = if let Some(max_seq) = incidents.iter().map(|e| e.seq).max() {
+            if max_seq > prev_cursor {
+                self.set_cursor(consumer, max_seq)
+                    .map_err(|e| format!("cannot set cursor: {e}"))?;
+                max_seq
+            } else {
+                prev_cursor
+            }
+        } else {
+            prev_cursor
+        };
+
+        Ok(InboxDigest {
+            unacked_mail: new_mail,
+            incidents,
+            prev_cursor,
+            new_cursor,
+        })
 }
+    }
 
 /// Handles an incoming herdr plugin hook event:
 /// - Extracts pane, agent, and status.
@@ -212,10 +315,16 @@ pub fn handle_event_hook<H: HerdrOps>(
         .or_else(|| val.get("data").and_then(|d| d.get("agent")))
         .and_then(|v| v.as_str());
 
-    let subject = if let Some(a) = agent {
-        if !a.is_empty() { a } else { pid }
+    let subject_str = if !pid.is_empty() {
+        pid.to_string()
+    } else if let Some(a) = agent {
+        if !a.is_empty() {
+            a.to_string()
+        } else {
+            format!("anon-{}", crate::bus::now_ms())
+        }
     } else {
-        pid
+        format!("anon-{}", crate::bus::now_ms())
     };
 
     let db_path = runs_dir.join("quaqua.db");
@@ -229,34 +338,36 @@ pub fn handle_event_hook<H: HerdrOps>(
 
     if ev_name == "pane.agent_status_changed" || ev_name == "pane_agent_status_changed" {
         if agent_status == "blocked" {
-            let incident_key = val
-                .get("incident_key")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| {
-                    let status_since = val
-                        .get("status_since")
-                        .or_else(|| val.get("data").and_then(|d| d.get("status_since")))
-                        .or_else(|| val.get("state_labels").and_then(|l| l.get("status_since")))
-                        .and_then(|v| {
-                            v.as_str()
-                                .map(String::from)
-                                .or_else(|| v.as_i64().map(|n| n.to_string()))
-                        });
-                    match status_since {
-                        Some(ts) => format!("blocked:{pid}:{ts}"),
-                        None => format!("blocked:{pid}"),
+            let incident_key = if let Some(k) = val.get("incident_key").and_then(|v| v.as_str()) {
+                k.to_string()
+            } else if let Some(ts) = val
+                .get("status_since")
+                .or_else(|| val.get("data").and_then(|d| d.get("status_since")))
+                .or_else(|| val.get("state_labels").and_then(|l| l.get("status_since")))
+                .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_i64().map(|n| n.to_string())))
+            {
+                format!("blocked:{subject_str}:{ts}")
+            } else {
+                let latest = bus.latest_event_for_subject(&subject_str);
+                match &latest {
+                    Some((typ, Some(prev_key))) if typ == "blocked" => {
+                        prev_key.clone()
                     }
-                });
+                    _ => {
+                        let now = crate::bus::now_ms();
+                        format!("blocked:{subject_str}:{now}")
+                    }
+                }
+            };
 
             let mut ev = FarmEvent::new(
                 "blocked",
                 Some("herdr"),
-                Some(subject),
+                Some(&subject_str),
                 None::<String>,
                 None::<String>,
             )
-            .with_incident_key(incident_key.clone());
+            .with_incident_key(incident_key);
 
             if !ej.is_empty() && ej != "{}" {
                 ev = ev.with_payload_json(ej);
@@ -265,9 +376,25 @@ pub fn handle_event_hook<H: HerdrOps>(
             let inserted = bus.record(&ev).map_err(|e| format!("cannot record event: {e}"))?;
             if inserted {
                 let title = "quaqua: blocked";
-                let body = format!("Agent '{subject}' is blocked");
+                let body = format!("Agent '{subject_str}' is blocked");
                 let _ = herdr.notification_show(title, &body, Some("request"));
                 return Ok(true);
+            }
+            return Ok(false);
+        } else if !agent_status.is_empty() {
+            let prev = bus.latest_event_for_subject(&subject_str);
+            if let Some((typ, _)) = &prev {
+                if typ == "blocked" {
+                    let ev = FarmEvent::new(
+                        "agent_status",
+                        Some("herdr"),
+                        Some(&subject_str),
+                        None::<String>,
+                        None::<String>,
+                    )
+                    .with_payload_json(ej);
+                    let _ = bus.record(&ev);
+                }
             }
             return Ok(false);
         }
@@ -280,7 +407,7 @@ pub fn handle_event_hook<H: HerdrOps>(
         let mut ev = FarmEvent::new(
             "agent_exited",
             Some("herdr"),
-            Some(subject),
+            Some(&subject_str),
             None::<String>,
             None::<String>,
         );
@@ -299,6 +426,18 @@ pub fn handle_event_hook<H: HerdrOps>(
 
 /// Entry point for `quaqua events hook` CLI command.
 pub fn run_events_hook() -> Result<i32, String> {
+    let timeout_ms: u64 = std::env::var("QUAQUA_HOOK_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1500);
+
+    // Watchdog thread ensuring hard deadline: exits 0 if exceeded
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
+        eprintln!("quaqua events hook: hard deadline exceeded; exiting 0 to avoid blocking herdr");
+        std::process::exit(0);
+    });
+
     let runs_dir = if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
         std::path::PathBuf::from(dir)
     } else {

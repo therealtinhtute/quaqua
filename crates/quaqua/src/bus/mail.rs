@@ -489,6 +489,10 @@ pub fn check_unacked_incidents(
         ])?;
         if rows_affected > 0 {
             inserted_count += 1;
+            let herdr = crate::herdr::Herdr::new();
+            let title = "quaqua mail: unacked";
+            let body = format!("Mail #{id} from {from_name} to {to_name} ({kind}) is unacknowledged");
+            let _ = herdr.notification_show(title, &body, Some("request"));
         }
     }
     Ok(inserted_count)

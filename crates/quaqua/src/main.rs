@@ -846,8 +846,21 @@ fn main() {
             match quaqua::bus::FarmBus::open(&db_path) {
                 Ok(bus) => {
                     if follow {
+                        let mut last_seen_mail = match bus.inbox_digest(&runs_dir, &r#for) {
+                            Ok(digest) => {
+                                if !digest.unacked_mail.is_empty() || !digest.incidents.is_empty() {
+                                    print!("{}", digest.render(&r#for));
+                                }
+                                digest.unacked_mail.iter().map(|m| m.id).max().unwrap_or(0)
+                            }
+                            Err(e) => {
+                                eprintln!("inbox error: {e}");
+                                0
+                            }
+                        };
                         loop {
-                            match bus.inbox_digest(&runs_dir, &r#for) {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            match bus.follow_tick(&runs_dir, &r#for, &mut last_seen_mail) {
                                 Ok(digest) => {
                                     if !digest.unacked_mail.is_empty() || !digest.incidents.is_empty() {
                                         print!("{}", digest.render(&r#for));
@@ -855,7 +868,6 @@ fn main() {
                                 }
                                 Err(e) => eprintln!("inbox error: {e}"),
                             }
-                            std::thread::sleep(std::time::Duration::from_secs(2));
                         }
                     } else {
                         match bus.inbox_digest(&runs_dir, &r#for) {

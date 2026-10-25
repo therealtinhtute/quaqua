@@ -17,10 +17,13 @@ fn hermetic_temp_dir(prefix: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("create hermetic temp dir");
     dir
 }
+static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 
 #[test]
 fn test_herdr_notification_exactly_one_per_incident_key() {
     let runs_dir = hermetic_temp_dir("notif-dedup");
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let notif_log = runs_dir.join("notifications.log");
 
     // Create a stub herdr binary that logs `notification show` calls
@@ -149,6 +152,7 @@ fn test_plugin_manifest_contains_events_hook() {
 #[test]
 fn test_finding_1_blocked_unique_per_episode_without_status_since() {
     let runs_dir = hermetic_temp_dir("finding-1-episode");
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let notif_log = runs_dir.join("notifications.log");
 
     let bin_dir = runs_dir.join("bin");
@@ -265,6 +269,7 @@ exit 0
 fn test_finding_2_mail_unacked_pushes_notification_once() {
     let runs_dir = hermetic_temp_dir("finding-2-unacked");
     let notif_log = runs_dir.join("notifications.log");
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     let bin_dir = runs_dir.join("bin");
     fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -325,6 +330,7 @@ fn test_finding_4_events_hook_hard_timeout_on_hanging_notification() {
     let bin_dir = runs_dir.join("bin");
     fs::create_dir_all(&bin_dir).expect("bin dir");
     let herdr_bin = bin_dir.join("herdr");
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     // Stub herdr that hangs for 10 seconds
     let script = r#"#!/bin/sh
