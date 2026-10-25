@@ -19,17 +19,12 @@ use crate::state::WorkerMetadata;
 use crate::worker::prompt::readonly;
 use crate::worker::worktree::resolve_worktree_path;
 
-/// Parses a builder report line `Verified: <level> <sha>`.
+/// The last `Verified:` line of a builder report: `(raw line, level, sha)`.
 ///
-/// Compares `<sha>` with the actual worktree HEAD:
-/// - Mismatch or missing -> `VerdictLevel::Inconclusive`
-/// - Unknown level -> `VerdictLevel::Inconclusive`
-/// - Valid level and matching SHA -> `<level>` at `worktree_head`
-pub fn parse_builder_report(
-    report_content: &str,
-    worktree_head: &str,
-) -> (VerdictLevel, String, String) {
-    let last_line = report_content
+/// Bullet markers and a bold `**Verified:**` label are stripped from `raw`; the
+/// remaining words are split into the level token and the reported SHA.
+fn last_verified_line(report_content: &str) -> Option<(&str, &str, &str)> {
+    let (raw_line, rest) = report_content
         .lines()
         .map(str::trim)
         .filter_map(|l| {
@@ -51,12 +46,34 @@ pub fn parse_builder_report(
                 None
             }
         })
-        .last();
+        .last()?;
+    let mut parts = rest.split_whitespace();
+    let level = parts.next().unwrap_or("");
+    let sha = parts.next().unwrap_or("");
+    Some((raw_line, level, sha))
+}
 
-    if let Some((raw_line, rest)) = last_line {
-        let mut parts = rest.split_whitespace();
-        let level_str = parts.next().unwrap_or("");
-        let reported_sha = parts.next().unwrap_or("");
+/// Warning text for a `Verified:` level the parser does not recognise. The
+/// builder is told what was recorded and which tokens are valid.
+pub fn unknown_level_warning(level: &str) -> String {
+    format!(
+        "unrecognised Verified level '{level}' in builder report \
+         (rules/_all/brief.md); recorded as `inconclusive`. Valid levels: {}",
+        VerdictLevel::vocabulary()
+    )
+}
+
+/// Parses a builder report line `Verified: <level> <sha>`.
+///
+/// Compares `<sha>` with the actual worktree HEAD:
+/// - Mismatch or missing -> `VerdictLevel::Inconclusive`
+/// - Unknown level -> `VerdictLevel::Inconclusive`
+/// - Valid level and matching SHA -> `<level>` at `worktree_head`
+pub fn parse_builder_report(
+    report_content: &str,
+    worktree_head: &str,
+) -> (VerdictLevel, String, String) {
+    if let Some((raw_line, level_str, reported_sha)) = last_verified_line(report_content) {
         let parsed_level = VerdictLevel::from_str(level_str).unwrap_or(VerdictLevel::Inconclusive);
 
         let matches_head = !worktree_head.is_empty()
@@ -177,6 +194,29 @@ pub fn record_verdict_on_acceptance<G: GitOps>(
     expect_verdict: bool,
     git: &G,
     repo_dir: Option<&Path>,
+) -> Result<Option<VerdictRecord>, String> {
+    record_verdict_on_acceptance_warned(
+        runs_dir,
+        name,
+        report_content,
+        expect_verdict,
+        git,
+        repo_dir,
+        &mut |msg: &str| eprintln!("warning: {msg}"),
+    )
+}
+
+/// [`record_verdict_on_acceptance`] with the warning sink passed in, so a test
+/// can read the warnings the accept path emits instead of scraping stderr.
+#[allow(clippy::too_many_arguments)]
+fn record_verdict_on_acceptance_warned<G: GitOps>(
+    runs_dir: &Path,
+    name: &str,
+    report_content: &str,
+    expect_verdict: bool,
+    git: &G,
+    repo_dir: Option<&Path>,
+    warn: &mut dyn FnMut(&str),
 ) -> Result<Option<VerdictRecord>, String> {
     // Exclude taskforce workers from recording branch review verdicts
     if runs_dir.join(format!("{name}.taskforce")).is_file() {
@@ -316,6 +356,14 @@ pub fn record_verdict_on_acceptance<G: GitOps>(
         };
 
         let (lvl, s_sha, ev) = parse_builder_report(report_content, &worktree_head);
+        // A level the parser does not know records as `inconclusive`; say so and
+        // name the vocabulary instead of leaving the builder to guess. Warns,
+        // never blocks (pstack MVP).
+        if let Some((_, level_token, _)) = last_verified_line(report_content) {
+            if VerdictLevel::parse_known(level_token).is_none() {
+                warn(&unknown_level_warning(level_token));
+            }
+        }
 
         (
             branch,
@@ -806,10 +854,76 @@ mod tests {
         let verdict = res.unwrap().expect("verdict recorded");
         assert_eq!(verdict.level, VerdictLevel::Inconclusive);
 
+        // The level is not silently swallowed: accept warns, names the offending
+        // token and quotes the six valid levels, and never blocks.
+        let mut warnings: Vec<String> = Vec::new();
+        let res = record_verdict_on_acceptance_warned(
+            &runs_dir,
+            name,
+            &report_content,
+            false,
+            &git,
+            Some(tmp.path()),
+            &mut |msg: &str| warnings.push(msg.to_string()),
+        );
+        assert!(res.is_ok(), "a bad level must not fail acceptance");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "an unrecognised level warns once at accept, got {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("mysterious-super-pass"),
+            "warning must name the offending level: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains(&VerdictLevel::vocabulary()),
+            "warning must name the six valid levels: {}",
+            warnings[0]
+        );
+
+        // A recognised level is quiet, so the check above can see a warning at all.
+        let ok_name = "sude-task2";
+        let ok_sha = "4444444444444444444444444444444444444444";
+        fs::create_dir_all(tmp.path().join(".wt").join(ok_name)).unwrap();
+        let ok_report = format!("# Build\nVerified: type-check-only {ok_sha}\n## Lessons\nnone\n");
+        let ok_git = MockGit::new(ok_sha, "quaqua/sude-task2");
+        let mut ok_warnings: Vec<String> = Vec::new();
+        record_verdict_on_acceptance_warned(
+            &runs_dir,
+            ok_name,
+            &ok_report,
+            false,
+            &ok_git,
+            Some(tmp.path()),
+            &mut |msg: &str| ok_warnings.push(msg.to_string()),
+        )
+        .unwrap();
+        assert!(
+            ok_warnings.is_empty(),
+            "a recognised level must not warn: {ok_warnings:?}"
+        );
+
         // Also verify deserialization of unknown level from JSON
         let json = r#"{"branch":"quaqua/sude-task","sha":"3333333333333333333333333333333333333333","level":"unheard-of-level","evidence":"","verifier":"sude-task","source":"self","harness":"omp"}"#;
         let decoded: VerdictRecord = serde_json::from_str(json).unwrap();
         assert_eq!(decoded.level, VerdictLevel::Inconclusive);
+    }
+
+    // 7. the vocabulary has one home: the worker-facing report contract quotes it
+    #[test]
+    fn test_builder_level_vocabulary_documented_in_report_contract() {
+        let brief = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../templates/workspace/rules/_all/brief.md");
+        let doc = fs::read_to_string(&brief)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", brief.display()));
+        let vocabulary = VerdictLevel::vocabulary();
+        assert!(
+            doc.contains(&vocabulary),
+            "rules/_all/brief.md `## Report format` must list the levels as {vocabulary} — \
+             a builder has nowhere else to learn them"
+        );
     }
 
     #[test]
