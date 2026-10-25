@@ -33,5 +33,5 @@ pub mod bus;
 
 /// Process-global env is shared by every test in this binary; tests that
 /// mutate it take [`test_env::lock_env`] and restore through its guard.
-#[doc(hidden)]
-pub mod test_env;
+#[cfg(test)]
+pub(crate) mod test_env;

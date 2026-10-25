@@ -52,24 +52,3 @@ impl Drop for TestEnvVarGuard {
         }
     }
 }
-
-/// Isolates a test by holding `lock_env`, scrubbing leaking parent shell variables,
-/// and setting `QUAQUA_TEST=1`.
-pub struct TestIsolation {
-    _lock: MutexGuard<'static, ()>,
-    _guards: Vec<TestEnvVarGuard>,
-}
-
-impl TestIsolation {
-    pub fn scrub() -> Self {
-        let lock = lock_env();
-        let guards = vec![
-            TestEnvVarGuard::remove("QUAQUA_OWNER"),
-            TestEnvVarGuard::remove("QUAQUA_HOME"),
-            TestEnvVarGuard::remove("QUAQUA_ROOT"),
-            TestEnvVarGuard::remove("HERDR_PANE_ID"),
-            TestEnvVarGuard::set("QUAQUA_TEST", "1"),
-        ];
-        Self { _lock: lock, _guards: guards }
-    }
-}

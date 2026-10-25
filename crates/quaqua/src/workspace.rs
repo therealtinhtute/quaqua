@@ -30,9 +30,6 @@ pub fn is_test_environment() -> bool {
 }
 
 fn is_running_in_cargo_test() -> bool {
-    if std::env::var_os("CARGO_TARGET_TMPDIR").is_some() {
-        return true;
-    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             if parent.ends_with("deps") {
@@ -43,17 +40,76 @@ fn is_running_in_cargo_test() -> bool {
     false
 }
 
-static INITIAL_HOME: std::sync::LazyLock<Option<PathBuf>> =
-    std::sync::LazyLock::new(|| std::env::var_os("HOME").map(PathBuf::from));
+#[cfg(unix)]
+fn home_from_passwd() -> Option<PathBuf> {
+    use std::ffi::CStr;
 
-/// Returns the initial HOME directory captured at startup.
-pub fn initial_home() -> Option<PathBuf> {
-    INITIAL_HOME.clone()
+    #[cfg(target_os = "macos")]
+    #[repr(C)]
+    struct Passwd {
+        pw_name: *mut std::ffi::c_char,
+        pw_passwd: *mut std::ffi::c_char,
+        pw_uid: u32,
+        pw_gid: u32,
+        pw_change: i64,
+        pw_class: *mut std::ffi::c_char,
+        pw_gecos: *mut std::ffi::c_char,
+        pw_dir: *mut std::ffi::c_char,
+        pw_shell: *mut std::ffi::c_char,
+        pw_expire: i64,
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[repr(C)]
+    struct Passwd {
+        pw_name: *mut std::ffi::c_char,
+        pw_passwd: *mut std::ffi::c_char,
+        pw_uid: u32,
+        pw_gid: u32,
+        pw_gecos: *mut std::ffi::c_char,
+        pw_dir: *mut std::ffi::c_char,
+        pw_shell: *mut std::ffi::c_char,
+    }
+
+    extern "C" {
+        fn getuid() -> u32;
+        fn getpwuid(uid: u32) -> *const Passwd;
+    }
+
+    unsafe {
+        let pwd = getpwuid(getuid());
+        if pwd.is_null() {
+            return None;
+        }
+        let dir = (*pwd).pw_dir;
+        if dir.is_null() {
+            return None;
+        }
+        let bytes = CStr::from_ptr(dir).to_bytes();
+        std::str::from_utf8(bytes).ok().map(PathBuf::from)
+    }
 }
 
-/// Returns the live workspace DB path at `$HOME/quaqua/runs/quaqua.db` if initial HOME is set.
+/// Returns the real user home directory from the system passwd database (independent of HOME env var),
+/// falling back to the HOME environment variable if passwd lookup is unavailable.
+pub fn system_user_home() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        if let Some(h) = home_from_passwd() {
+            return Some(h);
+        }
+    }
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Returns the live workspace DB path at `<system_user_home>/quaqua/runs/quaqua.db`.
 pub fn live_workspace_db() -> Option<PathBuf> {
-    initial_home().map(|h| h.join("quaqua/runs/quaqua.db"))
+    system_user_home().map(|h| h.join("quaqua/runs/quaqua.db"))
+}
+
+/// Returns the live workspace runs directory at `<system_user_home>/quaqua/runs`.
+pub fn live_workspace_runs() -> Option<PathBuf> {
+    system_user_home().map(|h| h.join("quaqua/runs"))
 }
 
 /// Returns true if `path` points to the live workspace DB at `$HOME/quaqua/runs/quaqua.db`.

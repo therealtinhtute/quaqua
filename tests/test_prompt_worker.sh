@@ -25,6 +25,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ── sandbox: stub herdr, temp HOME/quaqua/runs ──────────────────────────────
 mkdir -p "$T/bin" "$T/home/quaqua/runs"
+export QUAQUA_RUNS_DIR="$T/home/quaqua/runs"
 cat > "$T/bin/herdr" <<'STUB'
 #!/usr/bin/env bash
 echo "herdr $*" >> "$CALLS"

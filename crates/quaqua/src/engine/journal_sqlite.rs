@@ -210,12 +210,12 @@ pub struct SqliteJournal {
 use crate::engine::sqlite::{open_conn, retry_while_busy};
 
 impl SqliteJournal {
-    /// Returns the default SQLite journal path at `<workspace_root>/runs/quaqua.db`.
+    /// Returns the default SQLite journal path at `<default_runs_dir>/quaqua.db`.
     pub fn default_path() -> PathBuf {
         crate::worker::cleanup::default_runs_dir().join("quaqua.db")
     }
 
-    /// Opens or creates the SQLite journal at `<workspace_root>/runs/quaqua.db`.
+    /// Opens or creates the SQLite journal at `<default_runs_dir>/quaqua.db`.
     pub fn new() -> Result<Self, JournalError> {
         Self::open(&Self::default_path())
     }

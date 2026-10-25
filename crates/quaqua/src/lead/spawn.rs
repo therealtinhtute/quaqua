@@ -760,6 +760,7 @@ mod tests {
         let _test_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_TEST", "1");
         let _team_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_TEAM_TOML");
         let _lead_guard = crate::test_env::TestEnvVarGuard::remove("LEAD_KIND");
+        let _home_quaqua_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_HOME");
 
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -776,10 +777,8 @@ mod tests {
         fs::write(root.join("projects/child.md"), "# child card\n").unwrap();
 
         let _root_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_ROOT", root.to_str().unwrap());
-        let _home_quaqua_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_HOME");
         let _home_guard = crate::test_env::TestEnvVarGuard::set("HOME", root.to_str().unwrap());
         let _owner_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_OWNER", "parent-lead");
-        let _pane_guard = crate::test_env::TestEnvVarGuard::set("HERDR_PANE_ID", "");
 
         let git = DummyGit;
         let herdr = DummyHerdr::new();

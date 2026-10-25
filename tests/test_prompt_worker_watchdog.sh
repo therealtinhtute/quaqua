@@ -22,6 +22,7 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 mkdir -p "$T/bin" "$T/home/quaqua/runs" "$T/repo"
+export QUAQUA_RUNS_DIR="$T/home/quaqua/runs"
 git -C "$T/repo" init -q
 echo initial > "$T/repo/changed.txt"
 git -C "$T/repo" add changed.txt

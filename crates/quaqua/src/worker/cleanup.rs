@@ -449,11 +449,6 @@ pub(crate) mod metrics {
             std::env::set_var(key, val);
             Self { key, prev }
         }
-        fn remove(key: &'static str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::remove_var(key);
-            Self { key, prev }
-        }
     }
 
     impl Drop for TestEnvVarGuard {
@@ -628,11 +623,11 @@ pub(crate) mod metrics {
         std::fs::create_dir_all(&runs_dir).unwrap();
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
+        let _env_owner = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let _env_home = TestEnvVarGuard::set("HOME", &tmp);
         let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
         let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
         let _env_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
-        let _env_owner = TestEnvVarGuard::remove("QUAQUA_OWNER");
 
         // Fixture opencode DB
         let state_dir = runs_dir.join(".opencode-state").join("tieude-clean1").join("opencode");
