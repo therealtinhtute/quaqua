@@ -3,8 +3,7 @@
 # validation (models.md Naming: <kind>-<task>, ascii [a-z0-9-], <=20 chars),
 # the optional --base <ref> worktree start point, the same-name retry that
 # reuses a branch kept by cleanup, the --review read-only mode for the claude
-# kinds (including the narrow claude Bash allows for `cargo test` and the
-# atomic report `mv`), the claude workspace-trust dialog the spawn answers
+# kinds (including the read-only evidence allows and the mutating-git denies), the claude workspace-trust dialog the spawn answers
 # before sending a brief, and its best-effort grid check.
 # git+herdr are stubbed on PATH (the in-process grid check drives the herdr
 # stub's `api snapshot`). Bad names must exit 1 before either is called; good
@@ -405,15 +404,19 @@ expect_reject_review tieude-revbad tieude "--review on tieude"
 
 # ── --review claude kinds: repo read-only, $HOME/quaqua/runs writable ────────
 # claude has no filesystem sandbox, so the reviewer is held read-only by
-# --permission-mode dontAsk ("Auto-denies every call that would
-# otherwise prompt ... tools pre-approved via permissions.allow rules still
+# --permission-mode dontAsk ("Auto-denies every call that would otherwise
+# prompt, though ... tools pre-approved via permissions.allow rules still
 # run"), so the unattended reviewer never stalls on a permission dialog, plus
 # Edit() path rules — the only file rules the file tools consult (a Write(...)
-# path rule is accepted but never checked). Read-only Bash (git diff/log/show,
-# cat, grep) stays prompt-free in every mode, so the reviewer keeps its
-# evidence commands; mutating Bash is denied except two narrow allows the
-# reviewer needs to finish a review: `cargo test` (its suite) and the
-# runs/.<name>.tmp -> runs/<name>.md atomic report `mv`.
+# path rule is accepted but never checked). dontAsk runs the built-in read-only
+# Bash set, but that set does not cover a `cd <worktree> && git diff` compound,
+# an unquoted glob beside a write-capable command, or a command its analysis
+# cannot parse — which is how a reviewer that could not `git diff` stalled. So
+# the read-only evidence commands it needs are named in permissions.allow
+# (git diff/log/show/status/rev-parse/merge-base/grep, cargo build/clippy/fmt
+# --check, rg/grep/cat/sed -n/ls/cd), the runs dir and the worktree family are
+# working directories (reads inside them need no approval), and the mutating
+# git verbs are denied outright.
 for k in ni suhuynh truonglao; do
   case $k in ni) eff=low ;; suhuynh) eff=medium ;; truonglao) eff=high ;; esac
   spawn_args=(--review)
@@ -423,19 +426,37 @@ for k in ni suhuynh truonglao; do
   grep -qF -- '--kind claude' "$T/calls" || fail "--review $k: not a claude start: $(cat "$T/calls")"
   grep -qF -- '--permission-mode dontAsk' "$T/calls" \
     || fail "--review $k: no dontAsk permission mode: $(cat "$T/calls")"
-  grep -qF -- "--add-dir $T/home/quaqua/runs" "$T/calls" \
-    || fail "--review $k: runs dir not a working directory: $(cat "$T/calls")"
+  grep -qF -- "--add-dir $T/home/quaqua/runs $T/.wt --settings" "$T/calls" \
+    || fail "--review $k: runs+worktree-family not working directories: $(cat "$T/calls")"
   grep -qF -- "Edit(//${T#/}/home/quaqua/runs/**)" "$T/calls" \
     || fail "--review $k: runs not writable (no Edit allow rule): $(cat "$T/calls")"
-  grep -qF -- "Edit(//${T#/}/.wt/$k-revread/**)" "$T/calls" \
+  grep -qF -- "Edit(//${T#/}/.wt/**)" "$T/calls" \
     || fail "--review $k: worktree not read-only (no Edit deny rule): $(cat "$T/calls")"
-  grep -qF -- 'Bash(cargo test:*)' "$T/calls" \
-    || fail "--review $k: cargo test not allowed: $(cat "$T/calls")"
+  # read-only evidence gathering: the review cannot run without it
+  for rule in 'git diff' 'git log' 'git show' 'git status' 'git rev-parse' \
+              'git merge-base' 'git grep'; do
+    grep -qF -- "Bash($rule:*)" "$T/calls" \
+      || fail "--review $k: $rule not allowed: $(cat "$T/calls")"
+  done
+  for rule in 'cargo test' 'cargo build' 'cargo clippy' 'cargo fmt --check' \
+              'rg' 'grep' 'cat' 'sed -n' 'ls' 'cd'; do
+    grep -qF -- "Bash($rule:*)" "$T/calls" \
+      || fail "--review $k: $rule not allowed: $(cat "$T/calls")"
+  done
   grep -qF -- 'Bash(mv *runs/.*.tmp *runs/*.md)' "$T/calls" \
     || fail "--review $k: atomic report mv not allowed: $(cat "$T/calls")"
+  # ...and it still cannot write the worktree or the history
+  for rule in 'git commit' 'git push' 'git checkout' 'git reset' 'git switch' \
+              'git restore' 'git clean'; do
+    grep -qF -- "Bash($rule:*)" "$T/calls" \
+      || fail "--review $k: $rule not denied: $(cat "$T/calls")"
+  done
   ! grep -qF -- '"Bash"' "$T/calls" || fail "--review $k: bare Bash allow leaked: $(cat "$T/calls")"
   ! grep -qF -- 'Bash(*)' "$T/calls" || fail "--review $k: Bash(*) allow leaked: $(cat "$T/calls")"
+  ! grep -qF -- 'Bash(git:*)' "$T/calls" || fail "--review $k: blanket git allow leaked: $(cat "$T/calls")"
   ! grep -qF -- 'Bash(mv:*' "$T/calls" || fail "--review $k: unbounded mv allow leaked: $(cat "$T/calls")"
+  ! grep -qF -- '"allow":["Bash(git commit' "$T/calls" \
+    || fail "--review $k: git commit allowed: $(cat "$T/calls")"
   grep -qF -- '--model claude-opus-5-5' "$T/calls" || fail "--review $k: model changed: $(cat "$T/calls")"
   grep -qF -- "--effort $eff" "$T/calls" || fail "--review $k: effort not $eff: $(cat "$T/calls")"
   [[ -e "$T/home/quaqua/runs/$k-revread.review" ]] \
@@ -443,7 +464,7 @@ for k in ni suhuynh truonglao; do
   ! grep -qF -- '--approve-for-me' "$T/calls" || fail "--review $k: approval flag leaked: $(cat "$T/calls")"
   ! grep -qF -- 'default_permissions' "$T/calls" || fail "--review $k: foreign profile leaked: $(cat "$T/calls")"
   grep -qF "worker=$k-revread" "$T/out" || fail "--review $k: no success line"
-  echo "ok: --review $k -> dontAsk + Edit() rules (runs writable, worktree denied) + narrow Bash allows (cargo test, atomic mv), model/effort unchanged"
+  echo "ok: --review $k -> dontAsk + read-only evidence allows (git/cargo/rg/cat) + Edit() rules (runs writable, worktrees denied) + mutating git denied, model/effort unchanged"
 done
 
 # the review Bash allows are review-only: a plain claude spawn keeps ambient settings
@@ -451,6 +472,7 @@ spawn ni-plain ni
 [[ $rc -eq 0 ]] || fail "plain ni: exit $rc, want 0: $(cat "$T/err")"
 ! grep -qF -- '--permission-mode dontAsk' "$T/calls" || fail "plain ni: review mode leaked: $(cat "$T/calls")"
 ! grep -qF -- 'Bash(cargo test:*)' "$T/calls" || fail "plain ni: review cargo rule leaked: $(cat "$T/calls")"
+! grep -qF -- 'Bash(git diff:*)' "$T/calls" || fail "plain ni: review git rule leaked: $(cat "$T/calls")"
 ! grep -qF -- 'Bash(mv *runs/.*.tmp *runs/*.md)' "$T/calls" || fail "plain ni: review mv rule leaked: $(cat "$T/calls")"
 echo "ok: plain ni (no --review) -> ambient settings, no review mode/Bash rules"
 

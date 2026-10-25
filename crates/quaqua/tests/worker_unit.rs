@@ -1928,22 +1928,148 @@ fn test_launch_review_args_per_harness() {
     let omp_build = cmd("omp", "google-antigravity/gemini-3.8-flash", "high", false);
     assert!(!omp_build.agent_args.iter().any(|a| a.starts_with("--tools")));
 
-    // claude: today's settings, unchanged.
+    // claude: dontAsk stays, and the reviewer's capability is the settings JSON
+    // (checked field by field in
+    // test_claude_review_settings_allow_readonly_evidence_deny_writes).
     let cl = cmd("claude", "opus-5.5", "high", true);
     assert_eq!(
-        cl.agent_args,
-        vec![
+        &cl.agent_args[..7],
+        [
             "--", "--model", "claude-opus-5-5", "--effort", "high",
-            "--permission-mode", "dontAsk", "--add-dir", "/w/runs", "--settings",
-            r#"{"permissions":{"allow":["Edit(//w/runs/**)","Bash(cargo test:*)","Bash(mv *runs/.*.tmp *runs/*.md)"],"deny":["Edit(//repo/.wt/rev/**)"]}}"#,
-            "--append-system-prompt-file", "/r/x.rules.md",
+            "--permission-mode", "dontAsk",
         ]
     );
+    // runs dir (report) + the worktree family (the builder's branch) are
+    // readable working directories
+    assert_eq!(
+        &cl.agent_args[7..11],
+        ["--add-dir", "/w/runs", "/repo/.wt", "--settings"]
+    );
+    let tail = &cl.agent_args[cl.agent_args.len() - 2..];
+    assert_eq!(tail, ["--append-system-prompt-file", "/r/x.rules.md"]);
 
     // opencode: no confirmed edit-deny config key yet — review launch equals
     // build launch; detection (`worker::prompt::readonly`) is the guard.
     let oc = cmd("opencode", "opencode-go/deepseek-v4.1-flash", "max", true);
     assert_eq!(oc, cmd("opencode", "opencode-go/deepseek-v4.1-flash", "max", false));
+}
+
+/// A claude reviewer runs in `dontAsk` mode, so every tool call it is not
+/// pre-approved for is auto-denied: a review that cannot `git diff` the
+/// builder branch (or read its worktree) stalls with no way to gather
+/// evidence. The launch must therefore pre-approve read-only evidence
+/// gathering while still refusing to write the worktree or the repo.
+#[test]
+fn test_claude_review_settings_allow_readonly_evidence_deny_writes() {
+    let l = resolve_launch(&kind("claude", "opus-5.5", Some("high")), "suhuynh").unwrap();
+    let cmd = build_launch_cmd(
+        &l,
+        "suhuynh-r1",
+        "/r/x.rules.md",
+        "/w/runs",
+        "/repo/.wt/suhuynh-r1",
+        true,
+    )
+    .unwrap();
+    let args = &cmd.agent_args;
+
+    // no dialog ever appears: the mode stays dontAsk
+    let mode = args
+        .iter()
+        .position(|a| a == "--permission-mode")
+        .map(|i| args[i + 1].as_str());
+    assert_eq!(mode, Some("dontAsk"), "{args:?}");
+
+    // the report dir and the sibling worktrees (where the builder branch is
+    // checked out) are working directories: file reads there need no approval
+    let add_dir = args
+        .iter()
+        .position(|a| a == "--add-dir")
+        .expect("--add-dir");
+    let mut dirs: Vec<&str> = Vec::new();
+    for a in &args[add_dir + 1..] {
+        if a.starts_with("--") {
+            break;
+        }
+        dirs.push(a.as_str());
+    }
+    assert!(dirs.contains(&"/w/runs"), "runs dir not readable: {dirs:?}");
+    assert!(
+        dirs.contains(&"/repo/.wt"),
+        "builder worktree not readable: {dirs:?}"
+    );
+
+    let si = args
+        .iter()
+        .position(|a| a == "--settings")
+        .expect("--settings");
+    let settings: serde_json::Value =
+        serde_json::from_str(&args[si + 1]).expect("settings must be JSON");
+    let rules = |key: &str| -> Vec<String> {
+        settings["permissions"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("permissions.{key} missing"))
+            .iter()
+            .map(|r| r.as_str().expect("rule is a string").to_string())
+            .collect()
+    };
+    let allow = rules("allow");
+    let deny = rules("deny");
+
+    // read-only evidence gathering is pre-approved
+    for want in [
+        "Bash(git diff:*)",
+        "Bash(git log:*)",
+        "Bash(git show:*)",
+        "Bash(git status:*)",
+        "Bash(git rev-parse:*)",
+        "Bash(git merge-base:*)",
+        "Bash(git grep:*)",
+        "Bash(cargo test:*)",
+        "Bash(cargo build:*)",
+        "Bash(cargo clippy:*)",
+        "Bash(cargo fmt --check:*)",
+        "Bash(rg:*)",
+        "Bash(grep:*)",
+        "Bash(cat:*)",
+        "Bash(sed -n:*)",
+        "Bash(ls:*)",
+    ] {
+        assert!(
+            allow.iter().any(|r| r == want),
+            "review cannot run `{want}`: {allow:?}"
+        );
+    }
+
+    // ...but the worktree stays read-only and history stays unwritten
+    assert!(
+        deny.iter().any(|r| r == "Edit(//repo/.wt/**)"),
+        "worktree not edit-denied: {deny:?}"
+    );
+    for want in ["Bash(git commit:*)", "Bash(git push:*)"] {
+        assert!(
+            deny.iter().any(|r| r == want),
+            "{want} not denied: {deny:?}"
+        );
+    }
+    for forbidden in [
+        "Bash",
+        "Bash(*)",
+        "Bash(git:*)",
+        "Bash(git commit:*)",
+        "Bash(git push:*)",
+    ] {
+        assert!(
+            !allow.iter().any(|r| r == forbidden),
+            "{forbidden} allowed in review: {allow:?}"
+        );
+    }
+
+    // the report is the only file it may write
+    assert!(
+        allow.iter().any(|r| r == "Edit(//w/runs/**)"),
+        "report not writable: {allow:?}"
+    );
 }
 
 #[test]
