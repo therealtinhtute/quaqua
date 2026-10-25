@@ -5,7 +5,7 @@ Set up a multi-agent orchestration workspace on this machine using the SLP model
 ## References
 - SLP article: https://vhlam.com/article/agent-orchestration-multi-agent-slp
 - Herdr: run `herdr --help` once it's installed; find its plugins under the GitHub topic `herdr-plugin`.
-- pi-setup (pi agent config): https://github.com/therealtinhtute/pi-setup
+- pi-setup (pi agent config): https://github.com/tinhtute/pi-setup
 
 ## Architecture
 - **Lead** (one main session):

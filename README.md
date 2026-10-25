@@ -66,7 +66,7 @@ them. Bootstrap the skeleton — the dirs plus `memory/rules.md`,
 `projects/INDEX.md`, `projects/_template.md` and `USER.md` — with:
 
 ```bash
-git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
+git clone git@github.com:tinhtute/quaqua.git ~/quaqua && cd ~/quaqua
 cargo install --path crates/quaqua --locked   # installs the quaqua binary to ~/.cargo/bin
 quaqua init
 ```
@@ -100,7 +100,7 @@ Pick the tag to install and the target of this machine:
 ```bash
 tag=v0.1.0                                  # the release tag, e.g. from the releases page
 target=x86_64-unknown-linux-gnu             # or aarch64-apple-darwin, x86_64-apple-darwin
-base="https://github.com/therealtinhtute/quaqua/releases/download/${tag}"
+base="https://github.com/tinhtute/quaqua/releases/download/${tag}"
 curl -fsSLO "${base}/quaqua-${tag}-${target}.tar.gz"
 curl -fsSLO "${base}/quaqua-${tag}-${target}.tar.gz.sha256"
 sha256sum -c "quaqua-${tag}-${target}.tar.gz.sha256"   # macOS: shasum -a 256 -c "…"
@@ -122,7 +122,7 @@ duplicating them, so a tag that failed halfway is repaired by re-running.
 Requires a Rust toolchain (install `rustup` if `cargo --version` fails).
 
 ```bash
-git clone git@github.com:therealtinhtute/quaqua.git ~/quaqua && cd ~/quaqua
+git clone git@github.com:tinhtute/quaqua.git ~/quaqua && cd ~/quaqua
 cargo install --path crates/quaqua --locked   # installs the quaqua binary to ~/.cargo/bin
 ~/.cargo/bin/quaqua --version   # verify; an interactive `quaqua` shell function can shadow the binary, so call it by path
 quaqua init     # dirs + rules.md, INDEX.md, _template.md, USER.md
