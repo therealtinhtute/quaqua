@@ -1,7 +1,7 @@
 # pstack integration — PR specs
 
 Source: review session 2026-10-21 (pstack @ 190d287, plugin 0.15.29, vs quaqua main d24be71). Revised 2026-10-21 against main 309f698 (H1 + H2 merged; H3a + H4 in flight). v3 adds the router, figure-it-out, session lifecycle, and the orchestrate rules found on a second read. v3.1 (2026-10-21, main dd01e68, H3a + H4 merged): P1 split into P1a/P1b, coordinator-never-edits-code rule, merge warns without a verdict at head, fixed Verify lines, and an evidence audit (§ Audit). v3.2 (2026-10-22): non-Claude second pass on § Audit (`runs/suhuynh-pstackfit.md`), counts redone with recorded filters, exit 6 starts as a warning, 24 principles as cited leaves, 18 playbooks in P2a–d, the SLP team mapping, P3 first. v3.3 (2026-10-22, main dd01e68): applies the v3.2 review (`~/quaqua/docs/plans/pstack-integration-review.md`, workspace-private): an MVP of steps S0–S8, success metrics measured before building, idempotency rules, deterministic Phase 2 triggers; the full port starts right after S6. v3.4 (2026-10-23): pilot slimmed to ≥5 units/lane (anh iu).
-Status: **in progress** (2026-10-23) · S1–S7 + P2 (18 playbooks, 24 principles, `/poteto-mode`) merged on main (#101 merged); S8 pilot running; P5 `watch`/drain still deferred to its trigger. [F] = verified in repo/CLI or the pstack source, [A] = assumption the step must confirm first.
+Status: **done — MVP closed** (2026-10-25) · S1–S7 + P2 (18 playbooks, 24 principles, `/poteto-mode`) merged on main (#101); S8 measured, § Pilot. Exit 6 on a missing `## Playbook` shipped (`a6ffc0b`) on its Phase 2 trigger. S0's baseline artifact was never written, so G1–G3 are absolute counts, no before/after delta (§ Pilot). Still deferred on their triggers, not part of the MVP: P5 `watch`/drain (trigger met 2026-10-24 — needs its own unit), Lead routing per Peer's rule (trigger met 2026-10-24; the behaviour already runs), Edit/Write deny hook, same-family → `source: self`, `HARNESS.md`, required Scope/Acceptance/Verify headers. [F] = verified in repo/CLI or the pstack source, [A] = assumption the step must confirm first.
 
 Scope: only ideas ported from [pstack](https://github.com/cursor/plugins/tree/main/pstack): its skills, principles and playbooks. Nothing from other skill sets. Non-pstack work (drift, read-only reviewers, pi, `harness/`, Codex) lives in `harness-hygiene.md` + `pi-harness.md`.
 
@@ -176,6 +176,38 @@ Verify: `cargo test --locked -p quaqua --test init`
 - Count per report: `## Playbook` present, `playbook_gap` events, gaps that hid real unfinished work (G3), verdicts recorded, merges without a verdict (G1), exit-6 resumes (G2).
 - Output: § Phase 2 table filled with the real numbers, plus G1–G3 against the S0 baseline.
 
+### Results — measured 2026-10-25
+
+Window `--since 2026-10-22T00:00:00` (S6/S6b/S7 2026-10-22, on main 22:06; pilot through 2026-10-25). Read-only, run from the `~/quaqua` workspace:
+
+```
+$ ~/.cargo/bin/quaqua status --metrics --since 2026-10-22T00:00:00
+total: 57 workers · $55.42 (+24 claude unpriced) · 47h12m
+verdicts: 66 total - inconclusive=44 review-clean=4 unit-test-verified=3 verifier-failed=15
+playbook_gap: none
+merges: 53 merge(s) (53 incoming heads), 49 without a verifier pass at the head (G1) - 40 with no verdict, 9 failed/blocked/inconclusive - 1 repo(s), from git (no merge event is journaled), since 2026-10-22T00:00:00
+  merges ~/Lab/quaqua: 53 merge(s), 53 head(s), 49 without - refs origin/main=53
+exits: 73 accepted, 2 exit-6, 0 resumed after exit 6 (G2 0.0%)
+```
+
+Per-report counts, scripted from `runs/.*.playbook` (37 pins) → `runs/<name>.md` → `^## Playbook`, with the kind from `runs/telemetry.jsonl`:
+
+| Kind (harness) | Reports | With `## Playbook` |
+|---|---|---|
+| `sude` (omp) | 17 | 17 |
+| `suhuynh` (claude) | 8 | 8 |
+| `tieude` (pi) | 7 | 7 |
+| no `kind` in telemetry (`sude-s8cap2`, `tieude-relwf`) | 2 | 2 |
+
+One builder (`sude-freeze-p7`) and two others (`sude-busp6`, `tieude-s8close`) had a pin and no report yet at measurement time.
+
+- **G1** — 49 of 53 merges into `origin/main` had no verifier pass at the head SHA (40 no verdict, 9 failed/blocked/inconclusive) = **92.5% unacknowledged**. vs baseline: **unmeasured**. The 24h window of the same command reads 10 of 11.
+- **G2** — **0.0%**: 2 exit-6 events, 0 resumed after exit 6, 73 accepted (`status.rs:1650-1672` counts `exit 6` against a later resume of the same workflow). The two events (`suhuynh-farmid` 2026-10-24 16:05, `suhuynh-doctorrv` 22:39) are not false blocks: both reports now carry every pinned step (`runs/.suhuynh-farmid.playbook` `ids=1,2,3`). vs baseline: **unmeasured**.
+- **G3** — **0**: `playbook_gap` 0 events in the window, 0 confirmed to have hidden real unfinished work. vs baseline: **unmeasured**. By this section's own rule (G3 stays 0 → S5's check is not paying off) S5 has no measured payoff beyond the exit-6 gate, which shipped as its own Phase 2 item.
+- **Baseline missing** — the S0 row's artifact `raw/<date>-pstack-baseline.md` does not exist (`find ~/quaqua -iname '*baseline*'` → nothing; no `S0` line in `memory/` or `raw/`), and `status --metrics` windows forward from `--since` only, so a closed pre-MVP window cannot be re-derived now. The three numbers above are absolute, not a delta: **unmeasured: S0 never produced its artifact**.
+- **G1 caveat** — 44 of 66 verdicts are `inconclusive` because builders write levels the enum does not know: `Verified: high` (14), `full` (7), `medium`/`low` (2 each) against `unit-test-verified | type-check-only | review-clean | inconclusive | verifier-blocked | verifier-failed` (S1). Nothing in `templates/workspace/rules/`, `playbooks/` or the workspace's `rules/_all/` states that vocabulary (`grep -rn unit-test-verified` → 0 files), so G1's 92.5% overstates unverified merges; the level list needs a home (its own unit).
+- **Pilot shape** — the brief said one pi worker and one claude worker; the units actually ran as 8 pi and 8 claude spawns. The property the pilot was for (per-harness report shape ≥5 units) held either way.
+
 ## P2 — Full port
 
 Starts right after S6, in parallel with S7–S8, not on a trigger. Goal: the other 15 playbooks in `templates/workspace/playbooks/` and the other 18 leaves in `templates/workspace/principles/`, under the S6 port rules and the ≤3-leaf cap.
@@ -201,15 +233,15 @@ Verify: `cargo test --locked -p quaqua playbook`
 
 Each item is built only when its count from `quaqua status --metrics` (S7), the journal or memory reaches the trigger.
 
-| Item | Trigger | Source |
-|---|---|---|
-| exit 6 for a missing `## Playbook` | ≥5 reports per kind (claude, pi), section present 5/5 on each, G2 not above baseline | metrics + pilot log |
-| Required Scope / Acceptance / Verify headers | ≥2 units failed or respawned in 30 days with root cause = that missing header (coordinator-labelled) | memory + journal |
-| `quaqua watch` + drain (v3.2 P5) | ≥1 WAITER-LOST / missed completion after the MVP lands, or a run with >4 concurrent workers | status |
-| Edit/Write deny hook for coordinators | 1 more coordinator-edit incident after the AGENTS rule lands | memory |
-| Same-family verdict → `source: self` | team.toml / models.md has a family table | config |
-| `HARNESS.md` (per-harness skip mapping) | the first `skip: unsupported on <harness>` in a report | journal |
-| Lead routing per Peer | the first SLP team that runs after S6b | status |
+| Item | Trigger | Source | Measured (2026-10-25, § Pilot) | Met? |
+|---|---|---|---|---|
+| exit 6 for a missing `## Playbook` | ≥5 reports per kind (claude, pi), section present 5/5 on each, G2 not above baseline | metrics + pilot log | claude 8/8, pi 7/7 reports carry `## Playbook`; G2 0.0% (0 of 73 accepted) — baseline half unmeasured | **met**; shipped `a6ffc0b` (2026-10-23) |
+| Required Scope / Acceptance / Verify headers | ≥2 units failed or respawned in 30 days with root cause = that missing header (coordinator-labelled) | memory + journal | 0 of 2: no report or memory line names a missing header as a failure's root cause | **not met** |
+| `quaqua watch` + drain (v3.2 P5) | ≥1 WAITER-LOST / missed completion after the MVP lands, or a run with >4 concurrent workers | status | 0 real missed completions (the `WAITER-LOST` strings in `runs/sude-statusteam.md:62-64` are a status table pasted from a test run); concurrency peak 8 worker windows on 2026-10-22 22:07, 7 on 2026-10-24 21:11 | **met** on the concurrency arm — unbuilt |
+| Edit/Write deny hook for coordinators | 1 more coordinator-edit incident after the AGENTS rule lands | memory | 0 since the rule landed (`61e5b9e`, 2026-10-22, `templates/workspace/AGENTS.md:59`): no coordinator edit in `memory/2026-10-2[2-5].md` | **not met** |
+| Same-family verdict → `source: self` | team.toml / models.md has a family table | config | none: `grep -inE 'famil|families' ~/quaqua/team.toml ~/quaqua/models.md` → no match | **not met** |
+| `HARNESS.md` (per-harness skip mapping) | the first `skip: unsupported on <harness>` in a report | journal | 0: `grep -rn 'skip: unsupported on' runs/*.md` → no match; `templates/workspace/HARNESS.md` absent | **not met** |
+| Lead routing per Peer | the first SLP team that runs after S6b | status | 4 SLP teams ran after S6b (on the branch 2026-10-22 11:17, on main 22:06): bus, gate, freeze on 2026-10-24, mono-desk-lead 2026-10-22 22:07; Leads already route per Peer (`runs/.sude-statusteam.playbook`=feature vs `.sude-shadowrb.playbook`=refactoring, both `gate-lead`; `runs/sude-busp5.brief.md` = `Topology: lead — bus-lead` + `Playbook: feature`) | **met** — behaviour runs; its AGENTS rule and check are what is missing |
 
 Notes for the deferred items:
 - `quaqua watch`: v3.2's `status --drain` marked signals drained in `runs/quaqua.db`, which the CoS and Leads share (`lead/spawn.rs:237`), so one coordinator's drain would swallow another's signals. When built, use a stateless `status --since <seq>` or scope by owner (`WorkerMetadata::load_owner` exists). It is still P1 of `farm-layouts/event-monitor.md` and marks that plan's P1 superseded. herdr contract from the evtprobe run (`~/quaqua/raw/2026-10-17-tieude-evtprobe.md`): subscriptions are per pane, no wildcard, no snapshot on connect; `idle` with a background shell is a real idle, so `runs/<name>.md` stays the source of truth. Gates (`gate {question, options, default}`) follow `watch`.
