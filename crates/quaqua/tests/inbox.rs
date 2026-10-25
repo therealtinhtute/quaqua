@@ -120,3 +120,57 @@ fn test_inbox_digest_with_mail_and_incidents() {
     assert!(rendered.contains(&format!("#{} mu-lead accept", send_res.id)), "rendered mail header");
     assert!(rendered.contains("stall:sude-worker:5000"), "rendered incident");
 }
+
+#[test]
+fn test_finding_3_inbox_follow_no_duplicate_deliveries_and_only_new_items() {
+    let runs_dir = hermetic_temp_dir("finding-3-follow");
+    let db_path = runs_dir.join("quaqua.db");
+    let bus = FarmBus::open(&db_path).expect("open bus");
+    let herdr = Herdr::new();
+
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("QUAQUA_OWNER", "mu-lead");
+    std::env::remove_var("HERDR_PANE_ID");
+
+    let opts = SendMailOpts {
+        to: "cos".to_string(),
+        kind: "accept".to_string(),
+        body: "ready for review".to_string(),
+        project: Some("mu".to_string()),
+        reply_to: None,
+        client_id: None,
+    };
+    let send_res = mail::send_mail(&runs_dir, &opts, &herdr).expect("send mail");
+    assert!(send_res.id > 0);
+
+    // Run `quaqua inbox --for cos --follow` as a child process for 2.5 seconds (spans tick 0 and tick 1)
+    let quaqua_bin = env!("CARGO_BIN_EXE_quaqua");
+    let mut child = std::process::Command::new(quaqua_bin)
+        .args(["inbox", "--for", "cos", "--follow"])
+        .env("QUAQUA_RUNS_DIR", &runs_dir)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn quaqua inbox --follow");
+
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("wait on child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // In 2.5 seconds, the follow loop executed tick 0 and tick 1.
+    // Finding 3: `--follow` must print only new items and NOT re-print the existing mail,
+    // nor bump `deliveries` repeatedly on each tick.
+    let occurrences = stdout.matches(&format!("#{} mu-lead accept", send_res.id)).count();
+    assert_eq!(
+        occurrences, 1,
+        "mail should be printed exactly once across ticks, but was printed {occurrences} times: {stdout}"
+    );
+
+    let deliveries: i64 = bus.conn_for_test()
+        .query_row("SELECT deliveries FROM mail WHERE id = ?1", rusqlite::params![send_res.id as i64], |r| r.get(0))
+        .expect("query deliveries");
+    assert_eq!(
+        deliveries, 1,
+        "follow loop must not bump deliveries on each tick; deliveries was {deliveries}"
+    );
+}

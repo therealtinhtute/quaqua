@@ -3,6 +3,7 @@
 use quaqua::herdr::Herdr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn hermetic_temp_dir(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -142,5 +143,229 @@ fn test_plugin_manifest_contains_events_hook() {
     assert!(
         text.contains("on = \"pane.exited\""),
         "herdr-plugin.toml must subscribe to pane.exited"
+    );
+}
+
+#[test]
+fn test_finding_1_blocked_unique_per_episode_without_status_since() {
+    let runs_dir = hermetic_temp_dir("finding-1-episode");
+    let notif_log = runs_dir.join("notifications.log");
+
+    let bin_dir = runs_dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    let herdr_bin = bin_dir.join("herdr");
+
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "notification" ] && [ "$2" = "show" ]; then
+    echo "$*" >> "{}"
+    exit 0
+fi
+exit 0
+"#,
+        notif_log.display()
+    );
+    fs::write(&herdr_bin, script).expect("write stub herdr");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&herdr_bin).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&herdr_bin, perms).expect("chmod");
+    }
+
+    std::env::set_var("HERDR_BIN_PATH", &herdr_bin);
+    let herdr_ops = Herdr::new();
+
+    // Episode 1: Pane w9:p6 blocks (no status_since in payload)
+    let payload_blocked_1 = serde_json::json!({
+        "pane_id": "w9:p6",
+        "agent": "worker-1",
+        "agent_status": "blocked",
+        "workspace_id": "w9"
+    }).to_string();
+
+    let res1 = quaqua::bus::events::handle_event_hook(
+        &runs_dir,
+        Some("pane.agent_status_changed"),
+        Some(&payload_blocked_1),
+        &herdr_ops,
+    );
+    assert_eq!(res1, Ok(true), "episode 1 must notify");
+
+    // Repeated delivery within episode 1 must be deduped
+    let res1_dup = quaqua::bus::events::handle_event_hook(
+        &runs_dir,
+        Some("pane.agent_status_changed"),
+        Some(&payload_blocked_1),
+        &herdr_ops,
+    );
+    assert_eq!(res1_dup, Ok(false), "repeated delivery in episode 1 must be deduped");
+
+    let count1 = fs::read_to_string(&notif_log).unwrap_or_default().lines().filter(|l| l.contains("notification show")).count();
+    assert_eq!(count1, 1, "exactly 1 notification after episode 1");
+
+    // Unblock: worker transitions to working
+    let payload_working = serde_json::json!({
+        "pane_id": "w9:p6",
+        "agent": "worker-1",
+        "agent_status": "working",
+        "workspace_id": "w9"
+    }).to_string();
+    let _ = quaqua::bus::events::handle_event_hook(
+        &runs_dir,
+        Some("pane.agent_status_changed"),
+        Some(&payload_working),
+        &herdr_ops,
+    );
+
+    // Episode 2: Worker blocks again! Real payload shape, no status_since
+    let res2 = quaqua::bus::events::handle_event_hook(
+        &runs_dir,
+        Some("pane.agent_status_changed"),
+        Some(&payload_blocked_1),
+        &herdr_ops,
+    );
+    assert_eq!(res2, Ok(true), "episode 2 must notify after unblocking");
+
+    let count2 = fs::read_to_string(&notif_log).unwrap_or_default().lines().filter(|l| l.contains("notification show")).count();
+    assert_eq!(count2, 2, "second blocked episode must send a second notification");
+
+    // Missing pane_id: two different agents with empty pane_id must not collapse farm-wide
+    let payload_nopane_a = serde_json::json!({
+        "pane_id": "",
+        "agent": "agent-A",
+        "agent_status": "blocked",
+        "workspace_id": "w9"
+    }).to_string();
+    let res_a = quaqua::bus::events::handle_event_hook(
+        &runs_dir,
+        Some("pane.agent_status_changed"),
+        Some(&payload_nopane_a),
+        &herdr_ops,
+    );
+    assert_eq!(res_a, Ok(true), "first pane-less agent must notify");
+
+    let payload_nopane_b = serde_json::json!({
+        "pane_id": "",
+        "agent": "agent-B",
+        "agent_status": "blocked",
+        "workspace_id": "w9"
+    }).to_string();
+    let res_b = quaqua::bus::events::handle_event_hook(
+        &runs_dir,
+        Some("pane.agent_status_changed"),
+        Some(&payload_nopane_b),
+        &herdr_ops,
+    );
+    assert_eq!(res_b, Ok(true), "second pane-less agent must notify, not collapse into blocked:");
+}
+
+#[test]
+fn test_finding_2_mail_unacked_pushes_notification_once() {
+    let runs_dir = hermetic_temp_dir("finding-2-unacked");
+    let notif_log = runs_dir.join("notifications.log");
+
+    let bin_dir = runs_dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    let herdr_bin = bin_dir.join("herdr");
+
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "notification" ] && [ "$2" = "show" ]; then
+    echo "$*" >> "{}"
+    exit 0
+fi
+exit 0
+"#,
+        notif_log.display()
+    );
+    fs::write(&herdr_bin, script).expect("write stub herdr");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&herdr_bin).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&herdr_bin, perms).expect("chmod");
+    }
+
+    std::env::set_var("HERDR_BIN_PATH", &herdr_bin);
+
+    // Seed mail table with an unacked message from 40m ago (past 30m timeout)
+    let db_path = runs_dir.join("quaqua.db");
+    let bus = quaqua::bus::FarmBus::open(&db_path).expect("open bus");
+    let now = quaqua::bus::now_ms();
+    let past = now.saturating_sub(40 * 60 * 1000);
+    bus.conn_for_test().execute(
+        r#"
+        INSERT INTO mail (msg_key, ts_ms, from_name, from_role, to_name, kind, project, body)
+        VALUES ('k1', ?1, 'mu-lead', 'lead', 'cos', 'escalate', 'mu', 'help needed')
+        "#,
+        rusqlite::params![past as i64],
+    ).expect("insert mail");
+
+    // Run inbox digest which triggers unacked check
+    let _ = bus.inbox_digest(&runs_dir, "cos").expect("digest");
+
+    // Notification must have been pushed!
+    let log1 = fs::read_to_string(&notif_log).unwrap_or_default();
+    let count1 = log1.lines().filter(|l| l.contains("notification show") && l.contains("unacked")).count();
+    assert_eq!(count1, 1, "must push 1 notification for unacked mail");
+
+    // Second digest must not duplicate notification
+    let _ = bus.inbox_digest(&runs_dir, "cos").expect("digest 2");
+    let log2 = fs::read_to_string(&notif_log).unwrap_or_default();
+    let count2 = log2.lines().filter(|l| l.contains("notification show") && l.contains("unacked")).count();
+    assert_eq!(count2, 1, "notification count must remain exactly 1");
+}
+
+#[test]
+fn test_finding_4_events_hook_hard_timeout_on_hanging_notification() {
+    let runs_dir = hermetic_temp_dir("finding-4-timeout");
+    let bin_dir = runs_dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    let herdr_bin = bin_dir.join("herdr");
+
+    // Stub herdr that hangs for 10 seconds
+    let script = r#"#!/bin/sh
+if [ "$1" = "notification" ] && [ "$2" = "show" ]; then
+    sleep 10
+    exit 0
+fi
+exit 0
+"#;
+    fs::write(&herdr_bin, script).expect("write stub herdr");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&herdr_bin).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&herdr_bin, perms).expect("chmod");
+    }
+
+    let quaqua_bin = env!("CARGO_BIN_EXE_quaqua");
+    let event_payload = serde_json::json!({
+        "type": "pane_agent_status_changed",
+        "pane_id": "pane-hang",
+        "agent": "worker-hang",
+        "agent_status": "blocked"
+    }).to_string();
+
+    let start = std::time::Instant::now();
+    let output = Command::new(quaqua_bin)
+        .args(["events", "hook"])
+        .env("HERDR_BIN_PATH", &herdr_bin)
+        .env("QUAQUA_RUNS_DIR", &runs_dir)
+        .env("HERDR_PLUGIN_EVENT", "pane.agent_status_changed")
+        .env("HERDR_PLUGIN_EVENT_JSON", &event_payload)
+        .output()
+        .expect("run events hook");
+    let elapsed = start.elapsed();
+
+    assert_eq!(output.status.code(), Some(0), "hook must exit 0 within deadline");
+    assert!(
+        elapsed < std::time::Duration::from_millis(2500),
+        "hook must finish within hard timeout (<2.5s) even if herdr hangs, took {:?}",
+        elapsed
     );
 }
