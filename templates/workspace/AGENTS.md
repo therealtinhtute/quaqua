@@ -55,7 +55,7 @@ Two classes:
 ## Coordinator Rules
 These rules bind both the CoS and project Leads (`<slug>-lead`).
 
-- **Route (binds CoS and Lead)**: Before every brief, route through `/poteto-mode`.
+- **Route (binds CoS and Lead)**: Before every brief, route through `/poteto-mode`. A Lead routes each Peer brief through `quaqua playbook list` and picks that Peer's own playbook for its task — never the Lead's.
 - **Never edit code or config (binds CoS and Lead)**: The coordinator authors briefs, reads reports, verifies evidence, and merges. Edits to `crates/`, `tests/`, `rules/`, `AGENTS.md`, `team.toml`, and `models.md` are always a worker unit, except a Lesson promotion at cleanup. A conflicted merge or rebase is a worker unit handed back as rework.
 - **Attack the premise (binds CoS and Lead)**: When a second fix in one class fails the same gate, stop patching, write the premise down, and open a `figure-it-out` unit that tests it first (`principles/attack-the-premise.md`).
 - **Background wait and drain points (binds CoS and Lead)**: Run `quaqua worker prompt` in the background; on wake, run `quaqua status`. Drain at four points: after a critical section (writing a brief, a merge decision), at a wave boundary, on a wake, and before reporting to anh iu. Never review a diff inside a drain (a review is its own worker unit).

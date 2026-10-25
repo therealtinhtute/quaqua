@@ -416,6 +416,27 @@ fn prompt_check_brief_cli_warns_and_rejects_unknown_playbook() {
         "{stderr}"
     );
 
+    // A Lead's Peer brief is held to the same header contract: the coordinator
+    // that writes it still picks a playbook (templates/workspace/AGENTS.md
+    // '## Coordinator Rules' — Route; a Lead picks each Peer's own playbook).
+    let peer_brief = "\
+Topology: lead — quaqua-rs lead plan
+Goal: one Peer unit
+Hard constraints: none
+Current design: the approach as it stands
+Unknowns: none
+Evidence: command + result
+Context: runs/tieude-upstream.md pasted in full
+Time budget: 30 min
+";
+    let out = run_check_brief(&sandbox, &dirs, peer_brief);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stderr.contains("warning: brief has no 'Playbook:'"),
+        "a Peer brief without Playbook: must warn: {stderr}"
+    );
+
     // Headers present: exit 0 and quiet.
     let out = run_check_brief(
         &sandbox,
