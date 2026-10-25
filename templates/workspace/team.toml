@@ -1,3 +1,4 @@
+# Runtime v2 config; layout is synthesized from these role limits.
 schema_version = 2
 
 [limits]
@@ -47,6 +48,7 @@ design = "truonglao"
 [opencode_models]
 "deepseek-v4.1-flash" = ["low", "high", "max"]
 
+# Set harness, model, and effort for every kind; fallback is one hop on agent-start failure only.
 [kinds.tieude]
 harness = "omp"
 model = "opencode-go/deepseek-v4.1-flash"
@@ -78,7 +80,7 @@ harness = "claude"
 model = "opus-5.5"
 effort = "high"
 can_review = true
-spawn = "auto"
+spawn = "auto" # "approve" requires Principal approval.
 
 [taskforce.advisor]
 members = ["suhuynh"]
