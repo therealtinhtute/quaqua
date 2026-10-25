@@ -4,6 +4,7 @@
 
 use crate::config::Kind;
 use crate::herdr::HerdrOps;
+use std::path::Path;
 
 /// The harness/model/effort a spawn launches with, resolved from team.toml.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +77,86 @@ pub fn resolve_launch(
 
 /// omp tools a reviewer keeps: no `edit`/`write`/`notebook`/`python`.
 pub const OMP_REVIEW_TOOLS: &str = "read,bash,grep,glob";
+
+/// Bash commands a claude reviewer needs to gather evidence. `dontAsk` mode
+/// auto-denies every call that would prompt, and the built-in read-only set
+/// does not cover a compound `cd <worktree> && git diff`, an unquoted glob
+/// beside a write-capable command, or a command the read-only analysis cannot
+/// parse — so each read-only prefix is named here. `:*` is Claude Code's
+/// trailing wildcard (`Bash(git diff:*)` matches `git diff --stat main`).
+pub const CLAUDE_REVIEW_BASH_ALLOW: &[&str] = &[
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "Bash(git show:*)",
+    "Bash(git status:*)",
+    "Bash(git rev-parse:*)",
+    "Bash(git merge-base:*)",
+    "Bash(git grep:*)",
+    "Bash(cargo test:*)",
+    "Bash(cargo build:*)",
+    "Bash(cargo clippy:*)",
+    "Bash(cargo fmt --check:*)",
+    "Bash(rg:*)",
+    "Bash(grep:*)",
+    "Bash(cat:*)",
+    "Bash(sed -n:*)",
+    "Bash(ls:*)",
+    // `cd <review worktree> && git diff` prompts on the `cd` alone when it
+    // changes directory, even though both halves are read-only.
+    "Bash(cd:*)",
+];
+
+/// Git commands that write the worktree or the repo. Deny rules outrank allow
+/// rules and hold in every mode, so a claude reviewer cannot rewrite the code
+/// or the history it is judging even if the permission mode ever changes.
+pub const CLAUDE_REVIEW_BASH_DENY: &[&str] = &[
+    "Bash(git commit:*)",
+    "Bash(git push:*)",
+    "Bash(git add:*)",
+    "Bash(git rm:*)",
+    "Bash(git mv:*)",
+    "Bash(git checkout:*)",
+    "Bash(git switch:*)",
+    "Bash(git restore:*)",
+    "Bash(git reset:*)",
+    "Bash(git clean:*)",
+    "Bash(git stash:*)",
+    "Bash(git apply:*)",
+    "Bash(git merge:*)",
+    "Bash(git rebase:*)",
+    "Bash(git cherry-pick:*)",
+    "Bash(git revert:*)",
+    // `git log/show/diff --output=<file>` writes a file through an allowed
+    // read-only prefix.
+    "Bash(git *--output*)",
+];
+
+/// The worktree family a reviewer may read: worktrees sit side by side in
+/// `<repo>/.wt/<name>`, so the sibling directory holds the builder's branch.
+/// Falls back to the worktree itself when the caller's path is not `<…>/.wt/<name>`.
+fn review_read_root(wt: &str) -> String {
+    Path::new(wt)
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == ".wt"))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| wt.to_string())
+}
+
+/// `--settings` for a claude reviewer: `dontAsk` runs only what is pre-approved
+/// here, so this list is the reviewer's whole capability — read-only evidence
+/// gathering plus writing its report, and nothing that writes a worktree.
+fn claude_review_settings(runs_dir: &str, read_root: &str) -> String {
+    let runs_clean = runs_dir.trim_start_matches('/');
+    let read_clean = read_root.trim_start_matches('/');
+    let mut allow = vec![
+        format!("Edit(//{runs_clean}/**)"),
+        "Bash(mv *runs/.*.tmp *runs/*.md)".to_string(),
+    ];
+    allow.extend(CLAUDE_REVIEW_BASH_ALLOW.iter().map(|r| r.to_string()));
+    let mut deny = vec![format!("Edit(//{read_clean}/**)")];
+    deny.extend(CLAUDE_REVIEW_BASH_DENY.iter().map(|r| r.to_string()));
+    serde_json::json!({"permissions": {"allow": allow, "deny": deny}}).to_string()
+}
 
 /// One attempt's `herdr` invocation: the pane-split envs and the args after
 /// `herdr agent start <name> --kind <harness> --pane <p> --timeout <ms>`.
@@ -173,17 +254,16 @@ pub fn build_launch_cmd(
                 launch.effort.clone(),
             ];
             if review {
-                let runs_clean = runs_dir.trim_start_matches('/');
-                let wt_clean = wt.trim_start_matches('/');
-                let settings = format!(
-                    "{{\"permissions\":{{\"allow\":[\"Edit(//{runs_clean}/**)\",\"Bash(cargo test:*)\",\"Bash(mv *runs/.*.tmp *runs/*.md)\"],\"deny\":[\"Edit(//{wt_clean}/**)\"]}}}}"
-                );
+                let read_root = review_read_root(wt);
                 args.push("--permission-mode".to_string());
                 args.push("dontAsk".to_string());
+                // Working directories: file reads inside them need no approval,
+                // and `dontAsk` denies every read that would ask.
                 args.push("--add-dir".to_string());
                 args.push(runs_dir.to_string());
+                args.push(read_root.clone());
                 args.push("--settings".to_string());
-                args.push(settings);
+                args.push(claude_review_settings(runs_dir, &read_root));
             }
             args.push("--append-system-prompt-file".to_string());
             args.push(rules_file.to_string());
