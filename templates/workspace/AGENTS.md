@@ -40,7 +40,7 @@ Authority comes from role, not persona. Brief format: `rules/_all/brief.md`.
 | Peer | Task worker | Owns one task in its own worktree, commits locally, and may challenge premises with evidence. |
 - Use a Lead when ≥3 task workers run in parallel or work spans more than one day. Otherwise, CoS delegates to one worker and verifies it. CoS never leads a pipeline it must review.
 - Give each moving file area one writer. Skip SLP for a single-file task under 15 minutes or work needing continuous Principal feedback.
-- If a report includes `## Challenge` (premise + evidence), resolve it before acceptance. Plan tasks touching >2 files or shared code paths; skip planning for mechanical changes to ≤2 files when tests pass.
+- If a report includes `## Challenge` (premise + evidence), the Lead (or CoS for no-SLP work) resolves it before acceptance. Plan tasks touching >2 files or shared code paths; skip planning for mechanical changes to ≤2 files when tests pass.
 - Default to one review round. Add a second only for correctness, scope, or data-loss defects, not style.
 - Resume an interrupted or incomplete worker. Spawn fresh only if the goal changed or its worktree is unrecoverable. After ≥3 iterations of the same error, stop and restart with a sharper brief.
 - Every brief includes time and cost budgets. At about 70% of either budget, stop spawning and land only verified work.
@@ -62,8 +62,8 @@ These rules bind CoS and Leads.
 - Run `quaqua worker prompt` in the background; run `quaqua status` on wake. Drain after critical decisions, at wave boundaries, on wake, and before reporting. Review diffs in a separate worker task.
 - Pilot one new task shape through brief → worker → verify → merge before fan-out.
 - Encode repeated instructions as lint, metadata, runtime checks, or scripts.
-- Bound retries by failure mode: cap/OOM gets smaller scope; network drops retry as-is; tool errors use another model. Retry at most twice, then replan. If more spawns would spread a systemic failure, stop new work and fix the root cause.
-- At each wave boundary, account for every worker as arrived, resumed, or absorbed. Never silently redo missing scope.
+- Bound retries by failure mode: cap/OOM gets smaller scope; network drops retry as-is; tool errors use another model. Retry at most twice, then replan. If more spawns would spread a systemic failure, write a stop line, finish in-flight work, and fix the root cause.
+- At each wave boundary, account for every worker as arrived, respawned, or scope absorbed. Never silently redo missing scope.
 - Resume by default. A fresh worker receives the original brief, later directives, prior report, and branch.
 - Do not wait for the Principal on reversible decisions. Pause only for irreversible actions listed under Identity.
 
