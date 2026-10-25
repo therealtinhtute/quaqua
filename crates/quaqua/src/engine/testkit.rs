@@ -121,6 +121,7 @@ impl VirtualClock {
 #[derive(Debug, Clone, Default)]
 pub struct MockActivities {
     canned_by_id: HashMap<String, ActivityResult>,
+    latencies: HashMap<String, Duration>,
     default_result: Option<ActivityResult>,
     call_log: Vec<(String, ActivityRequest)>,
 }
@@ -133,6 +134,18 @@ impl MockActivities {
     /// Registers a canned result for a specific activity ID.
     pub fn register(&mut self, id: impl Into<String>, result: ActivityResult) {
         self.canned_by_id.insert(id.into(), result);
+    }
+
+    /// Registers a canned result with an explicit execution latency for virtual clock progression.
+    pub fn register_with_latency(
+        &mut self,
+        id: impl Into<String>,
+        result: ActivityResult,
+        latency: Duration,
+    ) {
+        let id_str = id.into();
+        self.latencies.insert(id_str.clone(), latency);
+        self.canned_by_id.insert(id_str, result);
     }
 
     /// Sets a default result returned when an activity ID has no explicit canned result.
@@ -213,15 +226,38 @@ impl Journal for InMemoryJournal {
     }
 }
 
-/// A blocking `AgentWait` advances the virtual clock by its timeout, which is
-/// what the real herdr call does.
-fn advance_for_wait(clock: &mut VirtualClock, activity: &ActivityRequest) {
+/// A blocking `AgentWait` advances the virtual clock:
+/// - By the registered latency if specified on the mock activity.
+/// - Or if the wait matched a target state in `until` (not a timeout), by a default transition latency (1s).
+/// - Otherwise by the full `timeout_ms`.
+fn advance_for_wait(
+    clock: &mut VirtualClock,
+    id: &str,
+    activity: &ActivityRequest,
+    activities: &MockActivities,
+) {
+    if let Some(latency) = activities.latencies.get(id) {
+        clock.advance(*latency);
+        return;
+    }
     if let ActivityRequest::Herdr(crate::engine::activity::HerdrRequest::AgentWait {
         timeout_ms,
+        until,
         ..
     }) = activity
     {
         if *timeout_ms > 0 {
+            if let Some(ActivityResult::Herdr(crate::engine::activity::HerdrResult::AgentWait {
+                status,
+                err,
+                ..
+            })) = activities.canned_by_id.get(id)
+            {
+                if err.is_empty() && (until.is_empty() || until.contains(status)) {
+                    clock.advance(Duration::from_millis(1000));
+                    return;
+                }
+            }
             clock.advance(Duration::from_millis(*timeout_ms));
         }
     }
@@ -289,7 +325,7 @@ pub fn run_to_completion<W: Workflow>(
                         ),
                     )?;
 
-                    advance_for_wait(clock, &activity);
+                    advance_for_wait(clock, &id, &activity, activities);
                     let result = activities.execute(&id, &activity)?;
                     seq += 1;
                     journal.append_event(
@@ -391,7 +427,7 @@ pub fn run_to_completion<W: Workflow>(
                     ),
                 )?;
 
-                advance_for_wait(clock, &activity);
+                advance_for_wait(clock, &id, &activity, activities);
                 let result = activities.execute(&id, &activity)?;
                 seq += 1;
                 journal.append_event(

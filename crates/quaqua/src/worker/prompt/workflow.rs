@@ -524,6 +524,9 @@ fn default_until(state: &SingleWorkerState) -> Vec<String> {
         // The current state already matches the default set; flip so the wait
         // returns only when the agent starts working again (U1a spin).
         vec!["working".to_string(), "blocked".to_string()]
+    } else if state.agent_status == "working" {
+        // Sleep inside herdr agent wait matching blocked or done while working (P6).
+        vec!["blocked".to_string(), "done".to_string()]
     } else {
         Vec::new()
     }
@@ -1033,6 +1036,40 @@ mod tests {
             }],
         );
         assert_eq!(out.exit, 5);
+    }
+
+    #[test]
+    fn exit_5_latency_under_5s_on_working_to_blocked_transition() {
+        let (out, now, events) = run(
+            "worker-working-to-blocked",
+            1800,
+            config(30, 1800),
+            vec![
+                Poll {
+                    status: "working",
+                    ..Poll::default()
+                },
+                Poll {
+                    status: "blocked",
+                    ..Poll::default()
+                },
+            ],
+        );
+        assert_eq!(out.exit, 5, "exit code must be 5 (blocked)");
+        let latency_ms = now.saturating_sub(100_000);
+        assert!(
+            latency_ms < 5000,
+            "exit 5 latency must be under 5s on working->blocked transition, was {latency_ms}ms"
+        );
+        let wake_1_sched = events
+            .iter()
+            .find(|e| e.kind == "activity_scheduled" && e.payload_json.contains("AgentWait") && e.payload_json.contains("\"timeout_ms\":30000"))
+            .expect("wake_1 AgentWait must be scheduled");
+        assert!(
+            wake_1_sched.payload_json.contains("\"until\":[\"blocked\",\"done\"]"),
+            "wake_1 while working must specify --until blocked --until done, got: {}",
+            wake_1_sched.payload_json
+        );
     }
 
     #[test]

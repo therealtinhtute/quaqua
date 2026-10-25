@@ -28,3 +28,11 @@ command = ["quaqua", "grid", "hook"]
 [[events]]
 on = "workspace.closed"
 command = ["quaqua", "grid", "hook"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["quaqua", "events", "hook"]
+
+[[events]]
+on = "pane.exited"
+command = ["quaqua", "events", "hook"]

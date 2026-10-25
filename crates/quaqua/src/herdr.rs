@@ -69,6 +69,19 @@ pub trait HerdrOps {
         timeout_ms: u32,
         log_file: std::fs::File,
     ) -> std::io::Result<Child>;
+    fn notification_show(
+        &self,
+        title: &str,
+        body: &str,
+        sound: Option<&str>,
+    ) -> std::io::Result<Output> {
+        let mut args = vec!["notification", "show", title, "--body", body];
+        if let Some(s) = sound {
+            args.push("--sound");
+            args.push(s);
+        }
+        self.run(&args)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +142,58 @@ impl Herdr {
         cmd.args(["--timeout", &timeout]);
         cmd.output()
     }
+
+    pub fn notification_show(
+        &self,
+        title: &str,
+        body: &str,
+        sound: Option<&str>,
+    ) -> std::io::Result<Output> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["notification", "show", title, "--body", body]);
+        if let Some(s) = sound {
+            cmd.args(["--sound", s]);
+        }
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        let mut child = cmd.spawn()?;
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(500);
+        loop {
+            match child.try_wait()? {
+                Some(status) => {
+                    return Ok(Output {
+                        status,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                None => {
+                    if start.elapsed() >= timeout {
+                        let _ = child.kill();
+                        let status = child.wait().unwrap_or_else(|_| {
+                            // Fallback dummy status if wait fails
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::process::ExitStatusExt;
+                                std::process::ExitStatus::from_raw(0)
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                child.try_wait().ok().flatten().unwrap()
+                            }
+                        });
+                        return Ok(Output {
+                            status,
+                            stdout: Vec::new(),
+                            stderr: Vec::new(),
+                        });
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
 }
 
 impl Default for Herdr {
@@ -140,6 +205,14 @@ impl Default for Herdr {
 impl HerdrOps for Herdr {
     fn run(&self, args: &[&str]) -> std::io::Result<Output> {
         Command::new(&self.bin).args(args).output()
+    }
+    fn notification_show(
+        &self,
+        title: &str,
+        body: &str,
+        sound: Option<&str>,
+    ) -> std::io::Result<Output> {
+        self.notification_show(title, body, sound)
     }
 
     fn agent_list(&self) -> std::io::Result<String> {

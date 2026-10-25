@@ -4,6 +4,8 @@
 //! Uses shared SQLite connection opener with WAL mode, busy timeout, and retry_while_busy.
 
 pub mod mail;
+pub mod events;
+pub use events::InboxDigest;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
