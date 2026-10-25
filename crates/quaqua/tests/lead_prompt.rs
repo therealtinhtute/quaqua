@@ -13,6 +13,11 @@ struct Fixture {
     calls: PathBuf,
     state: PathBuf,
 }
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 
 impl Fixture {
     fn new(tag: &str) -> Self {
@@ -34,15 +39,24 @@ impl Fixture {
         }
     }
 
-    fn run(&self) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_quaqua"))
-            .args(["lead", "prompt", "baro", "please fix the gate"])
+    fn cmd(&self) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+        cmd.args(["lead", "prompt", "baro", "please fix the gate"])
             .env("HERDR_BIN_PATH", &self.herdr)
             .env("QUAQUA_TEST_STATE", &self.state)
             .env("QUAQUA_TEST_CALLS", &self.calls)
             .env("QUAQUA_LEAD_PROMPT_WAIT_MS", "300")
-            .output()
-            .expect("run quaqua lead prompt")
+            .env_remove("HERDR_PANE_ID");
+        for (k, _) in std::env::vars() {
+            if k.starts_with("HERDR_") && k != "HERDR_BIN_PATH" {
+                cmd.env_remove(&k);
+            }
+        }
+        cmd
+    }
+
+    fn run(&self) -> Output {
+        self.cmd().output().expect("run quaqua lead prompt")
     }
 
     fn calls(&self) -> String {
@@ -123,6 +137,30 @@ fn a_landed_prompt_clears_then_submits_with_wait() {
         "{calls}"
     );
 }
+#[test]
+fn landed_prompt_is_hermetic_when_ambient_herdr_pane_env_is_set() {
+    let _lock = env_lock();
+    let f = Fixture::new("ambient");
+    let orig = std::env::var("HERDR_PANE_ID").ok();
+    std::env::set_var("HERDR_PANE_ID", "w99:pAmbient");
+
+    let out = f.run();
+
+    if let Some(val) = &orig {
+        std::env::set_var("HERDR_PANE_ID", val);
+    } else {
+        std::env::remove_var("HERDR_PANE_ID");
+    }
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let calls = f.calls();
+    assert_eq!(
+        calls.lines().next(),
+        Some("agent get baro-lead"),
+        "ambient HERDR_PANE_ID must not cause shadow to query pane before checking lead liveness: {calls}"
+    );
+}
+
 
 #[test]
 fn a_draft_left_in_the_input_box_is_nonzero() {
