@@ -59,7 +59,7 @@ Deferred routes with quaqua mappings (P2):
 
 ## Principles
 
-Read the leaf in full for any principle you cite. Each leaf lives under `principles/<name>.md`. S6 shipped 6 leaves; P2a brought the library to 17 leaves; P2b brought the library to 20 leaves; P2c added 4 playbooks reusing existing leaves; P2d completes the library at 24 leaves and 18 playbooks. No leaf gap remains.
+Read the full `principles/<name>.md` leaf before citing it.
 
 **Core**
 
@@ -144,8 +144,6 @@ Keep comments clean as you go. Keep a comment only for a non-obvious *why* the c
 ## Playbooks
 
 Instead of maintaining a static file index that can drift, the router queries `quaqua playbook list` dynamically.
-
-S6 shipped the initial 3 playbooks (bug-fix, feature, figure-it-out); P2 completes the library at 18 playbooks, all active.
 
 - **Figure-it-out fallback:** A large or cross-cutting effort (a migration across many call sites, an ambitious multi-part change), or work the user steps away from to trust later, routes to `figure-it-out` even when a narrower playbook like Feature fits. Use `figure-it-out` whenever no bundled playbook fits. It designs a bespoke, rigorous workflow for the task.
 - **Orchestration:** A standing project-scale program routes to a project Lead (`<slug>-lead`).
