@@ -301,8 +301,23 @@ pub fn warn_brief_headers(task: &str) {
     }
 }
 
+/// Read the Lead's pinned playbook name from `runs/.<lead_name>.playbook`.
+pub fn read_lead_playbook(runs_dir: &Path, lead_name: &str) -> Option<String> {
+    let path = runs_dir.join(format!(".{lead_name}.playbook"));
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        if let Some(value) = line.trim().strip_prefix("name=") {
+            let n = value.trim();
+            if !n.is_empty() {
+                return Some(n.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Warnings for Lead routing per Peer (templates/workspace/AGENTS.md '## Coordinator Rules' — Route).
-/// Flags a Peer brief whose `Playbook:` is missing, or equals the Lead's own pinned playbook
+/// Flags a Peer brief whose `Playbook:` equals the Lead's own pinned playbook
 /// (from `runs/.<owner>.playbook` if present) without a stated reason.
 pub fn lead_routing_warnings(text: &str, owner: Option<&str>, runs_dir: &Path) -> Vec<String> {
     let Some(owner) = owner else {
@@ -312,24 +327,12 @@ pub fn lead_routing_warnings(text: &str, owner: Option<&str>, runs_dir: &Path) -
         return Vec::new();
     }
     let mut warnings = Vec::new();
-    match playbook_header(text) {
-        PlaybookHeader::Missing => {
-            warnings.push(
-                "warning: brief has no 'Playbook:' header (AGENTS.md '## Coordinator Rules' — Route)"
-                    .to_string(),
-            );
-        }
-        _ => {
-            if let Some(lead_pin) =
-                crate::worker::prompt::playbook_check::PlaybookPin::read(runs_dir, owner)
-            {
-                if let Some((name, reason)) = named_playbook_with_reason(text) {
-                    if name.eq_ignore_ascii_case(&lead_pin.name) && reason.is_none() {
-                        warnings.push(format!(
-                            "warning: brief uses the Lead's own playbook '{name}' without a stated reason (AGENTS.md '## Coordinator Rules' — Route)"
-                        ));
-                    }
-                }
+    if let Some(lead_pb) = read_lead_playbook(runs_dir, owner) {
+        if let Some((name, reason)) = named_playbook_with_reason(text) {
+            if name.eq_ignore_ascii_case(&lead_pb) && reason.is_none() {
+                warnings.push(format!(
+                    "warning: brief uses the Lead's own playbook '{name}' without a stated reason (AGENTS.md '## Coordinator Rules' — Route)"
+                ));
             }
         }
     }

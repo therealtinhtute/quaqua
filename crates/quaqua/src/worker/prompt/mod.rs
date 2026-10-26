@@ -158,36 +158,15 @@ pub fn resolve_budget_sec(task: &str) -> (u64, &'static str) {
     (2700, "default")
 }
 
-fn resolve_caller_owner(runs_dir: &std::path::Path) -> Option<String> {
-    if let Ok(pane_id) = std::env::var("HERDR_PANE_ID") {
-        if !pane_id.trim().is_empty() {
-            let herdr = crate::herdr::Herdr::new();
-            let caller = crate::identity::resolve_caller(&herdr, runs_dir);
-            if caller.role == crate::identity::Role::Lead {
-                return Some(caller.name);
-            }
-        }
-    }
-    if std::env::var("QUAQUA_TEST").as_deref() == Ok("1") {
-        if let Ok(owner) = std::env::var("QUAQUA_OWNER") {
-            if !owner.trim().is_empty() {
-                return Some(owner.trim().to_string());
-            }
-        }
-    }
-    None
-}
-
 pub fn do_check_brief(task: &str) -> Result<(), (i32, String)> {
     let runs_dir = default_runs_dir();
-    let owner = resolve_caller_owner(&runs_dir);
-    do_check_brief_with_owner(task, owner.as_deref(), Some(&runs_dir))
+    do_check_brief_with_owner(task, None, &runs_dir)
 }
 
 pub fn do_check_brief_with_owner(
     task: &str,
     owner: Option<&str>,
-    runs_dir: Option<&std::path::Path>,
+    runs_dir: &std::path::Path,
 ) -> Result<(), (i32, String)> {
     validate_env_budget()?;
     if !brief_headers_ok(task) {
@@ -200,15 +179,7 @@ pub fn do_check_brief_with_owner(
     // does not say solo or lead cannot be checked against AGENTS.md '## Roles (SLP)'.
     crate::worker::leadgate::topology(task).map_err(|msg| (1, msg))?;
     brief::warn_brief_headers(task);
-    let fallback_runs_dir;
-    let rdir = match runs_dir {
-        Some(d) => d,
-        None => {
-            fallback_runs_dir = default_runs_dir();
-            &fallback_runs_dir
-        }
-    };
-    brief::warn_lead_routing(task, owner, rdir);
+    brief::warn_lead_routing(task, owner, runs_dir);
     // A name the present index cannot resolve or render is the one rejection
     // here; a missing or incomplete index only warns.
     brief::prepare_injection_in_workspace(task)?;

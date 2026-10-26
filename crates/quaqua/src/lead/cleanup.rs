@@ -60,8 +60,15 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
     };
     let lead_json = serde_json::from_str::<Value>(&lead_body).ok();
 
-    let agent_obj = lead_json.as_ref().and_then(|j| j.get("result")).and_then(|r| r.get("agent")).unwrap();
-    let pane = agent_obj.get("pane_id").and_then(|p| p.as_str()).unwrap_or("");
+    let agent_obj = lead_json
+        .as_ref()
+        .and_then(|j| j.get("result"))
+        .and_then(|r| r.get("agent"))
+        .unwrap();
+    let pane = agent_obj
+        .get("pane_id")
+        .and_then(|p| p.as_str())
+        .unwrap_or("");
     let ws = agent_obj
         .get("workspace_id")
         .and_then(|w| w.as_str())
@@ -151,6 +158,7 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
     let rf = runs_dir.join(format!("{name}.rules.md"));
     let _ = std::fs::remove_file(rf);
     let _ = std::fs::remove_file(WorkerMetadata::owner_path(&runs_dir, &name));
+    let _ = std::fs::remove_file(runs_dir.join(format!(".{name}.playbook")));
 
     let index = root.join("projects/INDEX.md");
     if index.is_file() {
