@@ -57,7 +57,10 @@ pub fn resolve_lead_launch(
     };
 
     let kind_info = cfg.kinds.get(&kind_name).ok_or_else(|| {
-        (1, format!("error: default lead kind '{kind_name}' not found in team.toml\n"))
+        (
+            1,
+            format!("error: default lead kind '{kind_name}' not found in team.toml\n"),
+        )
     })?;
 
     let launch = crate::launch::resolve_launch(kind_info, &kind_name, cfg)?;
@@ -119,7 +122,11 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     if slug.is_empty() {
         return Err((1, format!("{}\n", USAGE)));
     }
-    if slug.starts_with('-') || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if slug.starts_with('-')
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         return Err((1, format!("{}\n", USAGE)));
     }
 
@@ -160,7 +167,13 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
 
     if !found {
-        return Err((1, format!("unknown project slug '{slug}' — no row in {}\n", index.display())));
+        return Err((
+            1,
+            format!(
+                "unknown project slug '{slug}' — no row in {}\n",
+                index.display()
+            ),
+        ));
     }
     if !card.is_file() {
         return Err((1, format!("no project card {}\n", card.display())));
@@ -196,12 +209,28 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     if !integ_exists {
         let mut origin_head = String::new();
         let origin_head_exists = git
-            .run_in(repo, &["rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD"])
+            .run_in(
+                repo,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/HEAD",
+                ],
+            )
             .map(|o| o.status.success())
             .unwrap_or(false);
 
         if origin_head_exists {
-            if let Ok(out) = git.run_in(repo, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) {
+            if let Ok(out) = git.run_in(
+                repo,
+                &[
+                    "symbolic-ref",
+                    "--quiet",
+                    "--short",
+                    "refs/remotes/origin/HEAD",
+                ],
+            ) {
                 if out.status.success() {
                     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     origin_head = s.strip_prefix("origin/").unwrap_or(&s).to_string();
@@ -216,13 +245,21 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
                 continue;
             }
             let local_ref = format!("refs/heads/{cand}");
-            if git.run_in(repo, &["rev-parse", "--verify", "--quiet", &local_ref]).map(|o| o.status.success()).unwrap_or(false) {
+            if git
+                .run_in(repo, &["rev-parse", "--verify", "--quiet", &local_ref])
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
                 base_branch = Some(cand.to_string());
                 break;
             }
             if cand == origin_head.as_str() {
                 let remote_ref = format!("refs/remotes/origin/{cand}");
-                if git.run_in(repo, &["rev-parse", "--verify", "--quiet", &remote_ref]).map(|o| o.status.success()).unwrap_or(false) {
+                if git
+                    .run_in(repo, &["rev-parse", "--verify", "--quiet", &remote_ref])
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+                {
                     base_branch = Some(format!("origin/{cand}"));
                     break;
                 }
@@ -277,7 +314,8 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
 
     // Resolve caller identity and log at spawn
     let caller = crate::identity::resolve_caller(herdr, &runs_dir);
-    let caller_owner = if caller.role == crate::identity::Role::Unknown && caller.name == "unknown" {
+    let caller_owner = if caller.role == crate::identity::Role::Unknown && caller.name == "unknown"
+    {
         // The single default to QUAQUA_OWNER (or "cos" if unset) when caller identity
         // has no pane tokens (parity with resolve_owner in worker/spawn.rs until P3 gate enforcement).
         std::env::var("QUAQUA_OWNER")
@@ -299,21 +337,18 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     let lead_env = std::env::var("LEAD_KIND").ok();
     let (lead_kind, launch) = resolve_lead_launch(&cfg, lead_env.as_deref())?;
     let lead_kind_info = cfg.kinds.get(&lead_kind).ok_or_else(|| {
-        (1, format!("error: default lead kind '{lead_kind}' not found in team.toml\n"))
+        (
+            1,
+            format!("error: default lead kind '{lead_kind}' not found in team.toml\n"),
+        )
     })?;
     crate::config::check_spawn_policy(&lead_kind, lead_kind_info, &approve_kinds)?;
 
     let root_str = root.to_string_lossy().to_string();
     let runs_str = runs_dir.to_string_lossy().to_string();
     let rf_str = rf.to_string_lossy().to_string();
-    let cmd = crate::launch::build_launch_cmd(
-        &launch,
-        &name,
-        &rf_str,
-        &runs_str,
-        &root_str,
-        false,
-    )?;
+    let cmd =
+        crate::launch::build_launch_cmd(&launch, &name, &rf_str, &runs_str, &root_str, false)?;
 
     crate::layout::shadow(
         Some(&caller),
@@ -350,9 +385,12 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         ws_args.push("--env");
         ws_args.push(env_str);
     }
-    let ws_out = herdr.run(&ws_args).map_err(|e| (1, format!("herdr workspace create failed: {e}\n")))?;
+    let ws_out = herdr
+        .run(&ws_args)
+        .map_err(|e| (1, format!("herdr workspace create failed: {e}\n")))?;
     let ws_str = String::from_utf8_lossy(&ws_out.stdout).to_string();
-    let ws_json: Value = serde_json::from_str(&ws_str).map_err(|e| (1, format!("invalid workspace JSON: {e}\n")))?;
+    let ws_json: Value =
+        serde_json::from_str(&ws_str).map_err(|e| (1, format!("invalid workspace JSON: {e}\n")))?;
     let pane = ws_json
         .get("result")
         .and_then(|r| r.get("root_pane"))
@@ -364,21 +402,28 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         .and_then(|r| r.get("workspace"))
         .and_then(|w| w.get("workspace_id"))
         .and_then(|w| w.as_str())
-        .ok_or_else(|| (1, "no workspace.workspace_id in workspace JSON\n".to_string()))?;
+        .ok_or_else(|| {
+            (
+                1,
+                "no workspace.workspace_id in workspace JSON\n".to_string(),
+            )
+        })?;
 
     // Tag Lead pane as orchestrator
     let grid_owner_tok = format!("grid_owner={name}");
-    let meta_out = herdr.run(&[
-        "pane",
-        "report-metadata",
-        pane,
-        "--source",
-        "herdr-quaqua",
-        "--token",
-        "grid_role=orchestrator",
-        "--token",
-        &grid_owner_tok,
-    ]).map_err(|e| (1, format!("herdr pane report-metadata failed: {e}\n")))?;
+    let meta_out = herdr
+        .run(&[
+            "pane",
+            "report-metadata",
+            pane,
+            "--source",
+            "herdr-quaqua",
+            "--token",
+            "grid_role=orchestrator",
+            "--token",
+            &grid_owner_tok,
+        ])
+        .map_err(|e| (1, format!("herdr pane report-metadata failed: {e}\n")))?;
     if !meta_out.status.success() {
         return Err((1, String::from_utf8_lossy(&meta_out.stderr).to_string()));
     }
@@ -398,7 +443,9 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     for arg in &cmd.agent_args {
         start_args.push(arg);
     }
-    let start_out = herdr.run(&start_args).map_err(|e| (1, format!("herdr agent start failed: {e}\n")))?;
+    let start_out = herdr
+        .run(&start_args)
+        .map_err(|e| (1, format!("herdr agent start failed: {e}\n")))?;
     if !start_out.status.success() {
         return Err((1, String::from_utf8_lossy(&start_out.stderr).to_string()));
     }
@@ -429,6 +476,20 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
             println!("kickoff={name}");
         }
         Kickoff::Next(line) => eprintln!("{line}"),
+    }
+    // Pin Lead playbook if the brief/kickoff specifies one
+    if let Some(task_str) = task.as_deref() {
+        let injection = crate::worker::prompt::brief::prepare_injection_in_workspace(task_str)
+            .ok()
+            .flatten();
+        if let Some(inj) = injection.as_ref() {
+            crate::worker::prompt::brief::pin_playbook(&runs_dir, &name, Some(inj));
+        } else if let Some(pb_name) = crate::worker::prompt::brief::named_playbook(task_str) {
+            let path = runs_dir.join(format!(".{name}.playbook"));
+            let tmp = runs_dir.join(format!(".{name}.playbook.tmp"));
+            let _ = std::fs::write(&tmp, format!("name={pb_name}\nids=\n"))
+                .and_then(|()| std::fs::rename(&tmp, &path));
+        }
     }
     Ok(())
 }
@@ -521,8 +582,16 @@ pub fn update_project_index_owner(
             .join(format!("INDEX.md.tmp.{}", std::process::id()));
         std::fs::write(&tmp_path, updated)
             .map_err(|e| (1, format!("cannot write {}: {e}\n", tmp_path.display())))?;
-        std::fs::rename(&tmp_path, &index)
-            .map_err(|e| (1, format!("cannot rename {} to {}: {e}\n", tmp_path.display(), index.display())))?;
+        std::fs::rename(&tmp_path, &index).map_err(|e| {
+            (
+                1,
+                format!(
+                    "cannot rename {} to {}: {e}\n",
+                    tmp_path.display(),
+                    index.display()
+                ),
+            )
+        })?;
         Ok(())
     })();
 
@@ -683,7 +752,11 @@ mod tests {
         }
         fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
             if self.started.get() {
-                Ok((true, r#"{"result":{"agent":{"agent_status":"working","pane_id":"w1:p1"}}}"#.to_string()))
+                Ok((
+                    true,
+                    r#"{"result":{"agent":{"agent_status":"working","pane_id":"w1:p1"}}}"#
+                        .to_string(),
+                ))
             } else {
                 Ok((false, r#"{"error":{"code":"agent_not_found"}}"#.to_string()))
             }
@@ -731,7 +804,11 @@ mod tests {
             })
         }
         fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<Output> {
-            unimplemented!()
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
         }
         fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<Output> {
             unimplemented!()
@@ -766,7 +843,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("quaqua-lead-spawn-caller-{}-{nanos}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "quaqua-lead-spawn-caller-{}-{nanos}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("projects")).unwrap();
         fs::create_dir_all(root.join("rules/_all")).unwrap();
@@ -776,7 +856,8 @@ mod tests {
         fs::write(root.join("projects/INDEX.md"), index_content).unwrap();
         fs::write(root.join("projects/child.md"), "# child card\n").unwrap();
 
-        let _root_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_ROOT", root.to_str().unwrap());
+        let _root_guard =
+            crate::test_env::TestEnvVarGuard::set("QUAQUA_ROOT", root.to_str().unwrap());
         let _home_guard = crate::test_env::TestEnvVarGuard::set("HOME", root.to_str().unwrap());
         let _owner_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_OWNER", "parent-lead");
 
@@ -799,5 +880,62 @@ mod tests {
         assert_eq!(snap.layout.name, "slp");
         assert_eq!(snap.sha256.len(), 64);
         assert!(snap.source.starts_with("team.toml@"));
+    }
+
+    #[test]
+    fn test_lead_spawn_pins_playbook_from_task() {
+        let _lock = crate::test_env::lock_env();
+        let _test_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _team_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_TEAM_TOML");
+        let _lead_guard = crate::test_env::TestEnvVarGuard::remove("LEAD_KIND");
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "quaqua-lead-spawn-pb-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("projects")).unwrap();
+        fs::create_dir_all(root.join("rules/_all")).unwrap();
+        let _guard = CleanupDir(root.clone());
+
+        let index_content = "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| child | ~/Lab/child | cos | active | goal |\n";
+        fs::write(root.join("projects/INDEX.md"), index_content).unwrap();
+        fs::write(root.join("projects/child.md"), "# child card\n").unwrap();
+
+        let _root_guard =
+            crate::test_env::TestEnvVarGuard::set("QUAQUA_ROOT", root.to_str().unwrap());
+        let _home_guard = crate::test_env::TestEnvVarGuard::set("HOME", root.to_str().unwrap());
+        let _owner_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+        let _pane_guard = crate::test_env::TestEnvVarGuard::set("HERDR_PANE_ID", "");
+
+        let git = DummyGit;
+        let herdr = DummyHerdr::new();
+
+        let task_brief = "Topology: lead — kickoff\nPlaybook: figure-it-out\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+        let res = spawn_lead(
+            &[
+                "child".to_string(),
+                "--task".to_string(),
+                task_brief.to_string(),
+            ],
+            &git,
+            &herdr,
+        );
+        assert!(res.is_ok(), "spawn_lead failed: {:?}", res.err());
+
+        let pin_file = root.join("runs/.child-lead.playbook");
+        assert!(
+            pin_file.is_file(),
+            "runs/.child-lead.playbook must exist after spawn_lead with --task"
+        );
+        let pin_content = fs::read_to_string(&pin_file).unwrap();
+        assert!(
+            pin_content.contains("name=figure-it-out"),
+            "pin content: {pin_content}"
+        );
     }
 }

@@ -4780,3 +4780,143 @@ fn lead_gate_warns_on_a_single_signal_and_spawns() {
         "one signal only warns"
     );
 }
+
+#[test]
+fn lead_routing_flags_missing_playbook_from_lead_owner() {
+    use quaqua::worker::prompt::{brief_header_warnings, do_check_brief_with_owner, lead_routing_warnings};
+    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-missing-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp);
+
+    let brief = "Topology: lead — test\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    let header_warnings = brief_header_warnings(brief);
+    assert!(header_warnings.iter().any(|w| w.contains("brief has no 'Playbook:' header")));
+
+    // lead_routing_warnings does not duplicate the missing Playbook warning
+    let lead_warnings = lead_routing_warnings(brief, Some("pstack-lead"), &temp);
+    assert!(lead_warnings.is_empty(), "lead_routing_warnings must not duplicate missing playbook warning: {lead_warnings:?}");
+
+    // do_check_brief_with_owner succeeds (warn-only)
+    assert!(do_check_brief_with_owner(brief, Some("pstack-lead"), &temp).is_ok());
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn lead_routing_flags_same_as_lead_without_reason() {
+    use quaqua::worker::prompt::lead_routing_warnings;
+    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-same-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp);
+
+    // Pin lead playbook
+    std::fs::write(temp.join(".pstack-lead.playbook"), "name=feature\nids=1,2\n").unwrap();
+
+    let brief = "Topology: lead — test\nPlaybook: feature\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    let warnings = lead_routing_warnings(brief, Some("pstack-lead"), &temp);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("uses the Lead's own playbook 'feature' without a stated reason"), "{}", warnings[0]);
+    assert!(warnings[0].contains("AGENTS.md '## Coordinator Rules' — Route"), "{}", warnings[0]);
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn lead_routing_silent_for_cos_owner() {
+    use quaqua::worker::prompt::lead_routing_warnings;
+    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-cos-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp);
+
+    std::fs::write(temp.join(".cos.playbook"), "name=feature\nids=1,2\n").unwrap();
+
+    // With playbook matching
+    let brief = "Topology: solo — test\nPlaybook: feature\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    let warnings = lead_routing_warnings(brief, Some("cos"), &temp);
+    assert!(warnings.is_empty(), "CoS owner must not trigger lead routing warnings: {warnings:?}");
+
+    // Without playbook
+    let brief_no_pb = "Topology: solo — test\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    let warnings_no_pb = lead_routing_warnings(brief_no_pb, Some("cos"), &temp);
+    assert!(warnings_no_pb.is_empty(), "CoS owner must not trigger lead routing warnings: {warnings_no_pb:?}");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn lead_routing_silent_with_stated_reason() {
+    use quaqua::worker::prompt::lead_routing_warnings;
+    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-reason-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp);
+
+    std::fs::write(temp.join(".pstack-lead.playbook"), "name=feature\nids=1,2\n").unwrap();
+
+    let brief = "Topology: lead — test\nPlaybook: feature, peer builds engine slice\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    let warnings = lead_routing_warnings(brief, Some("pstack-lead"), &temp);
+    assert!(warnings.is_empty(), "Stated reason must clear warning: {warnings:?}");
+
+    let brief_dash = "Topology: lead — test\nPlaybook: feature — peer slice\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    let warnings_dash = lead_routing_warnings(brief_dash, Some("pstack-lead"), &temp);
+    assert!(warnings_dash.is_empty(), "Stated reason with em-dash must clear warning: {warnings_dash:?}");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn lead_routing_silent_for_different_playbook() {
+    use quaqua::worker::prompt::lead_routing_warnings;
+    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-diff-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp);
+
+    std::fs::write(temp.join(".pstack-lead.playbook"), "name=feature\nids=1,2\n").unwrap();
+
+    let brief = "Topology: lead — test\nPlaybook: refactoring\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    let warnings = lead_routing_warnings(brief, Some("pstack-lead"), &temp);
+    assert!(warnings.is_empty(), "Different playbook must not trigger warning: {warnings:?}");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn lead_routing_silent_when_no_lead_playbook_pinned() {
+    use quaqua::worker::prompt::lead_routing_warnings;
+    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-nopin-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp);
+
+    // No .pstack-lead.playbook exists
+    let brief = "Topology: lead — test\nPlaybook: feature\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    let warnings = lead_routing_warnings(brief, Some("pstack-lead"), &temp);
+    assert!(warnings.is_empty(), "Missing lead pin must not trigger same-as-lead warning: {warnings:?}");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn check_brief_with_owner_integration() {
+    use quaqua::worker::prompt::do_check_brief_with_owner;
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-cb-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp);
+
+    // Pin lead playbook
+    std::fs::write(temp.join(".pstack-lead.playbook"), "name=feature\nids=1,2\n").unwrap();
+
+    // 1. Same-as-lead without reason: exits 0 (warn-only)
+    let brief_same = "Topology: lead — test\nPlaybook: feature\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    assert!(
+        do_check_brief_with_owner(brief_same, Some("pstack-lead"), &temp).is_ok(),
+        "warn-only must return Ok(())"
+    );
+
+    // 2. CoS owner: exits 0 (clean)
+    assert!(
+        do_check_brief_with_owner(brief_same, Some("cos"), &temp).is_ok(),
+        "CoS owner must pass"
+    );
+
+    // 3. Lead owner with missing playbook: exits 0 (warn-only)
+    let brief_missing = "Topology: lead — test\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    assert!(
+        do_check_brief_with_owner(brief_missing, Some("pstack-lead"), &temp).is_ok(),
+        "missing playbook warns only"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
