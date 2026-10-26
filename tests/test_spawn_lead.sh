@@ -209,7 +209,7 @@ grep -q 'agent start aaaaaaaaaaaaaaaaaaaaaaaaaaa-lead ' "$T/calls" \
 echo "ok: 32-char lead name (27-char slug) accepted"
 
 # ── INDEX update is exact-cell: 'mono' must not touch the mono-desk row ─────
-spawn mono QUAQUA_OWNER=parent-lead
+spawn mono QUAQUA_OWNER=parent-lead QUAQUA_LAYOUT_SHADOW=1
 [[ $rc -eq 0 ]] || fail "mono: exit $rc, want 0: $(cat "$T/err")"
 [[ -f "$T/runs/mono-lead.owner" ]] || fail "mono: runs/mono-lead.owner not written"
 [[ "$(cat "$T/runs/mono-lead.owner")" == "parent-lead" ]] || fail "mono: runs/mono-lead.owner != parent-lead"

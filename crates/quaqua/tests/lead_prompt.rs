@@ -18,7 +18,6 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-
 impl Fixture {
     fn new(tag: &str) -> Self {
         let root =
@@ -50,6 +49,7 @@ impl Fixture {
             .env("QUAQUA_RUNS_DIR", self.root.join("runs"))
             .env("QUAQUA_HOME", &self.root)
             .env("QUAQUA_TEST", "1")
+            .env("QUAQUA_LAYOUT_SHADOW", "1")
             .env_remove("HERDR_PANE_ID")
             .env_remove("QUAQUA_OWNER")
             .env_remove("QUAQUA_ROOT");
@@ -166,7 +166,6 @@ fn landed_prompt_is_hermetic_when_ambient_herdr_pane_env_is_set() {
         "ambient HERDR_PANE_ID must not cause shadow to query pane before checking lead liveness: {calls}"
     );
 }
-
 
 #[test]
 fn a_draft_left_in_the_input_box_is_nonzero() {

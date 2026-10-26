@@ -1,12 +1,12 @@
 use quaqua::config::{self, Config};
 use quaqua::identity::{Caller, CallerDepth, IdentitySource, Role};
+use quaqua::layout::migrate::{format_diff, migrate_team_toml, run_migrate, MigrateResult};
 use quaqua::layout::{
     builtin, check, check_with_count, find_lead_in_owner_chain, layout_sha256,
     read_layout_snapshot, resolve_caller_by_name, resolve_effective_layout, resolve_layout,
     run_refreeze, run_show, run_why, why, write_layout_snapshot, Layout, LayoutOrigin, Naming,
     RoleClass, Verb,
 };
-use quaqua::layout::migrate::{format_diff, migrate_team_toml, run_migrate, MigrateResult};
 use std::path::PathBuf;
 
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -16,7 +16,10 @@ fn hermetic_temp_dir(prefix: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("quaqua-layout-test-{prefix}-{}-{nanos}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "quaqua-layout-test-{prefix}-{}-{nanos}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).expect("create hermetic temp dir");
     dir
 }
@@ -34,8 +37,14 @@ fn layout_evidence_1_from_legacy_edge_set_equals_slp_builtin() {
 fn layout_evidence_2_v3_use_slp_equals_legacy() {
     let template_toml = include_str!("../../../templates/workspace/team.toml");
     let v3_toml = template_toml
-        .replace("schema_version = 2", "schema_version = 3\n[layout]\nuse = \"slp\"")
-        .replace("max_workers_per_orchestrator = 8", "max_workers_per_orchestrator = 3")
+        .replace(
+            "schema_version = 2",
+            "schema_version = 3\n[layout]\nuse = \"slp\"",
+        )
+        .replace(
+            "max_workers_per_orchestrator = 8",
+            "max_workers_per_orchestrator = 3",
+        )
         .replace("max_peers = 4", "max_peers = 2");
     let cfg: Config = toml::from_str(&v3_toml).expect("parse v3 config");
     let v3_layout = resolve_layout(&cfg).expect("resolve v3 layout");
@@ -100,7 +109,8 @@ fn layout_evidence_live_team_toml_loads() {
 #[test]
 fn layout_all_builtins_load() {
     for name in &["slp", "lead-peer", "advisor", "dual-lens", "council"] {
-        let layout = builtin::get(name).unwrap_or_else(|| panic!("failed to load built-in '{name}'"));
+        let layout =
+            builtin::get(name).unwrap_or_else(|| panic!("failed to load built-in '{name}'"));
         assert_eq!(&layout.name, *name);
         assert!(layout.depth > 0);
         assert!(!layout.roles.is_empty());
@@ -127,7 +137,10 @@ use = "slp"
 "#;
     let cfg: Config = toml::from_str(valid_v3).expect("v3 [layout] use must parse");
     assert_eq!(cfg.schema_version, 3);
-    assert_eq!(cfg.layout.as_ref().map(|l| l.use_layout.as_str()), Some("slp"));
+    assert_eq!(
+        cfg.layout.as_ref().map(|l| l.use_layout.as_str()),
+        Some("slp")
+    );
 
     // 2. Valid v3 with [layouts.review-council]
     let valid_custom_v3 = r#"
@@ -170,7 +183,8 @@ schema_version = 3
 use = "slp"
 bogus_key = true
 "#;
-    let err = toml::from_str::<Config>(bad_layout).expect_err("unknown field in [layout] must fail");
+    let err =
+        toml::from_str::<Config>(bad_layout).expect_err("unknown field in [layout] must fail");
     assert!(err.to_string().contains("unknown field"), "err: {err}");
 }
 
@@ -368,8 +382,14 @@ fn layout_repro_f2_depth_cycle_error_reaches_gate() {
 fn layout_repro_f3_v3_use_slp_retains_live_caps_and_depth() {
     let template_toml = include_str!("../../../templates/workspace/team.toml");
     let v3_toml = template_toml
-        .replace("schema_version = 2", "schema_version = 3\n[layout]\nuse = \"slp\"")
-        .replace("max_workers_per_orchestrator = 8", "max_workers_per_orchestrator = 3")
+        .replace(
+            "schema_version = 2",
+            "schema_version = 3\n[layout]\nuse = \"slp\"",
+        )
+        .replace(
+            "max_workers_per_orchestrator = 8",
+            "max_workers_per_orchestrator = 3",
+        )
         .replace("max_peers = 4", "max_peers = 2");
     let cfg: Config = toml::from_str(&v3_toml).expect("parse v3 config");
     let resolved = resolve_layout(&cfg).expect("resolve v3 slp");
@@ -475,7 +495,10 @@ fn layout_evidence_a_team_toml_edit_does_not_change_gate_decisions() {
         resolve_effective_layout("cos-worker", &runs_dir, &edited_cfg).unwrap();
     assert!(!cos_origin.is_snapshot());
     let cos_dec = check(&cos_layout, &cos_caller, Verb::Prompt, "peer");
-    assert!(cos_dec.allow, "CoS-owned work must use live config immediately");
+    assert!(
+        cos_dec.allow,
+        "CoS-owned work must use live config immediately"
+    );
 }
 
 #[test]
@@ -498,10 +521,7 @@ fn layout_evidence_b_refreeze_applies_team_toml_edit() {
 
     // Refreeze snapshot with edited config
     let _guard = TEST_ENV_LOCK.lock().unwrap();
-    let edited_toml = template_toml.replace(
-        "can_prompt = []",
-        "can_prompt = [\"peer\"]",
-    );
+    let edited_toml = template_toml.replace("can_prompt = []", "can_prompt = [\"peer\"]");
     let team_path = dir.join("team.toml");
     std::fs::write(&team_path, &edited_toml).unwrap();
     let prev_runs = std::env::var("QUAQUA_RUNS_DIR").ok();
@@ -519,8 +539,13 @@ fn layout_evidence_b_refreeze_applies_team_toml_edit() {
         None => std::env::remove_var("QUAQUA_TEAM_TOML"),
     }
 
-    let snap = read_layout_snapshot(&runs_dir, "frz").unwrap().expect("snapshot exists");
-    assert_eq!(snap.layout.roles["peer"].can_prompt, vec!["peer".to_string()]);
+    let snap = read_layout_snapshot(&runs_dir, "frz")
+        .unwrap()
+        .expect("snapshot exists");
+    assert_eq!(
+        snap.layout.roles["peer"].can_prompt,
+        vec!["peer".to_string()]
+    );
 
     // Gate decision for frz-peer now ALLOWS prompt because snapshot was refrozen
     let caller = resolve_caller_by_name("frz-peer", &runs_dir);
@@ -532,7 +557,10 @@ fn layout_evidence_b_refreeze_applies_team_toml_edit() {
     assert_eq!(sha, snap.sha256);
     let dec_refrozen = check(&layout_refrozen, &caller, Verb::Prompt, "peer");
     assert!(dec_refrozen.allow);
-    assert_eq!(layout_refrozen.roles["peer"].can_prompt, vec!["peer".to_string()]);
+    assert_eq!(
+        layout_refrozen.roles["peer"].can_prompt,
+        vec!["peer".to_string()]
+    );
 }
 
 #[test]
@@ -702,10 +730,7 @@ can_review = true
         v2_legacy.roles["cos"].max_children
     );
     assert_eq!(custom_layout.roles["lead"].naming, Naming::SlugLead);
-    assert_eq!(
-        custom_layout.roles["taskforce"].class,
-        RoleClass::Taskforce
-    );
+    assert_eq!(custom_layout.roles["taskforce"].class, RoleClass::Taskforce);
     assert_eq!(
         quaqua::cap::owner_cap(&migrated_cfg, "x-lead"),
         quaqua::cap::owner_cap(&v2_cfg, "x-lead"),
@@ -854,9 +879,15 @@ exit 0
 
 struct DummyGit;
 impl quaqua::git::GitOps for DummyGit {
-    fn run_in(&self, _cwd: &std::path::Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    fn run_in(
+        &self,
+        _cwd: &std::path::Path,
+        args: &[&str],
+    ) -> std::io::Result<std::process::Output> {
         let stdout = if args.first() == Some(&"rev-parse") {
-            "391d347df43909dec802c632156fb6ff23c98815\n".as_bytes().to_vec()
+            "391d347df43909dec802c632156fb6ff23c98815\n"
+                .as_bytes()
+                .to_vec()
         } else {
             Vec::new()
         };
@@ -896,7 +927,11 @@ impl quaqua::git::GitOps for DummyGit {
     ) -> std::io::Result<std::process::Output> {
         self.run_in(_repo, &[])
     }
-    fn worktree_remove(&self, _repo: &std::path::Path, wt: &std::path::Path) -> std::io::Result<std::process::Output> {
+    fn worktree_remove(
+        &self,
+        _repo: &std::path::Path,
+        wt: &std::path::Path,
+    ) -> std::io::Result<std::process::Output> {
         let _ = std::fs::remove_dir_all(wt);
         self.run_in(_repo, &[])
     }
@@ -909,10 +944,17 @@ impl quaqua::git::GitOps for DummyGit {
     fn has_core_worktree(&self, _repo: &std::path::Path) -> bool {
         false
     }
-    fn enable_worktree_config(&self, _repo: &std::path::Path) -> std::io::Result<std::process::Output> {
+    fn enable_worktree_config(
+        &self,
+        _repo: &std::path::Path,
+    ) -> std::io::Result<std::process::Output> {
         self.run_in(_repo, &[])
     }
-    fn set_worktree_pushurl_blocked(&self, _wt: &std::path::Path, _remote: &str) -> std::io::Result<()> {
+    fn set_worktree_pushurl_blocked(
+        &self,
+        _wt: &std::path::Path,
+        _remote: &str,
+    ) -> std::io::Result<()> {
         Ok(())
     }
     fn is_git_dir(&self, _cwd: &std::path::Path) -> bool {
@@ -924,25 +966,49 @@ impl quaqua::git::GitOps for DummyGit {
 }
 
 struct MockHerdrTokens {
-    tokens_json: String,
+    tokens_json: std::cell::RefCell<String>,
     started: std::cell::Cell<bool>,
+    calls: std::cell::RefCell<Vec<String>>,
+    started_agents: std::cell::RefCell<Vec<String>>,
 }
 
 impl MockHerdrTokens {
     fn new(tokens_json: impl Into<String>) -> Self {
         Self {
-            tokens_json: tokens_json.into(),
+            tokens_json: std::cell::RefCell::new(tokens_json.into()),
             started: std::cell::Cell::new(false),
+            calls: std::cell::RefCell::new(Vec::new()),
+            started_agents: std::cell::RefCell::new(Vec::new()),
         }
     }
 }
 
 impl quaqua::herdr::HerdrOps for MockHerdrTokens {
     fn run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        self.calls.borrow_mut().push(args.join(" "));
         let stdout = if args.first() == Some(&"pane") && args.get(1) == Some(&"get") {
-            format!(r#"{{"result":{{"pane":{{"pane_id":"w1:p1","tokens":{}}}}}}}"#, self.tokens_json)
+            format!(
+                r#"{{"result":{{"pane":{{"pane_id":"w1:p1","tokens":{}}}}}}}"#,
+                self.tokens_json.borrow()
+            )
+        } else if args.first() == Some(&"pane") && args.get(1) == Some(&"report-metadata") {
+            let mut role = None;
+            let mut owner = None;
+            for arg in args {
+                if let Some(r) = arg.strip_prefix("grid_role=") {
+                    role = Some(r);
+                } else if let Some(o) = arg.strip_prefix("grid_owner=") {
+                    owner = Some(o);
+                }
+            }
+            if let (Some(r), Some(o)) = (role, owner) {
+                *self.tokens_json.borrow_mut() =
+                    format!(r#"{{"grid_role":"{r}","grid_owner":"{o}","logo":"\ue1a3"}}"#);
+            }
+            r#"{"result":{}}"#.to_string()
         } else if args.first() == Some(&"workspace") && args.get(1) == Some(&"create") {
-            r#"{"result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}"#.to_string()
+            r#"{"result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}"#
+                .to_string()
         } else if args.first() == Some(&"agent") && args.get(1) == Some(&"start") {
             self.started.set(true);
             r#"{"result":{}}"#.to_string()
@@ -957,24 +1023,61 @@ impl quaqua::herdr::HerdrOps for MockHerdrTokens {
             stderr: Vec::new(),
         })
     }
-    fn agent_list(&self) -> std::io::Result<String> { Ok(r#"{"result":{"agents":[]}}"#.to_string()) }
+    fn agent_list(&self) -> std::io::Result<String> {
+        let agents: Vec<serde_json::Value> = self
+            .started_agents
+            .borrow()
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "name": n,
+                    "agent_status": "working",
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "result": {
+                "agents": agents
+            }
+        })
+        .to_string())
+    }
     fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
         if self.started.get() {
-            Ok((true, r#"{"result":{"agent":{"agent_status":"working","pane_id":"w1:p1"}}}"#.to_string()))
+            Ok((
+                true,
+                r#"{"result":{"agent":{"agent_status":"working","pane_id":"w1:p1"}}}"#.to_string(),
+            ))
         } else {
             Ok((false, r#"{"error":{"code":"agent_not_found"}}"#.to_string()))
         }
     }
-    fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> { Ok(String::new()) }
-    fn agent_start(&self, _n: &str, _k: &str, _p: &str, _t: u32, _a: &[&str]) -> std::io::Result<std::process::Output> {
+    fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+        Ok(String::new())
+    }
+    fn agent_start(
+        &self,
+        n: &str,
+        _k: &str,
+        _p: &str,
+        _t: u32,
+        _a: &[&str],
+    ) -> std::io::Result<std::process::Output> {
         self.started.set(true);
+        self.started_agents.borrow_mut().push(n.to_string());
         Ok(std::process::Output {
             status: std::os::unix::process::ExitStatusExt::from_raw(0),
             stdout: r#"{"result":{}}"#.as_bytes().to_vec(),
             stderr: Vec::new(),
         })
     }
-    fn pane_split(&self, _c: &str, _o: &str, _e: &[(&str, &str)]) -> std::io::Result<std::process::Output> {
+    fn pane_split(
+        &self,
+        _c: &str,
+        _o: &str,
+        _e: &[(&str, &str)],
+    ) -> std::io::Result<std::process::Output> {
+        self.calls.borrow_mut().push("pane_split".to_string());
         Ok(std::process::Output {
             status: std::os::unix::process::ExitStatusExt::from_raw(0),
             stdout: r#"{"result":{"pane":{"pane_id":"w1:p1"}}}"#.as_bytes().to_vec(),
@@ -995,8 +1098,12 @@ impl quaqua::herdr::HerdrOps for MockHerdrTokens {
             stderr: Vec::new(),
         })
     }
-    fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool { true }
-    fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> { Ok(String::new()) }
+    fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
+        true
+    }
+    fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+        Ok(String::new())
+    }
     fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> {
         Ok(std::process::Output {
             status: std::os::unix::process::ExitStatusExt::from_raw(0),
@@ -1025,7 +1132,13 @@ impl quaqua::herdr::HerdrOps for MockHerdrTokens {
             stderr: Vec::new(),
         })
     }
-    fn agent_prompt_wait_background(&self, _n: &str, _p: &str, _t: u32, _f: std::fs::File) -> std::io::Result<std::process::Child> {
+    fn agent_prompt_wait_background(
+        &self,
+        _n: &str,
+        _p: &str,
+        _t: u32,
+        _f: std::fs::File,
+    ) -> std::io::Result<std::process::Child> {
         unimplemented!()
     }
 }
@@ -1045,24 +1158,41 @@ fn layout_shadow_evidence_cp1_spawn_worker_peer_denied_but_proceeds() {
         ("QUAQUA_TEST", "1".to_string()),
         ("GRID_SKIP", "1".to_string()),
         ("HERDR_PANE_ID", "w1:p1".to_string()),
+        ("QUAQUA_LAYOUT_SHADOW", "1".to_string()),
     ]);
 
     let cfg = test_slp_cfg();
     let git = DummyGit;
-    let herdr = MockHerdrTokens::new(r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#);
+    let herdr = MockHerdrTokens::new(
+        r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#,
+    );
 
     let opts = quaqua::worker::spawn::parse_spawn_args(&[
         "sude-worker1".to_string(),
         "sude".to_string(),
         repo_dir.to_str().unwrap().to_string(),
-    ]).unwrap();
+    ])
+    .unwrap();
 
-    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
-    assert!(res.is_ok(), "spawn_worker must succeed (proceed past shadow gate): {:?}", res.err());
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(
+        res.is_ok(),
+        "spawn_worker must succeed (proceed past shadow gate): {:?}",
+        res.err()
+    );
 
     let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
     let events = bus.load_events(0).expect("load events");
-    let would_denies: Vec<_> = events.iter().filter(|e| e.event_type == "would_deny").collect();
+    let would_denies: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .collect();
     assert_eq!(would_denies.len(), 1, "expected 1 would_deny event");
     assert_eq!(would_denies[0].actor.as_deref(), Some("tieude-peer"));
     assert_eq!(would_denies[0].subject.as_deref(), Some("sude-worker1"));
@@ -1095,17 +1225,27 @@ fn layout_shadow_evidence_cp2_lead_spawn_peer_denied_but_proceeds() {
         ("QUAQUA_TEST", "1".to_string()),
         ("GRID_SKIP", "1".to_string()),
         ("HERDR_PANE_ID", "w1:p1".to_string()),
+        ("QUAQUA_LAYOUT_SHADOW", "1".to_string()),
     ]);
 
     let git = DummyGit;
-    let herdr = MockHerdrTokens::new(r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#);
+    let herdr = MockHerdrTokens::new(
+        r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#,
+    );
 
     let res = quaqua::lead::spawn::spawn_lead(&["foo".to_string()], &git, &herdr);
-    assert!(res.is_ok(), "spawn_lead must succeed (proceed past shadow gate): {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "spawn_lead must succeed (proceed past shadow gate): {:?}",
+        res.err()
+    );
 
     let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
     let events = bus.load_events(0).expect("load events");
-    let would_denies: Vec<_> = events.iter().filter(|e| e.event_type == "would_deny").collect();
+    let would_denies: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .collect();
     assert_eq!(would_denies.len(), 1, "expected 1 would_deny event");
     assert_eq!(would_denies[0].actor.as_deref(), Some("tieude-peer"));
     assert_eq!(would_denies[0].subject.as_deref(), Some("foo-lead"));
@@ -1121,14 +1261,44 @@ fn layout_shadow_evidence_cp3_taskforce_peer_denied_but_proceeds() {
     std::fs::create_dir_all(&repo_dir).unwrap();
     std::fs::create_dir_all(&runs_dir).unwrap();
     std::fs::write(runs_dir.join("mu-lead.owner"), "cos\n").unwrap();
-    let _ = std::process::Command::new("git").args(["init", repo_dir.to_str().unwrap()]).output();
-    let _ = std::process::Command::new("git").args(["-C", repo_dir.to_str().unwrap(), "config", "user.name", "Test"]).output();
-    let _ = std::process::Command::new("git").args(["-C", repo_dir.to_str().unwrap(), "config", "user.email", "test@test.com"]).output();
-    let _ = std::process::Command::new("git").args(["-C", repo_dir.to_str().unwrap(), "commit", "--allow-empty", "-m", "init"]).output();
+    let _ = std::process::Command::new("git")
+        .args(["init", repo_dir.to_str().unwrap()])
+        .output();
+    let _ = std::process::Command::new("git")
+        .args([
+            "-C",
+            repo_dir.to_str().unwrap(),
+            "config",
+            "user.name",
+            "Test",
+        ])
+        .output();
+    let _ = std::process::Command::new("git")
+        .args([
+            "-C",
+            repo_dir.to_str().unwrap(),
+            "config",
+            "user.email",
+            "test@test.com",
+        ])
+        .output();
+    let _ = std::process::Command::new("git")
+        .args([
+            "-C",
+            repo_dir.to_str().unwrap(),
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ])
+        .output();
     let brief_file = temp.join("brief.md");
     std::fs::write(&brief_file, "Brief content").unwrap();
 
-    let stub = stub_herdr_script(&temp, r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#);
+    let stub = stub_herdr_script(
+        &temp,
+        r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#,
+    );
 
     let _env = EnvGuard::set(&[
         ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
@@ -1136,19 +1306,28 @@ fn layout_shadow_evidence_cp3_taskforce_peer_denied_but_proceeds() {
         ("GRID_SKIP", "1".to_string()),
         ("HERDR_PANE_ID", "w1:p1".to_string()),
         ("HERDR_BIN_PATH", stub.to_str().unwrap().to_string()),
+        ("QUAQUA_LAYOUT_SHADOW", "1".to_string()),
     ]);
 
     let git = quaqua::git::Git::new();
     let herdr = quaqua::herdr::Herdr::new();
 
-    let res = quaqua::taskforce::handle_taskforce(&[
-        "advisor".to_string(),
-        "mytest".to_string(),
-        repo_dir.to_str().unwrap().to_string(),
-        "--brief".to_string(),
-        brief_file.to_str().unwrap().to_string(),
-    ], &git, &herdr);
-    assert!(res.is_ok(), "handle_taskforce must succeed (proceed past shadow gate): {:?}", res.err());
+    let res = quaqua::taskforce::handle_taskforce(
+        &[
+            "advisor".to_string(),
+            "mytest".to_string(),
+            repo_dir.to_str().unwrap().to_string(),
+            "--brief".to_string(),
+            brief_file.to_str().unwrap().to_string(),
+        ],
+        &git,
+        &herdr,
+    );
+    assert!(
+        res.is_ok(),
+        "handle_taskforce must succeed (proceed past shadow gate): {:?}",
+        res.err()
+    );
 
     let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
     let events = bus.load_events(0).expect("load events");
@@ -1167,9 +1346,16 @@ fn layout_shadow_evidence_cp4_worker_prompt_peer_denied_but_proceeds() {
     let runs_dir = temp.join("runs");
     std::fs::create_dir_all(&runs_dir).unwrap();
     std::fs::write(runs_dir.join("sude-target.owner"), "other-lead\n").unwrap();
-    std::fs::write(runs_dir.join("sude-target.md"), "Outcome: COMPLETE\n\n## Blockers\nnone\n\n## Lessons\nnone\n").unwrap();
+    std::fs::write(
+        runs_dir.join("sude-target.md"),
+        "Outcome: COMPLETE\n\n## Blockers\nnone\n\n## Lessons\nnone\n",
+    )
+    .unwrap();
 
-    let stub = stub_herdr_script(&temp, r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#);
+    let stub = stub_herdr_script(
+        &temp,
+        r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#,
+    );
 
     let _env = EnvGuard::set(&[
         ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
@@ -1180,6 +1366,7 @@ fn layout_shadow_evidence_cp4_worker_prompt_peer_denied_but_proceeds() {
         ("PROMPT_WORKER_POLL_SEC", "1".to_string()),
         ("PROMPT_WORKER_IDLE_SEC", "1".to_string()),
         ("PROMPT_WORKER_STALL_SEC", "1".to_string()),
+        ("QUAQUA_LAYOUT_SHADOW", "1".to_string()),
     ]);
 
     let git = quaqua::git::Git::new();
@@ -1193,11 +1380,18 @@ fn layout_shadow_evidence_cp4_worker_prompt_peer_denied_but_proceeds() {
         &git,
         &herdr,
     );
-    assert!(res.is_ok(), "prompt_worker must succeed (proceed past shadow gate): {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "prompt_worker must succeed (proceed past shadow gate): {:?}",
+        res.err()
+    );
 
     let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
     let events = bus.load_events(0).expect("load events");
-    let would_denies: Vec<_> = events.iter().filter(|e| e.event_type == "would_deny").collect();
+    let would_denies: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .collect();
     assert_eq!(would_denies.len(), 1, "expected 1 would_deny event");
     assert_eq!(would_denies[0].actor.as_deref(), Some("tieude-peer"));
     assert_eq!(would_denies[0].subject.as_deref(), Some("sude-target"));
@@ -1216,17 +1410,27 @@ fn layout_shadow_evidence_cp5_lead_prompt_peer_denied_but_proceeds() {
         ("QUAQUA_TEST", "1".to_string()),
         ("GRID_SKIP", "1".to_string()),
         ("HERDR_PANE_ID", "w1:p1".to_string()),
+        ("QUAQUA_LAYOUT_SHADOW", "1".to_string()),
     ]);
 
-    let herdr = MockHerdrTokens::new(r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#);
+    let herdr = MockHerdrTokens::new(
+        r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#,
+    );
     herdr.started.set(true);
 
     let res = quaqua::lead::prompt::prompt_lead(&["baro".to_string(), "hello".to_string()], &herdr);
-    assert!(res.is_ok(), "prompt_lead must succeed (proceed past shadow gate): {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "prompt_lead must succeed (proceed past shadow gate): {:?}",
+        res.err()
+    );
 
     let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
     let events = bus.load_events(0).expect("load events");
-    let would_denies: Vec<_> = events.iter().filter(|e| e.event_type == "would_deny").collect();
+    let would_denies: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .collect();
     assert_eq!(would_denies.len(), 1, "expected 1 would_deny event");
     assert_eq!(would_denies[0].actor.as_deref(), Some("tieude-peer"));
     assert_eq!(would_denies[0].subject.as_deref(), Some("baro-lead"));
@@ -1269,8 +1473,15 @@ fn layout_shadow_evidence_cp6_cos_lead_spawn_allowed_no_would_deny() {
     let db_path = runs_dir.join("quaqua.db");
     let bus = quaqua::bus::FarmBus::open(&db_path).expect("open bus");
     let events = bus.load_events(0).expect("load events");
-    let would_denies: Vec<_> = events.iter().filter(|e| e.event_type == "would_deny").collect();
-    assert_eq!(would_denies.len(), 0, "CoS lead spawn must write 0 would_deny events");
+    let would_denies: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .collect();
+    assert_eq!(
+        would_denies.len(),
+        0,
+        "CoS lead spawn must write 0 would_deny events"
+    );
 }
 #[test]
 fn layout_shadow_evidence_taskforce_member_skips_edge() {
@@ -1286,30 +1497,54 @@ fn layout_shadow_evidence_taskforce_member_skips_edge() {
         ("QUAQUA_TEST", "1".to_string()),
         ("GRID_SKIP", "1".to_string()),
         ("HERDR_PANE_ID", "w1:p1".to_string()),
+        ("QUAQUA_LAYOUT_SHADOW", "1".to_string()),
     ]);
 
     let cfg = test_slp_cfg();
     let git = DummyGit;
     // Caller is a peer directly owned by cos (depth 1, target depth 2 <= layout limit 2).
     // In SLP, peer has no can_spawn edge to peer.
-    let herdr = MockHerdrTokens::new(r#"{"grid_role":"worker","grid_owner":"cos","grid_name":"tieude-peer"}"#);
+    let herdr = MockHerdrTokens::new(
+        r#"{"grid_role":"worker","grid_owner":"cos","grid_name":"tieude-peer"}"#,
+    );
 
     // 1) With Origin::Cli: peer has no spawn edge, so shadow writes 1 would_deny row for edge.none.
     let opts_cli = quaqua::worker::spawn::parse_spawn_args(&[
         "sude-cliworker".to_string(),
         "sude".to_string(),
         repo_dir.to_str().unwrap().to_string(),
-    ]).unwrap();
-    let res_cli = quaqua::worker::spawn::spawn_worker(opts_cli, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
-    assert!(res_cli.is_ok(), "spawn_worker with Cli must succeed (shadow never blocks): {:?}", res_cli.err());
+    ])
+    .unwrap();
+    let res_cli = quaqua::worker::spawn::spawn_worker(
+        opts_cli,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(
+        res_cli.is_ok(),
+        "spawn_worker with Cli must succeed (shadow never blocks): {:?}",
+        res_cli.err()
+    );
 
     let db_path = runs_dir.join("quaqua.db");
     let bus = quaqua::bus::FarmBus::open(&db_path).expect("open bus");
     let events_after_cli = bus.load_events(0).expect("load events");
-    let cli_would_denies: Vec<_> = events_after_cli.iter().filter(|e| e.event_type == "would_deny").collect();
-    assert_eq!(cli_would_denies.len(), 1, "Cli origin must record 1 would_deny event for peer caller");
+    let cli_would_denies: Vec<_> = events_after_cli
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .collect();
+    assert_eq!(
+        cli_would_denies.len(),
+        1,
+        "Cli origin must record 1 would_deny event for peer caller"
+    );
     assert_eq!(cli_would_denies[0].actor.as_deref(), Some("tieude-peer"));
-    assert_eq!(cli_would_denies[0].subject.as_deref(), Some("sude-cliworker"));
+    assert_eq!(
+        cli_would_denies[0].subject.as_deref(),
+        Some("sude-cliworker")
+    );
     assert!(cli_would_denies[0].payload_json.contains("edge.none"));
 
     // 2) With Origin::TaskforceMember: edge check is skipped, depth 2 <= 2 passes, so NO new would_deny event is written.
@@ -1317,12 +1552,26 @@ fn layout_shadow_evidence_taskforce_member_skips_edge() {
         "sude-tfworker".to_string(),
         "sude".to_string(),
         repo_dir.to_str().unwrap().to_string(),
-    ]).unwrap();
-    let res_tf = quaqua::worker::spawn::spawn_worker(opts_tf, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::TaskforceMember);
-    assert!(res_tf.is_ok(), "spawn_worker with TaskforceMember must succeed: {:?}", res_tf.err());
+    ])
+    .unwrap();
+    let res_tf = quaqua::worker::spawn::spawn_worker(
+        opts_tf,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::TaskforceMember,
+    );
+    assert!(
+        res_tf.is_ok(),
+        "spawn_worker with TaskforceMember must succeed: {:?}",
+        res_tf.err()
+    );
 
     let events_after_tf = bus.load_events(0).expect("load events");
-    let tf_would_denies: Vec<_> = events_after_tf.iter().filter(|e| e.event_type == "would_deny").collect();
+    let tf_would_denies: Vec<_> = events_after_tf
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .collect();
     assert_eq!(tf_would_denies.len(), 1, "TaskforceMember skips edge, so count of would_deny events stays 1 (no edge.none row added)");
 }
 
@@ -1333,9 +1582,16 @@ fn layout_shadow_evidence_worker_prompt_resume_dedupes_would_deny() {
     let runs_dir = temp.join("runs");
     std::fs::create_dir_all(&runs_dir).unwrap();
     std::fs::write(runs_dir.join("sude-resumetgt.owner"), "other-lead\n").unwrap();
-    std::fs::write(runs_dir.join("sude-resumetgt.md"), "Outcome: COMPLETE\n\n## Blockers\nnone\n\n## Lessons\nnone\n").unwrap();
+    std::fs::write(
+        runs_dir.join("sude-resumetgt.md"),
+        "Outcome: COMPLETE\n\n## Blockers\nnone\n\n## Lessons\nnone\n",
+    )
+    .unwrap();
 
-    let stub = stub_herdr_script(&temp, r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#);
+    let stub = stub_herdr_script(
+        &temp,
+        r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#,
+    );
 
     let _env = EnvGuard::set(&[
         ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
@@ -1346,6 +1602,7 @@ fn layout_shadow_evidence_worker_prompt_resume_dedupes_would_deny() {
         ("PROMPT_WORKER_POLL_SEC", "1".to_string()),
         ("PROMPT_WORKER_IDLE_SEC", "1".to_string()),
         ("PROMPT_WORKER_STALL_SEC", "1".to_string()),
+        ("QUAQUA_LAYOUT_SHADOW", "1".to_string()),
     ]);
 
     let git = quaqua::git::Git::new();
@@ -1360,27 +1617,34 @@ fn layout_shadow_evidence_worker_prompt_resume_dedupes_would_deny() {
         &git,
         &herdr,
     );
-    assert!(res1.is_ok(), "initial prompt must succeed: {:?}", res1.err());
+    assert!(
+        res1.is_ok(),
+        "initial prompt must succeed: {:?}",
+        res1.err()
+    );
 
     let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
     let events1 = bus.load_events(0).expect("load events");
-    let count1 = events1.iter().filter(|e| e.event_type == "would_deny").count();
+    let count1 = events1
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .count();
     assert_eq!(count1, 1, "initial prompt writes 1 would_deny");
 
     // Resume prompt (resume=true) dedupes and does not write another would_deny
-    let res2 = quaqua::worker::prompt::prompt_worker(
-        "sude-resumetgt",
-        None,
-        true,
-        None,
-        &git,
-        &herdr,
-    );
+    let res2 =
+        quaqua::worker::prompt::prompt_worker("sude-resumetgt", None, true, None, &git, &herdr);
     assert!(res2.is_ok(), "resume prompt must succeed: {:?}", res2.err());
 
     let events2 = bus.load_events(0).expect("load events");
-    let count2 = events2.iter().filter(|e| e.event_type == "would_deny").count();
-    assert_eq!(count2, 1, "resume prompt must dedupe and not write another would_deny");
+    let count2 = events2
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .count();
+    assert_eq!(
+        count2, 1,
+        "resume prompt must dedupe and not write another would_deny"
+    );
 }
 
 #[test]
@@ -1394,7 +1658,10 @@ fn layout_repro_finding1_missing_owner_and_cycle_have_distinct_rule_ids() {
     };
     let dec_missing = check(&slp, &lead_missing, Verb::Spawn, "peer");
     assert!(!dec_missing.allow);
-    assert_eq!(dec_missing.rule_id, "depth.owner_missing", "missing owner must deny depth.owner_missing, not depth.exceeded");
+    assert_eq!(
+        dec_missing.rule_id, "depth.owner_missing",
+        "missing owner must deny depth.owner_missing, not depth.exceeded"
+    );
 
     let lead_cycle = Caller {
         name: "cycle-lead".to_string(),
@@ -1404,7 +1671,10 @@ fn layout_repro_finding1_missing_owner_and_cycle_have_distinct_rule_ids() {
     };
     let dec_cycle = check(&slp, &lead_cycle, Verb::Spawn, "peer");
     assert!(!dec_cycle.allow);
-    assert_eq!(dec_cycle.rule_id, "depth.cycle", "cycle in owner chain must deny depth.cycle, not depth.exceeded");
+    assert_eq!(
+        dec_cycle.rule_id, "depth.cycle",
+        "cycle in owner chain must deny depth.cycle, not depth.exceeded"
+    );
 }
 
 #[test]
@@ -1450,7 +1720,10 @@ fn layout_shadow_evidence_lead_owned_peer_uses_frozen_snapshot_not_live_config()
 
     // Decision must come from the frozen snapshot (which denies peer -> peer prompt),
     // NOT from live_cfg (which allows it).
-    assert!(!decision.allow, "Lead-owned peer must resolve layout from frozen snapshot, denying prompt");
+    assert!(
+        !decision.allow,
+        "Lead-owned peer must resolve layout from frozen snapshot, denying prompt"
+    );
     assert!(
         decision.rule_id == "slp.peer.prompt.peer" || decision.rule_id == "edge.none",
         "rule_id was {}",
@@ -1459,8 +1732,15 @@ fn layout_shadow_evidence_lead_owned_peer_uses_frozen_snapshot_not_live_config()
 
     let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
     let events = bus.load_events(0).expect("load events");
-    let would_denies: Vec<_> = events.iter().filter(|e| e.event_type == "would_deny").collect();
-    assert_eq!(would_denies.len(), 1, "expected 1 would_deny event from frozen snapshot");
+    let would_denies: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .collect();
+    assert_eq!(
+        would_denies.len(),
+        1,
+        "expected 1 would_deny event from frozen snapshot"
+    );
     assert_eq!(would_denies[0].actor.as_deref(), Some("frz-peer"));
     assert_eq!(would_denies[0].subject.as_deref(), Some("other-peer"));
     assert!(would_denies[0].payload_json.contains(&decision.rule_id));
@@ -1481,11 +1761,21 @@ fn layout_shadow_evidence_lead_owned_peer_uses_frozen_snapshot_not_live_config()
         &runs_dir,
         Some(&live_cfg),
     );
-    assert!(cos_decision.allow, "CoS-owned caller must use live config immediately, allowing prompt");
+    assert!(
+        cos_decision.allow,
+        "CoS-owned caller must use live config immediately, allowing prompt"
+    );
 
     let events_after = bus.load_events(0).expect("load events");
-    let would_denies_after: Vec<_> = events_after.iter().filter(|e| e.event_type == "would_deny").collect();
-    assert_eq!(would_denies_after.len(), 1, "no new would_deny event for CoS-owned caller");
+    let would_denies_after: Vec<_> = events_after
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .collect();
+    assert_eq!(
+        would_denies_after.len(),
+        1,
+        "no new would_deny event for CoS-owned caller"
+    );
 }
 
 #[test]
@@ -1500,7 +1790,11 @@ fn layout_shadow_evidence_corrupt_snapshot_falls_back_to_live_layout() {
     std::fs::write(runs_dir.join("frz-peer.owner"), "frz-lead\n").unwrap();
 
     // Write a corrupt snapshot file for project "frz"
-    std::fs::write(runs_dir.join("frz.layout.toml"), "invalid [toml content :::\n").unwrap();
+    std::fs::write(
+        runs_dir.join("frz.layout.toml"),
+        "invalid [toml content :::\n",
+    )
+    .unwrap();
 
     let template_toml = include_str!("../../../templates/workspace/team.toml");
     let base_cfg: Config = toml::from_str(template_toml).expect("parse template team.toml");
@@ -1524,4 +1818,427 @@ fn layout_shadow_evidence_corrupt_snapshot_falls_back_to_live_layout() {
     // In base_cfg, peer cannot prompt peer, so it gets denied by the live fallback layout
     assert!(!decision.allow);
     assert_eq!(decision.rule_id, "edge.none");
+}
+#[test]
+fn test_layout_enforce_peer_spawn_denied_exit_1_no_worktree_or_pane() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("enforce-peer-spawn");
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    std::fs::write(runs_dir.join("mu-lead.owner"), "cos\n").unwrap();
+
+    let _env = EnvGuard::set(&[
+        ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
+        ("QUAQUA_TEST", "1".to_string()),
+        ("GRID_SKIP", "1".to_string()),
+        ("HERDR_PANE_ID", "w1:p1".to_string()),
+    ]);
+
+    let cfg = test_slp_cfg();
+    let git = DummyGit;
+    let herdr = MockHerdrTokens::new(
+        r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#,
+    );
+
+    let opts = quaqua::worker::spawn::parse_spawn_args(&[
+        "sude-worker1".to_string(),
+        "sude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(res.is_err(), "peer spawn must be denied under enforce mode");
+    let (code, msg) = res.unwrap_err();
+    assert_eq!(code, 1, "deny must exit 1");
+    assert!(
+        msg.contains("edge.none"),
+        "expected rule_id edge.none in msg: {msg}"
+    );
+    assert!(
+        !temp.join(".wt/sude-worker1").exists(),
+        "no worktree must be created on deny"
+    );
+    assert_eq!(
+        herdr
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| c.contains("pane_split"))
+            .count(),
+        0,
+        "no pane_split on deny"
+    );
+
+    let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let events = bus.load_events(0).expect("load events");
+    let denies: Vec<_> = events.iter().filter(|e| e.event_type == "denied").collect();
+    assert_eq!(denies.len(), 1, "expected 1 denied event in farm_events");
+    assert!(denies[0].payload_json.contains("edge.none"));
+}
+
+#[test]
+fn test_layout_enforce_cos_lead_spawn_allowed() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("enforce-cos-lead");
+    let root = temp.join("root");
+    let runs_dir = root.join("runs");
+    let repo_dir = root.join("projects/foo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    std::fs::create_dir_all(root.join("projects")).unwrap();
+    std::fs::create_dir_all(root.join("rules/_all")).unwrap();
+    std::fs::write(root.join("team.toml"), test_slp_team_toml()).unwrap();
+    let index_content = format!(
+        "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| foo | {} | cos | active | goal |\n",
+        repo_dir.display()
+    );
+    std::fs::write(root.join("projects/INDEX.md"), index_content).unwrap();
+    std::fs::write(root.join("projects/foo.md"), "# foo card\n").unwrap();
+    let _env = EnvGuard::set(&[
+        ("QUAQUA_HOME", root.to_str().unwrap().to_string()),
+        ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
+        ("QUAQUA_TEST", "1".to_string()),
+        ("GRID_SKIP", "1".to_string()),
+        ("HERDR_PANE_ID", "w1:p1".to_string()),
+    ]);
+
+    let git = DummyGit;
+    let herdr = MockHerdrTokens::new(r#"{"grid_role":"cos","grid_owner":"cos"}"#);
+
+    let res = quaqua::lead::spawn::spawn_lead(&["foo".to_string()], &git, &herdr);
+    assert!(
+        res.is_ok(),
+        "CoS lead spawn must be allowed: {:?}",
+        res.err()
+    );
+}
+
+#[test]
+fn test_layout_enforce_shadow_mode_escape_via_env() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("enforce-shadow-escape");
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    std::fs::write(runs_dir.join("mu-lead.owner"), "cos\n").unwrap();
+
+    let _env = EnvGuard::set(&[
+        ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
+        ("QUAQUA_TEST", "1".to_string()),
+        ("GRID_SKIP", "1".to_string()),
+        ("HERDR_PANE_ID", "w1:p1".to_string()),
+        ("QUAQUA_LAYOUT_SHADOW", "1".to_string()),
+    ]);
+
+    let cfg = test_slp_cfg();
+    let git = DummyGit;
+    let herdr = MockHerdrTokens::new(
+        r#"{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"tieude-peer"}"#,
+    );
+
+    let opts = quaqua::worker::spawn::parse_spawn_args(&[
+        "sude-worker-esc".to_string(),
+        "sude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(
+        res.is_ok(),
+        "QUAQUA_LAYOUT_SHADOW=1 must restore shadow mode and proceed: {:?}",
+        res.err()
+    );
+
+    let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let events = bus.load_events(0).expect("load events");
+    let would_denies: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "would_deny")
+        .collect();
+    assert_eq!(
+        would_denies.len(),
+        1,
+        "expected 1 would_deny event in shadow mode"
+    );
+}
+
+#[test]
+fn test_layout_enforce_cap_message_source_preserved() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("enforce-cap-source");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    let _cfg = test_slp_cfg();
+    let lead_caller = Caller {
+        name: "baro-lead".to_string(),
+        role: Role::Lead,
+        depth: CallerDepth::Resolved(1),
+        source: IdentitySource::PaneTokens,
+    };
+
+    let slp = builtin::get("slp").expect("slp");
+    // baro-lead with current_children = 4 (cap is 4)
+    let dec = check_with_count(&slp, &lead_caller, Verb::Spawn, "peer", Some(4));
+    assert!(!dec.allow);
+    assert_eq!(dec.rule_id, "cap.exceeded");
+    let trace_cap = dec.trace.iter().find(|t| !t.passed).expect("failing step");
+    assert!(
+        trace_cap.detail.contains("roles.lead.max_peers is 4"),
+        "must preserve lead cap source: {}",
+        trace_cap.detail
+    );
+    assert!(
+        trace_cap.detail.contains("worker cap exceeded"),
+        "must preserve cap error prefix: {}",
+        trace_cap.detail
+    );
+
+    let cos_caller = Caller {
+        name: "cos".to_string(),
+        role: Role::Cos,
+        depth: CallerDepth::Resolved(0),
+        source: IdentitySource::PaneTokens,
+    };
+    // cos with current_children = 8 (cap is 8)
+    let dec_cos = check_with_count(&slp, &cos_caller, Verb::Spawn, "peer", Some(8));
+    assert!(!dec_cos.allow);
+    assert_eq!(dec_cos.rule_id, "cap.exceeded");
+    let trace_cos = dec_cos
+        .trace
+        .iter()
+        .find(|t| !t.passed)
+        .expect("failing step");
+    assert!(
+        trace_cos
+            .detail
+            .contains("limits.max_workers_per_orchestrator is 8"),
+        "must preserve cos cap source: {}",
+        trace_cos.detail
+    );
+    assert!(
+        trace_cos.detail.contains("worker cap exceeded"),
+        "must preserve cap error prefix: {}",
+        trace_cos.detail
+    );
+}
+
+#[test]
+fn test_layout_pre_p3_untagged_lead_pane_reproduction_and_healing() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("pre-p3-lead-healing");
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    std::fs::write(runs_dir.join("mu-lead.owner"), "cos\n").unwrap();
+
+    let _env = EnvGuard::set(&[
+        ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
+        ("QUAQUA_TEST", "1".to_string()),
+        ("GRID_SKIP", "1".to_string()),
+        ("HERDR_PANE_ID", "wB:p1".to_string()),
+    ]);
+
+    let cfg = test_slp_cfg();
+    let git = DummyGit;
+    // Step 1: Pre-P3 untagged Lead pane (only logo, no grid_role/grid_owner)
+    let herdr = MockHerdrTokens::new(r#"{"logo":"\ue1a3"}"#);
+
+    let opts1 = quaqua::worker::spawn::parse_spawn_args(&[
+        "tieude-mulows1".to_string(),
+        "tieude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+
+    // Spawning from untagged pane reproduces FALSE DENY (denied with identity.unknown)
+    let res1 = quaqua::worker::spawn::spawn_worker(
+        opts1,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(
+        res1.is_err(),
+        "untagged pre-P3 lead pane must fail under enforce mode"
+    );
+    let (code1, msg1) = res1.unwrap_err();
+    assert_eq!(code1, 1);
+    assert!(
+        msg1.contains("identity.unknown"),
+        "expected identity.unknown: {msg1}"
+    );
+
+    // Step 2: Heal the Lead pane via tag_lead_pane (setting grid_role=orchestrator, grid_owner=mu-lead)
+    let tag_res = quaqua::lead::tag::tag_lead_pane(&herdr, "mu", "wB:p1");
+    assert!(tag_res.is_ok(), "tagging lead pane must succeed");
+    // Update herdr tokens to reflect the tag
+
+    let opts2 = quaqua::worker::spawn::parse_spawn_args(&[
+        "tieude-mulows2".to_string(),
+        "tieude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+
+    // Spawning from healed Lead pane now succeeds with ALLOW!
+    let res2 = quaqua::worker::spawn::spawn_worker(
+        opts2,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(
+        res2.is_ok(),
+        "spawn from healed Lead pane must succeed: {:?}",
+        res2.err()
+    );
+}
+
+#[test]
+fn test_lead_tagged_caller_records_owner_slug_lead_and_accounts_to_lead_cap() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("lead-tagged-owner-cap");
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    std::fs::write(runs_dir.join("mu-lead.owner"), "cos\n").unwrap();
+
+    let _env = EnvGuard::set(&[
+        ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
+        ("QUAQUA_TEST", "1".to_string()),
+        ("GRID_SKIP", "1".to_string()),
+        ("HERDR_PANE_ID", "wB:p1".to_string()),
+        ("QUAQUA_OWNER", "cos".to_string()), // Stale shell env saying cos!
+    ]);
+
+    let cfg = test_slp_cfg();
+    let git = DummyGit;
+    // Lead pane tagged with grid_role=orchestrator, grid_owner=mu-lead
+    let herdr = MockHerdrTokens::new(
+        r#"{"grid_role":"orchestrator","grid_owner":"mu-lead","logo":"\ue1a3"}"#,
+    );
+
+    let opts = quaqua::worker::spawn::parse_spawn_args(&[
+        "tieude-mulows-owned".to_string(),
+        "tieude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(res.is_ok(), "spawn must succeed: {:?}", res.err());
+
+    // Invariant 1: runs/<name>.owner must be mu-lead (not stale shell env cos)
+    let owner_file = runs_dir.join("tieude-mulows-owned.owner");
+    let owner = std::fs::read_to_string(&owner_file).expect("read owner file");
+    assert_eq!(owner.trim(), "mu-lead", "owner file must record mu-lead");
+
+    // Invariant 2: runs/<name>.grid must be mu-workers
+    let grid_file = runs_dir.join("tieude-mulows-owned.grid");
+    let grid = std::fs::read_to_string(&grid_file).expect("read grid file");
+    assert_eq!(
+        grid.trim(),
+        "mu-workers",
+        "grid tab must route to mu-workers"
+    );
+
+    // Invariant 3: slots must count against mu-lead, NOT cos!
+    let mu_slots = quaqua::cap::count_owner_slots(&runs_dir, "mu-lead", None, &herdr, &cfg);
+    assert_eq!(mu_slots, 1, "mu-lead slots must be 1");
+    let cos_slots = quaqua::cap::count_owner_slots(&runs_dir, "cos", None, &herdr, &cfg);
+    assert_eq!(
+        cos_slots, 0,
+        "cos slots must be 0 (not polluted by lead peer)"
+    );
+}
+
+#[test]
+fn test_layout_slp_full_matrix_60_cases() {
+    let fixture_str = include_str!("fixtures/layout/slp_replay_matrix.json");
+    let fixture: serde_json::Value = serde_json::from_str(fixture_str).expect("parse fixture");
+    let cases = fixture["cases"].as_array().expect("cases array");
+    assert_eq!(cases.len(), 60, "fixture must contain all 60 cases");
+
+    let slp = builtin::get("slp").expect("slp layout");
+    let runs_dir = hermetic_temp_dir("matrix-check");
+    std::fs::write(runs_dir.join("my-lead.owner"), "cos\n").unwrap();
+    std::fs::write(runs_dir.join("my-peer.owner"), "my-lead\n").unwrap();
+
+    for case in cases {
+        let caller_role_str = case["caller_role"].as_str().unwrap();
+        let verb_str = case["verb"].as_str().unwrap();
+        let target_role_str = case["target_role"].as_str().unwrap();
+        let want_allowed = case["allowed"].as_bool().unwrap();
+        let want_rule_id = case["rule_id"].as_str().unwrap();
+
+        let (caller_role, caller_name, depth) = match caller_role_str {
+            "cos" => (Role::Cos, "cos".to_string(), CallerDepth::Resolved(0)),
+            "lead" => (Role::Lead, "my-lead".to_string(), CallerDepth::Resolved(1)),
+            "peer" => (Role::Peer, "my-peer".to_string(), CallerDepth::Resolved(2)),
+            "taskforce" => (Role::Peer, "my-tf".to_string(), CallerDepth::Resolved(2)),
+            _ => (Role::Unknown, "unknown".to_string(), CallerDepth::Unknown),
+        };
+
+        let caller = Caller {
+            name: caller_name,
+            role: caller_role,
+            depth,
+            source: IdentitySource::PaneTokens,
+        };
+
+        let verb = match verb_str {
+            "spawn" => Verb::Spawn,
+            "prompt" => Verb::Prompt,
+            "mail" => Verb::Mail,
+            other => panic!("unknown verb: {other}"),
+        };
+
+        let target = match target_role_str {
+            "cos" => "cos",
+            "lead" => "target-lead",
+            "peer" => "peer",
+            "taskforce" => "taskforce",
+            other => other,
+        };
+
+        let decision = check(&slp, &caller, verb, target);
+        assert_eq!(
+            decision.allow, want_allowed,
+            "case {caller_role_str} -> {verb_str} -> {target_role_str}: want allow={}, got allow={} (rule_id={})",
+            want_allowed, decision.allow, decision.rule_id
+        );
+        assert_eq!(
+            decision.rule_id, want_rule_id,
+            "case {caller_role_str} -> {verb_str} -> {target_role_str}: want rule_id={}, got rule_id={}",
+            want_rule_id, decision.rule_id
+        );
+    }
 }

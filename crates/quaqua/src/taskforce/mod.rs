@@ -109,7 +109,40 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
     } else {
         base_cfg
     };
-    crate::layout::shadow(None, Some(herdr), crate::layout::Verb::Spawn, "taskforce", Some(&targs.task), crate::layout::SpawnOrigin::Cli, Some(&owner), proj_slug.as_deref(), &runs_dir, Some(&cfg));
+    let caller_tokens = crate::identity::caller_pane_tokens(herdr);
+    let mut caller = crate::identity::resolve_caller_from_tokens(caller_tokens.as_ref(), &runs_dir);
+    if caller.role == crate::identity::Role::Unknown
+        && std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
+        && caller_tokens.is_none()
+        && std::env::var("QUAQUA_OWNER").as_deref() != Ok("")
+    {
+        caller = crate::identity::Caller {
+            name: owner.clone(),
+            role: if crate::cap::is_lead_owner(&owner) {
+                crate::identity::Role::Lead
+            } else {
+                crate::identity::Role::Cos
+            },
+            depth: crate::identity::CallerDepth::Resolved(if crate::cap::is_lead_owner(&owner) {
+                1
+            } else {
+                0
+            }),
+            source: crate::identity::IdentitySource::EnvFallback,
+        };
+    }
+    crate::layout::gate(
+        Some(&caller),
+        Some(herdr),
+        crate::layout::Verb::Spawn,
+        "taskforce",
+        Some(&targs.task),
+        crate::layout::SpawnOrigin::Cli,
+        Some(&owner),
+        proj_slug.as_deref(),
+        &runs_dir,
+        Some(&cfg),
+    )?;
     let weight = cfg
         .limits
         .weights
@@ -154,7 +187,10 @@ fn run_advisor(
         .get("advisor")
         .map(|t| t.members.clone())
         .unwrap_or_else(|| vec![default_advisor.clone()]);
-    let kind = members.first().map(|s| s.as_str()).unwrap_or(&default_advisor);
+    let kind = members
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or(&default_advisor);
     let worker_name = format!("{kind}-{}", args.task);
 
     let opts = crate::worker::spawn::SpawnOptions {
@@ -171,7 +207,13 @@ fn run_advisor(
     // Set PIPELINE_TASK during inner spawn to prevent double-charging the reservation
     std::env::set_var("PIPELINE_TASK", &args.task);
     std::env::set_var("QUAQUA_OWNER", owner);
-    let spawn_res = crate::worker::spawn::spawn_worker(opts, cfg, git, herdr, crate::layout::SpawnOrigin::TaskforceMember);
+    let spawn_res = crate::worker::spawn::spawn_worker(
+        opts,
+        cfg,
+        git,
+        herdr,
+        crate::layout::SpawnOrigin::TaskforceMember,
+    );
     std::env::remove_var("PIPELINE_TASK");
     spawn_res?;
 
@@ -225,7 +267,10 @@ fn run_dual_lens(
         .get("dual-lens")
         .map(|t| t.members.clone())
         .unwrap_or_else(|| vec![default_lens1.clone(), default_lens2.clone()]);
-    let kind1 = members.first().map(|s| s.as_str()).unwrap_or(&default_lens1);
+    let kind1 = members
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or(&default_lens1);
     let kind2 = members.get(1).map(|s| s.as_str()).unwrap_or(&default_lens2);
 
     let w1 = format!("{kind1}-{}dl1", args.task);
@@ -268,9 +313,21 @@ fn run_dual_lens(
 
     std::env::set_var("PIPELINE_TASK", &args.task);
     std::env::set_var("QUAQUA_OWNER", owner);
-    let s1 = crate::worker::spawn::spawn_worker(opts1, cfg, git, herdr, crate::layout::SpawnOrigin::TaskforceMember);
+    let s1 = crate::worker::spawn::spawn_worker(
+        opts1,
+        cfg,
+        git,
+        herdr,
+        crate::layout::SpawnOrigin::TaskforceMember,
+    );
     let s2 = if s1.is_ok() {
-        crate::worker::spawn::spawn_worker(opts2, cfg, git, herdr, crate::layout::SpawnOrigin::TaskforceMember)
+        crate::worker::spawn::spawn_worker(
+            opts2,
+            cfg,
+            git,
+            herdr,
+            crate::layout::SpawnOrigin::TaskforceMember,
+        )
     } else {
         Ok(())
     };

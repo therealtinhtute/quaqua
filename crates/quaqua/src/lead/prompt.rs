@@ -40,8 +40,18 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
 
     let runs_dir = crate::worker::cleanup::default_runs_dir();
     let _ = std::fs::create_dir_all(&runs_dir);
-    crate::layout::shadow(
-        None,
+    let caller_tokens = crate::identity::caller_pane_tokens(herdr);
+    let mut caller = crate::identity::resolve_caller_from_tokens(caller_tokens.as_ref(), &runs_dir);
+    if caller.role == crate::identity::Role::Unknown && cfg!(test) && caller_tokens.is_none() {
+        caller = crate::identity::Caller {
+            name: "cos".to_string(),
+            role: crate::identity::Role::Cos,
+            depth: crate::identity::CallerDepth::Resolved(0),
+            source: crate::identity::IdentitySource::EnvFallback,
+        };
+    }
+    crate::layout::gate(
+        Some(&caller),
         Some(herdr),
         crate::layout::Verb::Prompt,
         "lead",
@@ -51,7 +61,7 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
         Some(slug),
         &runs_dir,
         None,
-    );
+    )?;
 
     // The Lead must exist and expose a pane to read back.
     let info = match liveness(herdr, &name) {
@@ -81,6 +91,7 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
     if pane.is_empty() {
         return Err((1, format!("error: lead '{name}' has no pane\n")));
     }
+    let _ = crate::lead::tag::ensure_lead_pane_tagged(herdr, slug, &pane);
     send_prompt(herdr, &name, &pane, &msg)
 }
 

@@ -1,11 +1,11 @@
 //! Positive identity and depth resolution from pane tokens and owner chains.
 
+use crate::herdr::HerdrOps;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use serde_json::Value;
-use crate::herdr::HerdrOps;
 
 /// Positive caller roles mapped from pane tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -266,7 +266,9 @@ pub fn resolve_caller_from_tokens(
     // (design.md:151; fail-closed in production, "never ambient env").
     let is_test = std::env::var("QUAQUA_TEST").as_deref() == Ok("1");
     if is_test {
-        let env_owner = std::env::var("QUAQUA_OWNER").ok().filter(|s| !s.trim().is_empty());
+        let env_owner = std::env::var("QUAQUA_OWNER")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
         if let Some(owner) = env_owner {
             let role = if owner == "cos" {
                 Role::Cos
@@ -277,7 +279,17 @@ pub fn resolve_caller_from_tokens(
             };
             let depth = match role {
                 Role::Cos => CallerDepth::Resolved(0),
-                Role::Lead => CallerDepth::from(depth_walk(runs_dir, &owner)),
+                Role::Lead => match depth_walk(runs_dir, &owner) {
+                    Ok(d) => CallerDepth::Resolved(d),
+                    Err(DepthError::Cycle(cycle)) => CallerDepth::Cycle(cycle),
+                    Err(DepthError::NotFound(_)) => {
+                        if is_test {
+                            CallerDepth::Resolved(1)
+                        } else {
+                            CallerDepth::MissingOwner(owner.clone())
+                        }
+                    }
+                },
                 Role::Unknown | Role::Peer => CallerDepth::Unknown,
             };
             return Caller {
@@ -356,7 +368,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let runs_dir = std::env::temp_dir().join(format!("quaqua-identity-test-{}-{nanos}", std::process::id()));
+        let runs_dir = std::env::temp_dir().join(format!(
+            "quaqua-identity-test-{}-{nanos}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&runs_dir);
         fs::create_dir_all(&runs_dir).unwrap();
         let _guard = TestDir(runs_dir.clone());
@@ -401,7 +416,10 @@ mod tests {
     impl HerdrOps for MockHerdrWithTokens {
         fn run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
             let stdout = if args.first() == Some(&"pane") && args.get(1) == Some(&"get") {
-                format!(r#"{{"result":{{"pane":{{"pane_id":"w1:p1","tokens":{}}}}}}}"#, self.tokens_json)
+                format!(
+                    r#"{{"result":{{"pane":{{"pane_id":"w1:p1","tokens":{}}}}}}}"#,
+                    self.tokens_json
+                )
             } else {
                 r#"{"result":{}}"#.to_string()
             };
@@ -411,20 +429,70 @@ mod tests {
                 stderr: Vec::new(),
             })
         }
-        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
-        fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> { unimplemented!() }
-        fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> { unimplemented!() }
-        fn agent_start(&self, _n: &str, _k: &str, _p: &str, _t: u32, _a: &[&str]) -> std::io::Result<std::process::Output> { unimplemented!() }
-        fn pane_split(&self, _c: &str, _o: &str, _e: &[(&str, &str)]) -> std::io::Result<std::process::Output> { unimplemented!() }
-        fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
-        fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<std::process::Output> { unimplemented!() }
-        fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool { unimplemented!() }
-        fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> { unimplemented!() }
-        fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
-        fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
-        fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> { unimplemented!() }
-        fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
-        fn agent_prompt_wait_background(&self, _n: &str, _p: &str, _t: u32, _f: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
+        fn agent_list(&self) -> std::io::Result<String> {
+            unimplemented!()
+        }
+        fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
+            unimplemented!()
+        }
+        fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            unimplemented!()
+        }
+        fn agent_start(
+            &self,
+            _n: &str,
+            _k: &str,
+            _p: &str,
+            _t: u32,
+            _a: &[&str],
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_split(
+            &self,
+            _c: &str,
+            _o: &str,
+            _e: &[(&str, &str)],
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_report_metadata(
+            &self,
+            _p: &str,
+            _t: &[&str],
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
+            unimplemented!()
+        }
+        fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            unimplemented!()
+        }
+        fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_wait_background(
+            &self,
+            _n: &str,
+            _p: &str,
+            _t: u32,
+            _f: std::fs::File,
+        ) -> std::io::Result<std::process::Child> {
+            unimplemented!()
+        }
     }
 
     #[test]
@@ -436,7 +504,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let runs_dir = std::env::temp_dir().join(format!("quaqua-identity-pane-{}-{nanos}", std::process::id()));
+        let runs_dir = std::env::temp_dir().join(format!(
+            "quaqua-identity-pane-{}-{nanos}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&runs_dir);
         fs::create_dir_all(&runs_dir).unwrap();
         let _guard = TestDir(runs_dir.clone());
@@ -452,7 +523,10 @@ mod tests {
         assert_eq!(caller.name, "cos");
         assert_eq!(caller.depth, CallerDepth::Resolved(0));
         assert_eq!(caller.source, IdentitySource::PaneTokens);
-        assert_eq!(format!("{caller}"), "name=cos, role=cos, depth=0, source=tokens");
+        assert_eq!(
+            format!("{caller}"),
+            "name=cos, role=cos, depth=0, source=tokens"
+        );
 
         // Lead pane
         let lead_herdr = MockHerdrWithTokens {
@@ -463,18 +537,25 @@ mod tests {
         assert_eq!(caller.name, "my-lead");
         assert_eq!(caller.depth, CallerDepth::Resolved(1));
         assert_eq!(caller.source, IdentitySource::PaneTokens);
-        assert_eq!(format!("{caller}"), "name=my-lead, role=lead, depth=1, source=tokens");
+        assert_eq!(
+            format!("{caller}"),
+            "name=my-lead, role=lead, depth=1, source=tokens"
+        );
 
         // Peer pane
         let peer_herdr = MockHerdrWithTokens {
-            tokens_json: r#"{"grid_role":"worker","grid_owner":"my-lead","grid_name":"sude-task"}"#.to_string(),
+            tokens_json: r#"{"grid_role":"worker","grid_owner":"my-lead","grid_name":"sude-task"}"#
+                .to_string(),
         };
         let caller = resolve_caller(&peer_herdr, &runs_dir);
         assert_eq!(caller.role, Role::Peer);
         assert_eq!(caller.name, "sude-task");
         assert_eq!(caller.depth, CallerDepth::Resolved(2));
         assert_eq!(caller.source, IdentitySource::PaneTokens);
-        assert_eq!(format!("{caller}"), "name=sude-task, role=peer, depth=2, source=tokens");
+        assert_eq!(
+            format!("{caller}"),
+            "name=sude-task, role=peer, depth=2, source=tokens"
+        );
 
         // R4: Orchestrator pane without grid_owner -> name is "unknown", never "cos"
         let no_owner_lead = MockHerdrWithTokens {
@@ -532,20 +613,78 @@ mod tests {
                     stderr: b"pane not found".to_vec(),
                 })
             }
-            fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
-            fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> { unimplemented!() }
-            fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> { unimplemented!() }
-            fn agent_start(&self, _n: &str, _k: &str, _p: &str, _t: u32, _a: &[&str]) -> std::io::Result<std::process::Output> { unimplemented!() }
-            fn pane_split(&self, _c: &str, _o: &str, _e: &[(&str, &str)]) -> std::io::Result<std::process::Output> { unimplemented!() }
-            fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
-            fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<std::process::Output> { unimplemented!() }
-            fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool { unimplemented!() }
-            fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> { unimplemented!() }
-            fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
-            fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
-            fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> { unimplemented!() }
-            fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
-            fn agent_prompt_wait_background(&self, _n: &str, _p: &str, _t: u32, _f: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
+            fn agent_list(&self) -> std::io::Result<String> {
+                unimplemented!()
+            }
+            fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
+                unimplemented!()
+            }
+            fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+                unimplemented!()
+            }
+            fn agent_start(
+                &self,
+                _n: &str,
+                _k: &str,
+                _p: &str,
+                _t: u32,
+                _a: &[&str],
+            ) -> std::io::Result<std::process::Output> {
+                unimplemented!()
+            }
+            fn pane_split(
+                &self,
+                _c: &str,
+                _o: &str,
+                _e: &[(&str, &str)],
+            ) -> std::io::Result<std::process::Output> {
+                unimplemented!()
+            }
+            fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> {
+                unimplemented!()
+            }
+            fn pane_report_metadata(
+                &self,
+                _p: &str,
+                _t: &[&str],
+            ) -> std::io::Result<std::process::Output> {
+                unimplemented!()
+            }
+            fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
+                unimplemented!()
+            }
+            fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+                unimplemented!()
+            }
+            fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> {
+                unimplemented!()
+            }
+            fn agent_send_keys(
+                &self,
+                _n: &str,
+                _key: &str,
+            ) -> std::io::Result<std::process::Output> {
+                unimplemented!()
+            }
+            fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> {
+                unimplemented!()
+            }
+            fn agent_prompt_nowait(
+                &self,
+                _n: &str,
+                _p: &str,
+            ) -> std::io::Result<std::process::Output> {
+                unimplemented!()
+            }
+            fn agent_prompt_wait_background(
+                &self,
+                _n: &str,
+                _p: &str,
+                _t: u32,
+                _f: std::fs::File,
+            ) -> std::io::Result<std::process::Child> {
+                unimplemented!()
+            }
         }
         let caller = resolve_caller(&FailingHerdr, &runs_dir);
         assert_eq!(caller.role, Role::Unknown);
@@ -563,7 +702,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let runs_dir = std::env::temp_dir().join(format!("quaqua-identity-env-{}-{nanos}", std::process::id()));
+        let runs_dir = std::env::temp_dir().join(format!(
+            "quaqua-identity-env-{}-{nanos}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&runs_dir);
         fs::create_dir_all(&runs_dir).unwrap();
         let _guard = TestDir(runs_dir.clone());
@@ -582,7 +724,10 @@ mod tests {
             assert_eq!(caller.name, "unknown");
             assert_eq!(caller.depth, CallerDepth::Unknown);
             assert_eq!(caller.source, IdentitySource::Unknown);
-            assert_eq!(format!("{caller}"), "name=unknown, role=unknown, depth=?, source=unknown");
+            assert_eq!(
+                format!("{caller}"),
+                "name=unknown, role=unknown, depth=?, source=unknown"
+            );
         }
 
         // Under QUAQUA_TEST=1, env fallback is active
@@ -596,7 +741,10 @@ mod tests {
             assert_eq!(caller.name, "cos");
             assert_eq!(caller.depth, CallerDepth::Resolved(0));
             assert_eq!(caller.source, IdentitySource::EnvFallback);
-            assert_eq!(format!("{caller}"), "name=cos, role=cos, depth=0, source=env");
+            assert_eq!(
+                format!("{caller}"),
+                "name=cos, role=cos, depth=0, source=env"
+            );
         }
 
         // QUAQUA_OWNER = "env-lead"
@@ -607,7 +755,10 @@ mod tests {
             assert_eq!(caller.name, "env-lead");
             assert_eq!(caller.depth, CallerDepth::Resolved(1));
             assert_eq!(caller.source, IdentitySource::EnvFallback);
-            assert_eq!(format!("{caller}"), "name=env-lead, role=lead, depth=1, source=env");
+            assert_eq!(
+                format!("{caller}"),
+                "name=env-lead, role=lead, depth=1, source=env"
+            );
         }
 
         // QUAQUA_OWNER unset
@@ -618,7 +769,10 @@ mod tests {
             assert_eq!(caller.name, "unknown");
             assert_eq!(caller.depth, CallerDepth::Unknown);
             assert_eq!(caller.source, IdentitySource::Unknown);
-            assert_eq!(format!("{caller}"), "name=unknown, role=unknown, depth=?, source=unknown");
+            assert_eq!(
+                format!("{caller}"),
+                "name=unknown, role=unknown, depth=?, source=unknown"
+            );
         }
     }
 
@@ -628,7 +782,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let runs_dir = std::env::temp_dir().join(format!("quaqua-identity-edge-{}-{nanos}", std::process::id()));
+        let runs_dir = std::env::temp_dir().join(format!(
+            "quaqua-identity-edge-{}-{nanos}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&runs_dir);
         fs::create_dir_all(&runs_dir).unwrap();
         let _guard = TestDir(runs_dir.clone());
@@ -648,6 +805,15 @@ mod tests {
         assert!(res.is_err());
         let err = res.unwrap_err();
         assert!(err.is_cycle());
-        assert_eq!(err, DepthError::Cycle(vec!["x".into(), "y".into(), "a".into(), "b".into(), "a".into()]));
+        assert_eq!(
+            err,
+            DepthError::Cycle(vec![
+                "x".into(),
+                "y".into(),
+                "a".into(),
+                "b".into(),
+                "a".into()
+            ])
+        );
     }
 }

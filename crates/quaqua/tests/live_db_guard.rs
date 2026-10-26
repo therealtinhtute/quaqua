@@ -36,7 +36,9 @@ fn test_default_runs_dir_under_test_never_resolves_to_live_workspace() {
     std::env::remove_var("QUAQUA_HOME");
     std::env::remove_var("QUAQUA_ROOT");
 
-    let home = std::env::var("HOME").map(PathBuf::from).expect("HOME must be set");
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .expect("HOME must be set");
     let live_runs = home.join("quaqua/runs");
 
     let resolved_runs = quaqua::worker::cleanup::default_runs_dir();
@@ -54,7 +56,9 @@ fn test_farm_bus_default_path_never_resolves_to_live_db() {
     std::env::remove_var("QUAQUA_HOME");
     std::env::remove_var("QUAQUA_ROOT");
 
-    let home = std::env::var("HOME").map(PathBuf::from).expect("HOME must be set");
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .expect("HOME must be set");
     let live_db = home.join("quaqua/runs/quaqua.db");
 
     let resolved_db = quaqua::bus::FarmBus::default_path();
@@ -72,7 +76,9 @@ fn test_sqlite_journal_default_path_never_resolves_to_live_db() {
     std::env::remove_var("QUAQUA_HOME");
     std::env::remove_var("QUAQUA_ROOT");
 
-    let home = std::env::var("HOME").map(PathBuf::from).expect("HOME must be set");
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .expect("HOME must be set");
     let live_db = home.join("quaqua/runs/quaqua.db");
 
     let resolved_db = quaqua::engine::journal_sqlite::SqliteJournal::default_path();
@@ -85,7 +91,10 @@ fn test_sqlite_journal_default_path_never_resolves_to_live_db() {
 
 #[test]
 fn test_live_db_open_refused_under_test() {
-    let home = std::env::var("HOME").map(PathBuf::from).expect("HOME must be set");
+    let _guard = EnvGuard::new(&[]);
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .expect("HOME must be set");
     let live_db = home.join("quaqua/runs/quaqua.db");
 
     let open_res = quaqua::bus::FarmBus::open(&live_db);
@@ -98,15 +107,21 @@ fn test_live_db_open_refused_under_test() {
 #[test]
 fn test_live_db_detected_even_when_home_is_overridden_first() {
     let _guard = EnvGuard::new(&["HOME"]);
-    let original_home = std::env::var("HOME").map(PathBuf::from).expect("HOME must be set");
+    let original_home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .expect("HOME must be set");
     let live_db = original_home.join("quaqua/runs/quaqua.db");
 
     // Override HOME to a fake temporary location first
     std::env::set_var("HOME", "/tmp/fake-home-for-order-test");
 
     // System user home must be independent of the mutated HOME environment variable
-    let sys_home = quaqua::workspace::system_user_home().expect("system user home must be available");
-    assert_eq!(sys_home, original_home, "system_user_home() must resolve real passwd home regardless of HOME env");
+    let sys_home =
+        quaqua::workspace::system_user_home().expect("system user home must be available");
+    assert_eq!(
+        sys_home, original_home,
+        "system_user_home() must resolve real passwd home regardless of HOME env"
+    );
     assert!(
         quaqua::workspace::is_live_workspace_db(&live_db),
         "live DB must still be recognized as live even when HOME was mutated to a temp directory"

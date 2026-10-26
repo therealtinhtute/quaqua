@@ -393,6 +393,7 @@ mod tests {
 
     #[test]
     fn test_quaqua_status_output_unchanged_with_new_tables_present() {
+        let _lock = crate::test_env::lock_env();
         use crate::engine::journal_sqlite::SqliteJournal;
         use crate::engine::journal::{Journal, EventRecord};
         use crate::status::render_status;

@@ -22,12 +22,39 @@ impl Layout {
                 "peer" => RoleClass::Peer,
                 _ => RoleClass::Peer,
             };
-            let can_spawn = role_cfg.map(|r| r.can_spawn.clone()).unwrap_or_default();
-            let can_prompt = role_cfg.map(|r| r.can_prompt.clone()).unwrap_or_default();
-            let reports_to = role_cfg.and_then(|r| r.reports_to.clone());
+            let can_spawn = match role_cfg {
+                Some(r) => r.can_spawn.clone(),
+                None => match *name {
+                    "cos" => vec![
+                        "lead".to_string(),
+                        "peer".to_string(),
+                        "taskforce".to_string(),
+                    ],
+                    "lead" => vec!["peer".to_string(), "taskforce".to_string()],
+                    _ => Vec::new(),
+                },
+            };
+            let can_prompt = match role_cfg {
+                Some(r) => r.can_prompt.clone(),
+                None => match *name {
+                    "cos" => vec!["lead".to_string(), "peer".to_string()],
+                    "lead" => vec!["peer".to_string()],
+                    _ => Vec::new(),
+                },
+            };
+            let reports_to = match role_cfg.and_then(|r| r.reports_to.clone()) {
+                Some(r) => Some(r),
+                None => match *name {
+                    "lead" => Some("cos".to_string()),
+                    "peer" => Some("owner".to_string()),
+                    _ => None,
+                },
+            };
             let max_children = match *name {
                 "lead" => {
-                    let peers = role_cfg.and_then(|r| r.max_peers).unwrap_or(DEFAULT_LEAD_MAX_PEERS);
+                    let peers = role_cfg
+                        .and_then(|r| r.max_peers)
+                        .unwrap_or(DEFAULT_LEAD_MAX_PEERS);
                     Some(peers)
                 }
                 "cos" => Some(cfg.limits.max_workers_per_orchestrator),

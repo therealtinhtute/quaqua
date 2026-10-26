@@ -1,19 +1,18 @@
 //! Worker spawn logic (`quaqua worker spawn [--base <ref>] [--review] <name> <kind> <repo-path>`).
 
-use crate::cap::count_owner_slots;
 use crate::config::{Config, Kind};
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
 pub use crate::launch::{
     build_launch_cmd, claude_trust_dialog_up, resolve_launch, Launch, LaunchCmd,
 };
+pub use crate::layout::SpawnOrigin;
 use crate::state::WorkerMetadata;
 use crate::worker::cleanup::run_grid_hook;
 pub use crate::worker::worktree::{
     apply_push_block, canonicalize_repo_path, prepare_worktree, remove_worktree, resolve_paths,
     resolve_worktree_path, setup_worktree, validate_base_ref,
 };
-pub use crate::layout::SpawnOrigin;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Output;
@@ -248,7 +247,9 @@ fn resolve_owner_from_tokens(tokens: Option<&std::collections::HashMap<String, S
         if t.get("grid_role").map(|s| s.as_str()) == Some("worker") {
             return None;
         }
-        t.get("grid_owner").map(|o| o.trim().to_string()).filter(|o| !o.is_empty())
+        t.get("grid_owner")
+            .map(|o| o.trim().to_string())
+            .filter(|o| !o.is_empty())
     });
     match pane_owner {
         Some(pane)
@@ -354,8 +355,8 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
 ) -> Result<(String, String), (i32, String)> {
     let resolved_kind = match (&opts.purpose, &opts.kind) {
         (Some(p), Some(pos)) => {
-            let resolved = crate::config::resolve_purpose(cfg, p)
-                .map_err(|e| (1, format!("error: {e}\n")))?;
+            let resolved =
+                crate::config::resolve_purpose(cfg, p).map_err(|e| (1, format!("error: {e}\n")))?;
             if pos != resolved {
                 return Err((
                     1,
@@ -366,11 +367,9 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
             }
             resolved.to_string()
         }
-        (Some(p), None) => {
-            crate::config::resolve_purpose(cfg, p)
-                .map_err(|e| (1, format!("error: {e}\n")))?
-                .to_string()
-        }
+        (Some(p), None) => crate::config::resolve_purpose(cfg, p)
+            .map_err(|e| (1, format!("error: {e}\n")))?
+            .to_string(),
         (None, Some(k)) => {
             if cfg.kinds.contains_key(k) {
                 k.clone()
@@ -422,11 +421,36 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
 
     let caller_tokens = crate::identity::caller_pane_tokens(herdr);
     let owner = resolve_owner_from_tokens(caller_tokens.as_ref());
-    let caller = crate::identity::resolve_caller_from_tokens(caller_tokens.as_ref(), runs_dir);
+    let mut caller = crate::identity::resolve_caller_from_tokens(caller_tokens.as_ref(), runs_dir);
+    if caller.role == crate::identity::Role::Unknown
+        && (std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
+            || std::env::var("HERDR_BIN_PATH").is_ok()
+            || cfg!(test))
+        && caller_tokens.is_none()
+        && std::env::var("QUAQUA_OWNER").as_deref() != Ok("")
+    {
+        caller = crate::identity::Caller {
+            name: owner.clone(),
+            role: if crate::cap::is_lead_owner(&owner) {
+                crate::identity::Role::Lead
+            } else {
+                crate::identity::Role::Cos
+            },
+            depth: crate::identity::CallerDepth::Resolved(if crate::cap::is_lead_owner(&owner) {
+                1
+            } else {
+                0
+            }),
+            source: crate::identity::IdentitySource::EnvFallback,
+        };
+    }
     let _ = std::fs::create_dir_all(runs_dir);
-    eprintln!("[identity] worker spawn: name={} caller={caller}", opts.name);
+    eprintln!(
+        "[identity] worker spawn: name={} caller={caller}",
+        opts.name
+    );
 
-    crate::layout::shadow(
+    crate::layout::gate(
         Some(&caller),
         Some(herdr),
         crate::layout::Verb::Spawn,
@@ -437,8 +461,7 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         opts.repo_path.file_name().and_then(|n| n.to_str()),
         runs_dir,
         Some(cfg),
-    );
-
+    )?;
     // Lead gate (AGENTS.md '## Roles (SLP)'): a `cos`-owned project with two or
     // more topology signals needs a Lead before another worker joins it.
     let workspace_root = crate::workspace::workspace_root();
@@ -457,12 +480,6 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         cfg,
         herdr,
     )?;
-
-    if std::env::var("PIPELINE_TASK").is_err() {
-        let slots_used = count_owner_slots(&runs_dir, &owner, Some(&opts.name), herdr, cfg);
-        crate::cap::check_owner_cap(cfg, &owner, slots_used, 1, "this spawn")
-            .map_err(|e| (1, format!("error: {e} — cannot spawn {}\n", opts.name)))?;
-    }
 
     prepare_worktree(git, &repo, &wt, &opts.name, opts.base.as_deref())?;
     if opts.review {

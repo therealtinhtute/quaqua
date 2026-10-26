@@ -262,7 +262,11 @@ impl HerdrOps for MockActivitiesHerdr {
     }
 
     fn agent_list(&self) -> std::io::Result<String> {
-        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: String::new(), until: Vec::new(), timeout_ms: 0 });
+        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait {
+            name: String::new(),
+            until: Vec::new(),
+            timeout_ms: 0,
+        });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.agent_list", &req) {
             Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(content),
@@ -275,7 +279,11 @@ impl HerdrOps for MockActivitiesHerdr {
     }
 
     fn agent_get(&self, name: &str) -> std::io::Result<(bool, String)> {
-        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: name.to_string(), until: Vec::new(), timeout_ms: 0 });
+        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait {
+            name: name.to_string(),
+            until: Vec::new(),
+            timeout_ms: 0,
+        });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.agent_get", &req) {
             Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => {
@@ -297,7 +305,11 @@ impl HerdrOps for MockActivitiesHerdr {
     }
 
     fn agent_read(&self, name: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
-        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: name.to_string(), until: Vec::new(), timeout_ms: 0 });
+        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait {
+            name: name.to_string(),
+            until: Vec::new(),
+            timeout_ms: 0,
+        });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.agent_read", &req) {
             Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(content),
@@ -417,14 +429,22 @@ impl HerdrOps for MockActivitiesHerdr {
     }
 
     fn pane_wait_output(&self, pane: &str, _pattern: &str, _timeout_ms: u32) -> bool {
-        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: pane.to_string(), until: Vec::new(), timeout_ms: 0 });
+        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait {
+            name: pane.to_string(),
+            until: Vec::new(),
+            timeout_ms: 0,
+        });
         let mut acts = self.activities.lock().unwrap();
         let _ = acts.execute("herdr.pane_wait_output", &req);
         false
     }
 
     fn pane_read(&self, pane: &str, _source: &str, _lines: u32) -> std::io::Result<String> {
-        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait { name: pane.to_string(), until: Vec::new(), timeout_ms: 0 });
+        let req = ActivityRequest::Herdr(HerdrRequest::AgentWait {
+            name: pane.to_string(),
+            until: Vec::new(),
+            timeout_ms: 0,
+        });
         let mut acts = self.activities.lock().unwrap();
         match acts.execute("herdr.pane_read", &req) {
             Ok(ActivityResult::Herdr(HerdrResult::AgentOutput { content })) => Ok(content),
@@ -663,7 +683,13 @@ fn test_unknown_harness_rejected_before_split_n4() {
     ])
     .unwrap();
 
-    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &dummy_git, &spy, quaqua::layout::SpawnOrigin::Cli);
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &dummy_git,
+        &spy,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
     assert!(res.is_err());
     // N4: pane_split must NEVER have been called!
     assert!(!spy.has_call("herdr.pane_split"));
@@ -707,7 +733,13 @@ fn test_missing_effort_rejected_before_split() {
     ])
     .unwrap();
 
-    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &dummy_git, &spy, quaqua::layout::SpawnOrigin::Cli);
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &dummy_git,
+        &spy,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
     assert!(res.is_err());
     assert!(!spy.has_call("herdr.pane_split"));
     assert_eq!(spy.call_count(), 0);
@@ -717,7 +749,8 @@ fn test_missing_effort_rejected_before_split() {
 #[test]
 fn test_unsupported_effort_rejected_before_split() {
     let _env_lock = lock_env();
-    let temp = std::env::temp_dir().join(format!("quaqua-unsupported-effort-{}", std::process::id()));
+    let temp =
+        std::env::temp_dir().join(format!("quaqua-unsupported-effort-{}", std::process::id()));
     let repo_dir = temp.join("repo");
     let runs_dir = temp.join("runs");
     let _ = std::fs::create_dir_all(&repo_dir);
@@ -750,7 +783,13 @@ fn test_unsupported_effort_rejected_before_split() {
     ])
     .unwrap();
 
-    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &dummy_git, &spy, quaqua::layout::SpawnOrigin::Cli);
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &dummy_git,
+        &spy,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
     assert!(res.is_err());
     assert!(!spy.has_call("herdr.pane_split"));
     assert_eq!(spy.call_count(), 0);
@@ -975,8 +1014,7 @@ fn test_cap_count_ignores_process_env_team_toml() {
     // env decide who is a task worker, and a failed load must not silently
     // demote every worker to a non-worker (which skips the pipeline reserve).
     let _env_lock = lock_env();
-    let temp_dir =
-        std::env::temp_dir().join(format!("quaqua-cap-envfree-{}", std::process::id()));
+    let temp_dir = std::env::temp_dir().join(format!("quaqua-cap-envfree-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(&temp_dir).unwrap();
     let owner = "cos";
@@ -1007,7 +1045,10 @@ fn test_cap_count_ignores_process_env_team_toml() {
     )
     .unwrap();
 
-    for override_path in [foreign.as_path(), Path::new("/nonexistent/quaqua-team.toml")] {
+    for override_path in [
+        foreign.as_path(),
+        Path::new("/nonexistent/quaqua-team.toml"),
+    ] {
         std::env::set_var("QUAQUA_TEAM_TOML", override_path);
         assert_eq!(
             count_owner_slots(&temp_dir, owner, None, &mock, &cfg),
@@ -1342,7 +1383,6 @@ fn test_spawn_args_parsing_with_purpose() {
     assert_eq!(opts2.kind.as_deref(), Some("sude"));
 }
 
-
 #[test]
 fn test_cli_cap_smoke() {
     let bin = env!("CARGO_BIN_EXE_quaqua");
@@ -1440,8 +1480,8 @@ fn test_taskforce_dual_lens_cap_reservation() {
 
     // Starting one is refused when the owner cannot find the free slots.
     assert!(quaqua::cap::check_owner_cap(&cfg, "cos", cap - weight, weight, "dual-lens").is_ok());
-    let err =
-        quaqua::cap::check_owner_cap(&cfg, "cos", cap - weight + 1, weight, "dual-lens").unwrap_err();
+    let err = quaqua::cap::check_owner_cap(&cfg, "cos", cap - weight + 1, weight, "dual-lens")
+        .unwrap_err();
     assert!(err.contains("worker cap exceeded"), "{err}");
 
     // Finished dual-lens -> 0 slots reserved
@@ -1651,7 +1691,10 @@ weights = { pipeline = 2, "dual-lens" = 2 }
     // The CoS is untouched by the Lead cap: 8 slots, the 9th is refused.
     assert!(check_owner_cap(&cfg, "cos", 7, 1, "this spawn").is_ok());
     let err = check_owner_cap(&cfg, "cos", 8, 1, "this spawn").unwrap_err();
-    assert!(err.contains("limits.max_workers_per_orchestrator is 8"), "{err}");
+    assert!(
+        err.contains("limits.max_workers_per_orchestrator is 8"),
+        "{err}"
+    );
 
     // A project override only tightens: it lowers the Lead cap with the global one.
     let tight: quaqua::config::Config = toml::from_str(
@@ -1879,8 +1922,15 @@ fn test_launch_args_pi_exact_and_isolated() {
     .unwrap();
     let home = std::env::var("HOME").unwrap_or_default();
     let ext = format!("{home}/.pi/agent/extensions/herdr-agent-state.ts");
-    let build = build_launch_cmd(&pi, "tieude-x", "/r/x.rules.md", "/runs", "/repo/.wt/x", false)
-        .unwrap();
+    let build = build_launch_cmd(
+        &pi,
+        "tieude-x",
+        "/r/x.rules.md",
+        "/runs",
+        "/repo/.wt/x",
+        false,
+    )
+    .unwrap();
     assert!(build.split_envs.is_empty(), "pi takes no pane env");
     assert_eq!(
         build.agent_args,
@@ -1901,8 +1951,15 @@ fn test_launch_args_pi_exact_and_isolated() {
         ]
     );
     // review: tool allowlist without edit/write
-    let review = build_launch_cmd(&pi, "suhuynh-x", "/r/x.rules.md", "/runs", "/repo/.wt/x", true)
-        .unwrap();
+    let review = build_launch_cmd(
+        &pi,
+        "suhuynh-x",
+        "/r/x.rules.md",
+        "/runs",
+        "/repo/.wt/x",
+        true,
+    )
+    .unwrap();
     let tail = &review.agent_args[review.agent_args.len() - 2..];
     assert_eq!(tail, ["--tools", "read,grep,find,ls,bash"]);
     assert!(resolve_launch(&kind("pi", "m", Some("auto")), "tieude").is_err());
@@ -1912,7 +1969,15 @@ fn test_launch_args_pi_exact_and_isolated() {
 fn test_launch_review_args_per_harness() {
     let cmd = |harness: &str, model: &str, effort: &str, review: bool| {
         let l = resolve_launch(&kind(harness, model, Some(effort)), "k").unwrap();
-        build_launch_cmd(&l, "rev", "/r/x.rules.md", "/w/runs", "/repo/.wt/rev", review).unwrap()
+        build_launch_cmd(
+            &l,
+            "rev",
+            "/r/x.rules.md",
+            "/w/runs",
+            "/repo/.wt/rev",
+            review,
+        )
+        .unwrap()
     };
 
     // omp: review drops edit/write, keeps read tools + bash.
@@ -1920,13 +1985,22 @@ fn test_launch_review_args_per_harness() {
     assert_eq!(
         omp.agent_args,
         vec![
-            "--", "--model", "google-antigravity/gemini-3.8-flash", "--thinking", "high",
-            "--auto-approve", "--tools=read,bash,grep,glob", "--append-system-prompt",
+            "--",
+            "--model",
+            "google-antigravity/gemini-3.8-flash",
+            "--thinking",
+            "high",
+            "--auto-approve",
+            "--tools=read,bash,grep,glob",
+            "--append-system-prompt",
             "/r/x.rules.md",
         ]
     );
     let omp_build = cmd("omp", "google-antigravity/gemini-3.8-flash", "high", false);
-    assert!(!omp_build.agent_args.iter().any(|a| a.starts_with("--tools")));
+    assert!(!omp_build
+        .agent_args
+        .iter()
+        .any(|a| a.starts_with("--tools")));
 
     // claude: dontAsk stays, and the reviewer's capability is the settings JSON
     // (checked field by field in
@@ -1935,8 +2009,13 @@ fn test_launch_review_args_per_harness() {
     assert_eq!(
         &cl.agent_args[..7],
         [
-            "--", "--model", "claude-opus-5-5", "--effort", "high",
-            "--permission-mode", "dontAsk",
+            "--",
+            "--model",
+            "claude-opus-5-5",
+            "--effort",
+            "high",
+            "--permission-mode",
+            "dontAsk",
         ]
     );
     // runs dir (report) + the worktree family (the builder's branch) are
@@ -1951,7 +2030,10 @@ fn test_launch_review_args_per_harness() {
     // opencode: no confirmed edit-deny config key yet — review launch equals
     // build launch; detection (`worker::prompt::readonly`) is the guard.
     let oc = cmd("opencode", "opencode-go/deepseek-v4.1-flash", "max", true);
-    assert_eq!(oc, cmd("opencode", "opencode-go/deepseek-v4.1-flash", "max", false));
+    assert_eq!(
+        oc,
+        cmd("opencode", "opencode-go/deepseek-v4.1-flash", "max", false)
+    );
 }
 
 /// A claude reviewer runs in `dontAsk` mode, so every tool call it is not
@@ -2117,7 +2199,10 @@ fn test_launch_fails_closed_without_model_or_effort() {
     )
     .unwrap_err()
     .1;
-    assert!(e.contains("fix: add model and variants to team.toml [opencode_models]"), "{e}");
+    assert!(
+        e.contains("fix: add model and variants to team.toml [opencode_models]"),
+        "{e}"
+    );
 
     // claude's vocabulary is narrower than opencode's
     let e = resolve_launch(&kind("claude", "m", Some("minimal")), "ni")
@@ -2138,18 +2223,22 @@ fn test_launch_fails_closed_without_model_or_effort() {
 #[test]
 fn test_resolve_launch_uses_passed_cfg_for_opencode_models() {
     let mut cfg = config::Config::default();
-    cfg.opencode_models.insert(
-        "my-custom-model".to_string(),
-        vec!["max".to_string()],
-    );
+    cfg.opencode_models
+        .insert("my-custom-model".to_string(), vec!["max".to_string()]);
     // Custom model passes because passed cfg has it in opencode_models
     let k = kind("opencode", "my-custom-model", Some("max"));
     let res = quaqua::launch::resolve_launch(&k, "custom-kind", &cfg);
-    assert!(res.is_ok(), "expected custom model to launch: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "expected custom model to launch: {:?}",
+        res.err()
+    );
 
     // Without that entry in cfg, fails with hint naming team.toml
     let default_cfg = config::Config::default();
-    let err = quaqua::launch::resolve_launch(&k, "custom-kind", &default_cfg).unwrap_err().1;
+    let err = quaqua::launch::resolve_launch(&k, "custom-kind", &default_cfg)
+        .unwrap_err()
+        .1;
     assert!(
         err.contains("fix: add model and variants to team.toml [opencode_models]"),
         "got: {err}"
@@ -2392,7 +2481,8 @@ fn test_spawn_worker_resolving_purpose() {
             on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
-    cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
+    cfg.purposes
+        .insert("review".to_string(), "suhuynh".to_string());
 
     let git = SpawnTestGit;
     let mut mock = MockActivities::new();
@@ -2416,8 +2506,18 @@ fn test_spawn_worker_resolving_purpose() {
     .unwrap();
     assert_eq!(opts.purpose.as_deref(), Some("review"));
     assert_eq!(opts.kind, None);
-    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
-    assert!(res.is_ok(), "spawn should resolve purpose and succeed: {:?}", res.err());
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(
+        res.is_ok(),
+        "spawn should resolve purpose and succeed: {:?}",
+        res.err()
+    );
 
     let starts = herdr.agent_starts();
     assert_eq!(starts.len(), 1);
@@ -2430,7 +2530,8 @@ fn test_spawn_worker_resolving_purpose() {
 #[test]
 fn test_spawn_worker_purpose_with_matching_positional_kind() {
     let _env_lock = lock_env();
-    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-match-{}", std::process::id()));
+    let temp =
+        std::env::temp_dir().join(format!("quaqua-spawn-purpose-match-{}", std::process::id()));
     let repo_dir = temp.join("repo");
     let runs_dir = temp.join("quaqua/runs");
     let _ = std::fs::create_dir_all(&repo_dir);
@@ -2452,7 +2553,8 @@ fn test_spawn_worker_purpose_with_matching_positional_kind() {
             on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
-    cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
+    cfg.purposes
+        .insert("review".to_string(), "suhuynh".to_string());
 
     let git = SpawnTestGit;
     let mut mock = MockActivities::new();
@@ -2475,14 +2577,26 @@ fn test_spawn_worker_purpose_with_matching_positional_kind() {
         repo_dir.to_str().unwrap().to_string(),
     ])
     .unwrap();
-    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
-    assert!(res.is_ok(), "spawn with matching kind should succeed: {:?}", res.err());
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(
+        res.is_ok(),
+        "spawn with matching kind should succeed: {:?}",
+        res.err()
+    );
     let bus = quaqua::bus::FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
     let events = bus.load_events(0).expect("load events");
-    let spawned: Vec<_> = events.iter().filter(|e| e.event_type == "spawned").collect();
+    let spawned: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "spawned")
+        .collect();
     assert_eq!(spawned.len(), 1, "must record exactly one spawned event");
     assert_eq!(spawned[0].subject.as_deref(), Some("suhuynh-purpmatch"));
-
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -2490,7 +2604,10 @@ fn test_spawn_worker_purpose_with_matching_positional_kind() {
 #[test]
 fn test_spawn_worker_purpose_with_mismatched_positional_kind_fails() {
     let _env_lock = lock_env();
-    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-mismatch-{}", std::process::id()));
+    let temp = std::env::temp_dir().join(format!(
+        "quaqua-spawn-purpose-mismatch-{}",
+        std::process::id()
+    ));
     let repo_dir = temp.join("repo");
     let runs_dir = temp.join("quaqua/runs");
     let _ = std::fs::create_dir_all(&repo_dir);
@@ -2512,7 +2629,8 @@ fn test_spawn_worker_purpose_with_mismatched_positional_kind_fails() {
             on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
-    cfg.purposes.insert("review".to_string(), "suhuynh".to_string());
+    cfg.purposes
+        .insert("review".to_string(), "suhuynh".to_string());
 
     let git = SpawnTestGit;
     let herdr = MockActivitiesHerdr::new(MockActivities::new());
@@ -2525,7 +2643,13 @@ fn test_spawn_worker_purpose_with_mismatched_positional_kind_fails() {
         repo_dir.to_str().unwrap().to_string(),
     ])
     .unwrap();
-    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
     assert!(res.is_err(), "spawn with mismatched kind should fail");
     let (code, msg) = res.unwrap_err();
     assert_eq!(code, 1);
@@ -2539,14 +2663,14 @@ fn test_spawn_worker_purpose_with_mismatched_positional_kind_fails() {
     assert_eq!(events[0].event_type, "spawn_failed");
     assert_eq!(events[0].subject.as_deref(), Some("suhuynh-purpmismatch"));
 
-
     let _ = std::fs::remove_dir_all(&temp);
 }
 
 #[test]
 fn test_spawn_worker_purpose_with_colon_resolves_correctly() {
     let _env_lock = lock_env();
-    let temp = std::env::temp_dir().join(format!("quaqua-spawn-purpose-colon-{}", std::process::id()));
+    let temp =
+        std::env::temp_dir().join(format!("quaqua-spawn-purpose-colon-{}", std::process::id()));
     let repo_dir = temp.join("repo");
     let runs_dir = temp.join("quaqua/runs");
     let _ = std::fs::create_dir_all(&repo_dir);
@@ -2568,7 +2692,8 @@ fn test_spawn_worker_purpose_with_colon_resolves_correctly() {
             on_cost_cap: config::COST_CAP_WARN.to_string(),
         },
     );
-    cfg.purposes.insert("fix:ui".to_string(), "sude".to_string());
+    cfg.purposes
+        .insert("fix:ui".to_string(), "sude".to_string());
 
     let git = SpawnTestGit;
     let mut mock = MockActivities::new();
@@ -2590,8 +2715,18 @@ fn test_spawn_worker_purpose_with_colon_resolves_correctly() {
         repo_dir.to_str().unwrap().to_string(),
     ])
     .unwrap();
-    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
-    assert!(res.is_ok(), "spawn with colon in purpose should resolve correctly: {:?}", res.err());
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(
+        res.is_ok(),
+        "spawn with colon in purpose should resolve correctly: {:?}",
+        res.err()
+    );
 
     let starts = herdr.agent_starts();
     assert_eq!(starts.len(), 1);
@@ -2674,8 +2809,14 @@ workers_tab = "workers"
     assert!(!quaqua::cap::is_task_worker_name("unknown-test1", &cfg));
 
     // 2. Cost: guess_harness_from_config correctly maps nhanvat to opencode
-    assert!(quaqua::worker::prompt::cost::is_opencode_worker("", "nhanvat-test1"));
-    assert!(!quaqua::worker::prompt::cost::is_omp_worker("", "nhanvat-test1"));
+    assert!(quaqua::worker::prompt::cost::is_opencode_worker(
+        "",
+        "nhanvat-test1"
+    ));
+    assert!(!quaqua::worker::prompt::cost::is_omp_worker(
+        "",
+        "nhanvat-test1"
+    ));
 
     // 3. Cleanup: cleanup_worker correctly records telemetry with kind = "nhanvat"
     let worker_name = "nhanvat-test1";
@@ -2692,7 +2833,10 @@ workers_tab = "workers"
     let tele_path = runs_dir.join("telemetry.jsonl");
     assert!(tele_path.exists());
     let content = std::fs::read_to_string(&tele_path).unwrap();
-    assert!(content.contains("\"kind\":\"nhanvat\""), "telemetry missing kind 'nhanvat': {content}");
+    assert!(
+        content.contains("\"kind\":\"nhanvat\""),
+        "telemetry missing kind 'nhanvat': {content}"
+    );
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -2827,7 +2971,13 @@ fn test_spawn_worker_fallback_scenarios() {
         ])
         .unwrap();
 
-        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
+        let res = quaqua::worker::spawn::spawn_worker(
+            opts,
+            &cfg,
+            &git,
+            &herdr,
+            quaqua::layout::SpawnOrigin::Cli,
+        );
         assert!(
             res.is_ok(),
             "spawn should succeed with fallback: {:?}",
@@ -2886,7 +3036,13 @@ fn test_spawn_worker_fallback_scenarios() {
         ])
         .unwrap();
 
-        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
+        let res = quaqua::worker::spawn::spawn_worker(
+            opts,
+            &cfg,
+            &git,
+            &herdr,
+            quaqua::layout::SpawnOrigin::Cli,
+        );
         assert!(res.is_err(), "must error when fallback fails");
 
         let starts = herdr.agent_starts();
@@ -2925,7 +3081,13 @@ fn test_spawn_worker_fallback_scenarios() {
         ])
         .unwrap();
 
-        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
+        let res = quaqua::worker::spawn::spawn_worker(
+            opts,
+            &cfg,
+            &git,
+            &herdr,
+            quaqua::layout::SpawnOrigin::Cli,
+        );
         assert!(res.is_err(), "must error when fallback kind is missing");
 
         let starts = herdr.agent_starts();
@@ -2969,7 +3131,13 @@ fn test_spawn_worker_fallback_scenarios() {
         ])
         .unwrap();
 
-        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
+        let res = quaqua::worker::spawn::spawn_worker(
+            opts,
+            &cfg,
+            &git,
+            &herdr,
+            quaqua::layout::SpawnOrigin::Cli,
+        );
         assert!(
             res.is_err(),
             "must refuse fallback to non-review kind when in review mode"
@@ -3028,7 +3196,14 @@ fn test_spawn_worker_approve_policy_gate() {
         repo.clone(),
     ])
     .unwrap();
-    let err = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli).unwrap_err();
+    let err = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    )
+    .unwrap_err();
     assert!(err.1.contains("--approve-kind truonglao"), "{}", err.1);
     assert!(
         !herdr.has_call("herdr.agent_start:claude"),
@@ -3081,7 +3256,13 @@ fn test_spawn_worker_default_grid_tab_from_owner() {
             repo_dir.to_str().unwrap().to_string(),
         ])
         .unwrap();
-        let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
+        let res = quaqua::worker::spawn::spawn_worker(
+            opts,
+            &cfg,
+            &git,
+            &herdr,
+            quaqua::layout::SpawnOrigin::Cli,
+        );
         assert!(res.is_ok(), "spawn {name} failed: {:?}", res.err());
         std::fs::read_to_string(runs_dir.join(format!("{name}.grid")))
             .expect("runs/<name>.grid must be recorded")
@@ -3093,6 +3274,7 @@ fn test_spawn_worker_default_grid_tab_from_owner() {
     // `<slug>-workers`), never a tab derived from the repo dir name — otherwise
     // siblings of the same owner split across `quaqua-workers` and
     // `quaqua-rs-workers` (runs/tieude-testlow.grid vs runs/tieude-spawneff.grid).
+    std::fs::write(runs_dir.join("quaqua-rs-lead.owner"), "cos\n").unwrap();
     std::env::set_var("QUAQUA_OWNER", "quaqua-rs-lead");
     assert_eq!(spawn_and_read_tab("sude-tablead"), "quaqua-rs-workers");
 
@@ -3145,7 +3327,13 @@ fn spawn_with_caller_pane(
         repo_dir.to_str().unwrap().to_string(),
     ])
     .unwrap();
-    let res = quaqua::worker::spawn::spawn_worker(opts, cfg, &SpawnTestGit, &herdr, quaqua::layout::SpawnOrigin::Cli);
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        cfg,
+        &SpawnTestGit,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
     assert!(res.is_ok(), "spawn {name} failed: {:?}", res.err());
     let owner = std::fs::read_to_string(runs_dir.join(format!("{name}.owner"))).unwrap();
     let grid = std::fs::read_to_string(runs_dir.join(format!("{name}.grid"))).unwrap();
@@ -3163,6 +3351,7 @@ fn test_spawn_owner_from_caller_pane_not_stale_env() {
     std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
     std::env::set_var("QUAQUA_TEST", "1");
     std::env::set_var("GRID_SKIP", "1");
+    std::env::set_var("QUAQUA_LAYOUT_SHADOW", "1");
     std::env::remove_var("GRID_TAB");
     std::env::set_var("HERDR_PANE_ID", "wA:p1");
 
@@ -3194,7 +3383,7 @@ fn test_spawn_owner_from_caller_pane_not_stale_env() {
         spawn_with_caller_pane("sude-paneworker", &repo_dir, &runs_dir, &cfg, worker_pane);
     assert_eq!(owner, "cos");
     assert_eq!(grid, "quaqua-workers");
-
+    std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
     let _ = std::fs::remove_dir_all(&temp);
 }
 
@@ -3249,7 +3438,13 @@ fn test_spawn_worker_grid_timeout_fails() {
     ])
     .unwrap();
 
-    let res = quaqua::worker::spawn::spawn_worker(opts, &cfg, &git, &herdr, quaqua::layout::SpawnOrigin::Cli);
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
 
     std::env::remove_var("QUAQUA_RUNS_DIR");
     std::env::remove_var("QUAQUA_OWNER");
@@ -4229,8 +4424,14 @@ fn test_cap_gate_counts_live_workers_and_exempts_leads() {
         repo.clone(),
     ])
     .unwrap();
-    let (code, msg) =
-        quaqua::worker::spawn::spawn_worker(opts, &cfg, &SpawnTestGit, &herdr, quaqua::layout::SpawnOrigin::Cli).unwrap_err();
+    let (code, msg) = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &SpawnTestGit,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    )
+    .unwrap_err();
     assert_eq!(code, 1, "cap refusal must exit 1: {msg}");
     assert!(msg.contains("worker cap exceeded"), "{msg}");
     assert!(
@@ -4243,16 +4444,19 @@ fn test_cap_gate_counts_live_workers_and_exempts_leads() {
     );
 
     // 3. Owner isolation: the CoS being full does not block a Lead's spawn.
+    std::fs::write(runs_dir.join("coucou-lead.owner"), "cos\n").unwrap();
     std::env::set_var("QUAQUA_OWNER", "coucou-lead");
-    let opts = parse_spawn_args(&[
-        "sude-leadw1".to_string(),
-        "sude".to_string(),
-        repo.clone(),
-    ])
-    .unwrap();
+    let opts =
+        parse_spawn_args(&["sude-leadw1".to_string(), "sude".to_string(), repo.clone()]).unwrap();
     let herdr = herdr_listing(&agent_list_json(&names));
-    quaqua::worker::spawn::spawn_worker(opts, &cfg, &SpawnTestGit, &herdr, quaqua::layout::SpawnOrigin::Cli)
-        .expect("a Lead spawns despite the CoS sitting at its cap");
+    quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &SpawnTestGit,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    )
+    .expect("a Lead spawns despite the CoS sitting at its cap");
     assert_eq!(
         std::fs::read_to_string(runs_dir.join("sude-leadw1.owner")).unwrap(),
         "coucou-lead\n"
@@ -4267,6 +4471,7 @@ fn test_cap_gate_counts_live_workers_and_exempts_leads() {
     for w in &peer_names {
         std::fs::write(runs_dir.join(format!("{w}.owner")), "baro-lead\n").unwrap();
     }
+    std::fs::write(runs_dir.join("baro-lead.owner"), "cos\n").unwrap();
     std::env::set_var("QUAQUA_OWNER", "baro-lead");
     let herdr = herdr_listing(&agent_list_json(&names));
     let opts = parse_spawn_args(&[
@@ -4275,8 +4480,14 @@ fn test_cap_gate_counts_live_workers_and_exempts_leads() {
         repo.clone(),
     ])
     .unwrap();
-    let (code, msg) =
-        quaqua::worker::spawn::spawn_worker(opts, &cfg, &SpawnTestGit, &herdr, quaqua::layout::SpawnOrigin::Cli).unwrap_err();
+    let (code, msg) = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &SpawnTestGit,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    )
+    .unwrap_err();
     assert_eq!(code, 1, "{msg}");
     assert!(msg.contains("owner 'baro-lead'"), "{msg}");
     assert!(
@@ -4285,15 +4496,16 @@ fn test_cap_gate_counts_live_workers_and_exempts_leads() {
     );
 
     std::env::set_var("QUAQUA_OWNER", "cos");
-    let opts = parse_spawn_args(&[
-        "sude-cosfree".to_string(),
-        "sude".to_string(),
-        repo,
-    ])
-    .unwrap();
+    let opts = parse_spawn_args(&["sude-cosfree".to_string(), "sude".to_string(), repo]).unwrap();
     let herdr = herdr_listing(&agent_list_json(&names));
-    quaqua::worker::spawn::spawn_worker(opts, &cfg, &SpawnTestGit, &herdr, quaqua::layout::SpawnOrigin::Cli)
-        .expect("the Lead cap must not leak into the CoS");
+    quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &SpawnTestGit,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    )
+    .expect("the Lead cap must not leak into the CoS");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -4308,7 +4520,9 @@ fn test_cap_gate_charges_a_pipeline_two_slots() {
     let pipe_weight = cfg.limits.weights.get("pipeline").copied().unwrap_or(2);
 
     // One active pipeline (2 slots) plus `cap - 2` standalone workers fills the cap.
-    let solo: Vec<String> = (1..=(cap - pipe_weight)).map(|i| format!("sude-s{i}")).collect();
+    let solo: Vec<String> = (1..=(cap - pipe_weight))
+        .map(|i| format!("sude-s{i}"))
+        .collect();
     for w in &solo {
         std::fs::write(tmp.join(format!("{w}.owner")), "cos\n").unwrap();
     }
@@ -4498,7 +4712,13 @@ impl GateFixture {
         args.push("sude".to_string());
         args.push(self.repo().to_string_lossy().to_string());
         let opts = parse_spawn_args(&args).unwrap();
-        quaqua::worker::spawn::spawn_worker(opts, &gate_cfg(), &SpawnTestGit, herdr, quaqua::layout::SpawnOrigin::Cli)
+        quaqua::worker::spawn::spawn_worker(
+            opts,
+            &gate_cfg(),
+            &SpawnTestGit,
+            herdr,
+            quaqua::layout::SpawnOrigin::Cli,
+        )
     }
 
     fn today(&self) -> String {
@@ -4590,7 +4810,10 @@ fn lead_gate_passes_when_caller_is_project_lead_even_if_repo_has_cos_row() {
     // Add a row for the running lead on the same repo in INDEX.md
     let index_path = fx.root.join("projects/INDEX.md");
     let current_index = std::fs::read_to_string(&index_path).unwrap();
-    let updated_index = format!("{current_index}| gate | {} | gate-lead | active | gate goal |\n", repo.display());
+    let updated_index = format!(
+        "{current_index}| gate | {} | gate-lead | active | gate goal |\n",
+        repo.display()
+    );
     std::fs::write(&index_path, updated_index).unwrap();
 
     let lead_caller = quaqua::identity::Caller {
@@ -4632,7 +4855,10 @@ fn lead_gate_blocks_lead_on_foreign_cos_project() {
     input.caller = &foreign_lead;
 
     let facts = leadgate::gather_facts(&input, &gate_cfg(), &herdr);
-    assert!(facts.is_some(), "lead on foreign cos repo must gather facts");
+    assert!(
+        facts.is_some(),
+        "lead on foreign cos repo must gather facts"
+    );
 
     let err = leadgate::check_spawn(input, &gate_cfg(), &herdr)
         .expect_err("lead on foreign cos repo with 2 signals must be blocked");
