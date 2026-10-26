@@ -22,7 +22,9 @@ pub trait HerdrOps {
     fn pane_read(&self, pane: &str, source: &str, lines: u32) -> std::io::Result<String>;
     fn pane_send_keys(&self, pane: &str, key: &str) -> std::io::Result<Output>;
     fn agent_send_keys(&self, name: &str, key: &str) -> std::io::Result<Output>;
-    fn agent_wait_idle(&self, name: &str, timeout_ms: u32) -> std::io::Result<Output>;
+    fn agent_wait_idle(&self, name: &str, timeout_ms: u32) -> std::io::Result<Output> {
+        self.agent_wait(name, &["idle"], timeout_ms as u64)
+    }
     fn agent_prompt_nowait(&self, name: &str, prompt: &str) -> std::io::Result<Output>;
     /// One blocking wait. Default implementation drives `run`; the live
     /// `Herdr` also has inherent methods with the same behaviour.
@@ -301,9 +303,12 @@ impl HerdrOps for Herdr {
         self.run(&["agent", "send-keys", name, key])
     }
 
+    fn agent_wait(&self, name: &str, until: &[&str], timeout_ms: u64) -> std::io::Result<Output> {
+        self.agent_wait(name, until, timeout_ms)
+    }
+
     fn agent_wait_idle(&self, name: &str, timeout_ms: u32) -> std::io::Result<Output> {
-        let t_str = timeout_ms.to_string();
-        self.run(&["agent", "wait", name, "--until", "idle", "--timeout", &t_str])
+        self.agent_wait(name, &["idle"], timeout_ms as u64)
     }
 
     fn agent_prompt_nowait(&self, name: &str, prompt: &str) -> std::io::Result<Output> {
@@ -410,5 +415,140 @@ impl HerdrDriver for Herdr {
             return Err(format!("pane rename failed: {err}"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    struct TestHerdr {
+        calls: RefCell<Vec<Vec<String>>>,
+    }
+
+    impl TestHerdr {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl HerdrOps for TestHerdr {
+        fn run(&self, args: &[&str]) -> std::io::Result<Output> {
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
+            #[cfg(unix)]
+            let status = std::os::unix::process::ExitStatusExt::from_raw(0);
+            #[cfg(not(unix))]
+            let status = std::process::ExitStatus::default();
+            Ok(Output {
+                status,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn agent_list(&self) -> std::io::Result<String> {
+            unimplemented!()
+        }
+        fn agent_get(&self, _n: &str) -> std::io::Result<(bool, String)> {
+            unimplemented!()
+        }
+        fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            unimplemented!()
+        }
+        fn agent_start(
+            &self,
+            _n: &str,
+            _k: &str,
+            _p: &str,
+            _t: u32,
+            _a: &[&str],
+        ) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_split(&self, _c: &str, _o: &str, _e: &[(&str, &str)]) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_close(&self, _p: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
+            unimplemented!()
+        }
+        fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            unimplemented!()
+        }
+        fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn agent_send_keys(&self, _n: &str, _k: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_wait_background(
+            &self,
+            _n: &str,
+            _p: &str,
+            _t: u32,
+            _f: std::fs::File,
+        ) -> std::io::Result<Child> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn test_herdr_agent_wait_constructs_multi_until_args() {
+        let herdr = TestHerdr::new();
+        let _ = herdr.agent_wait("test-lead", &["idle", "done"], 5000);
+        let calls = herdr.calls.borrow();
+        assert_eq!(
+            calls[0],
+            vec![
+                "agent",
+                "wait",
+                "test-lead",
+                "--until",
+                "idle",
+                "--until",
+                "done",
+                "--timeout",
+                "5000",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_herdr_agent_wait_idle_delegates_to_agent_wait() {
+        let herdr = TestHerdr::new();
+        let _ = herdr.agent_wait_idle("test-worker", 2000);
+        let calls = herdr.calls.borrow();
+        assert_eq!(
+            calls[0],
+            vec![
+                "agent",
+                "wait",
+                "test-worker",
+                "--until",
+                "idle",
+                "--timeout",
+                "2000",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_herdr_agent_wait_zero_timeout_calls_agent_get() {
+        let herdr = TestHerdr::new();
+        let _ = herdr.agent_wait("test-worker", &["idle"], 0);
+        let calls = herdr.calls.borrow();
+        assert_eq!(calls[0], vec!["agent", "get", "test-worker"]);
     }
 }

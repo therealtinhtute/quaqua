@@ -535,7 +535,7 @@ pub fn kickoff_plan(task: Option<&str>, name: &str) -> Kickoff {
     }
 }
 
-/// Block until the Lead is ready (`idle`) after its brief. `QUAQUA_LEAD_READY_MS`
+/// Block until the Lead is ready (`idle` or `done`) after its brief. `QUAQUA_LEAD_READY_MS`
 /// overrides the default window; a Lead still working past it gets a loud error
 /// instead of a kickoff injected into a running turn.
 fn wait_lead_ready<H: HerdrOps>(herdr: &H, name: &str) -> Result<(), (i32, String)> {
@@ -545,7 +545,7 @@ fn wait_lead_ready<H: HerdrOps>(herdr: &H, name: &str) -> Result<(), (i32, Strin
         .filter(|v| *v > 0)
         .unwrap_or(300_000);
     let ready = herdr
-        .agent_wait_idle(name, ms)
+        .agent_wait(name, &["idle", "done"], ms as u64)
         .map(|out| out.status.success())
         .unwrap_or(false);
     if ready {
