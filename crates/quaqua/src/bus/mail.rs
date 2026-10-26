@@ -280,14 +280,74 @@ pub fn is_safe_inbox_name(name: &str) -> bool {
     }
 }
 
+/// Helper to find a registered Lead's slug for a given pane ID from herdr agent list and projects/INDEX.md.
+fn try_find_lead_slug_for_pane<H: HerdrOps>(
+    herdr: &H,
+    runs_dir: &Path,
+    pane_id: &str,
+) -> Option<String> {
+    let agents_val = crate::lead::tag::get_agent_list_json(herdr)?;
+    let agents = agents_val
+        .pointer("/result/agents")
+        .and_then(|a| a.as_array())?;
+    let mut candidate = None;
+    for agent in agents {
+        let p = agent.get("pane_id").and_then(|p| p.as_str()).unwrap_or("");
+        if p == pane_id {
+            if let Some(name) = agent.get("name").and_then(|n| n.as_str()) {
+                if let Some(slug) = name.strip_suffix("-lead") {
+                    candidate = Some((slug.to_string(), name.to_string()));
+                    break;
+                }
+            }
+        }
+    }
+    let (slug, lead_name) = candidate?;
+
+    let ws_root = crate::workspace::workspace_root_checked()
+        .ok()
+        .or_else(|| runs_dir.parent().map(Path::to_path_buf))?;
+    let index_file = ws_root.join("projects/INDEX.md");
+    let content = std::fs::read_to_string(&index_file).ok()?;
+    let rows = crate::worker::leadgate::index_rows(&content);
+    let is_registered = rows.iter().any(|r| r.slug == slug && r.owner == lead_name);
+    if is_registered {
+        Some(slug)
+    } else {
+        None
+    }
+}
+
 /// Resolves the sender identity (name, role) strictly from harness (env only under QUAQUA_TEST=1).
+/// If the caller is on an untagged registered Lead pane, automatically self-heals by re-stamping
+/// orchestrator tokens. On failure, names the pane and the repair command.
 pub fn resolve_sender<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result<(String, String), String> {
     let caller = crate::identity::resolve_caller(herdr, runs_dir);
     if caller.role != crate::identity::Role::Unknown {
         return Ok((caller.name, caller.role.to_string()));
     }
 
-    Err("cannot determine sender identity from harness (unresolved caller)".to_string())
+    if let Ok(pane_id) = std::env::var("HERDR_PANE_ID") {
+        let pane_id = pane_id.trim();
+        if !pane_id.is_empty() {
+            if let Some(slug) = try_find_lead_slug_for_pane(herdr, runs_dir, pane_id) {
+                if crate::lead::tag::tag_lead_pane(herdr, &slug, pane_id).is_ok() {
+                    let healed = crate::identity::resolve_caller(herdr, runs_dir);
+                    if healed.role != crate::identity::Role::Unknown {
+                        return Ok((healed.name, healed.role.to_string()));
+                    }
+                }
+                return Err(format!(
+                    "cannot determine sender identity from harness (unresolved caller on pane {pane_id}); run 'quaqua lead repair {slug}' to re-stamp tokens"
+                ));
+            }
+            return Err(format!(
+                "cannot determine sender identity from harness (unresolved caller on pane {pane_id}); run 'quaqua lead repair <slug>' to re-stamp tokens"
+            ));
+        }
+    }
+
+    Err("cannot determine sender identity from harness (unresolved caller); run 'quaqua lead repair <slug>' to re-stamp tokens".to_string())
 }
 
 /// Escapes a single line of mail body so that lines starting with `## ` or `<!--`
