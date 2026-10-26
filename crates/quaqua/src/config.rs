@@ -514,11 +514,13 @@ pub fn resolve(mut cfg: Config, project: Option<&str>) -> Result<Config, String>
         if let Some(cap) = ov.max_workers_per_orchestrator {
             cfg.limits.max_workers_per_orchestrator = cap;
         }
-        if cfg.schema_version >= 3 && ov.layout.is_some() {
-            let resolved_layout = resolve_project_layout(&cfg, Some(slug))?;
-            cfg.layout = Some(LayoutRefConfig {
-                use_layout: resolved_layout.name,
-            });
+        if cfg.schema_version >= 3 {
+            if let Some(layout_key) = ov.layout {
+                let _ = resolve_project_layout(&cfg, Some(slug))?;
+                cfg.layout = Some(LayoutRefConfig {
+                    use_layout: layout_key,
+                });
+            }
         }
     }
     Ok(cfg)

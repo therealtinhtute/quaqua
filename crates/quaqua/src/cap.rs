@@ -145,8 +145,15 @@ pub fn count_owner_slots<H: HerdrOps>(
     }
     let pipe_weight = cfg.limits.weights.get("pipeline").copied().unwrap_or(2);
 
-    let effective_layout = crate::config::resolve_project_layout(cfg, None)
-        .unwrap_or_else(|_| crate::layout::Layout::from_legacy(cfg));
+    let effective_layout = match crate::config::resolve_project_layout(cfg, None) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!(
+                "warning: [cap count_owner_slots] cannot resolve layout, falling back to legacy: {e}"
+            );
+            crate::layout::Layout::from_legacy(cfg)
+        }
+    };
     let mut total_managed_slots: i64 = 0;
     let mut covered_workers: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(entries) = std::fs::read_dir(runs_dir) {

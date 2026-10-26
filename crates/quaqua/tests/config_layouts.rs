@@ -750,3 +750,98 @@ fn a4_taskforce_weight_precedence_all_tiers() {
     cfg.limits.weights.insert("council".to_string(), 7);
     assert_eq!(quaqua::cap::taskforce_weight(&cfg, &s_n, &test_layout), 7);
 }
+#[test]
+fn u3_1_project_write_back_stores_key_not_name() {
+    let mut cfg = valid_base_config();
+    cfg.schema_version = 3;
+
+    let mut roles = BTreeMap::new();
+    roles.insert(
+        "cos".to_string(),
+        LayoutRole {
+            class: RoleClass::Cos,
+            can_spawn: vec!["lead".to_string()],
+            can_prompt: vec![],
+            reports_to: None,
+            max_children: Some(8),
+            naming: Default::default(),
+            members: vec![],
+            quorum: None,
+        },
+    );
+    roles.insert(
+        "lead".to_string(),
+        LayoutRole {
+            class: RoleClass::Lead,
+            can_spawn: vec!["peer".to_string()],
+            can_prompt: vec![],
+            reports_to: Some("cos".to_string()),
+            max_children: Some(4),
+            naming: Default::default(),
+            members: vec![],
+            quorum: None,
+        },
+    );
+    roles.insert(
+        "peer".to_string(),
+        LayoutRole {
+            class: RoleClass::Peer,
+            can_spawn: vec![],
+            can_prompt: vec![],
+            reports_to: Some("owner".to_string()),
+            max_children: None,
+            naming: Default::default(),
+            members: vec![],
+            quorum: None,
+        },
+    );
+
+    // Layout key is "mine", but inner name is "renamed"
+    let custom_layout = Layout {
+        name: "renamed".to_string(),
+        depth: 2,
+        roles,
+    };
+    cfg.layouts.insert("mine".to_string(), custom_layout);
+
+    cfg.projects.insert(
+        "projM".to_string(),
+        ProjectOverride {
+            max_workers_per_orchestrator: None,
+            layout: Some("mine".to_string()),
+        },
+    );
+
+    // validate accepts it
+    assert!(config::validate(&cfg).is_ok());
+
+    // resolve must write back key "mine", NOT inner name "renamed"
+    let resolved = config::resolve(cfg.clone(), Some("projM")).expect("resolve projM");
+    assert_eq!(
+        resolved.layout.as_ref().map(|l| l.use_layout.as_str()),
+        Some("mine"),
+        "write-back must store the layout key 'mine', not inner name 'renamed'"
+    );
+
+    // And subsequent resolution on resolved config succeeds finding "mine" in cfg.layouts
+    let layout = config::resolve_project_layout(&resolved, None).expect("resolved layout");
+    assert_eq!(layout.name, "renamed");
+}
+
+#[test]
+fn u3_2_count_owner_slots_warns_on_unresolvable_layout() {
+    let tmp = temp_runs_dir("unresolvable-layout");
+    let mut cfg = valid_base_config();
+    cfg.schema_version = 3;
+    // Set layout to non-existent layout to trigger resolve_project_layout failure
+    cfg.layout = Some(config::LayoutRefConfig {
+        use_layout: "ghost_layout".to_string(),
+    });
+
+    let mock = MockHerdr::new(r#"{"result":{"agents":[]}}"#);
+    // count_owner_slots should warn and fallback to legacy without panicking
+    let slots = count_owner_slots(&tmp, "cos", None, &mock, &cfg);
+    assert_eq!(slots, 0);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
