@@ -1025,41 +1025,6 @@ pub fn prompt_worker<G: GitOps>(
         ),
     };
 
-    let single_output = match outcome {
-        Ok(RunnerOutcome::Completed(o)) => o,
-        Ok(RunnerOutcome::Blocked(reason)) => {
-            return Err((1, format!("workflow blocked: {reason}\n")))
-        }
-        Ok(RunnerOutcome::Failed { code, reason }) => {
-            return Err((code, format!("workflow failed: {reason}\n")))
-        }
-        Err(e) => return Err((1, format!("runner error: {e}\n"))),
-    };
-
-    // Check if grace or autoext was granted during this execution
-    if let Ok(Some(snap)) = journal.load_latest_snapshot(&active_wf_id) {
-        if let Ok(state) = serde_json::from_str::<SingleWorkerState>(&snap.state_json) {
-            let prior_grace = last_snap
-                .as_ref()
-                .map(|s| s.overrun_granted)
-                .unwrap_or(false);
-            if state.overrun_granted && !prior_grace {
-                let grace_sec = (active_budget / 4).max(1);
-                eprintln!("WATCHDOG grace +{grace_sec}s (progressing)");
-            }
-            let prior_autoext = last_snap
-                .as_ref()
-                .map(|s| s.extension_total_ms / 1000)
-                .unwrap_or(0);
-            let cur_autoext = state.extension_total_ms / 1000;
-            if cur_autoext > prior_autoext {
-                let diff = cur_autoext - prior_autoext;
-                let max_autoext = active_budget / 2;
-                eprintln!("WATCHDOG auto-extend +{diff}s (diff progressing, cap {max}s, total +{cur_autoext}s/+{max_autoext}s)");
-            }
-        }
-    }
-
     let final_wait = acts.last_wait.lock().unwrap().clone().unwrap_or_default();
     let change_ts = *acts.last_progress.lock().unwrap();
 
@@ -1106,6 +1071,62 @@ pub fn prompt_worker<G: GitOps>(
         }
         crate::bus::record_event_safely_in_runs(&runs_dir, &ev);
     };
+
+    let single_output = match outcome {
+        Ok(RunnerOutcome::Completed(o)) => o,
+        Ok(RunnerOutcome::Blocked(reason)) => {
+            let r = format!("workflow blocked: {reason}");
+            record_bus_event(
+                "stalled",
+                Some(format!("stall:{name}:{start_sec}")),
+                serde_json::json!({ "reason": &r }),
+            );
+            return Err(watchdog_exit(3, &r));
+        }
+        Ok(RunnerOutcome::Failed { code, reason }) => {
+            let exit_code = if code != 0 { code } else { 3 };
+            let r = format!("workflow failed: {reason}");
+            record_bus_event(
+                "stalled",
+                Some(format!("stall:{name}:{start_sec}")),
+                serde_json::json!({ "reason": &r }),
+            );
+            return Err(watchdog_exit(exit_code, &r));
+        }
+        Err(e) => {
+            let r = format!("runner error: {e}");
+            record_bus_event(
+                "stalled",
+                Some(format!("stall:{name}:{start_sec}")),
+                serde_json::json!({ "reason": &r }),
+            );
+            return Err(watchdog_exit(3, &r));
+        }
+    };
+
+    // Check if grace or autoext was granted during this execution
+    if let Ok(Some(snap)) = journal.load_latest_snapshot(&active_wf_id) {
+        if let Ok(state) = serde_json::from_str::<SingleWorkerState>(&snap.state_json) {
+            let prior_grace = last_snap
+                .as_ref()
+                .map(|s| s.overrun_granted)
+                .unwrap_or(false);
+            if state.overrun_granted && !prior_grace {
+                let grace_sec = (active_budget / 4).max(1);
+                eprintln!("WATCHDOG grace +{grace_sec}s (progressing)");
+            }
+            let prior_autoext = last_snap
+                .as_ref()
+                .map(|s| s.extension_total_ms / 1000)
+                .unwrap_or(0);
+            let cur_autoext = state.extension_total_ms / 1000;
+            if cur_autoext > prior_autoext {
+                let diff = cur_autoext - prior_autoext;
+                let max_autoext = active_budget / 2;
+                eprintln!("WATCHDOG auto-extend +{diff}s (diff progressing, cap {max}s, total +{cur_autoext}s/+{max_autoext}s)");
+            }
+        }
+    }
 
     match single_output.exit {
         0 => {

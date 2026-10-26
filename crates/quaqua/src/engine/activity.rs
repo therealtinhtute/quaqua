@@ -267,6 +267,41 @@ fn tag_value(value: serde_json::Value) -> Option<(String, serde_json::Value)> {
     Some((tag.clone(), inner.clone()))
 }
 
+#[derive(Deserialize)]
+struct SpawnReqPayload {
+    name: String,
+    kind: String,
+    repo: String,
+    #[serde(default)]
+    approve_kinds: Vec<String>,
+}
+#[derive(Deserialize)]
+struct CleanupReqPayload {
+    name: String,
+    repo: String,
+}
+#[derive(Deserialize)]
+struct PromptReqPayload {
+    name: String,
+    task: String,
+}
+#[derive(Deserialize)]
+struct SendKeysReqPayload {
+    name: String,
+    keys: String,
+}
+#[derive(Deserialize)]
+struct StopReqPayload {
+    name: String,
+}
+#[derive(Deserialize)]
+struct AgentWaitReqPayload {
+    name: String,
+    #[serde(default)]
+    until: Vec<String>,
+    timeout_ms: u64,
+}
+
 impl<'de> Deserialize<'de> for HerdrRequest {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(d)?;
@@ -274,15 +309,92 @@ impl<'de> Deserialize<'de> for HerdrRequest {
             return Ok(HerdrRequest::Unknown);
         };
         Ok(match tag.as_str() {
-            "Spawn" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
-            "Cleanup" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
-            "Prompt" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
-            "SendKeys" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
-            "Stop" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
-            "AgentWait" => serde_json::from_value(inner).unwrap_or(HerdrRequest::Unknown),
+            "Spawn" => match serde_json::from_value::<SpawnReqPayload>(inner) {
+                Ok(p) => HerdrRequest::Spawn {
+                    name: p.name,
+                    kind: p.kind,
+                    repo: p.repo,
+                    approve_kinds: p.approve_kinds,
+                },
+                Err(_) => HerdrRequest::Unknown,
+            },
+            "Cleanup" => match serde_json::from_value::<CleanupReqPayload>(inner) {
+                Ok(p) => HerdrRequest::Cleanup {
+                    name: p.name,
+                    repo: p.repo,
+                },
+                Err(_) => HerdrRequest::Unknown,
+            },
+            "Prompt" => match serde_json::from_value::<PromptReqPayload>(inner) {
+                Ok(p) => HerdrRequest::Prompt {
+                    name: p.name,
+                    task: p.task,
+                },
+                Err(_) => HerdrRequest::Unknown,
+            },
+            "SendKeys" => match serde_json::from_value::<SendKeysReqPayload>(inner) {
+                Ok(p) => HerdrRequest::SendKeys {
+                    name: p.name,
+                    keys: p.keys,
+                },
+                Err(_) => HerdrRequest::Unknown,
+            },
+            "Stop" => match serde_json::from_value::<StopReqPayload>(inner) {
+                Ok(p) => HerdrRequest::Stop { name: p.name },
+                Err(_) => HerdrRequest::Unknown,
+            },
+            "AgentWait" => match serde_json::from_value::<AgentWaitReqPayload>(inner) {
+                Ok(p) => HerdrRequest::AgentWait {
+                    name: p.name,
+                    until: p.until,
+                    timeout_ms: p.timeout_ms,
+                },
+                Err(_) => HerdrRequest::Unknown,
+            },
             _ => HerdrRequest::Unknown,
         })
     }
+}
+
+#[derive(Deserialize)]
+struct SpawnedResultPayload {
+    name: String,
+}
+#[derive(Deserialize)]
+struct CleanedResultPayload {
+    name: String,
+}
+#[derive(Deserialize)]
+struct PromptedResultPayload {
+    name: String,
+}
+#[derive(Deserialize)]
+struct KeysSentResultPayload {
+    name: String,
+}
+#[derive(Deserialize)]
+struct StoppedResultPayload {
+    name: String,
+}
+#[derive(Deserialize)]
+struct AgentOutputResultPayload {
+    content: String,
+}
+#[derive(Deserialize)]
+struct AgentWaitResultPayload {
+    name: String,
+    status: String,
+    seq: u64,
+    session_kind: String,
+    session_value: String,
+    harness: String,
+    cwd: String,
+    #[serde(default)]
+    err: String,
+    #[serde(default)]
+    lead_waiting: bool,
+    #[serde(default)]
+    hook_active: bool,
 }
 
 impl<'de> Deserialize<'de> for HerdrResult {
@@ -292,13 +404,45 @@ impl<'de> Deserialize<'de> for HerdrResult {
             return Ok(HerdrResult::Unknown);
         };
         Ok(match tag.as_str() {
-            "Spawned" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
-            "Cleaned" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
-            "Prompted" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
-            "KeysSent" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
-            "Stopped" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
-            "AgentOutput" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
-            "AgentWait" => serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
+            "Spawned" => match serde_json::from_value::<SpawnedResultPayload>(inner) {
+                Ok(p) => HerdrResult::Spawned { name: p.name },
+                Err(_) => HerdrResult::Unknown,
+            },
+            "Cleaned" => match serde_json::from_value::<CleanedResultPayload>(inner) {
+                Ok(p) => HerdrResult::Cleaned { name: p.name },
+                Err(_) => HerdrResult::Unknown,
+            },
+            "Prompted" => match serde_json::from_value::<PromptedResultPayload>(inner) {
+                Ok(p) => HerdrResult::Prompted { name: p.name },
+                Err(_) => HerdrResult::Unknown,
+            },
+            "KeysSent" => match serde_json::from_value::<KeysSentResultPayload>(inner) {
+                Ok(p) => HerdrResult::KeysSent { name: p.name },
+                Err(_) => HerdrResult::Unknown,
+            },
+            "Stopped" => match serde_json::from_value::<StoppedResultPayload>(inner) {
+                Ok(p) => HerdrResult::Stopped { name: p.name },
+                Err(_) => HerdrResult::Unknown,
+            },
+            "AgentOutput" => match serde_json::from_value::<AgentOutputResultPayload>(inner) {
+                Ok(p) => HerdrResult::AgentOutput { content: p.content },
+                Err(_) => HerdrResult::Unknown,
+            },
+            "AgentWait" => match serde_json::from_value::<AgentWaitResultPayload>(inner) {
+                Ok(p) => HerdrResult::AgentWait {
+                    name: p.name,
+                    status: p.status,
+                    seq: p.seq,
+                    session_kind: p.session_kind,
+                    session_value: p.session_value,
+                    harness: p.harness,
+                    cwd: p.cwd,
+                    err: p.err,
+                    lead_waiting: p.lead_waiting,
+                    hook_active: p.hook_active,
+                },
+                Err(_) => HerdrResult::Unknown,
+            },
             _ => HerdrResult::Unknown,
         })
     }

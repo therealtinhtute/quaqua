@@ -337,10 +337,19 @@ impl Workflow for SingleWorkerWorkflow {
                             err,
                         ),
                         _ => {
-                            return StepDecision::Fail {
-                                code: 1,
-                                reason: format!("wake {index}: unexpected activity result"),
+                            state.errors += 1;
+                            state.gone_since_ms = 0;
+                            state.wait_err = format!("wake {index}: unexpected activity result");
+                            if now >= state.cap_deadline_ms {
+                                return complete_step(state, now, 2);
                             }
+                            if state.errors >= 3 {
+                                return complete_step(state, now, 3);
+                            }
+                            let backoff = (30_000u64).min(state.config.poll_sec * 1000);
+                            let t = wait_interval(state, now, now + backoff);
+                            schedule_wake(state, ctx, index + 1, Vec::new(), t);
+                            return StepDecision::Continue;
                         }
                     };
 
