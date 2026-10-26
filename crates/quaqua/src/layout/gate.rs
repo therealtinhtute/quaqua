@@ -162,6 +162,25 @@ pub fn resolve_target_role<'a>(
 
     Err("role.unknown".to_string())
 }
+/// Resolve the target role name and its Naming convention for a spawn call site.
+///
+/// Maps target class (e.g. "peer", "lead", "taskforce") or explicit role name
+/// via `resolve_target_role`, returning the role name and its configured `Naming`.
+pub fn resolve_target_role_and_naming<'a>(
+    layout: &'a Layout,
+    caller: &Caller,
+    runs_dir: Option<&Path>,
+    target_class_or_role: &'a str,
+) -> Result<(&'a str, crate::layout::model::Naming), String> {
+    let caller_r = resolve_caller_role(layout, caller, runs_dir).ok();
+    let target_r = resolve_target_role(layout, caller_r, target_class_or_role)?;
+    let naming = layout
+        .roles
+        .get(target_r)
+        .map(|r| r.naming)
+        .unwrap_or_default();
+    Ok((target_r, naming))
+}
 fn role_class_rank(class: RoleClass) -> u8 {
     match class {
         RoleClass::Cos => 0,
@@ -991,8 +1010,28 @@ fn gate_inner<H: HerdrOps>(
         }
     };
 
+    let lead_snapshot_exists = |name: &str| -> bool {
+        if let Some(slug) = crate::layout::snapshot::find_lead_in_owner_chain(runs_dir, name) {
+            crate::state::WorkerMetadata::layout_path(runs_dir, &slug).is_file()
+        } else {
+            false
+        }
+    };
+
+    let layout_lookup_name = if verb == Verb::Prompt {
+        if let Some(tname) = target_name.filter(|t| lead_snapshot_exists(t)) {
+            tname
+        } else if let Some(ow) = owner.filter(|o| lead_snapshot_exists(o)) {
+            ow
+        } else {
+            effective_caller.name.as_str()
+        }
+    } else {
+        effective_caller.name.as_str()
+    };
+
     let layout = match crate::layout::resolve_effective_layout(
-        &effective_caller.name,
+        layout_lookup_name,
         runs_dir,
         effective_cfg,
     ) {

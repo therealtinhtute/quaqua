@@ -159,6 +159,7 @@ pub fn cleanup_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32,
     let _ = std::fs::remove_file(rf);
     let _ = std::fs::remove_file(WorkerMetadata::owner_path(&runs_dir, &name));
     let _ = std::fs::remove_file(runs_dir.join(format!(".{name}.playbook")));
+    let _ = std::fs::remove_file(crate::layout::layout_role_path(&runs_dir, &name));
 
     let index = root.join("projects/INDEX.md");
     if index.is_file() {

@@ -50,6 +50,7 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
             source: crate::identity::IdentitySource::EnvFallback,
         };
     }
+    let cfg = crate::config::load_team_config().ok();
     crate::layout::gate(
         Some(&caller),
         Some(herdr),
@@ -60,7 +61,7 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
         None,
         Some(slug),
         &runs_dir,
-        None,
+        cfg.as_ref(),
     )?;
 
     // The Lead must exist and expose a pane to read back.
@@ -379,6 +380,7 @@ mod tests {
     fn landed_prompt_clears_then_submits_with_wait() {
         let _env_lock = crate::test_env::lock_env();
         let _pane_guard = crate::test_env::TestEnvVarGuard::remove("HERDR_PANE_ID");
+        let _owner_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let fake = FakeHerdr::new(
             "working",
             true,
@@ -397,6 +399,9 @@ mod tests {
 
     #[test]
     fn a_draft_left_in_the_input_box_fails() {
+        let _env_lock = crate::test_env::lock_env();
+        let _pane_guard = crate::test_env::TestEnvVarGuard::remove("HERDR_PANE_ID");
+        let _owner_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let fake = FakeHerdr::new(
             "idle",
             true,
@@ -409,12 +414,14 @@ mod tests {
 
     #[test]
     fn a_rejected_submit_names_the_reason() {
+        let _env_lock = crate::test_env::lock_env();
+        let _pane_guard = crate::test_env::TestEnvVarGuard::remove("HERDR_PANE_ID");
+        let _owner_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let fake = FakeHerdr::new("blocked", false, "");
         let err = prompt_lead(&args(), &fake).expect_err("rejected");
         assert!(err.1.contains("did not land"), "{}", err.1);
         assert!(err.1.contains("agent_prompt_stalled"), "{}", err.1);
     }
-
     #[test]
     fn input_box_detection() {
         let msg = "please fix the gate now";
