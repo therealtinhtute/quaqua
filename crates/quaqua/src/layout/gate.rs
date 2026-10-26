@@ -391,7 +391,6 @@ pub fn validate_layout(layout: &Layout) -> Result<(), String> {
             ));
         }
 
-        // Taskforce members
         // Upward roles check: target class cannot outrank source class (rank cos=0 > lead=1 > peer/taskforce=2)
         for target_name in &role.can_spawn {
             if let Some(target_role) = layout.roles.get(target_name) {
@@ -1129,17 +1128,25 @@ fn gate_inner<H: HerdrOps>(
             let caller_r = resolve_caller_role(&layout, effective_caller, Some(runs_dir)).ok();
             if let Ok(target_role) = resolve_target_role(&layout, caller_r, target) {
                 if let Err(e) = record_layout_role(runs_dir, tname, target_role) {
-                    eprintln!(
-                        "warning: [layout gate] failed to record layout role for '{tname}': {e}"
-                    );
-                    return Err((
-                        1,
-                        format!("error: [gate.layout_role_err] failed to record layout role for '{tname}': {e}\n"),
-                    ));
+                    let is_shadow = force_shadow || is_shadow_mode();
+                    if is_shadow {
+                        eprintln!(
+                            "warning: [layout shadow] failed to record layout role for '{tname}': {e}"
+                        );
+                    } else {
+                        eprintln!(
+                            "warning: [layout gate] failed to record layout role for '{tname}': {e}"
+                        );
+                        return Err((
+                            1,
+                            format!(
+                                "error: [gate.layout_role_err] failed to record layout role for '{tname}': {e}\n"
+                            ),
+                        ));
+                    }
                 }
             }
         }
     }
-
     Ok(decision)
 }

@@ -226,8 +226,12 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
         );
     }
 
-    // For non-SLP migration, synthesize taskforce role if not explicitly defined
-    if !matches_slp && !seen_roles.iter().any(|r| r == "taskforce") {
+    // For non-SLP migration, synthesize taskforce role only when some v2 role spawns taskforce
+    let any_role_spawns_taskforce = cfg
+        .roles
+        .values()
+        .any(|r| r.can_spawn.iter().any(|s| s == "taskforce"));
+    if !matches_slp && any_role_spawns_taskforce && !seen_roles.iter().any(|r| r == "taskforce") {
         out_lines.push(String::new());
         out_lines.push("[layouts.custom.roles.taskforce]".to_string());
         out_lines.push("class = \"taskforce\"".to_string());

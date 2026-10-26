@@ -11,6 +11,27 @@ use std::path::PathBuf;
 
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+struct EnvGuard {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn new(keys: &[&'static str]) -> Self {
+        let saved = keys.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+        Self { saved }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in &self.saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
 fn hermetic_temp_dir(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -311,6 +332,7 @@ members = [
 #[test]
 fn layout_unknown_depth_denied_in_enforce() {
     let _lock = TEST_ENV_LOCK.lock().unwrap();
+    let _env = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_LAYOUT_SHADOW"]);
 
     let slp = builtin::get("slp").expect("slp builtin");
     let caller = Caller {
@@ -321,9 +343,6 @@ fn layout_unknown_depth_denied_in_enforce() {
     };
 
     // Case 1: In test mode (QUAQUA_TEST=1) -> allowed with trace detail
-    let prev_shadow = std::env::var("QUAQUA_LAYOUT_SHADOW").ok();
-    let prev_test = std::env::var("QUAQUA_TEST").ok();
-
     std::env::set_var("QUAQUA_TEST", "1");
     std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
     let d_test = check(&slp, &caller, Verb::Spawn, "peer");
@@ -350,16 +369,91 @@ fn layout_unknown_depth_denied_in_enforce() {
         "CallerDepth::Unknown must be denied in enforce mode"
     );
     assert_eq!(d_enforce.rule_id, "depth.unknown");
+}
 
-    // Restore env
-    match prev_shadow {
-        Some(v) => std::env::set_var("QUAQUA_LAYOUT_SHADOW", v),
-        None => std::env::remove_var("QUAQUA_LAYOUT_SHADOW"),
-    }
-    match prev_test {
-        Some(v) => std::env::set_var("QUAQUA_TEST", v),
-        None => std::env::remove_var("QUAQUA_TEST"),
-    }
+#[test]
+fn layout_role_marker_write_failure_enforce_vs_shadow() {
+    use quaqua::layout::gate::{gate, shadow, SpawnOrigin};
+    let _lock = TEST_ENV_LOCK.lock().unwrap();
+    let _env = EnvGuard::new(&["QUAQUA_LAYOUT_SHADOW", "QUAQUA_TEST"]);
+
+    let template_toml = include_str!("../../../templates/workspace/team.toml");
+    let cfg: Config = toml::from_str(template_toml).expect("parse workspace team.toml");
+
+    let runs_dir = hermetic_temp_dir("marker-fail");
+    // Create a directory at runs/<worker>.layout_role so file write fails
+    let marker_path = runs_dir.join("worker-fail.layout_role");
+    std::fs::create_dir_all(&marker_path).expect("create blocking directory");
+
+    let cos_caller = Caller {
+        name: "cos".to_string(),
+        role: Role::Cos,
+        depth: CallerDepth::Resolved(0),
+        source: IdentitySource::PaneTokens,
+    };
+
+    // Case 1: In enforce mode (no shadow) -> fails with gate.layout_role_err and exit 1
+    std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
+    std::env::remove_var("QUAQUA_TEST");
+    let res_enforce = gate(
+        Some(&cos_caller),
+        None::<&quaqua::herdr::Herdr>,
+        Verb::Spawn,
+        "lead",
+        Some("worker-fail"),
+        SpawnOrigin::Cli,
+        None,
+        None,
+        &runs_dir,
+        Some(&cfg),
+    );
+    assert!(
+        res_enforce.is_err(),
+        "enforce mode must fail on marker write error"
+    );
+    let (code, msg) = res_enforce.unwrap_err();
+    assert_eq!(code, 1);
+    assert!(
+        msg.contains("gate.layout_role_err"),
+        "error message must contain gate.layout_role_err: {msg}"
+    );
+
+    // Case 2: In shadow mode via QUAQUA_LAYOUT_SHADOW=1 -> returns Ok(decision) without blocking
+    std::env::set_var("QUAQUA_LAYOUT_SHADOW", "1");
+    let res_shadow_env = gate(
+        Some(&cos_caller),
+        None::<&quaqua::herdr::Herdr>,
+        Verb::Spawn,
+        "lead",
+        Some("worker-fail"),
+        SpawnOrigin::Cli,
+        None,
+        None,
+        &runs_dir,
+        Some(&cfg),
+    );
+    assert!(
+        res_shadow_env.is_ok(),
+        "shadow mode via env must not block on marker write error"
+    );
+
+    // Case 3: In shadow mode via shadow() wrapper -> returns allowed Decision
+    let dec_shadow = shadow(
+        Some(&cos_caller),
+        None::<&quaqua::herdr::Herdr>,
+        Verb::Spawn,
+        "lead",
+        Some("worker-fail"),
+        SpawnOrigin::Cli,
+        None,
+        None,
+        &runs_dir,
+        Some(&cfg),
+    );
+    assert!(
+        dec_shadow.allow,
+        "shadow wrapper must return allowed decision"
+    );
 }
 
 #[test]
@@ -969,15 +1063,10 @@ can_review = true
 "#;
     std::fs::write(&team_path, custom_v3).unwrap();
 
-    let prev_team = std::env::var("QUAQUA_TEAM_TOML").ok();
+    let _env = EnvGuard::new(&["QUAQUA_TEAM_TOML"]);
     std::env::set_var("QUAQUA_TEAM_TOML", &team_path);
 
     let show_output = quaqua::layout::run_show(None, false).expect("run_show succeeds");
-
-    match prev_team {
-        Some(v) => std::env::set_var("QUAQUA_TEAM_TOML", v),
-        None => std::env::remove_var("QUAQUA_TEAM_TOML"),
-    }
 
     assert!(
         show_output.contains("members:      [purpose=review, purpose=review, purpose=design]"),
@@ -986,5 +1075,62 @@ can_review = true
     assert!(
         show_output.contains("quorum:       2"),
         "output must show quorum 2: {show_output}"
+    );
+}
+
+#[test]
+fn layout_migrate_no_taskforce_fixture_does_not_synthesize_taskforce() {
+    let v2_no_tf = r#"
+schema_version = 2
+
+[limits]
+depth = 2
+max_workers_per_orchestrator = 4
+
+[merge]
+integ_branch = "quaqua/{slug}-integ"
+
+[roles.cos]
+can_spawn = ["lead"]
+can_prompt = ["lead"]
+
+[roles.lead]
+can_spawn = ["peer"]
+can_prompt = ["peer"]
+reports_to = "cos"
+max_peers = 3
+
+[roles.peer]
+can_spawn = []
+can_prompt = []
+reports_to = "owner"
+
+[strategy]
+default_kind = "sude"
+default_reviewer = ["suhuynh"]
+builder_reviewer_differ = "none"
+
+[kinds.sude]
+harness = "omp"
+model = "google-antigravity/gemini-3.8-flash"
+effort = "high"
+can_review = true
+
+[kinds.suhuynh]
+harness = "claude"
+model = "opus-5.5"
+effort = "medium"
+can_review = true
+"#;
+
+    let res = migrate_team_toml(v2_no_tf).expect("migration of no-taskforce v2 must succeed");
+    let migrated_str = match res {
+        MigrateResult::Migrated(s) => s,
+        _ => panic!("expected Migrated result"),
+    };
+
+    assert!(
+        !migrated_str.contains("[layouts.custom.roles.taskforce]"),
+        "migrated TOML must not synthesize taskforce role when no v2 role spawns it"
     );
 }
