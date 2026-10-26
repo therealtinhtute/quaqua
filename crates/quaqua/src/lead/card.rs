@@ -295,12 +295,66 @@ Rules here
 
     #[test]
     fn find_stale_items_detects_merged_prs_and_commits() {
-        let repo_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
+        struct DirGuard(PathBuf);
+        impl Drop for DirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let base_dir = std::env::temp_dir().join(format!(
+            "quaqua-card-fixture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let repo_path = base_dir.join("repo");
+        let workspace_dir = base_dir.join("workspace");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let _guard = DirGuard(base_dir.clone());
+
+        let run_git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Quaqua Test")
+                .env("GIT_AUTHOR_EMAIL", "test@quaqua.local")
+                .env("GIT_COMMITTER_NAME", "Quaqua Test")
+                .env("GIT_COMMITTER_EMAIL", "test@quaqua.local")
+                .output()
+                .expect("run git command");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+
+        run_git(&["init", "-b", "main"]);
+        run_git(&["config", "user.name", "Quaqua Test"]);
+        run_git(&["config", "user.email", "test@quaqua.local"]);
+        run_git(&["config", "commit.gpgsign", "false"]);
+
+        // 1. Initial commit on main (known sha)
+        std::fs::write(repo_path.join("init.txt"), "initial commit\n").unwrap();
+        run_git(&["add", "init.txt"]);
+        run_git(&["commit", "-m", "initial commit"]);
+        let rev_out = run_git(&["rev-parse", "HEAD"]);
+        let full_sha = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+        let known_sha = full_sha[..7].to_string();
+
+        // 2. Merge commit on main referencing PR #153
+        std::fs::write(repo_path.join("pr153.txt"), "PR 153\n").unwrap();
+        run_git(&["add", "pr153.txt"]);
+        run_git(&["commit", "-m", "Merge pull request #153 from feature"]);
+
         let git = crate::git::Git::new();
 
         // 1. Stale open PR item (#153 is merged on main)
@@ -329,25 +383,24 @@ Rules here
         let unmerged_stale = find_stale_items(unmerged_card, &repo_path, &git);
         assert!(unmerged_stale.is_empty(), "{unmerged_stale:?}");
 
-        // 4. Stale open SHA item (c457227 is reachable from main)
-        let stale_sha_card = r#"# project
+        // 4. Stale open SHA item (known_sha is reachable from main)
+        let stale_sha_card = format!(
+            r#"# project
 ## Now
-- [ ] building on integ c457227
-"#;
-        let stale_shas = find_stale_items(stale_sha_card, &repo_path, &git);
+- [ ] building on integ {known_sha}
+"#
+        );
+        let stale_shas = find_stale_items(&stale_sha_card, &repo_path, &git);
         assert_eq!(stale_shas.len(), 1, "{stale_shas:?}");
-        assert_eq!(stale_shas[0].target, "commit c457227");
+        assert_eq!(stale_shas[0].target, format!("commit {known_sha}"));
 
         // 5. check_card_freshness refuses unless allow_stale is true
-        let temp_dir =
-            std::env::temp_dir().join(format!("quaqua-card-freshness-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let projects_dir = temp_dir.join("projects");
+        let projects_dir = workspace_dir.join("projects");
         std::fs::create_dir_all(&projects_dir).unwrap();
         std::fs::write(projects_dir.join("test-slug.md"), stale_pr_card).unwrap();
 
         // Without --allow-stale-card: Err(1, ...)
-        let res = check_card_freshness(&temp_dir, "test-slug", Some(&repo_path), false, &git);
+        let res = check_card_freshness(&workspace_dir, "test-slug", Some(&repo_path), false, &git);
         assert!(res.is_err());
         let (rc, err) = res.unwrap_err();
         assert_eq!(rc, 1);
@@ -365,9 +418,7 @@ Rules here
 
         // With --allow-stale-card: Ok(())
         let res_override =
-            check_card_freshness(&temp_dir, "test-slug", Some(&repo_path), true, &git);
+            check_card_freshness(&workspace_dir, "test-slug", Some(&repo_path), true, &git);
         assert!(res_override.is_ok());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
