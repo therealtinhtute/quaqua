@@ -354,9 +354,6 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     let base_cfg = crate::config::load_team_config()?;
     let cfg = crate::config::resolve(base_cfg.clone(), Some(&slug)).unwrap_or(base_cfg);
 
-    // Freeze layout snapshot in runs/<slug>.layout.toml
-    crate::layout::snapshot::write_layout_snapshot(&runs_dir, &slug, &cfg)
-        .map_err(|e| (1, format!("cannot write layout snapshot for {slug}: {e}\n")))?;
     let lead_env = std::env::var("LEAD_KIND").ok();
     let (lead_kind, launch) = resolve_lead_launch(&cfg, lead_env.as_deref())?;
     let lead_kind_info = cfg.kinds.get(&lead_kind).ok_or_else(|| {
@@ -372,6 +369,40 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     let rf_str = rf.to_string_lossy().to_string();
     let cmd =
         crate::launch::build_launch_cmd(&launch, &name, &rf_str, &runs_str, &root_str, false)?;
+    let target_naming = {
+        let layout_opt = crate::layout::resolve_layout(&cfg).ok();
+        if let Some(layout) = layout_opt {
+            let caller_r =
+                crate::layout::resolve_caller_role(&layout, &caller, Some(&runs_dir)).ok();
+            let target_r = crate::layout::resolve_target_role(&layout, caller_r, "lead").ok();
+            target_r
+                .and_then(|r| layout.roles.get(r))
+                .map(|r| r.naming)
+                .unwrap_or(crate::layout::model::Naming::SlugLead)
+        } else {
+            crate::layout::model::Naming::SlugLead
+        }
+    };
+    match target_naming {
+        crate::layout::model::Naming::SlugLead => {
+            if !name.ends_with("-lead") || name.len() > 32 {
+                return Err((
+                    1,
+                    format!(
+                        "lead name '{name}' is invalid: must end with '-lead' and be <= 32 chars\n"
+                    ),
+                ));
+            }
+        }
+        crate::layout::model::Naming::KindTask => {
+            if !crate::worker::spawn::is_valid_name(&name, &lead_kind) {
+                return Err((
+                    1,
+                    format!("lead name '{name}' is invalid for kind-task role: must start with '{lead_kind}-' and be <= 20 chars\n"),
+                ));
+            }
+        }
+    }
 
     crate::layout::gate(
         Some(&caller),
@@ -385,6 +416,15 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         &runs_dir,
         Some(&cfg),
     )?;
+    let mut role_guard = crate::worker::spawn::LayoutRoleGuard {
+        runs_dir: &runs_dir,
+        name: &name,
+        success: false,
+    };
+
+    // Freeze layout snapshot in runs/<slug>.layout.toml after gate allows
+    crate::layout::snapshot::write_layout_snapshot(&runs_dir, &slug, &cfg)
+        .map_err(|e| (1, format!("cannot write layout snapshot for {slug}: {e}\n")))?;
 
     // Herdr workspace create
     let owner_env = format!("QUAQUA_OWNER={name}");
@@ -514,6 +554,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
                 .and_then(|()| std::fs::rename(&tmp, &path));
         }
     }
+    role_guard.success = true;
     Ok(())
 }
 

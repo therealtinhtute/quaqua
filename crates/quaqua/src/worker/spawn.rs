@@ -160,7 +160,7 @@ pub fn parse_spawn_args(args: &[String]) -> Result<SpawnOptions, (i32, String)> 
     })
 }
 
-fn is_valid_name(name: &str, kind: &str) -> bool {
+pub(crate) fn is_valid_name(name: &str, kind: &str) -> bool {
     let prefix = format!("{kind}-");
     if !name.starts_with(&prefix) {
         return false;
@@ -174,6 +174,23 @@ fn is_valid_name(name: &str, kind: &str) -> bool {
     }
     rest.chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+pub(crate) fn cleanup_layout_role(runs_dir: &std::path::Path, name: &str) {
+    let _ = std::fs::remove_file(crate::layout::layout_role_path(runs_dir, name));
+}
+
+pub(crate) struct LayoutRoleGuard<'a> {
+    pub(crate) runs_dir: &'a std::path::Path,
+    pub(crate) name: &'a str,
+    pub(crate) success: bool,
+}
+
+impl<'a> Drop for LayoutRoleGuard<'a> {
+    fn drop(&mut self) {
+        if !self.success {
+            cleanup_layout_role(self.runs_dir, self.name);
+        }
+    }
 }
 /// A short, stable slug for why an agent start failed: herdr's `error.code`
 /// when the output carries one (`agent_not_ready`, auth/quota codes), else
@@ -390,10 +407,6 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         let line2 = USAGE.lines().next().unwrap_or(USAGE);
         (1, format!("{line2}\n"))
     })?;
-    if !is_valid_name(&opts.name, &kind) {
-        let lines: Vec<&str> = USAGE.lines().take(2).collect();
-        return Err((1, format!("{}\n", lines.join("\n"))));
-    }
 
     // One spawn-policy gate for every spawn path: a kind with
     // `spawn = "approve"` needs its own --approve-kind from the Principal.
@@ -449,6 +462,42 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         "[identity] worker spawn: name={} caller={caller}",
         opts.name
     );
+    let target_naming = {
+        let layout_opt = crate::layout::resolve_effective_layout(&owner, runs_dir, cfg)
+            .map(|(l, _)| l)
+            .ok()
+            .or_else(|| crate::layout::resolve_layout(cfg).ok());
+        if let Some(layout) = layout_opt {
+            let caller_r =
+                crate::layout::resolve_caller_role(&layout, &caller, Some(runs_dir)).ok();
+            let target_r = crate::layout::resolve_target_role(&layout, caller_r, "peer").ok();
+            target_r
+                .and_then(|r| layout.roles.get(r))
+                .map(|r| r.naming)
+                .unwrap_or(crate::layout::model::Naming::KindTask)
+        } else {
+            crate::layout::model::Naming::KindTask
+        }
+    };
+    match target_naming {
+        crate::layout::model::Naming::KindTask => {
+            if !is_valid_name(&opts.name, &kind) {
+                let lines: Vec<&str> = USAGE.lines().take(2).collect();
+                return Err((1, format!("{}\n", lines.join("\n"))));
+            }
+        }
+        crate::layout::model::Naming::SlugLead => {
+            if !opts.name.ends_with("-lead") || opts.name.len() > 32 {
+                return Err((
+                    1,
+                    format!(
+                        "worker name '{}' invalid for slug-lead role: must end with '-lead' and be <= 32 chars\n",
+                        opts.name
+                    ),
+                ));
+            }
+        }
+    }
 
     crate::layout::gate(
         Some(&caller),
@@ -462,6 +511,11 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         runs_dir,
         Some(cfg),
     )?;
+    let mut role_guard = LayoutRoleGuard {
+        runs_dir,
+        name: &opts.name,
+        success: false,
+    };
     // Lead gate (AGENTS.md '## Roles (SLP)'): a `cos`-owned project with two or
     // more topology signals needs a Lead before another worker joins it.
     let workspace_root = crate::workspace::workspace_root();
@@ -729,6 +783,7 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         ));
     }
 
+    role_guard.success = true;
     Ok((caller.to_string(), owner))
 }
 

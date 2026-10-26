@@ -540,6 +540,7 @@ pub fn prompt_worker<G: GitOps>(
         "peer"
     };
     if !resume {
+        let cfg = crate::config::load_team_config().ok();
         crate::layout::gate(
             None,
             Some(herdr),
@@ -550,7 +551,7 @@ pub fn prompt_worker<G: GitOps>(
             target_owner.as_deref(),
             None,
             &runs_dir,
-            None,
+            cfg.as_ref(),
         )?;
     }
 

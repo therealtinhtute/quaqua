@@ -991,8 +991,28 @@ fn gate_inner<H: HerdrOps>(
         }
     };
 
+    let lead_snapshot_exists = |name: &str| -> bool {
+        if let Some(slug) = crate::layout::snapshot::find_lead_in_owner_chain(runs_dir, name) {
+            crate::state::WorkerMetadata::layout_path(runs_dir, &slug).is_file()
+        } else {
+            false
+        }
+    };
+
+    let layout_lookup_name = if verb == Verb::Prompt {
+        if let Some(tname) = target_name.filter(|t| lead_snapshot_exists(t)) {
+            tname
+        } else if let Some(ow) = owner.filter(|o| lead_snapshot_exists(o)) {
+            ow
+        } else {
+            effective_caller.name.as_str()
+        }
+    } else {
+        effective_caller.name.as_str()
+    };
+
     let layout = match crate::layout::resolve_effective_layout(
-        &effective_caller.name,
+        layout_lookup_name,
         runs_dir,
         effective_cfg,
     ) {
