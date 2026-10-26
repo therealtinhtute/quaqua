@@ -247,8 +247,13 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
                 }
             }
         }
+        if carried_members.len() > 5 {
+            return Err(format!(
+                "cannot migrate taskforce members: carried member count {} exceeds maximum allowed of 5",
+                carried_members.len()
+            ));
+        }
         if !carried_members.is_empty() {
-            carried_members.truncate(5);
             let formatted: Vec<String> = carried_members
                 .iter()
                 .map(|m| format!("{{ kind = \"{m}\" }}"))

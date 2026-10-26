@@ -117,8 +117,13 @@ pub fn resolve_target_role<'a>(
     if target_trim.ends_with("-lead") && layout.roles.contains_key("lead") {
         return Ok("lead");
     }
-    if target_trim == "cos" && layout.roles.contains_key("cos") {
-        return Ok("cos");
+    if target_trim == "cos" {
+        if layout.roles.contains_key("cos") {
+            return Ok("cos");
+        }
+        if let Some((cos_name, _)) = layout.roles.iter().find(|(_, r)| r.class == RoleClass::Cos) {
+            return Ok(cos_name.as_str());
+        }
     }
 
     let requested_class = match target_trim {
@@ -156,6 +161,13 @@ pub fn resolve_target_role<'a>(
     }
 
     Err("role.unknown".to_string())
+}
+fn role_class_rank(class: RoleClass) -> u8 {
+    match class {
+        RoleClass::Cos => 0,
+        RoleClass::Lead => 1,
+        RoleClass::Peer | RoleClass::Taskforce => 2,
+    }
 }
 
 fn is_valid_role_name(name: &str) -> bool {
@@ -239,16 +251,6 @@ fn check_reachability(layout: &Layout, cos_role_name: &str) -> Result<(), String
     min_depth.insert(cos_role_name, 0);
     queue.push_back((cos_role_name, 0));
 
-    // Roles that report directly to cos start at depth 1
-    for (name, role) in &layout.roles {
-        if role.reports_to.as_deref() == Some(cos_role_name) {
-            if !min_depth.contains_key(name.as_str()) {
-                min_depth.insert(name.as_str(), 1);
-                queue.push_back((name.as_str(), 1));
-            }
-        }
-    }
-
     while let Some((u, d)) = queue.pop_front() {
         if let Some(role) = layout.roles.get(u) {
             for v in &role.can_spawn {
@@ -264,23 +266,16 @@ fn check_reachability(layout: &Layout, cos_role_name: &str) -> Result<(), String
 
     for role_name in layout.roles.keys() {
         let r_str = role_name.as_str();
-        if let Some(&d) = min_depth.get(r_str) {
-            if d > layout.depth {
-                return Err(format!(
-                    "layout '{}' role '{r_str}' reachable only at depth {d} which exceeds layout depth {}",
-                    layout.name, layout.depth
-                ));
-            }
-        } else {
-            let role = &layout.roles[r_str];
-            if let Some(rep) = &role.reports_to {
-                if rep != "owner" && !layout.roles.contains_key(rep) {
+        match min_depth.get(r_str) {
+            Some(&d) => {
+                if d > layout.depth {
                     return Err(format!(
-                        "layout '{}' role '{role_name}' reports_to references unknown role '{rep}'",
-                        layout.name
+                        "layout '{}' role '{r_str}' reachable only at depth {d} which exceeds layout depth {}",
+                        layout.name, layout.depth
                     ));
                 }
-            } else if r_str != cos_role_name {
+            }
+            None => {
                 return Err(format!(
                     "layout '{}' role '{r_str}' is unreachable from root '{cos_role_name}'",
                     layout.name
@@ -397,6 +392,31 @@ pub fn validate_layout(layout: &Layout) -> Result<(), String> {
         }
 
         // Taskforce members
+        // Upward roles check: target class cannot outrank source class (rank cos=0 > lead=1 > peer/taskforce=2)
+        for target_name in &role.can_spawn {
+            if let Some(target_role) = layout.roles.get(target_name) {
+                if role_class_rank(target_role.class) < role_class_rank(role.class) {
+                    return Err(format!(
+                        "layout.upward: layout '{}' role '{role_name}' ({}) cannot spawn higher-ranking role '{target_name}' ({})",
+                        layout.name, role.class, target_role.class
+                    ));
+                }
+            }
+        }
+        if let Some(rep) = &role.reports_to {
+            if rep != "owner" {
+                if let Some(parent_role) = layout.roles.get(rep) {
+                    if role_class_rank(parent_role.class) > role_class_rank(role.class) {
+                        return Err(format!(
+                            "layout.upward: layout '{}' role '{role_name}' ({}) cannot report to lower-ranking role '{rep}' ({})",
+                            layout.name, role.class, parent_role.class
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Taskforce members
         if !role.members.is_empty() {
             if role.class != RoleClass::Taskforce {
                 return Err(format!(
@@ -404,7 +424,7 @@ pub fn validate_layout(layout: &Layout) -> Result<(), String> {
                     layout.name
                 ));
             }
-            if role.members.len() < 1 || role.members.len() > 5 {
+            if role.members.len() > 5 {
                 return Err(format!(
                     "layout '{}' role '{role_name}': member count {} must be in 1..=5",
                     layout.name,
@@ -1108,7 +1128,15 @@ fn gate_inner<H: HerdrOps>(
         if let Some(tname) = target_name {
             let caller_r = resolve_caller_role(&layout, effective_caller, Some(runs_dir)).ok();
             if let Ok(target_role) = resolve_target_role(&layout, caller_r, target) {
-                let _ = record_layout_role(runs_dir, tname, target_role);
+                if let Err(e) = record_layout_role(runs_dir, tname, target_role) {
+                    eprintln!(
+                        "warning: [layout gate] failed to record layout role for '{tname}': {e}"
+                    );
+                    return Err((
+                        1,
+                        format!("error: [gate.layout_role_err] failed to record layout role for '{tname}': {e}\n"),
+                    ));
+                }
             }
         }
     }

@@ -1,10 +1,10 @@
 name = "dual-lens"
-depth = 1
+depth = 2
 
 [roles.cos]
 class = "cos"
-can_spawn = ["dual-lens"]
-can_prompt = ["dual-lens"]
+can_spawn = ["lead", "dual-lens"]
+can_prompt = ["lead", "dual-lens"]
 
 [roles.lead]
 class = "lead"
