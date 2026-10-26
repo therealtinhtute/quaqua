@@ -31,6 +31,7 @@ fail() { echo "FAIL: $*" >&2
 
 # ── sandbox: stub git/herdr, temp HOME/quaqua/runs, dummy repo + brief ──────
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs"
+export QUAQUA_RUNS_DIR="$T/home/quaqua/runs"
 # git stub: rev-parse HEAD is keyed on the -C dir's basename; call #1 is the
 # spawn-time base, call #2 the post-build tip, call #3+ the post-fix tip.
 # FAKE_BASE_SHA/FAKE_HEAD_SHA/FAKE_HEAD2_SHA shape each; FAKE_PORCELAIN feeds

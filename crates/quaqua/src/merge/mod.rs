@@ -475,13 +475,7 @@ pub fn handle_merge_with_sink<W: std::io::Write>(
             "warning: no check command configured; merging without checks"
         );
     }
-    let db_path = if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
-        PathBuf::from(dir).join("quaqua.db")
-    } else {
-        crate::workspace::workspace_root()
-            .join("runs")
-            .join("quaqua.db")
-    };
+    let db_path = crate::worker::cleanup::default_runs_dir().join("quaqua.db");
 
     for branch in &opts.branches {
         check_branch_verdict_with_sink(&db_path, target, branch, git, warn_sink);

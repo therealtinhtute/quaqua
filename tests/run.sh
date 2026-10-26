@@ -18,6 +18,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d "${TMPDIR:-/tmp}/quaqua-tests.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 
+# Scrub leaking parent shell env vars and set temp QUAQUA_RUNS_DIR and QUAQUA_TEST=1 once
+unset QUAQUA_OWNER QUAQUA_HOME QUAQUA_ROOT HERDR_PANE_ID
+export QUAQUA_TEST=1
+export QUAQUA_RUNS_DIR="$T/runs"
+mkdir -p "$T/runs"
 pass=0 fail=0 failed=() skipped=()
 
 # The files each slow suite exercises, space-separated: the suite runs only

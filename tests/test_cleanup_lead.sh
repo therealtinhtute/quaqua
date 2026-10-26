@@ -22,6 +22,7 @@ bin="${QUAQUA_BIN:-$root/target/debug/quaqua}"
 export QUAQUA_BIN="$bin"
 
 mkdir -p "$T/bin" "$T/projects" "$T/runs"
+export QUAQUA_RUNS_DIR="$T/runs"
 cat > "$T/INDEX.orig" <<'EOF'
 | slug | repo | owner | status | one-line goal |
 |------|------|-------|--------|---------------|
