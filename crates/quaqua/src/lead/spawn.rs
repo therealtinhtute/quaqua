@@ -535,7 +535,7 @@ pub fn kickoff_plan(task: Option<&str>, name: &str) -> Kickoff {
     }
 }
 
-/// Block until the Lead is ready (`idle`) after its brief. `QUAQUA_LEAD_READY_MS`
+/// Block until the Lead is ready (`idle` or `done`) after its brief. `QUAQUA_LEAD_READY_MS`
 /// overrides the default window; a Lead still working past it gets a loud error
 /// instead of a kickoff injected into a running turn.
 fn wait_lead_ready<H: HerdrOps>(herdr: &H, name: &str) -> Result<(), (i32, String)> {
@@ -545,7 +545,7 @@ fn wait_lead_ready<H: HerdrOps>(herdr: &H, name: &str) -> Result<(), (i32, Strin
         .filter(|v| *v > 0)
         .unwrap_or(300_000);
     let ready = herdr
-        .agent_wait_idle(name, ms)
+        .agent_wait(name, &["idle", "done"], ms as u64)
         .map(|out| out.status.success())
         .unwrap_or(false);
     if ready {
@@ -959,6 +959,203 @@ mod tests {
         assert!(
             pin_content.contains("name=figure-it-out"),
             "pin content: {pin_content}"
+        );
+    }
+
+    struct ClaudeLeadHerdr {
+        calls: RefCell<Vec<String>>,
+        started: std::cell::Cell<bool>,
+    }
+    impl ClaudeLeadHerdr {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                started: std::cell::Cell::new(false),
+            }
+        }
+    }
+    impl HerdrOps for ClaudeLeadHerdr {
+        fn run(&self, args: &[&str]) -> std::io::Result<Output> {
+            self.calls.borrow_mut().push(args.join(" "));
+            let first = args.first().copied().unwrap_or("");
+            let second = args.get(1).copied().unwrap_or("");
+            if first == "workspace" && second == "create" {
+                Ok(Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: r#"{"result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}"#.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                })
+            } else if first == "agent" && second == "start" {
+                self.started.set(true);
+                Ok(Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: r#"{"result":{}}"#.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                })
+            } else if first == "agent" && second == "wait" {
+                // A Claude Lead finishes its brief turn in status `done`.
+                // Waiting with `--until done` succeeds.
+                // Waiting only for `--until idle` fails (times out).
+                let mut until_states = Vec::new();
+                let mut prev = "";
+                for arg in args {
+                    if prev == "--until" {
+                        until_states.push(*arg);
+                    }
+                    prev = arg;
+                }
+                let success = until_states.contains(&"done");
+                let code = if success { 0 } else { 1 };
+                Ok(Output {
+                    status: std::process::ExitStatus::from_raw(code << 8),
+                    stdout: if success {
+                        r#"{"result":{"agent":{"agent_status":"done"}}}"#.as_bytes().to_vec()
+                    } else {
+                        r#"{"error":{"code":"timeout"}}"#.as_bytes().to_vec()
+                    },
+                    stderr: Vec::new(),
+                })
+            } else {
+                Ok(Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: r#"{"result":{}}"#.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        fn agent_list(&self) -> std::io::Result<String> {
+            Ok(r#"{"result":{"agents":[]}}"#.to_string())
+        }
+        fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
+            if self.started.get() {
+                Ok((
+                    true,
+                    r#"{"result":{"agent":{"agent_status":"working","pane_id":"w1:p1"}}}"#
+                        .to_string(),
+                ))
+            } else {
+                Ok((false, r#"{"error":{"code":"agent_not_found"}}"#.to_string()))
+            }
+        }
+        fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn agent_start(
+            &self,
+            _n: &str,
+            _k: &str,
+            _p: &str,
+            _t: u32,
+            _a: &[&str],
+        ) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn pane_split(&self, _c: &str, _o: &str, _e: &[(&str, &str)]) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_close(&self, _p: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
+            unimplemented!()
+        }
+        fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<Output> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn agent_wait_idle(&self, name: &str, timeout_ms: u32) -> std::io::Result<Output> {
+            let t_str = timeout_ms.to_string();
+            self.run(&[
+                "agent",
+                "wait",
+                name,
+                "--until",
+                "idle",
+                "--timeout",
+                &t_str,
+            ])
+        }
+        fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_wait_background(
+            &self,
+            _n: &str,
+            _p: &str,
+            _t: u32,
+            _f: std::fs::File,
+        ) -> std::io::Result<std::process::Child> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn test_lead_spawn_delivers_kickoff_when_lead_reports_done() {
+        let _lock = crate::test_env::lock_env();
+        let _test_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _team_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_TEAM_TOML");
+        let _lead_guard = crate::test_env::TestEnvVarGuard::remove("LEAD_KIND");
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "quaqua-lead-spawn-done-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("projects")).unwrap();
+        fs::create_dir_all(root.join("rules/_all")).unwrap();
+        let _guard = CleanupDir(root.clone());
+
+        let index_content = "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| child | ~/Lab/child | cos | active | goal |\n";
+        fs::write(root.join("projects/INDEX.md"), index_content).unwrap();
+        fs::write(root.join("projects/child.md"), "# child card\n").unwrap();
+
+        let _root_guard =
+            crate::test_env::TestEnvVarGuard::set("QUAQUA_ROOT", root.to_str().unwrap());
+        let _home_guard = crate::test_env::TestEnvVarGuard::set("HOME", root.to_str().unwrap());
+        let _owner_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+        let _pane_guard = crate::test_env::TestEnvVarGuard::set("HERDR_PANE_ID", "");
+
+        let git = DummyGit;
+        let herdr = ClaudeLeadHerdr::new();
+
+        let task_brief = "Topology: lead — kickoff\nPlaybook: figure-it-out\nGoal: deliver kickoff\nHard constraints: none\nCurrent design: none\n";
+        let res = spawn_lead(
+            &[
+                "child".to_string(),
+                "--task".to_string(),
+                task_brief.to_string(),
+            ],
+            &git,
+            &herdr,
+        );
+        assert!(res.is_ok(), "spawn_lead failed: {:?}", res.err());
+
+        let calls = herdr.calls.borrow();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("agent prompt child-lead Topology: lead — kickoff")),
+            "kickoff prompt must be delivered to lead, calls: {calls:#?}"
         );
     }
 }
