@@ -89,6 +89,24 @@ for c in 'git status' 'git log --oneline -3' 'git fetch origin' 'git diff HEAD' 
 done
 echo "ok: missing binary -> read-only git/gh calls pass with a warning"
 
+# ── pkill -f / --full is denied with the pgrep suggestion ────────────────────
+for c in 'pkill -f quaqua' 'pkill --full quaqua' 'pkill -9 -f quaqua' 'sudo pkill -f quaqua'; do
+  rc=0 out=''
+  out=$(printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$c" \
+    | env QUAQUA_BIN=/nonexistent/quaqua PATH="$noq_path" "$BASH" "$shim" 2>&1) || rc=$?
+  [[ $rc -eq 0 ]] || fail "missing binary, pkill '$c': exit $rc, want 0 (deny JSON); out: $out"
+  grep -q '"decision":"deny"' <<<"$out" || fail "missing binary, pkill '$c': no deny decision: $out"
+  grep -q 'use `pgrep -f` then kill the PID' <<<"$out" || fail "missing binary, pkill '$c': no pgrep suggestion: $out"
+done
+for c in 'pkill quaqua' 'pgrep -f quaqua' 'kill 1234'; do
+  rc=0 out=''
+  out=$(printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$c" \
+    | env QUAQUA_BIN=/nonexistent/quaqua PATH="$noq_path" "$BASH" "$shim" 2>&1) || rc=$?
+  [[ $rc -eq 0 ]] || fail "missing binary, allowed '$c': exit $rc, want 0; out: $out"
+  grep -q '"decision":"deny"' <<<"$out" && fail "missing binary, allowed '$c': wrongly denied: $out"
+done
+echo "ok: missing binary -> pkill -f/--full denied with pgrep suggestion, pgrep/pkill allowed"
+
 # ── $QUAQUA_BIN is honoured and gets `gate` + the hook's stdin ───────────────
 cat > "$T/stub" <<'STUB'
 #!/usr/bin/env bash

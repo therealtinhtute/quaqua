@@ -213,6 +213,125 @@ fn a_not_found_lead_still_listed_is_unknown_and_not_prompted() {
     assert!(!f.calls().contains("agent prompt"), "{}", f.calls());
 }
 
+#[test]
+fn prompt_refuses_when_card_has_stale_open_item_unless_allowed() {
+    let f = Fixture::new("stale-card");
+    let projects = f.root.join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    fs::write(
+        projects.join("INDEX.md"),
+        "| slug | repo | owner |\n| baro | . | cos |\n",
+    )
+    .unwrap();
+    fs::write(
+        projects.join("baro.md"),
+        "repo: .\n\n## Now\n- [ ] gatep4 running after #153 merged\n",
+    )
+    .unwrap();
+
+    // 1. Without --allow-stale-card: refuses with exit 1
+    let out = f.run();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("projects/baro.md ## Now has open item naming already-merged PR #153:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--allow-stale-card"), "{stderr}");
+
+    // 2. With --allow-stale-card: bypasses card freshness check
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.args([
+        "lead",
+        "prompt",
+        "baro",
+        "--allow-stale-card",
+        "please fix the gate",
+    ])
+    .env("HERDR_BIN_PATH", &f.herdr)
+    .env("QUAQUA_TEST_STATE", &f.state)
+    .env("QUAQUA_TEST_CALLS", &f.calls)
+    .env("QUAQUA_LEAD_PROMPT_WAIT_MS", "300")
+    .env("QUAQUA_RUNS_DIR", f.root.join("runs"))
+    .env("QUAQUA_HOME", &f.root)
+    .env("QUAQUA_TEST", "1")
+    .env("QUAQUA_LAYOUT_SHADOW", "1")
+    .env_remove("HERDR_PANE_ID")
+    .env_remove("QUAQUA_OWNER")
+    .env_remove("QUAQUA_ROOT");
+    let out_allowed = cmd
+        .output()
+        .expect("run quaqua lead prompt --allow-stale-card");
+    let stderr_allowed = String::from_utf8_lossy(&out_allowed.stderr);
+    assert!(
+        !stderr_allowed.contains("already-merged"),
+        "{stderr_allowed}"
+    );
+}
+
+#[test]
+fn spawn_refuses_when_card_has_stale_open_item_unless_allowed() {
+    let f = Fixture::new("spawn-stale");
+    let projects = f.root.join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    fs::create_dir_all(f.root.join("rules/_all")).unwrap();
+    fs::write(
+        projects.join("INDEX.md"),
+        "| slug | repo | owner |\n| baro | . | cos |\n",
+    )
+    .unwrap();
+    fs::write(
+        projects.join("baro.md"),
+        "repo: .\n\n## Now\n- [ ] gatep4 running after #153 merged\n",
+    )
+    .unwrap();
+    fs::write(f.state_file("missing"), "").unwrap();
+
+    // 1. Without --allow-stale-card: refuses with exit 1
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd.args(["lead", "spawn", "baro"])
+        .env("HERDR_BIN_PATH", &f.herdr)
+        .env("QUAQUA_TEST_STATE", &f.state)
+        .env("QUAQUA_TEST_CALLS", &f.calls)
+        .env("QUAQUA_RUNS_DIR", f.root.join("runs"))
+        .env("QUAQUA_HOME", &f.root)
+        .env("QUAQUA_TEST", "1")
+        .env("QUAQUA_LAYOUT_SHADOW", "1")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_OWNER")
+        .env_remove("QUAQUA_ROOT");
+    let out = cmd.output().expect("run quaqua lead spawn");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("projects/baro.md ## Now has open item naming already-merged PR #153:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--allow-stale-card"), "{stderr}");
+
+    // 2. With --allow-stale-card: bypasses card freshness check
+    let mut cmd_allowed = Command::new(env!("CARGO_BIN_EXE_quaqua"));
+    cmd_allowed
+        .args(["lead", "spawn", "--allow-stale-card", "baro"])
+        .env("HERDR_BIN_PATH", &f.herdr)
+        .env("QUAQUA_TEST_STATE", &f.state)
+        .env("QUAQUA_TEST_CALLS", &f.calls)
+        .env("QUAQUA_RUNS_DIR", f.root.join("runs"))
+        .env("QUAQUA_HOME", &f.root)
+        .env("QUAQUA_TEST", "1")
+        .env("QUAQUA_LAYOUT_SHADOW", "1")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("QUAQUA_OWNER")
+        .env_remove("QUAQUA_ROOT");
+    let out_allowed = cmd_allowed
+        .output()
+        .expect("run quaqua lead spawn --allow-stale-card");
+    let stderr_allowed = String::from_utf8_lossy(&out_allowed.stderr);
+    assert!(
+        !stderr_allowed.contains("already-merged"),
+        "{stderr_allowed}"
+    );
+}
 #[allow(dead_code)]
 fn _exists(p: &Path) -> bool {
     p.exists()

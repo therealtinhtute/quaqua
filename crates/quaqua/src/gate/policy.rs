@@ -537,6 +537,7 @@ fn check_words(w: &[String], ctx: &Ctx) -> Verdict {
         return deny_removed(&w[i], replacement);
     }
     match base {
+        "pkill" => check_pkill(a),
         "herdr" => check_herdr(a, ctx),
         "git" => check_git(a, ctx),
         "gh" => check_gh(a, ctx),
@@ -579,6 +580,23 @@ fn check_words(w: &[String], ctx: &Ctx) -> Verdict {
         | "xargs" | "builtin" | "chrt" | "ionice" | "taskset" => wrapper(base, a, ctx),
         _ => Verdict::Allow,
     }
+}
+
+/// `pkill` arm: deny `pkill -f` / `pkill --full` (self-matches the calling shell).
+fn check_pkill(a: &[String]) -> Verdict {
+    for arg in a {
+        if arg == "-f" || arg == "--full" {
+            return Verdict::Deny(
+                "pkill -f/--full is denied: self-matches the calling shell; use `pgrep -f` then kill the PID".to_string(),
+            );
+        }
+        if arg.starts_with('-') && !arg.starts_with("--") && arg.contains('f') {
+            return Verdict::Deny(
+                "pkill -f/--full is denied: self-matches the calling shell; use `pgrep -f` then kill the PID".to_string(),
+            );
+        }
+    }
+    Verdict::Allow
 }
 
 /// The `herdr` arm: help handling and the guarded verb pair.

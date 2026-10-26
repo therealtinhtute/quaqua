@@ -74,8 +74,12 @@ enum Command {
         #[arg(long)]
         session_start: bool,
     },
-    /// Check the installed quaqua binary (missing, stale, shadowed).
-    Doctor,
+    /// Check the installed quaqua binary (missing, stale, shadowed), or workspace drift.
+    Doctor {
+        /// Check workspace rules and herdr plugin registration for drift.
+        #[arg(long)]
+        workspace: bool,
+    },
     /// Boot (or update) a workspace from the embedded template.
     Init {
         /// Target workspace (default: the workspace root).
@@ -673,7 +677,13 @@ fn main() {
         Some(Command::Gate {
             session_start: true,
         }) => quaqua::gate::run_session_start(),
-        Some(Command::Doctor) => quaqua::doctor::run(),
+        Some(Command::Doctor { workspace }) => {
+            if workspace {
+                quaqua::doctor::run_workspace(None, None, None)
+            } else {
+                quaqua::doctor::run()
+            }
+        }
         Some(Command::Init {
             dir,
             update,
