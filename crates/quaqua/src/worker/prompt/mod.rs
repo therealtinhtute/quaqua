@@ -352,10 +352,7 @@ fn parse_submit_output(out: &std::process::Output) -> (bool, String, String) {
     let mut status = String::new();
     let mut code = String::new();
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
-        if let Some(c) = json
-            .pointer("/error/code")
-            .and_then(|v| v.as_str())
-        {
+        if let Some(c) = json.pointer("/error/code").and_then(|v| v.as_str()) {
             code = c.to_string();
         }
         let agent = json
@@ -537,9 +534,13 @@ pub fn prompt_worker<G: GitOps>(
     let target_owner = std::fs::read_to_string(runs_dir.join(format!("{name}.owner")))
         .ok()
         .map(|s| s.trim().to_string());
-    let target_role = if name.ends_with("-lead") { "lead" } else { "peer" };
+    let target_role = if name.ends_with("-lead") {
+        "lead"
+    } else {
+        "peer"
+    };
     if !resume {
-        crate::layout::shadow(
+        crate::layout::gate(
             None,
             Some(herdr),
             crate::layout::Verb::Prompt,
@@ -550,7 +551,7 @@ pub fn prompt_worker<G: GitOps>(
             None,
             &runs_dir,
             None,
-        );
+        )?;
     }
 
     let out = runs_dir.join(format!("{name}.md"));
@@ -971,7 +972,9 @@ pub fn prompt_worker<G: GitOps>(
         .as_ref()
         .and_then(|cfg| {
             let kind = crate::config::kind_of_worker(cfg, name)?.to_string();
-            cfg.kinds.get(&kind).map(|k| k.on_cost_cap == crate::config::COST_CAP_KILL)
+            cfg.kinds
+                .get(&kind)
+                .map(|k| k.on_cost_cap == crate::config::COST_CAP_KILL)
         })
         .unwrap_or(false);
     let cost_buffer = team_cfg.map_or(0.2, |cfg| cfg.timers.cost_buffer);
@@ -1075,20 +1078,21 @@ pub fn prompt_worker<G: GitOps>(
         );
         (code, String::new())
     };
-    let record_bus_event = |event_type: &str, incident_key: Option<String>, payload: serde_json::Value| {
+    let record_bus_event = |event_type: &str,
+                            incident_key: Option<String>,
+                            payload: serde_json::Value| {
         let owner_str = crate::state::WorkerMetadata::load_owner(&runs_dir, name);
-        let owner = if owner_str.is_empty() { None } else { Some(owner_str) };
+        let owner = if owner_str.is_empty() {
+            None
+        } else {
+            Some(owner_str)
+        };
         let project = repo_dir
             .file_name()
             .and_then(|n| n.to_str())
             .map(String::from);
-        let mut ev = crate::bus::FarmEvent::new(
-            event_type,
-            Some("watchdog"),
-            Some(name),
-            owner,
-            project,
-        );
+        let mut ev =
+            crate::bus::FarmEvent::new(event_type, Some("watchdog"), Some(name), owner, project);
         if let Some(key) = incident_key {
             ev = ev.with_incident_key(key);
         }
@@ -1098,7 +1102,6 @@ pub fn prompt_worker<G: GitOps>(
         }
         crate::bus::record_event_safely_in_runs(&runs_dir, &ev);
     };
-
 
     match single_output.exit {
         0 => {
@@ -1349,10 +1352,11 @@ esac
         let bus = crate::bus::FarmBus::open(&db_path).expect("open bus");
         let farm_events = bus.load_events(0).expect("load farm events");
         assert!(
-            farm_events.iter().any(|e| e.event_type == "report_written" && e.subject.as_deref() == Some(name)),
+            farm_events
+                .iter()
+                .any(|e| e.event_type == "report_written" && e.subject.as_deref() == Some(name)),
             "exit 0 must record report_written event in farm_events"
         );
-
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1464,7 +1468,9 @@ esac
         let bus = crate::bus::FarmBus::open(&tmp.join("quaqua.db")).expect("open bus");
         let farm_events = bus.load_events(0).expect("load farm events");
         assert!(
-            farm_events.iter().any(|e| e.event_type == "malformed" && e.subject.as_deref() == Some("sude-gap")),
+            farm_events
+                .iter()
+                .any(|e| e.event_type == "malformed" && e.subject.as_deref() == Some("sude-gap")),
             "exit 6 must record malformed event in farm_events"
         );
 
@@ -1626,14 +1632,14 @@ esac
         // Git error output will contain quotes/special characters.
         let bogus_wt = tmp.join("path\"with\"quotes\nand\\backslashes");
         let baseline_file = readonly::baseline_path(&tmp, name);
-        fs::write(&baseline_file, format!("{}\nHEAD abc123\n", bogus_wt.display())).unwrap();
-
-        let report_file = tmp.join(format!("{name}.md"));
         fs::write(
-            &report_file,
-            "# Review\nVerdict: clean\n## Lessons\nnone\n",
+            &baseline_file,
+            format!("{}\nHEAD abc123\n", bogus_wt.display()),
         )
         .unwrap();
+
+        let report_file = tmp.join(format!("{name}.md"));
+        fs::write(&report_file, "# Review\nVerdict: clean\n## Lessons\nnone\n").unwrap();
 
         let herdr = Herdr {
             bin: stub.to_string_lossy().to_string(),

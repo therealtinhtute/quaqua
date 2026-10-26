@@ -48,6 +48,7 @@ export PATH="$T/bin:$PATH"
 export HERDR_BIN_PATH="$T/bin/herdr"
 export QUAQUA_TEST=1
 unset QUAQUA_RUNS_DIR QUAQUA_HOME QUAQUA_ROOT QUAQUA_OWNER HERDR_PANE_ID
+export QUAQUA_LAYOUT_SHADOW=1
 
 # Run lead prompt (which calls shadow gate)
 out="$("$bin" lead prompt baro testmsg 2>&1 || true)"

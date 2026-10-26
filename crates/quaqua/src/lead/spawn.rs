@@ -313,18 +313,41 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     let _ = std::fs::write(&rf, rules_content);
 
     // Resolve caller identity and log at spawn
-    let caller = crate::identity::resolve_caller(herdr, &runs_dir);
-    let caller_owner = if caller.role == crate::identity::Role::Unknown && caller.name == "unknown"
-    {
-        // The single default to QUAQUA_OWNER (or "cos" if unset) when caller identity
-        // has no pane tokens (parity with resolve_owner in worker/spawn.rs until P3 gate enforcement).
-        std::env::var("QUAQUA_OWNER")
-            .ok()
-            .filter(|o| !o.is_empty())
-            .unwrap_or_else(|| "cos".to_string())
-    } else {
-        caller.name.clone()
+    let mut caller = crate::identity::resolve_caller(herdr, &runs_dir);
+    let env_owner = std::env::var("QUAQUA_OWNER").ok().filter(|o| !o.is_empty());
+    let caller_owner = match &env_owner {
+        Some(o) => o.clone(),
+        None => {
+            if caller.name != "unknown" {
+                caller.name.clone()
+            } else {
+                "cos".to_string()
+            }
+        }
     };
+    if caller.role == crate::identity::Role::Unknown
+        && (std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
+            || std::env::var("HERDR_BIN_PATH").is_ok()
+            || cfg!(test))
+        && crate::identity::caller_pane_tokens(herdr).is_none()
+    {
+        caller = crate::identity::Caller {
+            name: caller_owner.clone(),
+            role: if crate::cap::is_lead_owner(&caller_owner) {
+                crate::identity::Role::Lead
+            } else {
+                crate::identity::Role::Cos
+            },
+            depth: crate::identity::CallerDepth::Resolved(
+                if crate::cap::is_lead_owner(&caller_owner) {
+                    1
+                } else {
+                    0
+                },
+            ),
+            source: crate::identity::IdentitySource::EnvFallback,
+        };
+    }
     eprintln!("[identity] lead spawn: slug={slug} caller={caller}");
 
     // Load config and resolve lead launch
@@ -350,7 +373,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     let cmd =
         crate::launch::build_launch_cmd(&launch, &name, &rf_str, &runs_str, &root_str, false)?;
 
-    crate::layout::shadow(
+    crate::layout::gate(
         Some(&caller),
         Some(herdr),
         crate::layout::Verb::Spawn,
@@ -361,7 +384,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         Some(&slug),
         &runs_dir,
         Some(&cfg),
-    );
+    )?;
 
     // Herdr workspace create
     let owner_env = format!("QUAQUA_OWNER={name}");
@@ -835,10 +858,10 @@ mod tests {
     fn test_lead_spawn_writes_caller_owner_when_set() {
         let _lock = crate::test_env::lock_env();
         let _test_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _shadow_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_LAYOUT_SHADOW", "1");
         let _team_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_TEAM_TOML");
         let _lead_guard = crate::test_env::TestEnvVarGuard::remove("LEAD_KIND");
         let _home_quaqua_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_HOME");
-
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

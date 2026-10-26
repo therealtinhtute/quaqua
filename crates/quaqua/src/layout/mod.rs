@@ -6,12 +6,10 @@ pub mod model;
 pub mod snapshot;
 
 pub use gate::{
-    check, check_with_count, check_with_origin, resolve_target_role, shadow, validate_layout,
-    SpawnOrigin,
+    check, check_with_count, check_with_origin, gate, is_shadow_mode, resolve_target_role, shadow,
+    validate_layout, SpawnOrigin,
 };
-pub use model::{
-    Decision, Layout, LayoutRole, Member, Naming, RoleClass, TraceStep, Verb,
-};
+pub use model::{Decision, Layout, LayoutRole, Member, Naming, RoleClass, TraceStep, Verb};
 pub use snapshot::{
     find_lead_in_owner_chain, layout_sha256, read_layout_snapshot, resolve_effective_layout,
     run_refreeze, write_layout_snapshot, LayoutOrigin, LayoutSnapshot,
@@ -32,7 +30,9 @@ pub fn resolve_layout(cfg: &Config) -> Result<Layout, String> {
         // Collisions between user layout names and built-in names are a hard error
         for name in cfg.layouts.keys() {
             if builtin::get(name).is_some() {
-                return Err(format!("user layout '{name}' collides with built-in layout"));
+                return Err(format!(
+                    "user layout '{name}' collides with built-in layout"
+                ));
             }
         }
 
@@ -147,20 +147,14 @@ pub fn resolve_caller_by_name(caller_name: &str, runs_dir: &Path) -> Caller {
 /// Explain layout decision for a caller, verb, and target.
 ///
 /// Returns (rule_id, trace).
-pub fn why(
-    layout: &Layout,
-    caller: &Caller,
-    verb: Verb,
-    target: &str,
-) -> (String, Vec<TraceStep>) {
+pub fn why(layout: &Layout, caller: &Caller, verb: Verb, target: &str) -> (String, Vec<TraceStep>) {
     let decision = check(layout, caller, verb, target);
     (decision.rule_id, decision.trace)
 }
 
 /// Handler for `quaqua layout show [--project <slug>] [--json]`
 pub fn run_show(project: Option<&str>, json: bool) -> Result<String, String> {
-    let cfg = crate::config::load_team_config()
-        .map_err(|(_, msg)| msg.trim().to_string())?;
+    let cfg = crate::config::load_team_config().map_err(|(_, msg)| msg.trim().to_string())?;
     let cfg = crate::config::resolve(cfg.clone(), project).unwrap_or(cfg);
     crate::config::validate(&cfg)?;
 
@@ -174,7 +168,11 @@ pub fn run_show(project: Option<&str>, json: bool) -> Result<String, String> {
 
     let mut drift_warning = None;
     if let Some(_slug) = project {
-        if let LayoutOrigin::Snapshot { sha256: ref frozen_sha, .. } = origin {
+        if let LayoutOrigin::Snapshot {
+            sha256: ref frozen_sha,
+            ..
+        } = origin
+        {
             let live_layout = resolve_layout(&cfg)?;
             let live_sha = snapshot::layout_sha256(&live_layout)?;
             if *frozen_sha != live_sha {
@@ -194,7 +192,12 @@ pub fn run_show(project: Option<&str>, json: bool) -> Result<String, String> {
     if let Some(warn) = drift_warning {
         let _ = write!(out, "{warn}");
     }
-    let _ = writeln!(out, "Layout: {} (source: {})", layout.name, origin.source_desc());
+    let _ = writeln!(
+        out,
+        "Layout: {} (source: {})",
+        layout.name,
+        origin.source_desc()
+    );
     let _ = writeln!(out, "Depth:  {}", layout.depth);
     let _ = writeln!(out, "\nRoles:");
     for (name, role) in &layout.roles {
@@ -237,8 +240,7 @@ pub fn run_why(
     project: Option<&str>,
     json: bool,
 ) -> Result<String, String> {
-    let cfg = crate::config::load_team_config()
-        .map_err(|(_, msg)| msg.trim().to_string())?;
+    let cfg = crate::config::load_team_config().map_err(|(_, msg)| msg.trim().to_string())?;
     let cfg = crate::config::resolve(cfg.clone(), project).unwrap_or(cfg);
     crate::config::validate(&cfg)?;
     let runs_dir = crate::worker::cleanup::default_runs_dir();
