@@ -607,17 +607,31 @@ pub fn resolve_engine_from_workspace(ws: &Path) -> Option<PathBuf> {
     None
 }
 
-pub fn resolve_herdr_plugins_json() -> Option<PathBuf> {
+/// Resolve the herdr config directory according to herdr conventions:
+/// 1. `HERDR_CONFIG_DIR` explicit override
+/// 2. `HERDR_CONFIG_PATH` explicit override (parent directory of config file)
+/// 3. `XDG_CONFIG_HOME/herdr`
+/// 4. `$HOME/.config/herdr`
+pub fn resolve_herdr_config_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("HERDR_CONFIG_DIR").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(dir).join("plugins.json"));
+        return Some(PathBuf::from(dir));
+    }
+    if let Some(path) = std::env::var_os("HERDR_CONFIG_PATH").filter(|v| !v.is_empty()) {
+        if let Some(parent) = Path::new(&path).parent() {
+            return Some(parent.to_path_buf());
+        }
     }
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(xdg).join("herdr/plugins.json"));
+        return Some(PathBuf::from(xdg).join("herdr"));
     }
     if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home).join(".config/herdr/plugins.json"));
+        return Some(PathBuf::from(home).join(".config/herdr"));
     }
     None
+}
+
+pub fn resolve_herdr_plugins_json() -> Option<PathBuf> {
+    resolve_herdr_config_dir().map(|dir| dir.join("plugins.json"))
 }
 
 pub fn evaluate_workspace(
@@ -1068,5 +1082,57 @@ command = ["quaqua", "events", "hook"]
         assert!(clean.is_empty(), "{clean:?}");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_herdr_config_dir_resolution_order() {
+        let _env_lock = crate::test_env::lock_env();
+        let _g_dir = crate::test_env::TestEnvVarGuard::remove("HERDR_CONFIG_DIR");
+        let _g_path = crate::test_env::TestEnvVarGuard::remove("HERDR_CONFIG_PATH");
+        let _g_xdg = crate::test_env::TestEnvVarGuard::remove("XDG_CONFIG_HOME");
+        let _g_home = crate::test_env::TestEnvVarGuard::remove("HOME");
+
+        let tmp = temp_dir("herdr-cfg-order");
+
+        // 1. None when all unset
+        assert_eq!(resolve_herdr_config_dir(), None);
+        assert_eq!(resolve_herdr_plugins_json(), None);
+
+        // 2. Fallback to HOME/.config/herdr
+        std::env::set_var("HOME", tmp.join("fake-home"));
+        assert_eq!(
+            resolve_herdr_config_dir(),
+            Some(tmp.join("fake-home/.config/herdr"))
+        );
+        assert_eq!(
+            resolve_herdr_plugins_json(),
+            Some(tmp.join("fake-home/.config/herdr/plugins.json"))
+        );
+
+        // 3. XDG_CONFIG_HOME takes precedence over HOME
+        std::env::set_var("XDG_CONFIG_HOME", tmp.join("fake-xdg"));
+        assert_eq!(resolve_herdr_config_dir(), Some(tmp.join("fake-xdg/herdr")));
+        assert_eq!(
+            resolve_herdr_plugins_json(),
+            Some(tmp.join("fake-xdg/herdr/plugins.json"))
+        );
+
+        // 4. HERDR_CONFIG_PATH takes precedence over XDG
+        std::env::set_var("HERDR_CONFIG_PATH", tmp.join("fake-path/config.toml"));
+        assert_eq!(resolve_herdr_config_dir(), Some(tmp.join("fake-path")));
+        assert_eq!(
+            resolve_herdr_plugins_json(),
+            Some(tmp.join("fake-path/plugins.json"))
+        );
+
+        // 5. HERDR_CONFIG_DIR takes top precedence
+        std::env::set_var("HERDR_CONFIG_DIR", tmp.join("fake-dir"));
+        assert_eq!(resolve_herdr_config_dir(), Some(tmp.join("fake-dir")));
+        assert_eq!(
+            resolve_herdr_plugins_json(),
+            Some(tmp.join("fake-dir/plugins.json"))
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }
