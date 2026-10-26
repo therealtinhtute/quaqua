@@ -28,6 +28,7 @@ cp "$repo/templates/workspace/team.toml" "$T/team.toml"
 # The workspace is $HOME/quaqua (reports land there); QUAQUA_HOME pins it so a
 # leaked QUAQUA_ROOT/QUAQUA_HOME from the caller cannot redirect the run.
 export QUAQUA_HOME="$T/home/quaqua"
+export QUAQUA_RUNS_DIR="$T/home/quaqua/runs"
 export QUAQUA_TEAM_TOML="$T/team.toml"
 export HOME="$T/home"
 export QUAQUA_OWNER="mylead-lead"

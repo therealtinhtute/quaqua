@@ -92,13 +92,7 @@ pub struct FarmBus {
 
 impl FarmBus {
     pub fn default_path() -> PathBuf {
-        if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
-            PathBuf::from(dir).join("quaqua.db")
-        } else {
-            crate::workspace::workspace_root()
-                .join("runs")
-                .join("quaqua.db")
-        }
+        crate::worker::cleanup::default_runs_dir().join("quaqua.db")
     }
 
     /// Opens or creates the bus at the default path.
@@ -108,6 +102,9 @@ impl FarmBus {
 
     /// Opens or creates the bus at `path`, initializing schema idempotently.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
+        if crate::workspace::is_test_environment() && crate::workspace::is_live_workspace_db(path) {
+            return Err(rusqlite::Error::InvalidPath(path.to_path_buf()));
+        }
         let conn = crate::engine::sqlite::open_conn(path)?;
         crate::engine::sqlite::retry_while_busy(|| {
             conn.execute_batch(
@@ -258,6 +255,13 @@ impl FarmBus {
 /// Safely records a farm event to the database at `db_path`.
 /// Logs on error and returns `false`, ensuring bus write failures never break callers.
 pub fn record_event_safely(db_path: &Path, event: &FarmEvent) -> bool {
+    if crate::workspace::is_test_environment() && crate::workspace::is_live_workspace_db(db_path) {
+        eprintln!(
+            "warning: bus refused write to live workspace database under test: {}",
+            db_path.display()
+        );
+        return false;
+    }
     match FarmBus::open(db_path) {
         Ok(bus) => match bus.record(event) {
             Ok(inserted) => inserted,

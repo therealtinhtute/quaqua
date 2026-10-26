@@ -129,7 +129,7 @@ run_cleanup zz-clean PIPELINE_TASK=t GRID_SKIP=1 >/dev/null || fail "cleanup fai
 grep -q '^herdr api snapshot' "$T/events" && fail "pipeline GRID_SKIP=1: grid checked: $(cat "$T/events")"
 echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not checked"
 worktree "$T/quaqua" zz-clean
-run_cleanup zz-clean GRID_SKIP=1 >/dev/null 2>"$T/err" || fail "cleanup failed with bare GRID_SKIP"
+run_cleanup zz-clean GRID_SKIP=1 QUAQUA_TEST= >/dev/null 2>"$T/err" || fail "cleanup failed with bare GRID_SKIP"
 grep -q '^herdr api snapshot' "$T/events" || fail "bare GRID_SKIP=1: grid not checked: $(cat "$T/events")"
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"
 echo "ok: bare GRID_SKIP=1 -> ignored with a warning, grid checked"

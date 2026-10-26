@@ -28,6 +28,7 @@ unset HERDR_PANE_ID HERDR_STUB_SNAPSHOT
 
 # ── sandbox: stub git/herdr that log every call, temp HOME, dummy repo ───────
 mkdir -p "$T/bin" "$T/repo" "$T/home/quaqua/runs"
+export QUAQUA_RUNS_DIR="$T/home/quaqua/runs"
 cat > "$T/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
@@ -345,7 +346,7 @@ spawn tieude-gridskip tieude PIPELINE_TASK=t GRID_SKIP=1
 [[ ! -s "$T/gridcalls" ]] || fail "pipeline GRID_SKIP=1: grid checked: $(cat "$T/gridcalls")"
 echo "ok: GRID_SKIP=1 under tests/pipeline -> grid not checked"
 
-spawn tieude-gridskip tieude GRID_SKIP=1
+spawn tieude-gridskip tieude GRID_SKIP=1 QUAQUA_TEST=
 [[ $rc -eq 0 ]] || fail "bare GRID_SKIP: exit $rc, want 0: $(cat "$T/err")"
 grep -q "grid check" "$T/gridcalls" || fail "bare GRID_SKIP=1: grid not checked: $(cat "$T/gridcalls")"
 grep -q 'GRID_SKIP=1 ignored' "$T/err" || fail "bare GRID_SKIP=1: no warning"

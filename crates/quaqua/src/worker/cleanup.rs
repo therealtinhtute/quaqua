@@ -278,7 +278,11 @@ pub fn default_runs_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
         return PathBuf::from(dir);
     }
-    home_quaqua_runs()
+    let runs = home_quaqua_runs();
+    if crate::workspace::is_test_environment() && crate::workspace::is_live_workspace_runs(&runs) {
+        return crate::workspace::test_default_runs_dir();
+    }
+    runs
 }
 
 pub fn run_grid_hook(grid_tab: &str, owner: Option<&str>) -> Result<(), (i32, String)> {
@@ -619,6 +623,7 @@ pub(crate) mod metrics {
         std::fs::create_dir_all(&runs_dir).unwrap();
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
+        let _env_owner = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let _env_home = TestEnvVarGuard::set("HOME", &tmp);
         let _env_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", &runs_dir);
         let _env_skip = TestEnvVarGuard::set("GRID_SKIP", "1");

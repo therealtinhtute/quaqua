@@ -2155,7 +2155,14 @@ exit 0
     /// Another process takes the hook's lock directory and holds it: a live
     /// `sleep` owns the pid in the lock file, exactly like a running hook.
     fn hold_lock_in_child(state_dir: &std::path::Path, hold_secs: u64) -> std::process::Child {
-        let child = std::process::Command::new("sleep")
+        let sleep_bin = if std::path::Path::new("/bin/sleep").is_file() {
+            "/bin/sleep"
+        } else if std::path::Path::new("/usr/bin/sleep").is_file() {
+            "/usr/bin/sleep"
+        } else {
+            "sleep"
+        };
+        let child = std::process::Command::new(sleep_bin)
             .arg(hold_secs.to_string())
             .spawn()
             .expect("spawn lock holder");
@@ -2432,6 +2439,8 @@ exit 0
 
     #[test]
     fn test_reconcile_activity_changed_when_moves_applied() {
+        let _lock = crate::test_env::lock_env();
+        let _env_owner = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let mock = MockHerdrDriver {
             snapshot: Snapshot {
                 panes: vec![
@@ -2522,6 +2531,8 @@ exit 0
 
     #[test]
     fn test_reconcile_activity_mixed_working_and_idle() {
+        let _lock = crate::test_env::lock_env();
+        let _env_owner = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let mock = MockHerdrDriver {
             snapshot: Snapshot {
                 panes: vec![
@@ -2612,6 +2623,8 @@ exit 0
 
     #[test]
     fn test_grid_activity_plan_json() {
+        let _lock = crate::test_env::lock_env();
+        let _env_owner = crate::test_env::TestEnvVarGuard::remove("QUAQUA_OWNER");
         let mock = MockHerdrDriver {
             snapshot: Snapshot {
                 panes: vec![

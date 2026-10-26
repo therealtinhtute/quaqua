@@ -20,6 +20,139 @@ pub fn resolve_workspace_root(quaqua_home: Option<&Path>, home: Option<&Path>) -
     }
 }
 
+/// Returns true if the process is running in a test environment.
+pub fn is_test_environment() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
+        || is_running_in_cargo_test()
+}
+
+fn is_running_in_cargo_test() -> bool {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            if parent.ends_with("deps") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn home_from_passwd() -> Option<PathBuf> {
+    use std::ffi::CStr;
+
+    #[cfg(target_os = "macos")]
+    #[repr(C)]
+    struct Passwd {
+        pw_name: *mut std::ffi::c_char,
+        pw_passwd: *mut std::ffi::c_char,
+        pw_uid: u32,
+        pw_gid: u32,
+        pw_change: i64,
+        pw_class: *mut std::ffi::c_char,
+        pw_gecos: *mut std::ffi::c_char,
+        pw_dir: *mut std::ffi::c_char,
+        pw_shell: *mut std::ffi::c_char,
+        pw_expire: i64,
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[repr(C)]
+    struct Passwd {
+        pw_name: *mut std::ffi::c_char,
+        pw_passwd: *mut std::ffi::c_char,
+        pw_uid: u32,
+        pw_gid: u32,
+        pw_gecos: *mut std::ffi::c_char,
+        pw_dir: *mut std::ffi::c_char,
+        pw_shell: *mut std::ffi::c_char,
+    }
+
+    extern "C" {
+        fn getuid() -> u32;
+        fn getpwuid(uid: u32) -> *const Passwd;
+    }
+
+    unsafe {
+        let pwd = getpwuid(getuid());
+        if pwd.is_null() {
+            return None;
+        }
+        let dir = (*pwd).pw_dir;
+        if dir.is_null() {
+            return None;
+        }
+        let bytes = CStr::from_ptr(dir).to_bytes();
+        std::str::from_utf8(bytes).ok().map(PathBuf::from)
+    }
+}
+
+/// Returns the real user home directory from the system passwd database (independent of HOME env var),
+/// falling back to the HOME environment variable if passwd lookup is unavailable.
+pub fn system_user_home() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        if let Some(h) = home_from_passwd() {
+            return Some(h);
+        }
+    }
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Returns the live workspace DB path at `<system_user_home>/quaqua/runs/quaqua.db`.
+pub fn live_workspace_db() -> Option<PathBuf> {
+    system_user_home().map(|h| h.join("quaqua/runs/quaqua.db"))
+}
+
+/// Returns the live workspace runs directory at `<system_user_home>/quaqua/runs`.
+pub fn live_workspace_runs() -> Option<PathBuf> {
+    system_user_home().map(|h| h.join("quaqua/runs"))
+}
+
+/// Returns true if `path` points to the live workspace DB at `$HOME/quaqua/runs/quaqua.db`.
+pub fn is_live_workspace_db(path: &Path) -> bool {
+    // Any path inside the system temp directory is a test path, never the live workspace.
+    let tmp = std::env::temp_dir();
+    if path.starts_with(&tmp) {
+        return false;
+    }
+    if let (Ok(p_canon), Ok(tmp_canon)) = (path.canonicalize(), tmp.canonicalize()) {
+        if p_canon.starts_with(&tmp_canon) {
+            return false;
+        }
+    }
+    if path.starts_with("/tmp") || path.starts_with("/private/tmp") || path.starts_with("/private/var") {
+        return false;
+    }
+
+    if let Some(live) = live_workspace_db() {
+        if path == live {
+            return true;
+        }
+        if let (Ok(p1), Ok(p2)) = (path.canonicalize(), live.canonicalize()) {
+            if p1 == p2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Returns true if `path` points to the live workspace runs directory at `$HOME/quaqua/runs`.
+pub fn is_live_workspace_runs(path: &Path) -> bool {
+    let db = path.join("quaqua.db");
+    is_live_workspace_db(&db)
+}
+/// A dedicated per-process temporary runs directory under test.
+pub fn test_default_runs_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("quaqua-test-runs-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// A non-empty env var as a path; an empty value counts as unset.
 pub(crate) fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
