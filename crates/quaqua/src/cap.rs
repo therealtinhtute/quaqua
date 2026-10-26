@@ -96,7 +96,7 @@ pub fn check_owner_cap(
 pub fn taskforce_weight(
     cfg: &Config,
     state: &crate::state::TaskforceExecutionState,
-    layout: Option<&crate::layout::Layout>,
+    layout: &crate::layout::Layout,
 ) -> i64 {
     if let Some(&w) = cfg.limits.weights.get(&state.kind) {
         return w;
@@ -107,24 +107,7 @@ pub fn taskforce_weight(
     if !state.members.is_empty() {
         return state.members.len() as i64;
     }
-    if let Some(l) = layout {
-        if let Some(role) = l.roles.get(&state.kind) {
-            if !role.members.is_empty() {
-                return role.members.len() as i64;
-            }
-        }
-    } else if let Ok(l) = crate::layout::resolve_layout(cfg) {
-        if let Some(role) = l.roles.get(&state.kind) {
-            if !role.members.is_empty() {
-                return role.members.len() as i64;
-            }
-        }
-    }
-    match state.kind.as_str() {
-        "dual-lens" => 2,
-        "council" => 3,
-        _ => 1,
-    }
+    crate::config::taskforce_weight_from_layout(cfg, &state.kind, layout)
 }
 
 
@@ -162,6 +145,8 @@ pub fn count_owner_slots<H: HerdrOps>(
     }
     let pipe_weight = cfg.limits.weights.get("pipeline").copied().unwrap_or(2);
 
+    let effective_layout = crate::config::resolve_project_layout(cfg, None)
+        .unwrap_or_else(|_| crate::layout::Layout::from_legacy(cfg));
     let mut total_managed_slots: i64 = 0;
     let mut covered_workers: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(entries) = std::fs::read_dir(runs_dir) {
@@ -212,14 +197,16 @@ pub fn count_owner_slots<H: HerdrOps>(
                     if t.owner() != owner {
                         continue;
                     }
-                    let weight = taskforce_weight(cfg, &t, None);
+                    let weight = taskforce_weight(cfg, &t, &effective_layout);
 
                     let mut t_alive = false;
                     if !t.pid.is_empty() && is_pid_alive(&t.pid) {
                         t_alive = true;
                     } else if !t.task.is_empty() {
                         for w in &live_workers {
-                            if WorkerMetadata::load_taskforce(runs_dir, w).as_deref() == Some(&t.task) {
+                            if WorkerMetadata::load_taskforce(runs_dir, w).as_deref() == Some(&t.task)
+                                || t.members.iter().any(|m| m == w)
+                            {
                                 t_alive = true;
                                 break;
                             }
@@ -230,7 +217,8 @@ pub fn count_owner_slots<H: HerdrOps>(
                         let mut t_cur_live: i64 = 0;
                         for w in &o_workers {
                             if !t.task.is_empty()
-                                && WorkerMetadata::load_taskforce(runs_dir, w).as_deref() == Some(&t.task)
+                                && (WorkerMetadata::load_taskforce(runs_dir, w).as_deref() == Some(&t.task)
+                                    || t.members.iter().any(|m| m == w))
                             {
                                 t_cur_live += 1;
                                 covered_workers.insert(w.clone());

@@ -146,7 +146,7 @@ fn config_validate_rejects_bad_layout() {
 
     let err = config::validate(&cfg).unwrap_err();
     assert!(
-        err.contains("layout.cycle") || err.contains("cycle"),
+        err.contains("layout.cycle"),
         "expected cycle error, got: {err}"
     );
 }
@@ -387,4 +387,366 @@ fn config_validate_rejects_project_unknown_layout() {
         err.contains("bad-proj") && err.contains("nonexistent_layout"),
         "error must name project and unknown layout: {err}"
     );
+}
+#[test]
+fn f1_schema2_project_resolve_preserves_schema2_and_does_not_invent_layout() {
+    let mut cfg = valid_base_config();
+    assert_eq!(cfg.schema_version, 2);
+    assert!(cfg.layout.is_none());
+
+    cfg.limits.max_workers_per_orchestrator = 5;
+    cfg.roles.get_mut("lead").unwrap().max_peers = Some(4);
+    cfg.projects.insert(
+        "zimage".to_string(),
+        ProjectOverride {
+            max_workers_per_orchestrator: Some(5),
+            layout: None,
+        },
+    );
+
+    // resolve must NOT invent cfg.layout
+    let resolved = config::resolve(cfg.clone(), Some("zimage")).expect("resolve project");
+    assert!(
+        resolved.layout.is_none(),
+        "resolve must never invent cfg.layout for schema 2"
+    );
+    assert_eq!(resolved.limits.max_workers_per_orchestrator, 5);
+
+    // validate on resolved config must pass without triggering schema 2 [layout] error
+    assert!(config::validate(&resolved).is_ok());
+
+    // resolve_project_layout must succeed and return synthesized legacy layout
+    let layout = config::resolve_project_layout(&cfg, Some("zimage")).expect("project layout");
+    assert_eq!(layout.roles["cos"].max_children, Some(5));
+}
+
+#[test]
+fn f2_v3_legacy_resolve_preserves_edges_and_does_not_widen_can_spawn() {
+    let mut cfg = valid_base_config();
+    cfg.schema_version = 3;
+    cfg.layout = None; // v3 legacy config: no [layout] table
+
+    // Restrict cos can_spawn to only ["lead"]
+    cfg.roles.get_mut("cos").unwrap().can_spawn = vec!["lead".to_string()];
+
+    cfg.projects.insert(
+        "proj9".to_string(),
+        ProjectOverride {
+            max_workers_per_orchestrator: Some(8),
+            layout: None,
+        },
+    );
+
+    // resolve must NOT invent cfg.layout = Some("slp")
+    let resolved = config::resolve(cfg.clone(), Some("proj9")).expect("resolve proj9");
+    assert!(
+        resolved.layout.is_none(),
+        "resolve must never invent cfg.layout for v3 legacy configs"
+    );
+
+    // Both without and with project must return the synthesized layout with restricted edges
+    let layout_no_proj = config::resolve_project_layout(&cfg, None).expect("layout without proj");
+    assert_eq!(
+        layout_no_proj.roles["cos"].can_spawn,
+        vec!["lead".to_string()]
+    );
+
+    let layout_proj =
+        config::resolve_project_layout(&cfg, Some("proj9")).expect("layout with proj");
+    assert_eq!(
+        layout_proj.roles["cos"].can_spawn,
+        vec!["lead".to_string()],
+        "can_spawn edges must not be widened to builtin slp"
+    );
+}
+
+#[test]
+fn f3_config_validate_rejects_weight_override_exceeding_spawner_cap() {
+    let mut cfg = valid_base_config();
+    cfg.schema_version = 3;
+    cfg.layout = Some(config::LayoutRefConfig {
+        use_layout: "council".to_string(),
+    });
+    // Council has 3 members in built-in layout, but weight override is 5
+    cfg.limits.weights.insert("council".to_string(), 5);
+
+    // Lead spawner cap is 4, but weight is 5 -> static check must catch it!
+    let err = config::validate(&cfg).unwrap_err();
+    assert!(
+        err.contains("N=5")
+            && err.contains("council")
+            && err.contains("lead")
+            && err.contains("4")
+            && err.contains("[roles.lead] max_peers"),
+        "error must reflect weight override N=5 vs lead cap 4: {err}"
+    );
+}
+
+#[test]
+fn f4_config_validate_rejects_project_cap_only_override_exceeding_effective_layout() {
+    let mut cfg = valid_base_config();
+    cfg.schema_version = 3;
+    cfg.layout = Some(config::LayoutRefConfig {
+        use_layout: "council".to_string(),
+    });
+
+    // Project small only overrides cap to 2 (effective council weight is 3)
+    cfg.projects.insert(
+        "small".to_string(),
+        ProjectOverride {
+            max_workers_per_orchestrator: Some(2),
+            layout: None,
+        },
+    );
+
+    let err = config::validate(&cfg).unwrap_err();
+    assert!(
+        err.contains("council")
+            && err.contains("N=3")
+            && err.contains("2")
+            && err.contains("[limits] max_workers_per_orchestrator"),
+        "error must reject project cap-only override 2 against inherited council weight 3: {err}"
+    );
+}
+
+#[test]
+fn f5_cap_council_counts_n_slots_with_state_members_without_markers() {
+    let tmp = temp_runs_dir("council-state-members");
+    let cfg = valid_base_config();
+
+    // Active council state with members= list and no .taskforce marker files written
+    let state_file = tmp.join("council-mycouncil.state");
+    std::fs::write(
+        &state_file,
+        format!(
+            "task=mycouncil\nkind=council\nowner=cos\nfinished=0\ntaskforce_pid={}\nmembers=sude-c1,sude-c2,sude-c3\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+
+    let members = ["sude-c1", "sude-c2", "sude-c3"];
+    for name in &members {
+        std::fs::write(tmp.join(format!("{name}.owner")), "cos\n").unwrap();
+        // Explicitly NOT writing .taskforce marker files
+    }
+
+    let agents_json = format!(
+        r#"{{"result":{{"agents":[
+            {{"name":"{}","agent_status":"working"}},
+            {{"name":"{}","agent_status":"working"}},
+            {{"name":"{}","agent_status":"working"}}
+        ]}}}}"#,
+        members[0], members[1], members[2]
+    );
+    let mock_all_live = MockHerdr::new(&agents_json);
+
+    // Must count N=3 slots via state.members attribution, not 2N=6 slots
+    assert_eq!(
+        count_owner_slots(&tmp, "cos", None, &mock_all_live, &cfg),
+        3,
+        "council with state members and no markers must count N=3 slots, never 2N"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn f6_config_validate_allows_peer_spawner_without_config_knob() {
+    let mut cfg = valid_base_config();
+    cfg.schema_version = 3;
+
+    let mut roles = BTreeMap::new();
+    roles.insert(
+        "cos".to_string(),
+        LayoutRole {
+            class: RoleClass::Cos,
+            can_spawn: vec!["lead".to_string()],
+            can_prompt: vec![],
+            reports_to: None,
+            max_children: Some(8),
+            naming: Default::default(),
+            members: vec![],
+            quorum: None,
+        },
+    );
+    roles.insert(
+        "lead".to_string(),
+        LayoutRole {
+            class: RoleClass::Lead,
+            can_spawn: vec!["peer".to_string()],
+            can_prompt: vec![],
+            reports_to: Some("cos".to_string()),
+            max_children: Some(4),
+            naming: Default::default(),
+            members: vec![],
+            quorum: None,
+        },
+    );
+    roles.insert(
+        "peer".to_string(),
+        LayoutRole {
+            class: RoleClass::Peer,
+            can_spawn: vec!["taskforce".to_string()],
+            can_prompt: vec![],
+            reports_to: Some("lead".to_string()),
+            max_children: None,
+            naming: Default::default(),
+            members: vec![],
+            quorum: None,
+        },
+    );
+    roles.insert(
+        "taskforce".to_string(),
+        LayoutRole {
+            class: RoleClass::Taskforce,
+            can_spawn: vec![],
+            can_prompt: vec![],
+            reports_to: Some("peer".to_string()),
+            max_children: None,
+            naming: Default::default(),
+            members: vec![
+                Member {
+                    purpose: Some("review".to_string()),
+                    kind: None,
+                },
+                Member {
+                    purpose: Some("review".to_string()),
+                    kind: None,
+                },
+            ],
+            quorum: Some(2),
+        },
+    );
+
+    let peerfork_layout = Layout {
+        name: "peerfork".to_string(),
+        depth: 3,
+        roles,
+    };
+    cfg.layouts.insert("peerfork".to_string(), peerfork_layout);
+
+    // Legal peer->taskforce spawn must be allowed without knob "unsupported" false reject
+    assert!(config::validate(&cfg).is_ok());
+
+    // If peer max_children is set below member count (1 < 2), it fails naming max_children
+    cfg.layouts
+        .get_mut("peerfork")
+        .unwrap()
+        .roles
+        .get_mut("peer")
+        .unwrap()
+        .max_children = Some(1);
+    let err = config::validate(&cfg).unwrap_err();
+    assert!(
+        err.contains("effective cap 1") && err.contains("layout role max_children"),
+        "error must name layout max_children: {err}"
+    );
+}
+
+#[test]
+fn a4_taskforce_weight_precedence_all_tiers() {
+    let mut cfg = valid_base_config();
+    cfg.schema_version = 3;
+
+    let mut roles = BTreeMap::new();
+    roles.insert(
+        "council".to_string(),
+        LayoutRole {
+            class: RoleClass::Taskforce,
+            can_spawn: vec![],
+            can_prompt: vec![],
+            reports_to: None,
+            max_children: None,
+            naming: Default::default(),
+            members: vec![
+                Member {
+                    purpose: Some("review".to_string()),
+                    kind: None,
+                },
+                Member {
+                    purpose: Some("review".to_string()),
+                    kind: None,
+                },
+                Member {
+                    purpose: Some("review".to_string()),
+                    kind: None,
+                },
+                Member {
+                    purpose: Some("design".to_string()),
+                    kind: None,
+                },
+            ],
+            quorum: Some(3),
+        },
+    );
+    let test_layout = Layout {
+        name: "testlayout".to_string(),
+        depth: 1,
+        roles,
+    };
+
+    let empty_layout = Layout {
+        name: "empty".to_string(),
+        depth: 1,
+        roles: BTreeMap::new(),
+    };
+
+    // Tier 5: Legacy default (dual-lens: 2, council: 3, other: 1)
+    let s_dual = quaqua::state::TaskforceExecutionState {
+        kind: "dual-lens".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        quaqua::cap::taskforce_weight(&cfg, &s_dual, &empty_layout),
+        2
+    );
+
+    let s_council = quaqua::state::TaskforceExecutionState {
+        kind: "council".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        quaqua::cap::taskforce_weight(&cfg, &s_council, &empty_layout),
+        3
+    );
+
+    let s_other = quaqua::state::TaskforceExecutionState {
+        kind: "advisor".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        quaqua::cap::taskforce_weight(&cfg, &s_other, &empty_layout),
+        1
+    );
+
+    // Tier 4: Layout role members count (test_layout has 4 members for "council")
+    assert_eq!(
+        quaqua::cap::taskforce_weight(&cfg, &s_council, &test_layout),
+        4
+    );
+
+    // Tier 3: State members count overrides layout members count
+    let s_members = quaqua::state::TaskforceExecutionState {
+        kind: "council".to_string(),
+        members: vec!["m1".to_string(), "m2".to_string()],
+        ..Default::default()
+    };
+    assert_eq!(
+        quaqua::cap::taskforce_weight(&cfg, &s_members, &test_layout),
+        2
+    );
+
+    // Tier 2: State n overrides state members count and layout members
+    let s_n = quaqua::state::TaskforceExecutionState {
+        kind: "council".to_string(),
+        members: vec!["m1".to_string(), "m2".to_string()],
+        n: Some(5),
+        ..Default::default()
+    };
+    assert_eq!(quaqua::cap::taskforce_weight(&cfg, &s_n, &test_layout), 5);
+
+    // Tier 1: Config weights.<role> overrides all state and layout fields
+    cfg.limits.weights.insert("council".to_string(), 7);
+    assert_eq!(quaqua::cap::taskforce_weight(&cfg, &s_n, &test_layout), 7);
 }
