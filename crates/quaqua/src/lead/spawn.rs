@@ -369,40 +369,6 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     let rf_str = rf.to_string_lossy().to_string();
     let cmd =
         crate::launch::build_launch_cmd(&launch, &name, &rf_str, &runs_str, &root_str, false)?;
-    let target_naming = {
-        let layout_opt = crate::layout::resolve_layout(&cfg).ok();
-        if let Some(layout) = layout_opt {
-            let caller_r =
-                crate::layout::resolve_caller_role(&layout, &caller, Some(&runs_dir)).ok();
-            let target_r = crate::layout::resolve_target_role(&layout, caller_r, "lead").ok();
-            target_r
-                .and_then(|r| layout.roles.get(r))
-                .map(|r| r.naming)
-                .unwrap_or(crate::layout::model::Naming::SlugLead)
-        } else {
-            crate::layout::model::Naming::SlugLead
-        }
-    };
-    match target_naming {
-        crate::layout::model::Naming::SlugLead => {
-            if !name.ends_with("-lead") || name.len() > 32 {
-                return Err((
-                    1,
-                    format!(
-                        "lead name '{name}' is invalid: must end with '-lead' and be <= 32 chars\n"
-                    ),
-                ));
-            }
-        }
-        crate::layout::model::Naming::KindTask => {
-            if !crate::worker::spawn::is_valid_name(&name, &lead_kind) {
-                return Err((
-                    1,
-                    format!("lead name '{name}' is invalid for kind-task role: must start with '{lead_kind}-' and be <= 20 chars\n"),
-                ));
-            }
-        }
-    }
 
     crate::layout::gate(
         Some(&caller),
@@ -517,6 +483,11 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     // spawns leave no phantom owner rows for status scanners (issue R1).
     crate::state::WorkerMetadata::save_owner(&runs_dir, &name, &caller_owner)
         .map_err(|e| (1, format!("cannot write owner file for {name}: {e}\n")))?;
+    // Invariant: runs/<name>.layout_role exists iff this spawn produced a live agent.
+    // The Lead agent is confirmed running and ownership is saved. Disarm the guard
+    // so subsequent prompt/index steps do not strip the marker from a live Lead.
+    role_guard.success = true;
+
     // Update projects/INDEX.md with mkdir lock
     update_project_index_owner(&root, &slug, &name)?;
 
@@ -554,7 +525,6 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
                 .and_then(|()| std::fs::rename(&tmp, &path));
         }
     }
-    role_guard.success = true;
     Ok(())
 }
 

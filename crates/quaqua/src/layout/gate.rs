@@ -162,6 +162,25 @@ pub fn resolve_target_role<'a>(
 
     Err("role.unknown".to_string())
 }
+/// Resolve the target role name and its Naming convention for a spawn call site.
+///
+/// Maps target class (e.g. "peer", "lead", "taskforce") or explicit role name
+/// via `resolve_target_role`, returning the role name and its configured `Naming`.
+pub fn resolve_target_role_and_naming<'a>(
+    layout: &'a Layout,
+    caller: &Caller,
+    runs_dir: Option<&Path>,
+    target_class_or_role: &'a str,
+) -> Result<(&'a str, crate::layout::model::Naming), String> {
+    let caller_r = resolve_caller_role(layout, caller, runs_dir).ok();
+    let target_r = resolve_target_role(layout, caller_r, target_class_or_role)?;
+    let naming = layout
+        .roles
+        .get(target_r)
+        .map(|r| r.naming)
+        .unwrap_or_default();
+    Ok((target_r, naming))
+}
 fn role_class_rank(class: RoleClass) -> u8 {
     match class {
         RoleClass::Cos => 0,

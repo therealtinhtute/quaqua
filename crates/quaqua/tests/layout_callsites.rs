@@ -2,9 +2,13 @@
 //!
 //! Verifies:
 //! - `lead_spawn_denied_leaves_no_snapshot`
-//! - `user_layout_chair_lead_spawn_allowed`
+//! - `lead_spawn_council_and_review_council_without_naming_succeeds` (F1 regression)
 //! - `prompt_gate_uses_effective_layout`
-//! - `spawn_refused_leaves_no_layout_role`
+//! - `spawn_refused_leaves_no_layout_role` (lead spawn rollback)
+//! - `worker_spawn_refused_leaves_no_layout_role` (worker spawn rollback, F4)
+//! - `post_agent_failure_retains_layout_role_marker` (F3 invariant)
+//! - `slug_lead_role_accepts_lead_name_in_worker_spawn` (F2 ii & iii)
+//! - `worker_spawn_and_cleanup_lifecycle`
 
 use std::cell::RefCell;
 use std::fs;
@@ -21,6 +25,8 @@ use quaqua::layout::gate::{gate, SpawnOrigin};
 use quaqua::layout::model::Verb;
 use quaqua::layout::read_layout_role;
 use quaqua::lead::spawn::spawn_lead;
+use quaqua::worker::cleanup::cleanup_worker_in;
+use quaqua::worker::spawn::{spawn_worker, SpawnOptions};
 
 static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -143,7 +149,7 @@ impl GitOps for DummyGit {
 
 struct DummyHerdr {
     calls: RefCell<Vec<String>>,
-    started: std::cell::Cell<bool>,
+    started_agents: RefCell<std::collections::HashSet<String>>,
     fail_workspace: bool,
 }
 
@@ -151,7 +157,7 @@ impl DummyHerdr {
     fn new() -> Self {
         Self {
             calls: RefCell::new(Vec::new()),
-            started: std::cell::Cell::new(false),
+            started_agents: RefCell::new(std::collections::HashSet::new()),
             fail_workspace: false,
         }
     }
@@ -170,7 +176,11 @@ impl HerdrOps for DummyHerdr {
             }
             r#"{"result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}"#
         } else if args.first() == Some(&"agent") && args.get(1) == Some(&"start") {
-            self.started.set(true);
+            if let Some(agent_name) = args.get(2) {
+                self.started_agents
+                    .borrow_mut()
+                    .insert(agent_name.to_string());
+            }
             r#"{"result":{}}"#
         } else {
             r#"{"result":{}}"#
@@ -184,11 +194,13 @@ impl HerdrOps for DummyHerdr {
     fn agent_list(&self) -> std::io::Result<String> {
         Ok(r#"{"result":{"agents":[]}}"#.to_string())
     }
-    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
-        if self.started.get() {
+    fn agent_get(&self, name: &str) -> std::io::Result<(bool, String)> {
+        if self.started_agents.borrow().contains(name) {
             Ok((
                 true,
-                r#"{"result":{"agent":{"agent_status":"working","pane_id":"w1:p1"}}}"#.to_string(),
+                format!(
+                    r#"{{"result":{{"agent":{{"agent_status":"working","pane_id":"w1:p1"}}}}}}"#
+                ),
             ))
         } else {
             Ok((false, r#"{"error":{"code":"agent_not_found"}}"#.to_string()))
@@ -199,13 +211,13 @@ impl HerdrOps for DummyHerdr {
     }
     fn agent_start(
         &self,
-        _n: &str,
+        name: &str,
         _k: &str,
         _p: &str,
         _t: u32,
         _a: &[&str],
     ) -> std::io::Result<Output> {
-        self.started.set(true);
+        self.started_agents.borrow_mut().insert(name.to_string());
         Ok(Output {
             status: std::process::ExitStatus::from_raw(0),
             stdout: Vec::new(),
@@ -331,7 +343,6 @@ effort = "high"
     let herdr = DummyHerdr::new();
 
     let res = spawn_lead(&["testslug".to_string()], &git, &herdr);
-    println!("spawn_lead returned: {res:?}");
     assert!(res.is_err(), "lead spawn must be denied by layout gate");
 
     let snapshot_file = runs_dir.join("testslug.layout.toml");
@@ -341,12 +352,12 @@ effort = "high"
     );
 }
 
-/// Proving Test 2: In a user layout where lead-class role is named "chair",
-/// lead spawn passes target class "lead" which maps to "chair" and is allowed.
+/// F1 regression: Lead spawn under the built-in council layout and under the design.md
+/// review-council example (where lead-class roles omit `naming`) must succeed.
 #[test]
-fn user_layout_chair_lead_spawn_allowed() {
+fn lead_spawn_council_and_review_council_without_naming_succeeds() {
     let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let temp_root = hermetic_temp_dir("chair-lead");
+    let temp_root = hermetic_temp_dir("council-nonaming");
     let runs_dir = temp_root.join("runs");
     fs::create_dir_all(&runs_dir).unwrap();
 
@@ -368,9 +379,14 @@ fn user_layout_chair_lead_spawn_allowed() {
     std::env::set_var("QUAQUA_OWNER", "cos");
     std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
 
-    // Layout with cos -> chair (class = "lead") -> peer
+    fs::create_dir_all(temp_root.join("rules/_all")).unwrap();
+    fs::create_dir_all(temp_root.join("projects")).unwrap();
+    let git = DummyGit;
+    let herdr = DummyHerdr::new();
+
+    // Case A: Built-in council layout (council.toml [roles.lead] omits naming)
     let team_toml_path = temp_root.join("team.toml");
-    let team_toml_content = r#"
+    let team_toml_council = r#"
 schema_version = 3
 [strategy]
 default_kind = "sude"
@@ -382,62 +398,82 @@ model = "claude-3-7-sonnet"
 effort = "high"
 
 [layout]
-use = "chair-layout"
+use = "council"
+"#;
+    fs::write(&team_toml_path, team_toml_council).unwrap();
+    std::env::set_var("QUAQUA_TEAM_TOML", &team_toml_path);
 
-[layouts.chair-layout]
-name = "chair-layout"
+    fs::write(
+        temp_root.join("projects/INDEX.md"),
+        "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| council | ~/Lab/council | cos | active | goal |\n| review | ~/Lab/review | cos | active | goal |\n",
+    )
+    .unwrap();
+    fs::write(temp_root.join("projects/council.md"), "# council card\n").unwrap();
+
+    let res_council = spawn_lead(&["council".to_string()], &git, &herdr);
+    assert!(
+        res_council.is_ok(),
+        "lead spawn under built-in council layout must succeed without naming: {:?}",
+        res_council.err()
+    );
+    assert!(runs_dir.join("council.layout.toml").is_file());
+    assert_eq!(
+        read_layout_role(&runs_dir, "council-lead"),
+        Some("lead".to_string())
+    );
+
+    // Case B: design.md review-council layout (chair omits naming)
+    let team_toml_review = r#"
+schema_version = 3
+[purposes]
+review = "sude"
+
+[strategy]
+default_kind = "sude"
+lead_kind = "sude"
+
+[kinds.sude]
+harness = "omp"
+model = "claude-3-7-sonnet"
+effort = "high"
+
+[layout]
+use = "review-council"
+
+[layouts.review-council]
+name = "review-council"
 depth = 2
 
-[layouts.chair-layout.roles.cos]
+[layouts.review-council.roles.cos]
 class = "cos"
 can_spawn = ["chair"]
 can_prompt = ["chair"]
 max_children = 2
 
-[layouts.chair-layout.roles.chair]
+[layouts.review-council.roles.chair]
 class = "lead"
-can_spawn = ["peer"]
-can_prompt = ["peer"]
+can_spawn = ["council"]
+can_prompt = ["council"]
 reports_to = "cos"
-naming = "slug-lead"
 
-[layouts.chair-layout.roles.peer]
-class = "peer"
-can_spawn = []
-can_prompt = []
+[layouts.review-council.roles.council]
+class = "taskforce"
 reports_to = "owner"
+members = [{ purpose = "review" }]
 "#;
-    fs::write(&team_toml_path, team_toml_content).unwrap();
-    std::env::set_var("QUAQUA_TEAM_TOML", &team_toml_path);
+    fs::write(&team_toml_path, team_toml_review).unwrap();
+    fs::write(temp_root.join("projects/review.md"), "# review card\n").unwrap();
 
-    fs::create_dir_all(temp_root.join("rules/_all")).unwrap();
-    fs::create_dir_all(temp_root.join("projects")).unwrap();
-    fs::write(
-        temp_root.join("projects/INDEX.md"),
-        "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| council | ~/Lab/council | cos | active | goal |\n",
-    )
-    .unwrap();
-    fs::write(temp_root.join("projects/council.md"), "# council card\n").unwrap();
-
-    let git = DummyGit;
-    let herdr = DummyHerdr::new();
-
-    let res = spawn_lead(&["council".to_string()], &git, &herdr);
+    let res_review = spawn_lead(&["review".to_string()], &git, &herdr);
     assert!(
-        res.is_ok(),
-        "lead spawn must succeed when lead class maps to chair: {:?}",
-        res.err()
+        res_review.is_ok(),
+        "lead spawn under review-council layout must succeed when chair omits naming: {:?}",
+        res_review.err()
     );
-
-    let snapshot_file = runs_dir.join("council.layout.toml");
-    assert!(
-        snapshot_file.exists(),
-        "successful lead spawn must write layout snapshot"
-    );
+    assert!(runs_dir.join("review.layout.toml").is_file());
     assert_eq!(
-        read_layout_role(&runs_dir, "council-lead"),
-        Some("chair".to_string()),
-        "recorded layout role for council-lead must be 'chair'"
+        read_layout_role(&runs_dir, "review-lead"),
+        Some("chair".to_string())
     );
 }
 
@@ -561,7 +597,7 @@ reports_to = "owner"
     );
 }
 
-/// Proving Test 4: A spawn refused or failing after the layout gate must leave no .layout_role marker.
+/// Proving Test 4: A lead spawn refused after the layout gate must leave no .layout_role marker.
 #[test]
 fn spawn_refused_leaves_no_layout_role() {
     let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -587,7 +623,6 @@ fn spawn_refused_leaves_no_layout_role() {
     std::env::set_var("QUAQUA_OWNER", "cos");
     std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
 
-    // Standard team config
     let team_toml_path = temp_root.join("team.toml");
     let team_toml_content = r#"
 schema_version = 3
@@ -630,12 +665,321 @@ effort = "high"
     );
 }
 
+/// F4: A worker spawn refused after the layout gate must leave no .layout_role marker.
+#[test]
+fn worker_spawn_refused_leaves_no_layout_role() {
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp_root = hermetic_temp_dir("worker-refused");
+    let runs_dir = temp_root.join("runs");
+    fs::create_dir_all(&runs_dir).unwrap();
+
+    let repo_dir = temp_root.join("testrepo");
+    fs::create_dir_all(&repo_dir).unwrap();
+
+    // Pre-create the worker worktree path as a plain directory so prepare_worktree fails
+    // after the layout gate allows and records the marker
+    let wt_dir = temp_root.join(".wt/sude-blocked");
+    fs::create_dir_all(&wt_dir).unwrap();
+
+    let _env = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_RUNS_DIR",
+        "QUAQUA_ROOT",
+        "QUAQUA_HOME",
+        "HOME",
+        "QUAQUA_OWNER",
+        "QUAQUA_LAYOUT_SHADOW",
+        "QUAQUA_TEAM_TOML",
+        "GRID_SKIP",
+    ]);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::set_var("QUAQUA_ROOT", &temp_root);
+    std::env::set_var("QUAQUA_HOME", &temp_root);
+    std::env::set_var("HOME", &temp_root);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
+
+    let team_toml_path = temp_root.join("team.toml");
+    let team_toml_content = r#"
+schema_version = 3
+[strategy]
+default_kind = "sude"
+lead_kind = "sude"
+
+[kinds.sude]
+harness = "omp"
+model = "claude-3-7-sonnet"
+effort = "high"
+"#;
+    fs::write(&team_toml_path, team_toml_content).unwrap();
+    std::env::set_var("QUAQUA_TEAM_TOML", &team_toml_path);
+    let cfg: Config = toml::from_str(team_toml_content).unwrap();
+
+    let git = DummyGit;
+    let herdr = DummyHerdr::new();
+
+    let opts = SpawnOptions {
+        name: "sude-blocked".to_string(),
+        kind: Some("sude".to_string()),
+        repo_path: repo_dir,
+        base: None,
+        review: false,
+        purpose: None,
+        approve_kinds: Vec::new(),
+        solo: None,
+    };
+
+    let res = spawn_worker(opts, &cfg, &git, &herdr, SpawnOrigin::Cli);
+    assert!(
+        res.is_err(),
+        "worker spawn must fail when worktree path is blocked"
+    );
+
+    let role_file = runs_dir.join("sude-blocked.layout_role");
+    assert!(
+        !role_file.exists(),
+        "refused worker spawn must leave no runs/<name>.layout_role marker on disk"
+    );
+}
+
+/// F3: Once an agent is confirmed live, a subsequent failure (e.g. index update or grid hook)
+/// must retain the .layout_role marker because the agent is running.
+#[test]
+fn post_agent_failure_retains_layout_role_marker() {
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp_root = hermetic_temp_dir("post-agent-retain");
+    let runs_dir = temp_root.join("runs");
+    fs::create_dir_all(&runs_dir).unwrap();
+
+    let _env = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_RUNS_DIR",
+        "QUAQUA_ROOT",
+        "QUAQUA_HOME",
+        "HOME",
+        "QUAQUA_OWNER",
+        "QUAQUA_LAYOUT_SHADOW",
+        "QUAQUA_TEAM_TOML",
+    ]);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("QUAQUA_ROOT", &temp_root);
+    std::env::set_var("QUAQUA_HOME", &temp_root);
+    std::env::set_var("HOME", &temp_root);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
+
+    let team_toml_path = temp_root.join("team.toml");
+    let team_toml_content = r#"
+schema_version = 3
+[strategy]
+default_kind = "sude"
+lead_kind = "sude"
+
+[kinds.sude]
+harness = "omp"
+model = "claude-3-7-sonnet"
+effort = "high"
+"#;
+    fs::write(&team_toml_path, team_toml_content).unwrap();
+    std::env::set_var("QUAQUA_TEAM_TOML", &team_toml_path);
+
+    fs::create_dir_all(temp_root.join("rules/_all")).unwrap();
+    fs::create_dir_all(temp_root.join("projects")).unwrap();
+    fs::write(
+        temp_root.join("projects/INDEX.md"),
+        "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| livetest | ~/Lab/livetest | cos | active | goal |\n",
+    )
+    .unwrap();
+    fs::write(temp_root.join("projects/livetest.md"), "# livetest card\n").unwrap();
+
+    // Lock projects/INDEX.md.lock.d so that update_project_index_owner fails AFTER
+    // the Lead agent is started and save_owner succeeds.
+    fs::create_dir_all(temp_root.join("projects/INDEX.md.lock.d")).unwrap();
+
+    let git = DummyGit;
+    let herdr = DummyHerdr::new();
+
+    let res = spawn_lead(&["livetest".to_string()], &git, &herdr);
+    assert!(
+        res.is_err(),
+        "spawn_lead must fail when INDEX.md lock directory exists"
+    );
+
+    let role_file = runs_dir.join("livetest-lead.layout_role");
+    assert!(
+        role_file.is_file(),
+        "invariant: marker exists iff spawn produced a live agent (must retain marker despite post-agent index failure)"
+    );
+}
+
+/// F2 ii & iii: A lead-class role with `naming = "slug-lead"` accepts a worker name
+/// ending in `-lead`, which `is_valid_name` would reject.
+#[test]
+fn slug_lead_role_accepts_lead_name_in_worker_spawn() {
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp_root = hermetic_temp_dir("slug-lead-worker");
+    let runs_dir = temp_root.join("runs");
+    fs::create_dir_all(&runs_dir).unwrap();
+
+    let repo_dir = temp_root.join("testrepo");
+    fs::create_dir_all(&repo_dir).unwrap();
+
+    let _env = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_RUNS_DIR",
+        "QUAQUA_ROOT",
+        "QUAQUA_HOME",
+        "HOME",
+        "QUAQUA_OWNER",
+        "QUAQUA_LAYOUT_SHADOW",
+        "QUAQUA_TEAM_TOML",
+        "GRID_SKIP",
+    ]);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::set_var("QUAQUA_ROOT", &temp_root);
+    std::env::set_var("QUAQUA_HOME", &temp_root);
+    std::env::set_var("HOME", &temp_root);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
+
+    // Layout where cos can spawn lead-class role "chair" with naming = "slug-lead"
+    let team_toml_path = temp_root.join("team.toml");
+    let team_toml_content = r#"
+schema_version = 3
+[strategy]
+default_kind = "sude"
+lead_kind = "sude"
+
+[kinds.sude]
+harness = "omp"
+model = "claude-3-7-sonnet"
+effort = "high"
+
+[layout]
+use = "lead-worker-layout"
+
+[layouts.lead-worker-layout]
+name = "lead-worker-layout"
+depth = 2
+
+[layouts.lead-worker-layout.roles.cos]
+class = "cos"
+can_spawn = ["chair", "peer"]
+can_prompt = ["chair", "peer"]
+max_children = 2
+
+[layouts.lead-worker-layout.roles.chair]
+class = "lead"
+can_spawn = ["peer"]
+can_prompt = ["peer"]
+reports_to = "cos"
+naming = "slug-lead"
+
+[layouts.lead-worker-layout.roles.peer]
+class = "peer"
+can_spawn = []
+can_prompt = []
+reports_to = "owner"
+"#;
+    fs::write(&team_toml_path, team_toml_content).unwrap();
+    std::env::set_var("QUAQUA_TEAM_TOML", &team_toml_path);
+    let cfg: Config = toml::from_str(team_toml_content).unwrap();
+
+    fs::create_dir_all(temp_root.join("rules/_all")).unwrap();
+    fs::create_dir_all(temp_root.join("projects")).unwrap();
+    fs::write(
+        temp_root.join("projects/INDEX.md"),
+        "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| testrepo | ~/testrepo | cos | active | goal |\n",
+    )
+    .unwrap();
+
+    let git = DummyGit;
+    let herdr = DummyHerdr::new();
+
+    // 1. "arch-lead" ends with "-lead" and is <= 32 chars.
+    // Under is_valid_name, it would be REJECTED (doesn't start with "sude-", ends with "-lead").
+    // Under SlugLead branch, it is ACCEPTED!
+    let opts_slug_lead = SpawnOptions {
+        name: "arch-lead".to_string(),
+        kind: Some("sude".to_string()),
+        repo_path: repo_dir.clone(),
+        base: None,
+        review: false,
+        purpose: None,
+        approve_kinds: Vec::new(),
+        solo: None,
+    };
+    let res = spawn_worker(opts_slug_lead, &cfg, &git, &herdr, SpawnOrigin::Cli);
+    assert!(
+        res.is_ok(),
+        "worker spawn with -lead name targeting SlugLead role must succeed: {:?}",
+        res.err()
+    );
+    assert_eq!(
+        read_layout_role(&runs_dir, "arch-lead"),
+        Some("chair".to_string())
+    );
+
+    // 2. A name exceeding 32 chars on SlugLead role is REJECTED
+    let opts_too_long = SpawnOptions {
+        name: "a-very-long-name-exceeding-thirty-two-chars-maximum-lead".to_string(),
+        kind: Some("sude".to_string()),
+        repo_path: repo_dir.clone(),
+        base: None,
+        review: false,
+        purpose: None,
+        approve_kinds: Vec::new(),
+        solo: None,
+    };
+    let res_long = spawn_worker(opts_too_long, &cfg, &git, &herdr, SpawnOrigin::Cli);
+    assert!(
+        res_long.is_err(),
+        "name > 32 chars on SlugLead must be rejected"
+    );
+
+    // 3. For a KindTask role ("peer"), a name with wrong prefix is REJECTED
+    let opts_bad_prefix = SpawnOptions {
+        name: "wrongprefix-task".to_string(),
+        kind: Some("sude".to_string()),
+        repo_path: repo_dir.clone(),
+        base: None,
+        review: false,
+        purpose: None,
+        approve_kinds: Vec::new(),
+        solo: None,
+    };
+    let res_prefix = spawn_worker(opts_bad_prefix, &cfg, &git, &herdr, SpawnOrigin::Cli);
+    assert!(
+        res_prefix.is_err(),
+        "KindTask role must reject name with wrong prefix"
+    );
+
+    // 4. For a KindTask role ("peer"), a name longer than 20 chars is REJECTED
+    let opts_too_long_task = SpawnOptions {
+        name: "sude-toolongnameherethatexceedstwenty".to_string(),
+        kind: Some("sude".to_string()),
+        repo_path: repo_dir,
+        base: None,
+        review: false,
+        purpose: None,
+        approve_kinds: Vec::new(),
+        solo: None,
+    };
+    let res_task_long = spawn_worker(opts_too_long_task, &cfg, &git, &herdr, SpawnOrigin::Cli);
+    assert!(
+        res_task_long.is_err(),
+        "KindTask role must reject name exceeding 20 chars"
+    );
+}
+
 /// Verifies that a successful worker spawn writes .layout_role and worker cleanup deletes it.
 #[test]
 fn worker_spawn_and_cleanup_lifecycle() {
-    use quaqua::worker::cleanup::cleanup_worker_in;
-    use quaqua::worker::spawn::{spawn_worker, SpawnOptions};
-
     let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp_root = hermetic_temp_dir("worker-lifecycle");
     let runs_dir = temp_root.join("runs");
@@ -726,92 +1070,5 @@ effort = "high"
     assert!(
         !role_file.exists(),
         "runs/<name>.layout_role must be removed by worker cleanup"
-    );
-}
-
-/// Verifies naming enforcement: KindTask role rejects names not conforming to {kind}-{task}.
-#[test]
-fn naming_wire_enforcement() {
-    use quaqua::worker::spawn::{spawn_worker, SpawnOptions};
-
-    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let temp_root = hermetic_temp_dir("naming-wire");
-    let runs_dir = temp_root.join("runs");
-    fs::create_dir_all(&runs_dir).unwrap();
-
-    let repo_dir = temp_root.join("testrepo");
-    fs::create_dir_all(&repo_dir).unwrap();
-
-    let _env = EnvGuard::new(&[
-        "QUAQUA_TEST",
-        "QUAQUA_RUNS_DIR",
-        "QUAQUA_ROOT",
-        "QUAQUA_HOME",
-        "HOME",
-        "QUAQUA_OWNER",
-        "QUAQUA_LAYOUT_SHADOW",
-        "QUAQUA_TEAM_TOML",
-        "GRID_SKIP",
-    ]);
-    std::env::set_var("QUAQUA_TEST", "1");
-    std::env::set_var("GRID_SKIP", "1");
-    std::env::set_var("QUAQUA_ROOT", &temp_root);
-    std::env::set_var("QUAQUA_HOME", &temp_root);
-    std::env::set_var("HOME", &temp_root);
-    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
-    std::env::set_var("QUAQUA_OWNER", "cos");
-    std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
-
-    let team_toml_path = temp_root.join("team.toml");
-    let team_toml_content = r#"
-schema_version = 3
-[strategy]
-default_kind = "sude"
-lead_kind = "sude"
-
-[kinds.sude]
-harness = "omp"
-model = "claude-3-7-sonnet"
-effort = "high"
-"#;
-    fs::write(&team_toml_path, team_toml_content).unwrap();
-    std::env::set_var("QUAQUA_TEAM_TOML", &team_toml_path);
-    let cfg: Config = toml::from_str(team_toml_content).unwrap();
-
-    let git = DummyGit;
-    let herdr = DummyHerdr::new();
-
-    // Name ending with "-lead" is rejected for KindTask role
-    let opts_bad_lead = SpawnOptions {
-        name: "sude-worker-lead".to_string(),
-        kind: Some("sude".to_string()),
-        repo_path: repo_dir.clone(),
-        base: None,
-        review: false,
-        purpose: None,
-        approve_kinds: Vec::new(),
-        solo: None,
-    };
-    let res = spawn_worker(opts_bad_lead, &cfg, &git, &herdr, SpawnOrigin::Cli);
-    assert!(
-        res.is_err(),
-        "KindTask role must reject name ending with -lead"
-    );
-
-    // Name not starting with {kind}- is rejected
-    let opts_bad_prefix = SpawnOptions {
-        name: "wrongprefix-task".to_string(),
-        kind: Some("sude".to_string()),
-        repo_path: repo_dir,
-        base: None,
-        review: false,
-        purpose: None,
-        approve_kinds: Vec::new(),
-        solo: None,
-    };
-    let res = spawn_worker(opts_bad_prefix, &cfg, &git, &herdr, SpawnOrigin::Cli);
-    assert!(
-        res.is_err(),
-        "KindTask role must reject name with wrong prefix"
     );
 }

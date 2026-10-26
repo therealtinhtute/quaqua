@@ -462,19 +462,28 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         "[identity] worker spawn: name={} caller={caller}",
         opts.name
     );
+    let target_class = if origin == SpawnOrigin::TaskforceMember {
+        "taskforce"
+    } else if opts.name.ends_with("-lead") {
+        "lead"
+    } else {
+        "peer"
+    };
+
     let target_naming = {
         let layout_opt = crate::layout::resolve_effective_layout(&owner, runs_dir, cfg)
             .map(|(l, _)| l)
             .ok()
             .or_else(|| crate::layout::resolve_layout(cfg).ok());
-        if let Some(layout) = layout_opt {
-            let caller_r =
-                crate::layout::resolve_caller_role(&layout, &caller, Some(runs_dir)).ok();
-            let target_r = crate::layout::resolve_target_role(&layout, caller_r, "peer").ok();
-            target_r
-                .and_then(|r| layout.roles.get(r))
-                .map(|r| r.naming)
-                .unwrap_or(crate::layout::model::Naming::KindTask)
+        if let Some(layout) = &layout_opt {
+            crate::layout::gate::resolve_target_role_and_naming(
+                layout,
+                &caller,
+                Some(runs_dir),
+                target_class,
+            )
+            .map(|(_, naming)| naming)
+            .unwrap_or(crate::layout::model::Naming::KindTask)
         } else {
             crate::layout::model::Naming::KindTask
         }
@@ -503,7 +512,7 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         Some(&caller),
         Some(herdr),
         crate::layout::Verb::Spawn,
-        "peer",
+        target_class,
         Some(&opts.name),
         origin,
         Some(&owner),
@@ -761,6 +770,10 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
     if pane_id.is_empty() {
         return Err((1, String::new()));
     }
+    // Invariant: runs/<name>.layout_role exists iff this spawn produced a live agent.
+    // The agent is confirmed live in pane_id. Disarm the guard so subsequent grid
+    // hook errors do not strip the role marker from a live agent.
+    role_guard.success = true;
 
     if opts.review {
         let _ = WorkerMetadata::mark_review(&runs_dir, &opts.name);
@@ -783,7 +796,6 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         ));
     }
 
-    role_guard.success = true;
     Ok((caller.to_string(), owner))
 }
 
