@@ -851,6 +851,42 @@ mod tests {
     }
 
     #[test]
+    fn test_two_concurrent_watchers_on_one_journal_both_survive() {
+        let path = temp_db_path("two-watchers-busy");
+        let _cleaner = TempDbCleaner(path.clone());
+
+        {
+            let _init = SqliteJournal::open(&path).expect("init db");
+        }
+
+        let holder = rusqlite::Connection::open(&path).expect("open holder");
+        holder.execute_batch("BEGIN IMMEDIATE;").expect("hold lock");
+
+        let release = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(150));
+            holder.execute_batch("COMMIT;").expect("commit holder");
+        });
+
+        let mut j2 = SqliteJournal::open(&path).expect("open j2");
+        // Lower j2's busy timeout to 50ms so that without journal retry,
+        // it fails with "database is locked" while holder holds the lock for 150ms.
+        j2.conn
+            .lock()
+            .unwrap()
+            .pragma_update(None, "busy_timeout", 50u64)
+            .unwrap();
+
+        let ev = EventRecord::new(0, 1001, "wake", "{}");
+        let res = j2.append_event("wf-watcher2", &ev);
+        release.join().expect("release thread");
+
+        assert!(
+            res.is_ok(),
+            "concurrent watcher append_event must survive a locked database via retry, got: {res:?}"
+        );
+    }
+
+    #[test]
     fn test_concurrent_writers_monotonic_seq() {
         let path = temp_db_path("concurrent");
         let _cleaner = TempDbCleaner(path.clone());

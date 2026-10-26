@@ -10,13 +10,13 @@ pub mod watchdog;
 pub mod workflow;
 
 pub use crate::util::now_sec;
-pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
-pub use observer::{lead_waiting, report_ready};
-pub use watchdog::{is_lessons_heading, nap, prepend_header, validate_report_content};
 pub use brief::{
     brief_header_warnings, lead_routing_warnings, named_playbook_with_reason, warn_brief_headers,
     warn_lead_routing,
 };
+pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
+pub use observer::{lead_waiting, report_ready};
+pub use watchdog::{is_lessons_heading, nap, prepend_header, validate_report_content};
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -760,7 +760,11 @@ pub fn prompt_worker<G: GitOps>(
         // append the named playbook's Worker steps + cited leaves to the prompt.
         brief::warn_brief_headers(task_str);
         let owner_str = crate::state::WorkerMetadata::load_owner(&runs_dir, name);
-        let owner = if owner_str.is_empty() { None } else { Some(owner_str.as_str()) };
+        let owner = if owner_str.is_empty() {
+            None
+        } else {
+            Some(owner_str.as_str())
+        };
         brief::warn_lead_routing(task_str, owner, &runs_dir);
         let injection = brief::prepare_injection_in_workspace(task_str)?;
 
@@ -1659,6 +1663,60 @@ esac
         let parsed: serde_json::Value = serde_json::from_str(&malformed_ev.payload_json)
             .expect("payload_json must be valid JSON even when error message contains special characters and newlines");
         assert!(parsed.get("readonly").is_some());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_worker_prompt_runner_error_gives_non_zero_watchdog_exit() {
+        let _env_lock = lock_env();
+
+        let tmp = std::env::temp_dir().join(format!("quaqua-wp-runner-err-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _guard_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _guard_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _guard_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+
+        let name = "sude-runner-err";
+        let stub_herdr = tmp.join("herdr-stub");
+        fs::write(
+            &stub_herdr,
+            r#"#!/bin/sh
+echo '{"result": {"agent": {"agent_status": "working"}}}'
+exit 0
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&stub_herdr).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub_herdr, perms).unwrap();
+        let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_herdr.to_str().unwrap());
+
+        let herdr = Herdr {
+            bin: stub_herdr.to_string_lossy().to_string(),
+        };
+        let git = crate::git::Git::new();
+
+        let db_path = tmp.join("quaqua.db");
+        {
+            let mut j = SqliteJournal::open(&db_path).unwrap();
+            let snap = crate::engine::journal::SnapshotRecord::new(1, "{ corrupt json");
+            j.append_snapshot(&format!("worker:{name}#1"), &snap)
+                .unwrap();
+        }
+
+        // Calling resume on a worker with corrupt state triggers RunnerError::Serialization
+        let res = prompt_worker(name, None, true, None, &git, &herdr);
+        // Runner failure must return a non-zero WATCHDOG exit (code 3), never exit 0 without a report
+        assert_eq!(
+            res,
+            Err((3, String::new())),
+            "runner failure must return watchdog exit 3"
+        );
+
         let _ = fs::remove_dir_all(&tmp);
     }
 }

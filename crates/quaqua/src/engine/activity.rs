@@ -346,9 +346,9 @@ impl<'de> Deserialize<'de> for ActivityResult {
             return Ok(ActivityResult::Unknown);
         };
         Ok(match tag.as_str() {
-            "Herdr" => ActivityResult::Herdr(
-                serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown),
-            ),
+            "Herdr" => {
+                ActivityResult::Herdr(serde_json::from_value(inner).unwrap_or(HerdrResult::Unknown))
+            }
             "Git" => match serde_json::from_value(inner) {
                 Ok(v) => ActivityResult::Git(v),
                 Err(_) => ActivityResult::Unknown,
@@ -388,9 +388,24 @@ mod roundtrip_tests {
     fn cost_result_roundtrips_through_value() {
         let r = ActivityResult::Cost(CostResult::Spend(10.0));
         let v = serde_json::to_value(&r).unwrap();
-        assert_eq!(
-            serde_json::from_value::<ActivityResult>(v).unwrap(),
-            r
-        );
+        assert_eq!(serde_json::from_value::<ActivityResult>(v).unwrap(), r);
+    }
+
+    #[test]
+    fn agent_wait_result_roundtrips_through_value() {
+        let r = ActivityResult::Herdr(HerdrResult::AgentWait {
+            name: "sude-test".to_string(),
+            status: "working".to_string(),
+            seq: 1,
+            session_kind: "path".to_string(),
+            session_value: "/tmp/sess".to_string(),
+            harness: "omp".to_string(),
+            cwd: "/tmp".to_string(),
+            err: String::new(),
+            lead_waiting: false,
+            hook_active: false,
+        });
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(serde_json::from_value::<ActivityResult>(v).unwrap(), r);
     }
 }
