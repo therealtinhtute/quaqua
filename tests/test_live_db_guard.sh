@@ -13,11 +13,17 @@ trap 'rm -rf "$T"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+file_stat() {
+  if [[ -e "$1" ]]; then
+    stat -c "%Y %s" "$1" 2>/dev/null || stat -f "%m %z" "$1" 2>/dev/null || true
+  fi
+}
+
 real_db="$HOME/quaqua/runs/quaqua.db"
-before_count=0
-if [[ -f "$real_db" ]]; then
-  before_count=$(sqlite3 "$real_db" 'select count(*) from farm_events;')
-fi
+before_stat="$(file_stat "$real_db")"
+before_wal_stat="$(file_stat "$real_db-wal")"
+before_shm_stat="$(file_stat "$real_db-shm")"
+before_jrn_stat="$(file_stat "$real_db-journal")"
 
 mkdir -p "$T/bin"
 cat > "$T/bin/herdr" <<'EOF'
@@ -46,10 +52,12 @@ unset QUAQUA_RUNS_DIR QUAQUA_HOME QUAQUA_ROOT QUAQUA_OWNER HERDR_PANE_ID
 # Run lead prompt (which calls shadow gate)
 out="$("$bin" lead prompt baro testmsg 2>&1 || true)"
 
-if [[ -f "$real_db" ]]; then
-  after_count=$(sqlite3 "$real_db" 'select count(*) from farm_events;')
-  [[ "$before_count" -eq "$after_count" ]] || fail "live DB row count changed from $before_count to $after_count!"
-fi
+after_stat="$(file_stat "$real_db")"
+[[ "$before_stat" == "$after_stat" ]] || fail "live DB was modified! stat changed from '$before_stat' to '$after_stat'"
+[[ "$(file_stat "$real_db-wal")" == "$before_wal_stat" ]] || fail "live DB wal file modified!"
+[[ "$(file_stat "$real_db-shm")" == "$before_shm_stat" ]] || fail "live DB shm file modified!"
+[[ "$(file_stat "$real_db-journal")" == "$before_jrn_stat" ]] || fail "live DB journal file modified!"
+[[ "$out" == *"would_deny:"* ]] || fail "expected would_deny in lead prompt output, got: $out"
 
 echo "ok: suite forgetting HOME with QUAQUA_TEST=1 did not touch live DB"
 echo "PASS"
