@@ -588,7 +588,7 @@ pub fn diff_lead_tokens_with<H: crate::herdr::HerdrOps>(
     let rows = crate::worker::leadgate::index_rows(&content);
     let lead_rows: Vec<_> = rows
         .into_iter()
-        .filter(|r| r.owner.ends_with("-lead"))
+        .filter(|r| r.owner == format!("{}-lead", r.slug))
         .collect();
     if lead_rows.is_empty() {
         return problems;

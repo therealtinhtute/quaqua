@@ -79,6 +79,8 @@ pub fn ensure_lead_pane_tagged<H: HerdrOps>(
     Ok(())
 }
 
+/// Repair a registered Lead's pane tokens.
+/// Verifies consistency between herdr agent registry and projects/INDEX.md registration.
 pub fn repair_lead<H: HerdrOps>(
     herdr: &H,
     slug: &str,
@@ -87,52 +89,58 @@ pub fn repair_lead<H: HerdrOps>(
     let clean_slug = slug.strip_suffix("-lead").unwrap_or(slug);
     let lead_name = format!("{clean_slug}-lead");
 
-    // Check projects/INDEX.md registration if a workspace can be resolved
-    if let Ok(root) = crate::workspace::workspace_root_checked() {
-        let index_file = root.join("projects/INDEX.md");
-        if let Ok(content) = std::fs::read_to_string(&index_file) {
-            let rows = crate::worker::leadgate::index_rows(&content);
-            if let Some(row) = rows.iter().find(|r| r.slug == clean_slug) {
-                if row.owner != lead_name {
-                    return Err(format!(
-                        "project '{clean_slug}' owner in projects/INDEX.md is '{}', not '{lead_name}'",
-                        row.owner
-                    ));
+    // Fail closed: projects/INDEX.md must be resolvable and register this lead
+    let root = crate::workspace::workspace_root_checked()
+        .map_err(|(_, e)| format!("cannot resolve workspace root: {e}"))?;
+    let index_file = root.join("projects/INDEX.md");
+    let content = std::fs::read_to_string(&index_file)
+        .map_err(|e| format!("cannot read {}: {e}", index_file.display()))?;
+    let rows = crate::worker::leadgate::index_rows(&content);
+    if let Some(row) = rows.iter().find(|r| r.slug == clean_slug) {
+        if row.owner != lead_name {
+            return Err(format!(
+                "project '{clean_slug}' owner in projects/INDEX.md is '{}', not '{lead_name}'",
+                row.owner
+            ));
+        }
+    } else {
+        return Err(format!(
+            "unknown project slug '{clean_slug}' — no row in {}",
+            index_file.display()
+        ));
+    }
+
+    // Look up agent in herdr agent list
+    let agents_val =
+        get_agent_list_json(herdr).ok_or_else(|| "cannot query herdr agent list".to_string())?;
+    let agents = agents_val
+        .pointer("/result/agents")
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| "no agents array in herdr agent list response".to_string())?;
+    let mut matched_pane = None;
+    for agent in agents {
+        let name = agent.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if name == lead_name {
+            if let Some(p) = agent.get("pane_id").and_then(|p| p.as_str()) {
+                if !p.is_empty() {
+                    matched_pane = Some(p.to_string());
+                    break;
                 }
-            } else {
-                return Err(format!(
-                    "unknown project slug '{clean_slug}' — no row in {}",
-                    index_file.display()
-                ));
             }
         }
     }
+    let agent_pane = matched_pane
+        .ok_or_else(|| format!("agent '{lead_name}' is not registered or running in herdr"))?;
 
-    let pane = if let Some(p) = explicit_pane.filter(|s| !s.trim().is_empty()) {
-        p.to_string()
-    } else {
-        // Look up agent in herdr agent list
-        let agents_val = get_agent_list_json(herdr)
-            .ok_or_else(|| "cannot query herdr agent list".to_string())?;
-        let agents = agents_val
-            .pointer("/result/agents")
-            .and_then(|a| a.as_array())
-            .ok_or_else(|| "no agents array in herdr agent list response".to_string())?;
-        let mut matched_pane = None;
-        for agent in agents {
-            let name = agent.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            if name == lead_name {
-                if let Some(p) = agent.get("pane_id").and_then(|p| p.as_str()) {
-                    if !p.is_empty() {
-                        matched_pane = Some(p.to_string());
-                        break;
-                    }
-                }
-            }
+    // Verify explicit pane matches the agent's actual pane
+    if let Some(p) = explicit_pane.filter(|s| !s.trim().is_empty()) {
+        if p != agent_pane {
+            return Err(format!(
+                "agent '{lead_name}' is running on pane '{agent_pane}', not requested pane '{p}'"
+            ));
         }
-        matched_pane
-            .ok_or_else(|| format!("agent '{lead_name}' is not registered or running in herdr"))?
-    };
+    }
+    let pane = agent_pane;
 
     // Check if pane is already correctly tagged
     if let Ok(out) = herdr.run(&["pane", "get", &pane]) {
@@ -168,7 +176,7 @@ pub fn repair_all_leads<H: HerdrOps>(herdr: &H) -> Result<Vec<String>, String> {
     let rows = crate::worker::leadgate::index_rows(&content);
     let lead_rows: Vec<_> = rows
         .into_iter()
-        .filter(|r| r.owner.ends_with("-lead"))
+        .filter(|r| r.owner == format!("{}-lead", r.slug))
         .collect();
 
     if lead_rows.is_empty() {
@@ -178,11 +186,21 @@ pub fn repair_all_leads<H: HerdrOps>(herdr: &H) -> Result<Vec<String>, String> {
     }
 
     let mut results = Vec::new();
+    let mut failures = 0;
     for row in lead_rows {
         match repair_lead(herdr, &row.slug, None) {
             Ok(msg) => results.push(msg),
-            Err(err) => results.push(format!("lead '{}': {err}", row.slug)),
+            Err(err) => {
+                results.push(format!("lead '{}': {err}", row.slug));
+                failures += 1;
+            }
         }
+    }
+    if failures > 0 {
+        return Err(format!(
+            "repair --all failed for {failures} lead(s):\n{}",
+            results.join("\n")
+        ));
     }
     Ok(results)
 }

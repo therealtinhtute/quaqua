@@ -296,7 +296,9 @@ fn test_repair_lead_fails_closed_when_workspace_root_unresolvable() {
     let err = repair_lead(&herdr, "totally-made-up", Some("wC:p7"))
         .expect_err("repair_lead must fail closed when workspace INDEX is unresolvable");
     assert!(
-        err.contains("projects/INDEX.md is missing") || err.contains("no quaqua workspace") || err.contains("cannot resolve workspace root"),
+        err.contains("projects/INDEX.md is missing")
+            || err.contains("no quaqua workspace")
+            || err.contains("cannot resolve workspace root"),
         "got: {err}"
     );
 }
@@ -321,10 +323,7 @@ fn test_repair_lead_rejects_pane_mismatch() {
 
     let err = repair_lead(&herdr, "mu", Some("wC:p7"))
         .expect_err("repair_lead must refuse when explicit pane does not match agent pane");
-    assert!(
-        err.contains("wC:p7") && err.contains("wB:p1"),
-        "got: {err}"
-    );
+    assert!(err.contains("wC:p7") && err.contains("wB:p1"), "got: {err}");
 }
 
 #[test]

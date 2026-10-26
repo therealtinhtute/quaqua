@@ -322,6 +322,8 @@ Rules here
                 .arg("-C")
                 .arg(&repo_path)
                 .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .env("GIT_AUTHOR_NAME", "Quaqua Test")
                 .env("GIT_AUTHOR_EMAIL", "test@quaqua.local")
                 .env("GIT_COMMITTER_NAME", "Quaqua Test")

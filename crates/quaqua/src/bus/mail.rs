@@ -281,11 +281,7 @@ pub fn is_safe_inbox_name(name: &str) -> bool {
 }
 
 /// Helper to find a registered Lead's slug for a given pane ID from herdr agent list and projects/INDEX.md.
-fn try_find_lead_slug_for_pane<H: HerdrOps>(
-    herdr: &H,
-    runs_dir: &Path,
-    pane_id: &str,
-) -> Option<String> {
+fn try_find_lead_slug_for_pane<H: HerdrOps>(herdr: &H, pane_id: &str) -> Option<String> {
     let agents_val = crate::lead::tag::get_agent_list_json(herdr)?;
     let agents = agents_val
         .pointer("/result/agents")
@@ -304,9 +300,7 @@ fn try_find_lead_slug_for_pane<H: HerdrOps>(
     }
     let (slug, lead_name) = candidate?;
 
-    let ws_root = crate::workspace::workspace_root_checked()
-        .ok()
-        .or_else(|| runs_dir.parent().map(Path::to_path_buf))?;
+    let ws_root = crate::workspace::workspace_root_checked().ok()?;
     let index_file = ws_root.join("projects/INDEX.md");
     let content = std::fs::read_to_string(&index_file).ok()?;
     let rows = crate::worker::leadgate::index_rows(&content);
@@ -319,8 +313,8 @@ fn try_find_lead_slug_for_pane<H: HerdrOps>(
 }
 
 /// Resolves the sender identity (name, role) strictly from harness (env only under QUAQUA_TEST=1).
-/// If the caller is on an untagged registered Lead pane, automatically self-heals by re-stamping
-/// orchestrator tokens. On failure, names the pane and the repair command.
+/// If the caller is on an untagged registered Lead pane, automatically self-heals by verifying
+/// consistency with projects/INDEX.md and re-stamping orchestrator tokens. On failure, names the pane and the repair command.
 pub fn resolve_sender<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result<(String, String), String> {
     let caller = crate::identity::resolve_caller(herdr, runs_dir);
     if caller.role != crate::identity::Role::Unknown {
@@ -330,7 +324,7 @@ pub fn resolve_sender<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result<(String
     if let Ok(pane_id) = std::env::var("HERDR_PANE_ID") {
         let pane_id = pane_id.trim();
         if !pane_id.is_empty() {
-            if let Some(slug) = try_find_lead_slug_for_pane(herdr, runs_dir, pane_id) {
+            if let Some(slug) = try_find_lead_slug_for_pane(herdr, pane_id) {
                 if crate::lead::tag::tag_lead_pane(herdr, &slug, pane_id).is_ok() {
                     let healed = crate::identity::resolve_caller(herdr, runs_dir);
                     if healed.role != crate::identity::Role::Unknown {
