@@ -1468,6 +1468,10 @@ fn test_taskforce_dual_lens_cap_reservation() {
     for w in &solo {
         std::fs::write(tmp.join(format!("{w}.owner")), "cos\n").unwrap();
     }
+    for name in members {
+        std::fs::write(tmp.join(format!("{name}.owner")), "cos\n").unwrap();
+        std::fs::write(tmp.join(format!("{name}.taskforce")), "mytest\n").unwrap();
+    }
     let herdr = herdr_listing(&agent_list_json(&names));
     assert_eq!(
         count_owner_slots(&tmp, "cos", None, &herdr, &cfg),
@@ -1476,6 +1480,10 @@ fn test_taskforce_dual_lens_cap_reservation() {
     );
     for w in &solo {
         std::fs::remove_file(tmp.join(format!("{w}.owner"))).unwrap();
+    }
+    for name in members {
+        std::fs::remove_file(tmp.join(format!("{name}.owner"))).unwrap();
+        std::fs::remove_file(tmp.join(format!("{name}.taskforce"))).unwrap();
     }
 
     // Starting one is refused when the owner cannot find the free slots.

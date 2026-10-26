@@ -39,6 +39,21 @@ impl WorkerMetadata {
         runs_dir.join(format!("{name}.pipeline"))
     }
 
+    pub fn taskforce_path(runs_dir: &Path, name: &str) -> PathBuf {
+        runs_dir.join(format!("{name}.taskforce"))
+    }
+
+    pub fn save_taskforce(runs_dir: &Path, name: &str, task: &str) -> io::Result<()> {
+        atomic_write(&Self::taskforce_path(runs_dir, name), format!("{task}\n"))
+    }
+
+    pub fn load_taskforce(runs_dir: &Path, name: &str) -> Option<String> {
+        fs::read_to_string(Self::taskforce_path(runs_dir, name))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     pub fn review_path(runs_dir: &Path, name: &str) -> PathBuf {
         runs_dir.join(format!("{name}.review"))
     }
@@ -231,6 +246,7 @@ impl WorkerMetadata {
         let _ = fs::remove_file(Self::grid_path(runs_dir, name));
         let _ = fs::remove_file(Self::repo_path(runs_dir, name));
         let _ = fs::remove_file(Self::pipeline_path(runs_dir, name));
+        let _ = fs::remove_file(Self::taskforce_path(runs_dir, name));
         let _ = fs::remove_file(Self::review_path(runs_dir, name));
         let _ = fs::remove_file(Self::provider_retry_path(runs_dir, name));
         let _ = fs::remove_file(Self::cost80_path(runs_dir, name));
@@ -267,6 +283,8 @@ pub struct TaskforceExecutionState {
     pub pid: String,
     pub kind: String,
     pub finished: bool,
+    pub members: Vec<String>,
+    pub n: Option<i64>,
 }
 
 impl PipelineExecutionState {
@@ -294,7 +312,9 @@ impl ExecutionState {
         let file_name = path.file_name().and_then(|n| n.to_str())?;
         let is_pipeline = file_name.starts_with("pipeline-") && file_name.ends_with(".state");
         let is_taskforce = file_name.ends_with(".state")
-            && (file_name.starts_with("taskforce-") || file_name.starts_with("dual-lens-"));
+            && (file_name.starts_with("taskforce-")
+                || file_name.starts_with("dual-lens-")
+                || file_name.starts_with("council-"));
         if !is_pipeline && !is_taskforce {
             return None;
         }
@@ -351,7 +371,33 @@ impl ExecutionState {
                     state.kind = v.to_string();
                 } else if let Some(v) = line.strip_prefix("task=") {
                     state.task = v.to_string();
+                } else if let Some(v) = line.strip_prefix("members=") {
+                    state.members = v
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                } else if let Some(v) = line.strip_prefix("n=") {
+                    state.n = v.parse::<i64>().ok();
                 }
+            }
+            if state.kind.is_empty() {
+                if file_name.starts_with("council-") {
+                    state.kind = "council".to_string();
+                } else if file_name.starts_with("dual-lens-") {
+                    state.kind = "dual-lens".to_string();
+                } else {
+                    state.kind = "taskforce".to_string();
+                }
+            }
+            if state.task.is_empty() {
+                state.task = file_name
+                    .strip_prefix("council-")
+                    .or_else(|| file_name.strip_prefix("dual-lens-"))
+                    .or_else(|| file_name.strip_prefix("taskforce-"))
+                    .and_then(|n| n.strip_suffix(".state"))
+                    .unwrap_or("")
+                    .to_string();
             }
             Some(ExecutionState::Taskforce(state))
         }

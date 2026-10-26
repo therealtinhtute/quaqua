@@ -385,10 +385,12 @@ pub struct Grid {
     pub deferred_statuses: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectOverride {
     pub max_workers_per_orchestrator: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
 }
 
 /// Parse a duration string like "45m", "120s", "2h" into seconds.
@@ -469,7 +471,35 @@ pub fn load_team_config() -> Result<Config, (i32, String)> {
     }
 }
 
+/// Resolves the effective layout for a project (or global):
+/// Resolution order is project override -> global [layout] -> synthesized legacy layout.
+///
+/// - If `project` is `Some(slug)` and `cfg.projects` has a `[projects.<slug>]` entry with `layout = Some(name)`,
+///   that layout name takes precedence.
+/// - Otherwise, falls back to global `cfg.layout` (`[layout] use = "<name>"`).
+/// - If `cfg.layout` is None (or schema_version < 3), synthesizes the legacy SLP layout.
+pub fn resolve_project_layout(
+    cfg: &Config,
+    project: Option<&str>,
+) -> Result<crate::layout::Layout, String> {
+    let mut effective_cfg = cfg.clone();
+    if let Some(slug) = project {
+        if let Some(ov) = cfg.projects.get(slug) {
+            if let Some(cap) = ov.max_workers_per_orchestrator {
+                effective_cfg.limits.max_workers_per_orchestrator = cap;
+            }
+            if let Some(layout_name) = &ov.layout {
+                effective_cfg.layout = Some(LayoutRefConfig {
+                    use_layout: layout_name.clone(),
+                });
+            }
+        }
+    }
+    crate::layout::resolve_layout(&effective_cfg)
+}
+
 /// Apply a project override over the defaults. Unknown project is a hard error.
+/// Calls `resolve_project_layout` as the single implementation of layout resolution order.
 pub fn resolve(mut cfg: Config, project: Option<&str>) -> Result<Config, String> {
     if let Some(slug) = project {
         let ov = cfg
@@ -480,8 +510,58 @@ pub fn resolve(mut cfg: Config, project: Option<&str>) -> Result<Config, String>
         if let Some(cap) = ov.max_workers_per_orchestrator {
             cfg.limits.max_workers_per_orchestrator = cap;
         }
+        let resolved_layout = resolve_project_layout(&cfg, Some(slug))?;
+        cfg.layout = Some(LayoutRefConfig {
+            use_layout: resolved_layout.name,
+        });
     }
     Ok(cfg)
+}
+
+/// Statically validates that for every role with members in the layout,
+/// the member count N is less than or equal to the effective cap of every spawner role
+/// that can spawn it.
+pub fn validate_layout_caps(layout: &crate::layout::Layout, cfg: &Config) -> Result<(), String> {
+    for (role_name, role) in &layout.roles {
+        if role.members.is_empty() {
+            continue;
+        }
+        let n = role.members.len() as i64;
+        for (spawner_name, spawner_role) in &layout.roles {
+            let can_spawn = spawner_role.can_spawn.iter().any(|target| {
+                target == role_name
+                    || (role.class == crate::layout::RoleClass::Taskforce && target == "taskforce")
+            });
+            if !can_spawn {
+                continue;
+            }
+            let (spawner_cap, knob) = match spawner_role.class {
+                crate::layout::RoleClass::Cos => (
+                    cfg.limits.max_workers_per_orchestrator,
+                    "[limits] max_workers_per_orchestrator",
+                ),
+                crate::layout::RoleClass::Lead => {
+                    let lead_max = cfg
+                        .roles
+                        .get("lead")
+                        .and_then(|r| r.max_peers)
+                        .unwrap_or(DEFAULT_LEAD_MAX_PEERS);
+                    (
+                        lead_max.min(cfg.limits.max_workers_per_orchestrator),
+                        "[roles.lead] max_peers",
+                    )
+                }
+                _ => (0, "unsupported"),
+            };
+            if n > spawner_cap {
+                return Err(format!(
+                    "layout '{}' role '{role_name}' member count N={n} exceeds spawner '{spawner_name}' effective cap {spawner_cap} (knob to raise: {knob})",
+                    layout.name
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate the resolved config. team.toml is the only source of
@@ -500,10 +580,26 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         ));
     }
 
-    if cfg.schema_version == 2 && (cfg.layout.is_some() || !cfg.layouts.is_empty()) {
+    if cfg.schema_version == 2
+        && (cfg.layout.is_some()
+            || !cfg.layouts.is_empty()
+            || cfg.projects.values().any(|p| p.layout.is_some()))
+    {
         return Err(
             "schema_version 2 does not support [layout] (requires schema_version = 3)".to_string(),
         );
+    }
+
+    for (slug, ov) in &cfg.projects {
+        if let Some(layout_name) = &ov.layout {
+            if crate::layout::builtin::get(layout_name).is_none()
+                && !cfg.layouts.contains_key(layout_name)
+            {
+                return Err(format!(
+                    "project '{slug}' references unknown layout '{layout_name}'"
+                ));
+            }
+        }
     }
 
     if cfg.schema_version == 3 {
@@ -523,7 +619,38 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             if l.name.is_empty() {
                 l.name = name.clone();
             }
-            crate::layout::validate_layout(&l)?;
+            crate::layout::validate_user_layout_with_config(&l, cfg)?;
+            validate_layout_caps(&l, cfg)?;
+        }
+        let builtin_in_use_name = match &cfg.layout {
+            Some(layout_ref) if crate::layout::builtin::is_builtin(&layout_ref.use_layout) => {
+                Some(layout_ref.use_layout.as_str())
+            }
+            None => Some("slp"),
+            _ => None,
+        };
+        if let Some(builtin_name) = builtin_in_use_name {
+            if let Some(bl) = crate::layout::builtin::get(builtin_name) {
+                crate::layout::validate_layout_with_config(&bl, cfg)?;
+                validate_layout_caps(&bl, cfg)?;
+            }
+        }
+
+        for (slug, ov) in &cfg.projects {
+            if let Some(layout_name) = &ov.layout {
+                let proj_cfg = resolve(cfg.clone(), Some(slug))?;
+                if let Some(bl) = crate::layout::builtin::get(layout_name) {
+                    crate::layout::validate_layout_with_config(&bl, &proj_cfg)?;
+                    validate_layout_caps(&bl, &proj_cfg)?;
+                } else if let Some(custom) = cfg.layouts.get(layout_name) {
+                    let mut l = custom.clone();
+                    if l.name.is_empty() {
+                        l.name = layout_name.clone();
+                    }
+                    crate::layout::validate_user_layout_with_config(&l, &proj_cfg)?;
+                    validate_layout_caps(&l, &proj_cfg)?;
+                }
+            }
         }
     }
 
