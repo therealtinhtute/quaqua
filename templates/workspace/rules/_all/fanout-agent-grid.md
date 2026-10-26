@@ -11,5 +11,5 @@ Every spawn/fanout of task workers MUST end with the workers arranged in the age
 - `GRID_SKIP=1` is for `quaqua pipeline` (grids its own workers) and tests (`QUAQUA_TEST=1`) only; anywhere else it is ignored with a warning — never use it to dodge the grid.
 - Label each pane with the worker name. Moving or swapping a pane while its agent runs is allowed — the move keeps the agent process and session (isolated herdr smoke, issue #79); still avoid moving panes during `--wait`.
 
-Why: 2026-10-11 — the Lead split into the CoS tab put its Peer there too (3 panes in one tab), and a CoS worker was stranded alone in a project tab. anh iu, 2026-10-02 — workers left scattered had to be moved by hand (tieude-pillfix + tieude-ccresearch → w4:t3 "coucou-workers"). 2026-10-11 — CoS spawned probes with `GRID_SKIP=1`, piling 3 panes into the CoS tab.
+
 - A pipeline that spawns with GRID_SKIP=1 must repair (not only --check) across all of the owner's workers; a per-worker --check passes on a layout that is wrong in total — 2026-10-16, quaqua-rs-lead wP:t1

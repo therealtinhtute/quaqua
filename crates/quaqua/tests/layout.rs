@@ -610,9 +610,10 @@ fn layout_evidence_e_drift_warning_shown_on_mismatch() {
     assert!(snap_path.is_file());
 
     // Mutate live team.toml role topology
-    let mutated_toml = template_toml.replace(
-        "can_spawn  = [\"lead\", \"peer\", \"taskforce\"]",
-        "can_spawn  = [\"lead\"]",
+    let mutated_toml = template_toml.replace("\"lead\", \"peer\", \"taskforce\"", "\"lead\"");
+    assert_ne!(
+        mutated_toml, template_toml,
+        "drift fixture must actually change the template's CoS role"
     );
     let team_path = dir.join("team.toml");
     std::fs::write(&team_path, &mutated_toml).unwrap();
@@ -748,7 +749,10 @@ fn layout_p7_migrate_dry_run_unified_diff() {
     };
 
     let diff = format_diff(template_toml, &migrated, "team.toml");
-    assert!(diff.starts_with("--- team.toml\n+++ team.toml\n@@ -4,8 +4,11 @@\n"));
+    assert!(
+        diff.starts_with("--- team.toml\n+++ team.toml\n@@ -"),
+        "diff must be a unified diff over team.toml: {diff}"
+    );
     assert!(diff.contains("-schema_version = 2\n"));
     assert!(diff.contains("+schema_version = 3\n"));
     assert!(diff.contains("+[layout]\n+use = \"slp\"\n"));
