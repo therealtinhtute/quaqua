@@ -4922,28 +4922,60 @@ fn check_brief_with_owner_integration() {
 }
 
 #[test]
-fn spawn_lead_pins_lead_playbook_from_task() {
-    use quaqua::worker::prompt::brief::read_lead_playbook;
-    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-spawnlead-{}", std::process::id()));
+fn check_brief_resolves_lead_owner_from_harness_and_warns() {
+    let _lock = lock_env();
+    std::env::set_var("GRID_SKIP", "1");
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("HERDR_PANE_ID", "w1:p1");
+
+    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-f1-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp);
+    std::env::set_var("QUAQUA_RUNS_DIR", temp.to_str().unwrap());
 
-    let brief = "Topology: lead — kickoff\nPlaybook: figure-it-out\nGoal: g\nHard constraints: none\nCurrent design: d\n";
-    let lead_name = "testproj-lead";
+    // Pin lead playbook
+    std::fs::write(temp.join(".pstack-lead.playbook"), "name=feature\nids=1,2\n").unwrap();
 
-    if let Some(pb_name) = quaqua::worker::prompt::brief::named_playbook(brief) {
-        let path = temp.join(format!(".{lead_name}.playbook"));
-        let tmp = temp.join(format!(".{lead_name}.playbook.tmp"));
-        let _ = std::fs::write(&tmp, format!("name={pb_name}\nids=\n"))
-            .and_then(|()| std::fs::rename(&tmp, &path));
+    let brief = "Topology: lead — test\nPlaybook: feature\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+
+    struct LeadPaneHerdr;
+    impl quaqua::herdr::HerdrOps for LeadPaneHerdr {
+        fn run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+            let stdout = if args.first() == Some(&"pane") && args.get(1) == Some(&"get") {
+                r#"{"result":{"pane":{"pane_id":"w1:p1","tokens":{"grid_role":"orchestrator","grid_owner":"pstack-lead"}}}}"#.to_string()
+            } else {
+                r#"{"result":{}}"#.to_string()
+            };
+            Ok(std::process::Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+        fn agent_list(&self) -> std::io::Result<String> { unimplemented!() }
+        fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> { unimplemented!() }
+        fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> { unimplemented!() }
+        fn agent_start(&self, _n: &str, _k: &str, _p: &str, _t: u32, _a: &[&str]) -> std::io::Result<std::process::Output> { unimplemented!() }
+        fn pane_split(&self, _c: &str, _o: &str, _e: &[(&str, &str)]) -> std::io::Result<std::process::Output> { unimplemented!() }
+        fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+        fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<std::process::Output> { unimplemented!() }
+        fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool { unimplemented!() }
+        fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> { unimplemented!() }
+        fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+        fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+        fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> { unimplemented!() }
+        fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+        fn agent_prompt_wait_background(&self, _n: &str, _p: &str, _t: u32, _f: std::fs::File) -> std::io::Result<std::process::Child> { unimplemented!() }
     }
 
-    assert_eq!(read_lead_playbook(&temp, lead_name), Some("figure-it-out".to_string()));
+    let herdr = LeadPaneHerdr;
+    let resolved_owner = quaqua::worker::prompt::resolve_caller_lead_owner(&herdr);
+    assert_eq!(resolved_owner, Some("pstack-lead".to_string()));
 
-    // Peer brief with same playbook without reason warns
-    let peer_brief = "Topology: lead — test\nPlaybook: figure-it-out\nGoal: g\nHard constraints: none\nCurrent design: d\n";
-    let warnings = quaqua::worker::prompt::lead_routing_warnings(peer_brief, Some(lead_name), &temp);
+    let warnings = quaqua::worker::prompt::lead_routing_warnings(brief, resolved_owner.as_deref(), &temp);
     assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("uses the Lead's own playbook 'figure-it-out' without a stated reason"));
+    assert!(warnings[0].contains("uses the Lead's own playbook 'feature' without a stated reason"));
+    std::env::remove_var("HERDR_PANE_ID");
+    std::env::remove_var("QUAQUA_RUNS_DIR");
 
     let _ = std::fs::remove_dir_all(&temp);
 }

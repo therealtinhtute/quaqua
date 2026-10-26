@@ -158,6 +158,28 @@ pub fn resolve_budget_sec(task: &str) -> (u64, &'static str) {
     (2700, "default")
 }
 
+/// Resolve the Lead caller owner using harness pane identity (grid_owner ending in -lead).
+/// Fails closed to None if not inside a Lead pane or no pane tokens exist (never ambient env).
+pub fn resolve_caller_lead_owner<H: HerdrOps>(herdr: &H) -> Option<String> {
+    let tokens = crate::identity::caller_pane_tokens(herdr);
+    let t = tokens.as_ref()?;
+    if t.get("grid_role").map(|s| s.as_str()) == Some("worker") {
+        return None;
+    }
+    let owner = t.get("grid_owner")?.trim();
+    if owner.ends_with("-lead") {
+        Some(owner.to_string())
+    } else {
+        None
+    }
+}
+
+pub fn do_check_brief_with_herdr<H: HerdrOps>(task: &str, herdr: &H) -> Result<(), (i32, String)> {
+    let runs_dir = default_runs_dir();
+    let owner = resolve_caller_lead_owner(herdr);
+    do_check_brief_with_owner(task, owner.as_deref(), &runs_dir)
+}
+
 pub fn do_check_brief(task: &str) -> Result<(), (i32, String)> {
     let runs_dir = default_runs_dir();
     do_check_brief_with_owner(task, None, &runs_dir)

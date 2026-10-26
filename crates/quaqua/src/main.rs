@@ -7,7 +7,9 @@ use quaqua::config;
 use quaqua::git::Git;
 use quaqua::herdr::Herdr;
 use quaqua::worker::cleanup::{cleanup_worker, default_runs_dir};
-use quaqua::worker::prompt::{do_check_brief, prompt_worker, USAGE as PROMPT_USAGE};
+use quaqua::worker::prompt::{
+    do_check_brief_with_herdr, prompt_worker, USAGE as PROMPT_USAGE,
+};
 use quaqua::worker::spawn::{parse_spawn_args, spawn_worker};
 use quaqua::worker::stop::{parse_stop_args, stop_worker};
 use std::path::{Path, PathBuf};
@@ -354,7 +356,7 @@ fn handle_worker(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, 
                 if p_args.len() != 2 || p_args[1].is_empty() {
                     return Err((1, format!("{PROMPT_USAGE}\n")));
                 }
-                do_check_brief(&p_args[1])?;
+                do_check_brief_with_herdr(&p_args[1], herdr)?;
                 return Ok(());
             }
             if p_args[0] == "--resume" {

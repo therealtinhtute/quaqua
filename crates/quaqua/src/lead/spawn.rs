@@ -804,7 +804,11 @@ mod tests {
             })
         }
         fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<Output> {
-            unimplemented!()
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
         }
         fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<Output> {
             unimplemented!()
@@ -876,5 +880,62 @@ mod tests {
         assert_eq!(snap.layout.name, "slp");
         assert_eq!(snap.sha256.len(), 64);
         assert!(snap.source.starts_with("team.toml@"));
+    }
+
+    #[test]
+    fn test_lead_spawn_pins_playbook_from_task() {
+        let _lock = crate::test_env::lock_env();
+        let _test_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _team_guard = crate::test_env::TestEnvVarGuard::remove("QUAQUA_TEAM_TOML");
+        let _lead_guard = crate::test_env::TestEnvVarGuard::remove("LEAD_KIND");
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "quaqua-lead-spawn-pb-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("projects")).unwrap();
+        fs::create_dir_all(root.join("rules/_all")).unwrap();
+        let _guard = CleanupDir(root.clone());
+
+        let index_content = "| slug | repo | owner | status | one-line goal |\n|------|------|-------|--------|---------------|\n| child | ~/Lab/child | cos | active | goal |\n";
+        fs::write(root.join("projects/INDEX.md"), index_content).unwrap();
+        fs::write(root.join("projects/child.md"), "# child card\n").unwrap();
+
+        let _root_guard =
+            crate::test_env::TestEnvVarGuard::set("QUAQUA_ROOT", root.to_str().unwrap());
+        let _home_guard = crate::test_env::TestEnvVarGuard::set("HOME", root.to_str().unwrap());
+        let _owner_guard = crate::test_env::TestEnvVarGuard::set("QUAQUA_OWNER", "cos");
+        let _pane_guard = crate::test_env::TestEnvVarGuard::set("HERDR_PANE_ID", "");
+
+        let git = DummyGit;
+        let herdr = DummyHerdr::new();
+
+        let task_brief = "Topology: lead — kickoff\nPlaybook: figure-it-out\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+        let res = spawn_lead(
+            &[
+                "child".to_string(),
+                "--task".to_string(),
+                task_brief.to_string(),
+            ],
+            &git,
+            &herdr,
+        );
+        assert!(res.is_ok(), "spawn_lead failed: {:?}", res.err());
+
+        let pin_file = root.join("runs/.child-lead.playbook");
+        assert!(
+            pin_file.is_file(),
+            "runs/.child-lead.playbook must exist after spawn_lead with --task"
+        );
+        let pin_content = fs::read_to_string(&pin_file).unwrap();
+        assert!(
+            pin_content.contains("name=figure-it-out"),
+            "pin content: {pin_content}"
+        );
     }
 }
