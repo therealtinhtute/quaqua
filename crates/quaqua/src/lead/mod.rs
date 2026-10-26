@@ -1,5 +1,6 @@
 //! Project Lead operations (`quaqua lead {spawn, prompt, cleanup}`).
 
+pub mod card;
 pub mod cleanup;
 pub mod prompt;
 pub mod spawn;

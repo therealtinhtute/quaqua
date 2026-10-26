@@ -9,6 +9,7 @@ use std::time::Duration;
 
 pub const USAGE: &str = "\
 # Usage: quaqua lead spawn <slug> [--task \"<kickoff>\"] [--approve-kind <kind>]
+#   [--allow-stale-card]
 #   Start the project Lead for <slug> (AGENTS.md '## Roles (SLP)'): an agent
 #   session named <slug>-lead running in the quaqua checkout this script
 #   belongs to (normally ~/quaqua). The Lead is not a worker — no worktree,
@@ -34,7 +35,8 @@ pub const USAGE: &str = "\
 #                         <kickoff> to it (same verified submit as `lead prompt`).
 #                         Without --task the command prints
 #                         `NEXT: herdr agent prompt <slug>-lead \"<kickoff>\"` on stderr —
-#                         a Lead left at 'ready' never starts work by itself.";
+#                         a Lead left at 'ready' never starts work by itself.
+#   --allow-stale-card    override refusal on stale open items in projects/<slug>.md ## Now";
 
 use crate::workspace::workspace_root_checked;
 
@@ -77,6 +79,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     let mut slug = String::new();
     let mut approve_kinds: Vec<String> = Vec::new();
     let mut task: Option<String> = None;
+    let mut allow_stale_card = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -111,6 +114,9 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
                 return Err((1, format!("{}\n", USAGE)));
             }
             approve_kinds.push(v.to_string());
+            i += 1;
+        } else if arg == "--allow-stale-card" {
+            allow_stale_card = true;
             i += 1;
         } else if arg.starts_with('-') || !slug.is_empty() {
             return Err((1, format!("{}\n", USAGE)));
@@ -198,6 +204,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         repo_cell.clone()
     };
     let repo = Path::new(&repo_path_str);
+    crate::lead::card::check_card_freshness(&root, &slug, Some(repo), allow_stale_card, git)?;
     let integ = format!("quaqua/{slug}-integ");
 
     let integ_ref = format!("refs/heads/{}", integ);

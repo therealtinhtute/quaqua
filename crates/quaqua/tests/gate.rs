@@ -444,6 +444,44 @@ fn a_clean_pr_still_asks_and_merging_to_main_still_denies_without_a_lookup() {
 }
 
 #[test]
+fn pkill_f_and_full_are_denied() {
+    let cases = [
+        "pkill -f quaqua",
+        "pkill --full quaqua",
+        "pkill -9 -f quaqua",
+        "pkill -9f quaqua",
+        "pkill -f9 quaqua",
+        "sudo pkill -f quaqua",
+        "bash -c 'pkill -f quaqua'",
+    ];
+    for c in cases {
+        match check(c) {
+            Verdict::Deny(reason) => {
+                assert!(
+                    reason.contains("use `pgrep -f` then kill the PID"),
+                    "case {c}: unexpected reason {reason}"
+                );
+            }
+            other => panic!("case {c}: expected Deny, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn pkill_without_f_and_pgrep_stay_allowed() {
+    let cases = [
+        "pkill quaqua",
+        "pkill -9 quaqua",
+        "pgrep -f quaqua",
+        "pgrep --full quaqua",
+        "kill 1234",
+    ];
+    for c in cases {
+        assert_eq!(check(c), Verdict::Allow, "case {c}");
+    }
+}
+
+#[test]
 fn removed_worker_scripts_are_denied_with_the_replacement_hint() {
     let cases = [
         (
@@ -683,13 +721,24 @@ fn binary_warns_on_rule_drift_after_session_start() {
             .stderr(Stdio::null())
             .spawn()
             .expect("failed to spawn the quaqua binary");
-        child.stdin.take().expect("stdin").write_all(json.as_bytes()).expect("write");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(json.as_bytes())
+            .expect("write");
         let out = child.wait_with_output().expect("wait");
-        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
     };
     let spawn = r#"{"session_id":"sess-1","tool_name":"Bash","tool_input":{"command":"quaqua worker spawn sude-x sude /r"}}"#;
 
-    let (code, out) = run(&["gate", "--session-start"], r#"{"session_id":"sess-1","source":"startup"}"#);
+    let (code, out) = run(
+        &["gate", "--session-start"],
+        r#"{"session_id":"sess-1","source":"startup"}"#,
+    );
     assert_eq!((code, out.as_str()), (Some(0), ""));
     let (code, out) = run(&["gate"], spawn);
     assert_eq!((code, out.trim()), (Some(0), ""), "no drift, no output");
@@ -699,17 +748,29 @@ fn binary_warns_on_rule_drift_after_session_start() {
         &["gate"],
         r#"{"session_id":"sess-1","tool_name":"Bash","tool_input":{"command":"quaqua status"}}"#,
     );
-    assert_eq!((code, out.trim()), (Some(0), ""), "non-dispatch commands stay quiet");
+    assert_eq!(
+        (code, out.trim()),
+        (Some(0), ""),
+        "non-dispatch commands stay quiet"
+    );
     let (code, out) = run(&["gate"], spawn);
     assert_eq!(code, Some(0), "drift never blocks");
     let v: serde_json::Value = serde_json::from_str(out.trim()).expect("hook JSON");
-    let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    let ctx = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
     assert!(ctx.contains("rules/_all/a.md"), "{ctx}");
     assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     let (_, out) = run(&["gate"], spawn);
     assert_eq!(out.trim(), "", "warns once per change");
 
-    let (code, out) = run(&["gate", "--session-start"], r#"{"session_id":"sess-1","source":"compact"}"#);
+    let (code, out) = run(
+        &["gate", "--session-start"],
+        r#"{"session_id":"sess-1","source":"compact"}"#,
+    );
     assert_eq!(code, Some(0));
-    assert!(out.contains("Re-read") && out.contains("AGENTS.md"), "{out}");
+    assert!(
+        out.contains("Re-read") && out.contains("AGENTS.md"),
+        "{out}"
+    );
 }

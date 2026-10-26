@@ -21,6 +21,19 @@ pub struct Report {
     pub checkout_checked: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriftProblem {
+    pub drift: String,
+    pub fix: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorkspaceDriftReport {
+    pub problems: Vec<DriftProblem>,
+    pub warnings: Vec<String>,
+    pub notes: Vec<String>,
+}
+
 /// `quaqua doctor`: print what was found, one `error:` per problem, and exit
 /// non-zero if anything is wrong.
 pub fn run() -> i32 {
@@ -46,6 +59,34 @@ pub fn run() -> i32 {
     } else {
         for problem in &report.problems {
             eprintln!("error: {problem}");
+        }
+        1
+    }
+}
+
+/// `quaqua doctor --workspace`: check workspace rules and herdr plugin event hooks
+/// for drift against engine templates and manifest.
+pub fn run_workspace(
+    workspace: Option<&Path>,
+    checkout: Option<&Path>,
+    plugins_json: Option<&Path>,
+) -> i32 {
+    let report = evaluate_workspace(workspace, checkout, plugins_json);
+    for line in &report.notes {
+        println!("{line}");
+    }
+    for line in &report.warnings {
+        eprintln!("warning: {line}");
+    }
+    if report.problems.is_empty() {
+        println!(
+            "ok: workspace rules and herdr plugin event hooks are in sync with engine templates"
+        );
+        0
+    } else {
+        for problem in &report.problems {
+            eprintln!("error: {}", problem.drift);
+            eprintln!("  fix: {}", problem.fix);
         }
         1
     }
@@ -324,6 +365,357 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, Strin
         .map_err(|e| format!("reading shell output failed: {e}"))
 }
 
+/// Compare workspace rule files under `workspace_rules_dir` against template files
+/// under `template_dir`. Returns a `DriftProblem` for each missing or differing rule.
+pub fn diff_rules(template_dir: &Path, workspace_rules_dir: &Path) -> Vec<DriftProblem> {
+    let mut problems = Vec::new();
+    let Ok(entries) = std::fs::read_dir(template_dir) else {
+        return problems;
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
+        .collect();
+    files.sort();
+
+    for t_path in files {
+        let Some(file_name) = t_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let ws_path = workspace_rules_dir.join(file_name);
+        let t_content = match std::fs::read_to_string(&t_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !ws_path.is_file() {
+            problems.push(DriftProblem {
+                drift: format!(
+                    "rule drift: rules/_all/{} is missing (template exists under {})",
+                    file_name,
+                    t_path.display()
+                ),
+                fix: format!("cp {} {}", t_path.display(), ws_path.display()),
+            });
+        } else {
+            match std::fs::read_to_string(&ws_path) {
+                Ok(ws_content) => {
+                    if ws_content != t_content {
+                        problems.push(DriftProblem {
+                            drift: format!(
+                                "rule drift: rules/_all/{} differs from template {}",
+                                file_name,
+                                t_path.display()
+                            ),
+                            fix: format!("cp {} {}", t_path.display(), ws_path.display()),
+                        });
+                    }
+                }
+                Err(e) => {
+                    problems.push(DriftProblem {
+                        drift: format!("rule drift: rules/_all/{} cannot be read: {e}", file_name),
+                        fix: format!("cp {} {}", t_path.display(), ws_path.display()),
+                    });
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// Fallback when no checkout is found: compare against the embedded template table.
+pub fn diff_embedded_rules(workspace_rules_dir: &Path) -> Vec<DriftProblem> {
+    let mut problems = Vec::new();
+    for entry in crate::init::ENTRIES {
+        if let Some(rel) = entry.path.strip_prefix("rules/_all/") {
+            let ws_file = workspace_rules_dir.join(rel);
+            let t_path_disp = format!("templates/workspace/rules/_all/{rel}");
+            if !ws_file.is_file() {
+                problems.push(DriftProblem {
+                    drift: format!("rule drift: rules/_all/{rel} is missing (template exists under {t_path_disp})"),
+                    fix: format!("cp {t_path_disp} {}", ws_file.display()),
+                });
+            } else {
+                match std::fs::read(&ws_file) {
+                    Ok(bytes) => {
+                        if bytes != entry.bytes {
+                            problems.push(DriftProblem {
+                                drift: format!("rule drift: rules/_all/{rel} differs from template {t_path_disp}"),
+                                fix: format!("cp {t_path_disp} {}", ws_file.display()),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        problems.push(DriftProblem {
+                            drift: format!("rule drift: rules/_all/{rel} cannot be read: {e}"),
+                            fix: format!("cp {t_path_disp} {}", ws_file.display()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// Pure diff function: compare event hooks declared in `manifest_toml` against
+/// registrations in `plugins_json`.
+pub fn diff_plugin_hooks(
+    manifest_toml: &str,
+    manifest_path: &Path,
+    plugins_json: &str,
+) -> Result<Vec<DriftProblem>, String> {
+    let mut problems = Vec::new();
+    let manifest_val: toml::Value =
+        toml::from_str(manifest_toml).map_err(|e| format!("cannot parse manifest TOML: {e}"))?;
+
+    let plugin_id = manifest_val
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("herdr-quaqua");
+
+    let mut declared_events: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(events_arr) = manifest_val.get("events").and_then(|v| v.as_array()) {
+        for ev in events_arr {
+            let on = ev.get("on").and_then(|v| v.as_str()).unwrap_or("");
+            let cmd: Vec<String> = ev
+                .get("command")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !on.is_empty() && !cmd.is_empty() {
+                declared_events.push((on.to_string(), cmd));
+            }
+        }
+    }
+
+    let plugin_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let fix_cmd = format!("herdr plugin link {}", plugin_dir.display());
+
+    let parsed_json: serde_json::Value = match serde_json::from_str(plugins_json) {
+        Ok(v) => v,
+        Err(e) => {
+            problems.push(DriftProblem {
+                drift: format!("plugin registration drift: plugins.json cannot be parsed ({e})"),
+                fix: fix_cmd,
+            });
+            return Ok(problems);
+        }
+    };
+
+    let entries = match parsed_json.as_array() {
+        Some(arr) => arr,
+        None => {
+            problems.push(DriftProblem {
+                drift: "plugin registration drift: plugins.json is not an array".to_string(),
+                fix: fix_cmd,
+            });
+            return Ok(problems);
+        }
+    };
+
+    let matching_plugin = entries.iter().find(|entry| {
+        entry.get("plugin_id").and_then(|v| v.as_str()) == Some(plugin_id)
+            || entry.get("name").and_then(|v| v.as_str()) == Some(plugin_id)
+    });
+
+    let Some(plugin) = matching_plugin else {
+        problems.push(DriftProblem {
+            drift: format!(
+                "plugin hook drift: herdr plugin '{plugin_id}' is not registered in plugins.json"
+            ),
+            fix: fix_cmd,
+        });
+        return Ok(problems);
+    };
+
+    let registered_events = plugin
+        .get("events")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut missing_hooks = Vec::new();
+    for (on, cmd) in &declared_events {
+        let found = registered_events.iter().any(|ev| {
+            let ev_on = ev.get("on").and_then(|v| v.as_str()).unwrap_or("");
+            let ev_cmd: Vec<String> = ev
+                .get("command")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ev_on == on && ev_cmd == *cmd
+        });
+        if !found {
+            missing_hooks.push(format!("{on} -> {cmd:?}"));
+        }
+    }
+
+    if !missing_hooks.is_empty() {
+        problems.push(DriftProblem {
+            drift: format!(
+                "plugin hook drift: herdr plugin '{plugin_id}' lacks event hook(s) declared in {}: {}",
+                manifest_path.display(),
+                missing_hooks.join(", ")
+            ),
+            fix: fix_cmd,
+        });
+    }
+
+    Ok(problems)
+}
+
+pub fn resolve_engine_from_workspace(ws: &Path) -> Option<PathBuf> {
+    let index = ws.join("projects/INDEX.md");
+    if let Ok(content) = std::fs::read_to_string(&index) {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('|') {
+                let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
+                if parts.len() >= 3 && parts[1] != "slug" && !parts[1].starts_with('-') {
+                    let r = parts[2];
+                    let repo_str = if let Some(stripped) = r.strip_prefix("~/") {
+                        format!("{}/{}", home, stripped)
+                    } else if r == "~" {
+                        home.clone()
+                    } else {
+                        r.to_string()
+                    };
+                    let p = PathBuf::from(repo_str);
+                    if p.join("crates/quaqua/src").is_dir() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let default_engine = PathBuf::from(home).join("Lab/quaqua");
+        if default_engine.join("crates/quaqua/src").is_dir() {
+            return Some(default_engine);
+        }
+    }
+    None
+}
+
+pub fn resolve_herdr_plugins_json() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("HERDR_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir).join("plugins.json"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(xdg).join("herdr/plugins.json"));
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(home).join(".config/herdr/plugins.json"));
+    }
+    None
+}
+
+pub fn evaluate_workspace(
+    workspace: Option<&Path>,
+    checkout: Option<&Path>,
+    plugins_json_path: Option<&Path>,
+) -> WorkspaceDriftReport {
+    let mut report = WorkspaceDriftReport::default();
+    let ws = workspace
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::workspace::workspace_root());
+
+    report.notes.push(format!("workspace: {}", ws.display()));
+
+    let checkout_dir = checkout
+        .map(PathBuf::from)
+        .or_else(checkout_root)
+        .or_else(|| resolve_engine_from_workspace(&ws));
+
+    // 1. Rules drift
+    if let Some(co) = &checkout_dir {
+        report.notes.push(format!("checkout: {}", co.display()));
+        let t_rules = co.join("templates/workspace/rules/_all");
+        let ws_rules = ws.join("rules/_all");
+        let rule_problems = diff_rules(&t_rules, &ws_rules);
+        report.problems.extend(rule_problems);
+    } else {
+        let ws_rules = ws.join("rules/_all");
+        let rule_problems = diff_embedded_rules(&ws_rules);
+        report.problems.extend(rule_problems);
+    }
+
+    // 2. Herdr plugin hook drift
+    let manifest_path = checkout_dir
+        .as_ref()
+        .map(|c| c.join("plugins/herdr-quaqua/herdr-plugin.toml"))
+        .unwrap_or_else(|| PathBuf::from("plugins/herdr-quaqua/herdr-plugin.toml"));
+
+    let manifest_toml = if manifest_path.is_file() {
+        std::fs::read_to_string(&manifest_path).ok()
+    } else {
+        Some(include_str!("../../../plugins/herdr-quaqua/herdr-plugin.toml").to_string())
+    };
+
+    let pjson_path = plugins_json_path
+        .map(PathBuf::from)
+        .or_else(resolve_herdr_plugins_json);
+
+    match (manifest_toml, pjson_path) {
+        (Some(toml_str), Some(pj_path)) => {
+            if pj_path.is_file() {
+                match std::fs::read_to_string(&pj_path) {
+                    Ok(json_str) => match diff_plugin_hooks(&toml_str, &manifest_path, &json_str) {
+                        Ok(probs) => report.problems.extend(probs),
+                        Err(e) => report
+                            .warnings
+                            .push(format!("plugin hook check error: {e}")),
+                    },
+                    Err(e) => {
+                        let plugin_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+                        report.problems.push(DriftProblem {
+                            drift: format!(
+                                "plugin hook drift: herdr plugins.json at {} cannot be read: {e}",
+                                pj_path.display()
+                            ),
+                            fix: format!("herdr plugin link {}", plugin_dir.display()),
+                        });
+                    }
+                }
+            } else {
+                let plugin_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+                report.problems.push(DriftProblem {
+                    drift: format!(
+                        "plugin hook drift: herdr plugins.json not found at {}",
+                        pj_path.display()
+                    ),
+                    fix: format!("herdr plugin link {}", plugin_dir.display()),
+                });
+            }
+        }
+        (None, _) => {
+            report
+                .warnings
+                .push("cannot find herdr-plugin.toml manifest".to_string());
+        }
+        (_, None) => {
+            report
+                .warnings
+                .push("cannot resolve herdr plugins.json path".to_string());
+        }
+    }
+
+    // 3. Workspace warnings
+    report.warnings.extend(workspace_warnings(Some(&ws)));
+
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +942,131 @@ mod tests {
         assert!(find_on_path("quaqua", Some(path)).is_none());
         let path = dir.as_os_str();
         assert_eq!(find_on_path("quaqua", Some(path)), Some(bin));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diff_rules_detects_content_difference_and_missing_rules() {
+        let dir = temp_dir("diff-rules");
+        let template_dir = dir.join("templates/rules");
+        let ws_rules_dir = dir.join("ws/rules");
+        fs::create_dir_all(&template_dir).unwrap();
+        fs::create_dir_all(&ws_rules_dir).unwrap();
+
+        fs::write(
+            template_dir.join("lead-inbox.md"),
+            "template lead inbox content",
+        )
+        .unwrap();
+        fs::write(template_dir.join("brief.md"), "common brief content").unwrap();
+        fs::write(template_dir.join("missing.md"), "template only content").unwrap();
+
+        // ws has differing lead-inbox, identical brief, and missing.md is absent
+        fs::write(
+            ws_rules_dir.join("lead-inbox.md"),
+            "stale workspace lead inbox",
+        )
+        .unwrap();
+        fs::write(ws_rules_dir.join("brief.md"), "common brief content").unwrap();
+
+        let problems = diff_rules(&template_dir, &ws_rules_dir);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+
+        let diff_lead = problems
+            .iter()
+            .find(|p| p.drift.contains("lead-inbox.md"))
+            .unwrap();
+        assert!(diff_lead.drift.contains("differs from template"));
+        assert!(diff_lead.fix.starts_with("cp "));
+
+        let missing = problems
+            .iter()
+            .find(|p| p.drift.contains("missing.md"))
+            .unwrap();
+        assert!(missing.drift.contains("is missing"));
+        assert!(missing.fix.starts_with("cp "));
+
+        // When workspace is synced: 0 problems
+        fs::write(
+            ws_rules_dir.join("lead-inbox.md"),
+            "template lead inbox content",
+        )
+        .unwrap();
+        fs::write(ws_rules_dir.join("missing.md"), "template only content").unwrap();
+        let clean = diff_rules(&template_dir, &ws_rules_dir);
+        assert!(clean.is_empty(), "{clean:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diff_plugin_hooks_detects_missing_event_hooks() {
+        let dir = temp_dir("diff-hooks");
+        let manifest_path = dir.join("herdr-quaqua/herdr-plugin.toml");
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+
+        let manifest_toml = r#"
+id = "herdr-quaqua"
+name = "herdr-quaqua"
+
+[[events]]
+on = "pane.created"
+command = ["quaqua", "grid", "hook"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["quaqua", "events", "hook"]
+
+[[events]]
+on = "pane.exited"
+command = ["quaqua", "events", "hook"]
+"#;
+
+        // plugins.json has only pane.created
+        let partial_json = r#"[
+  {
+    "plugin_id": "herdr-quaqua",
+    "name": "herdr-quaqua",
+    "events": [
+      {
+        "on": "pane.created",
+        "command": ["quaqua", "grid", "hook"]
+      }
+    ]
+  }
+]"#;
+
+        let problems = diff_plugin_hooks(manifest_toml, &manifest_path, partial_json).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].drift.contains("lacks event hook(s)"));
+        assert!(problems[0].drift.contains("pane.agent_status_changed"));
+        assert!(problems[0].drift.contains("pane.exited"));
+        assert!(problems[0].fix.contains("herdr plugin link"));
+
+        // When plugins.json has all hooks: 0 problems
+        let full_json = r#"[
+  {
+    "plugin_id": "herdr-quaqua",
+    "name": "herdr-quaqua",
+    "events": [
+      {
+        "on": "pane.created",
+        "command": ["quaqua", "grid", "hook"]
+      },
+      {
+        "on": "pane.agent_status_changed",
+        "command": ["quaqua", "events", "hook"]
+      },
+      {
+        "on": "pane.exited",
+        "command": ["quaqua", "events", "hook"]
+      }
+    ]
+  }
+]"#;
+        let clean = diff_plugin_hooks(manifest_toml, &manifest_path, full_json).unwrap();
+        assert!(clean.is_empty(), "{clean:?}");
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

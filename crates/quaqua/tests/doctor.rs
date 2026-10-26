@@ -78,6 +78,18 @@ impl Fixture {
             .output()
             .expect("run quaqua doctor")
     }
+
+    fn run_workspace_flag(&self) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_quaqua"))
+            .args(["doctor", "--workspace"])
+            .env("HOME", &self.home)
+            .env("QUAQUA_CHECKOUT", &self.checkout)
+            .env_remove("QUAQUA_HOME")
+            .env_remove("QUAQUA_ROOT")
+            .current_dir(&self.cwd)
+            .output()
+            .expect("run quaqua doctor --workspace")
+    }
 }
 
 impl Drop for Fixture {
@@ -187,4 +199,107 @@ fn a_split_workspace_is_quiet() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("warning:"), "{stderr}");
+}
+
+#[test]
+fn doctor_workspace_drift_reports_problems_and_clean_passes() {
+    let f = Fixture::new("ws-drift", "quaqua is /tmp/bin/quaqua");
+    let ws = f.home.join("quaqua");
+    let ws_rules = ws.join("rules/_all");
+    let t_rules = f.checkout.join("templates/workspace/rules/_all");
+    let plugin_dir = f.checkout.join("plugins/herdr-quaqua");
+    let herdr_config = f.home.join(".config/herdr");
+
+    fs::create_dir_all(&ws_rules).unwrap();
+    fs::create_dir_all(&t_rules).unwrap();
+    fs::create_dir_all(&plugin_dir).unwrap();
+    fs::create_dir_all(&herdr_config).unwrap();
+    fs::create_dir_all(ws.join("projects")).unwrap();
+    fs::write(ws.join("projects/INDEX.md"), "").unwrap();
+    fs::write(ws.join("AGENTS.md"), "@identity.md\n").unwrap();
+
+    // Rule drift
+    fs::write(t_rules.join("lead-inbox.md"), "template lead inbox content").unwrap();
+    fs::write(ws_rules.join("lead-inbox.md"), "stale workspace lead inbox").unwrap();
+
+    // Manifest with 2 hooks
+    let manifest = r#"
+id = "herdr-quaqua"
+name = "herdr-quaqua"
+
+[[events]]
+on = "pane.created"
+command = ["quaqua", "grid", "hook"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["quaqua", "events", "hook"]
+"#;
+    fs::write(plugin_dir.join("herdr-plugin.toml"), manifest).unwrap();
+
+    // plugins.json with only 1 hook (missing pane.agent_status_changed)
+    let plugins_json = r#"[
+  {
+    "plugin_id": "herdr-quaqua",
+    "name": "herdr-quaqua",
+    "events": [
+      {
+        "on": "pane.created",
+        "command": ["quaqua", "grid", "hook"]
+      }
+    ]
+  }
+]"#;
+    fs::write(herdr_config.join("plugins.json"), plugins_json).unwrap();
+
+    // 1. Run doctor --workspace -> should fail with exit 1 and report both drifts
+    let out = f.run_workspace_flag();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("rule drift: rules/_all/lead-inbox.md differs from template"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("cp "), "{stderr}");
+    assert!(
+        stderr.contains("plugin hook drift: herdr plugin 'herdr-quaqua' lacks event hook(s)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("pane.agent_status_changed"), "{stderr}");
+    assert!(stderr.contains("herdr plugin link"), "{stderr}");
+
+    // 2. Fix both drifts
+    fs::write(
+        ws_rules.join("lead-inbox.md"),
+        "template lead inbox content",
+    )
+    .unwrap();
+    let fixed_json = r#"[
+  {
+    "plugin_id": "herdr-quaqua",
+    "name": "herdr-quaqua",
+    "events": [
+      {
+        "on": "pane.created",
+        "command": ["quaqua", "grid", "hook"]
+      },
+      {
+        "on": "pane.agent_status_changed",
+        "command": ["quaqua", "events", "hook"]
+      }
+    ]
+  }
+]"#;
+    fs::write(herdr_config.join("plugins.json"), fixed_json).unwrap();
+
+    // 3. Run doctor --workspace -> should pass with exit 0
+    let out_clean = f.run_workspace_flag();
+    assert_eq!(out_clean.status.code(), Some(0), "{out_clean:?}");
+    let stdout_clean = String::from_utf8_lossy(&out_clean.stdout);
+    assert!(
+        stdout_clean.contains(
+            "ok: workspace rules and herdr plugin event hooks are in sync with engine templates"
+        ),
+        "{stdout_clean}"
+    );
 }

@@ -38,6 +38,14 @@ guarded='(pane[[:space:]]+(split|move)|tab[[:space:]]+create|workspace[[:space:]
 outward='(git[^"]*[[:space:]]push([^a-z]|$)|gh[[:space:]]+(pr[[:space:]]+(create|edit|merge|close|comment|ready)|issue[[:space:]]+(create|edit|close|comment)|release[[:space:]]+(create|edit|delete|upload)|repo[[:space:]]+(create|delete|fork|rename|edit|archive|unarchive|sync|set-default|transfer)))'
 
 stdin=$(cat)
+# pkill -f / --full: self-matches the calling shell and kills the session
+pkill_f='(^|[[:space:]/;&|\"'\''])pkill[[:space:]]+.*(-[a-zA-Z0-9]*f|--full)'
+if grep -Eq "$pkill_f" <<<"$stdin"; then
+  echo "denied: pkill -f/--full self-matches the calling shell; use \`pgrep -f\` then kill the PID" >&2
+  printf '{"decision":"deny","permissionDecisionReason":"pkill -f/--full is denied: self-matches the calling shell; use `pgrep -f` then kill the PID"}\n'
+  exit 0
+fi
+
 hit=''
 grep -Eq "herdr.*$guarded" <<<"$stdin" && hit='pane/workspace spawn+move'
 grep -Eq "$outward" <<<"$stdin" && hit="${hit:+$hit and }outward action"
