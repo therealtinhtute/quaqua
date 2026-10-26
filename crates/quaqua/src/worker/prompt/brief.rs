@@ -115,6 +115,33 @@ pub fn named_playbook(text: &str) -> Option<String> {
     }
 }
 
+/// Helper to extract both the named playbook and any reason stated on the same line.
+/// Returns None if Playbook is missing, none, or placeholder.
+/// Returns Some((name, Some(reason))) if a reason is stated after name, or Some((name, None)) if bare name.
+pub fn named_playbook_with_reason(text: &str) -> Option<(String, Option<String>)> {
+    let value = header_value(text, "Playbook")?;
+    if is_placeholder(value) || none_reason(value).is_some() {
+        return None;
+    }
+    let trimmed = value.trim();
+    let name_token = trimmed.split_whitespace().next()?;
+    let name = name_token.trim_end_matches([',', ';', ':']).to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let rest = trimmed[name_token.len()..]
+        .trim_start_matches(|c: char| {
+            c.is_whitespace() || matches!(c, ',' | ';' | ':' | '-' | '—' | '(')
+        })
+        .trim();
+    let reason = if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_string())
+    };
+    Some((name, reason))
+}
+
 /// Warnings for the two advisory headers. Empty when both are present and a
 /// `none` carries a reason. Never an error: briefs without them pass as before.
 pub fn brief_header_warnings(text: &str) -> Vec<String> {
@@ -270,6 +297,48 @@ pub fn prepare_injection_in_workspace(
 /// Print the advisory header warnings for a brief on stderr.
 pub fn warn_brief_headers(task: &str) {
     for warning in brief_header_warnings(task) {
+        eprintln!("{warning}");
+    }
+}
+
+/// Warnings for Lead routing per Peer (templates/workspace/AGENTS.md '## Coordinator Rules' — Route).
+/// Flags a Peer brief whose `Playbook:` is missing, or equals the Lead's own pinned playbook
+/// (from `runs/.<owner>.playbook` if present) without a stated reason.
+pub fn lead_routing_warnings(text: &str, owner: Option<&str>, runs_dir: &Path) -> Vec<String> {
+    let Some(owner) = owner else {
+        return Vec::new();
+    };
+    if !owner.ends_with("-lead") {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    match playbook_header(text) {
+        PlaybookHeader::Missing => {
+            warnings.push(
+                "warning: brief has no 'Playbook:' header (AGENTS.md '## Coordinator Rules' — Route)"
+                    .to_string(),
+            );
+        }
+        _ => {
+            if let Some(lead_pin) =
+                crate::worker::prompt::playbook_check::PlaybookPin::read(runs_dir, owner)
+            {
+                if let Some((name, reason)) = named_playbook_with_reason(text) {
+                    if name.eq_ignore_ascii_case(&lead_pin.name) && reason.is_none() {
+                        warnings.push(format!(
+                            "warning: brief uses the Lead's own playbook '{name}' without a stated reason (AGENTS.md '## Coordinator Rules' — Route)"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    warnings
+}
+
+/// Print the lead routing warnings for a brief on stderr.
+pub fn warn_lead_routing(text: &str, owner: Option<&str>, runs_dir: &Path) {
+    for warning in lead_routing_warnings(text, owner, runs_dir) {
         eprintln!("{warning}");
     }
 }

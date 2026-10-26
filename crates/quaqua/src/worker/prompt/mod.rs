@@ -13,6 +13,10 @@ pub use crate::util::now_sec;
 pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
 pub use observer::{lead_waiting, report_ready};
 pub use watchdog::{is_lessons_heading, nap, prepend_header, validate_report_content};
+pub use brief::{
+    brief_header_warnings, lead_routing_warnings, named_playbook_with_reason, warn_brief_headers,
+    warn_lead_routing,
+};
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -154,7 +158,37 @@ pub fn resolve_budget_sec(task: &str) -> (u64, &'static str) {
     (2700, "default")
 }
 
+fn resolve_caller_owner(runs_dir: &std::path::Path) -> Option<String> {
+    if let Ok(pane_id) = std::env::var("HERDR_PANE_ID") {
+        if !pane_id.trim().is_empty() {
+            let herdr = crate::herdr::Herdr::new();
+            let caller = crate::identity::resolve_caller(&herdr, runs_dir);
+            if caller.role == crate::identity::Role::Lead {
+                return Some(caller.name);
+            }
+        }
+    }
+    if std::env::var("QUAQUA_TEST").as_deref() == Ok("1") {
+        if let Ok(owner) = std::env::var("QUAQUA_OWNER") {
+            if !owner.trim().is_empty() {
+                return Some(owner.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn do_check_brief(task: &str) -> Result<(), (i32, String)> {
+    let runs_dir = default_runs_dir();
+    let owner = resolve_caller_owner(&runs_dir);
+    do_check_brief_with_owner(task, owner.as_deref(), Some(&runs_dir))
+}
+
+pub fn do_check_brief_with_owner(
+    task: &str,
+    owner: Option<&str>,
+    runs_dir: Option<&std::path::Path>,
+) -> Result<(), (i32, String)> {
     validate_env_budget()?;
     if !brief_headers_ok(task) {
         return Err((
@@ -166,6 +200,15 @@ pub fn do_check_brief(task: &str) -> Result<(), (i32, String)> {
     // does not say solo or lead cannot be checked against AGENTS.md '## Roles (SLP)'.
     crate::worker::leadgate::topology(task).map_err(|msg| (1, msg))?;
     brief::warn_brief_headers(task);
+    let fallback_runs_dir;
+    let rdir = match runs_dir {
+        Some(d) => d,
+        None => {
+            fallback_runs_dir = default_runs_dir();
+            &fallback_runs_dir
+        }
+    };
+    brief::warn_lead_routing(task, owner, rdir);
     // A name the present index cannot resolve or render is the one rejection
     // here; a missing or incomplete index only warns.
     brief::prepare_injection_in_workspace(task)?;
@@ -744,6 +787,9 @@ pub fn prompt_worker<G: GitOps>(
         // § S4: warn on a brief that names no playbook or no context, then
         // append the named playbook's Worker steps + cited leaves to the prompt.
         brief::warn_brief_headers(task_str);
+        let owner_str = crate::state::WorkerMetadata::load_owner(&runs_dir, name);
+        let owner = if owner_str.is_empty() { None } else { Some(owner_str.as_str()) };
+        brief::warn_lead_routing(task_str, owner, &runs_dir);
         let injection = brief::prepare_injection_in_workspace(task_str)?;
 
         // Synchronous land check: herdr's own "the prompt reached the turn"
