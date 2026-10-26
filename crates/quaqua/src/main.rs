@@ -138,6 +138,9 @@ enum Command {
         /// Continuously follow and print new items every 2 seconds
         #[arg(long)]
         follow: bool,
+        /// Show all unacked mail ignoring high-water mark
+        #[arg(long)]
+        all: bool,
     },
     /// Event bus operations: hook.
     Events {
@@ -228,7 +231,6 @@ enum EventsCmd {
     /// Herdr event hook for monitoring agent status changes and exits.
     Hook,
 }
-
 
 #[derive(Subcommand)]
 enum ConfigCmd {
@@ -810,30 +812,26 @@ fn main() {
                 target,
                 project,
                 json,
-            } => {
-                match quaqua::layout::run_why(&caller, &verb, &target, project.as_deref(), json) {
-                    Ok(out) => {
-                        print!("{out}");
-                        0
-                    }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        1
-                    }
+            } => match quaqua::layout::run_why(&caller, &verb, &target, project.as_deref(), json) {
+                Ok(out) => {
+                    print!("{out}");
+                    0
                 }
-            }
-            LayoutCmd::Refreeze { slug } => {
-                match quaqua::layout::run_refreeze(&slug) {
-                    Ok(msg) => {
-                        println!("{msg}");
-                        0
-                    }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        1
-                    }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
                 }
-            }
+            },
+            LayoutCmd::Refreeze { slug } => match quaqua::layout::run_refreeze(&slug) {
+                Ok(msg) => {
+                    println!("{msg}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            },
         },
         Some(Command::Mail { args }) => {
             match quaqua::bus::mail::handle_mail(&args, &Herdr::new()) {
@@ -845,69 +843,84 @@ fn main() {
                     1
                 }
             }
-        },
-        Some(Command::Inbox { r#for, follow }) => {
+        }
+        Some(Command::Inbox { r#for, follow, all }) => {
             let runs_dir = if let Ok(dir) = std::env::var("QUAQUA_RUNS_DIR") {
                 PathBuf::from(dir)
             } else {
                 quaqua::workspace::workspace_root().join("runs")
             };
             let db_path = runs_dir.join("quaqua.db");
-            match quaqua::bus::FarmBus::open(&db_path) {
-                Ok(bus) => {
-                    if follow {
-                        let mut last_seen_mail = match bus.inbox_digest(&runs_dir, &r#for) {
-                            Ok(digest) => {
-                                if !digest.unacked_mail.is_empty() || !digest.incidents.is_empty() {
-                                    print!("{}", digest.render(&r#for));
-                                }
-                                digest.unacked_mail.iter().map(|m| m.id).max().unwrap_or(0)
-                            }
-                            Err(e) => {
-                                eprintln!("inbox error: {e}");
-                                0
-                            }
-                        };
-                        loop {
-                            std::thread::sleep(std::time::Duration::from_secs(2));
-                            match bus.follow_tick(&runs_dir, &r#for, &mut last_seen_mail) {
-                                Ok(digest) => {
-                                    if !digest.unacked_mail.is_empty() || !digest.incidents.is_empty() {
-                                        print!("{}", digest.render(&r#for));
-                                    }
-                                }
-                                Err(e) => eprintln!("inbox error: {e}"),
-                            }
-                        }
-                    } else {
-                        match bus.inbox_digest(&runs_dir, &r#for) {
-                            Ok(digest) => {
-                                print!("{}", digest.render(&r#for));
-                                0
-                            }
-                            Err(e) => {
-                                eprintln!("error: {e}");
-                                1
-                            }
-                        }
+            if all {
+                match quaqua::bus::mail::render_inbox(&runs_dir, &r#for) {
+                    Ok(out) => {
+                        print!("{out}");
+                        0
                     }
-                }
-                Err(e) => {
-                    eprintln!("error opening bus at {}: {e}", db_path.display());
-                    1
-                }
-            }
-        },
-        Some(Command::Events { cmd }) => match cmd {
-            EventsCmd::Hook => {
-                match quaqua::bus::events::run_events_hook() {
-                    Ok(code) => code,
                     Err(e) => {
                         eprintln!("error: {e}");
                         1
                     }
                 }
+            } else {
+                match quaqua::bus::FarmBus::open(&db_path) {
+                    Ok(bus) => {
+                        if follow {
+                            let mut last_seen_mail = match bus.inbox_digest(&runs_dir, &r#for) {
+                                Ok(digest) => {
+                                    if !digest.unacked_mail.is_empty()
+                                        || !digest.incidents.is_empty()
+                                    {
+                                        print!("{}", digest.render(&r#for));
+                                    }
+                                    digest.unacked_mail.iter().map(|m| m.id).max().unwrap_or(0)
+                                }
+                                Err(e) => {
+                                    eprintln!("inbox error: {e}");
+                                    0
+                                }
+                            };
+                            loop {
+                                std::thread::sleep(std::time::Duration::from_secs(2));
+                                match bus.follow_tick(&runs_dir, &r#for, &mut last_seen_mail) {
+                                    Ok(digest) => {
+                                        if !digest.unacked_mail.is_empty()
+                                            || !digest.incidents.is_empty()
+                                        {
+                                            print!("{}", digest.render(&r#for));
+                                        }
+                                    }
+                                    Err(e) => eprintln!("inbox error: {e}"),
+                                }
+                            }
+                        } else {
+                            match bus.inbox_digest(&runs_dir, &r#for) {
+                                Ok(digest) => {
+                                    print!("{}", digest.render(&r#for));
+                                    0
+                                }
+                                Err(e) => {
+                                    eprintln!("error: {e}");
+                                    1
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error opening bus at {}: {e}", db_path.display());
+                        1
+                    }
+                }
             }
+        }
+        Some(Command::Events { cmd }) => match cmd {
+            EventsCmd::Hook => match quaqua::bus::events::run_events_hook() {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            },
         },
         None => 0,
     };
