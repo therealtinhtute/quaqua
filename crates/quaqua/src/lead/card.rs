@@ -318,7 +318,7 @@ Rules here
         let _guard = DirGuard(base_dir.clone());
 
         let run_git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::test_env::git_hermetic()
                 .arg("-C")
                 .arg(&repo_path)
                 .args(args)
@@ -337,18 +337,8 @@ Rules here
             out
         };
 
-        run_git(&["init", "-b", "main"]);
-        run_git(&["config", "user.name", "Quaqua Test"]);
-        run_git(&["config", "user.email", "test@quaqua.local"]);
-        run_git(&["config", "commit.gpgsign", "false"]);
-
-        // 1. Initial commit on main (known sha)
-        std::fs::write(repo_path.join("init.txt"), "initial commit\n").unwrap();
-        run_git(&["add", "init.txt"]);
-        run_git(&["commit", "-m", "initial commit"]);
-        let rev_out = run_git(&["rev-parse", "HEAD"]);
-        let full_sha = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
-        let known_sha = full_sha[..7].to_string();
+        // Own repo on `main` with one commit, independent of host git config.
+        let known_sha = crate::test_env::init_repo(&repo_path)[..7].to_string();
 
         // 2. Merge commit on main referencing PR #153
         std::fs::write(repo_path.join("pr153.txt"), "PR 153\n").unwrap();

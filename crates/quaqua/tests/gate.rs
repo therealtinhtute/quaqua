@@ -8,6 +8,9 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+#[path = "common/gitfix.rs"]
+mod gitfix;
+
 /// A PR lookup stub: never touches the network, records the selector the gate
 /// asked for.
 struct StubPr {
@@ -563,7 +566,7 @@ fn bare_push_resolves_the_checked_out_branch() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = gitfix::cmd("git")
             .arg("-C")
             .arg(&dir)
             .args(args)

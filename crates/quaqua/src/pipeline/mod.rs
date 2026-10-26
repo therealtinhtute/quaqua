@@ -4212,22 +4212,8 @@ mod tests {
         let runs_dir = base_dir.join("runs");
         let _ = std::fs::create_dir_all(&runs_dir);
 
-        let _ = std::process::Command::new("git")
-            .args(&["init", "-b", "main"])
-            .current_dir(&repo_dir)
-            .output();
-        let _ = std::process::Command::new("git")
-            .args(&["config", "user.name", "Tester"])
-            .current_dir(&repo_dir)
-            .output();
-        let _ = std::process::Command::new("git")
-            .args(&["config", "user.email", "tester@example.com"])
-            .current_dir(&repo_dir)
-            .output();
-        let _ = std::process::Command::new("git")
-            .args(&["commit", "--allow-empty", "-m", "initial commit"])
-            .current_dir(&repo_dir)
-            .output();
+        // A repo on `main` with one commit, independent of host git config.
+        crate::test_env::init_repo(&repo_dir);
 
         let brief_file = repo_dir.join("brief.md");
         std::fs::write(
@@ -4479,7 +4465,7 @@ esac
 
         // 2. Setup build commit in worktree and unparseable review report
         let wt_dir = base_dir.join(".wt").join(format!("sude-{task}"));
-        let _ = std::process::Command::new("git")
+        let _ = crate::test_env::git_hermetic()
             .args(&["commit", "--allow-empty", "-m", "build commit"])
             .current_dir(&wt_dir)
             .output();
@@ -4637,7 +4623,7 @@ esac
         );
 
         let wt_dir = base_dir.join(".wt").join(format!("sude-{task}"));
-        let _ = std::process::Command::new("git")
+        let _ = crate::test_env::git_hermetic()
             .args(&["commit", "--allow-empty", "-m", "build commit"])
             .current_dir(&wt_dir)
             .output();
@@ -5019,7 +5005,7 @@ esac
         // Pin finding 4: r1 VerifierFailed must be recorded at build SHA (HEAD~1), not final fix SHA
         let wt_dir = base_dir.join(".wt").join(format!("sude-{task}"));
         let build_sha = String::from_utf8(
-            std::process::Command::new("git")
+            crate::test_env::git_hermetic()
                 .args(&["rev-parse", "HEAD~1"])
                 .current_dir(&wt_dir)
                 .output()
@@ -5331,11 +5317,11 @@ esac
         // Now test Fix round at a new SHA vs re-run at that same SHA
         let fix_worker = format!("sude-{task}");
         let wt_dir = base_dir.join(".wt").join(&fix_worker);
-        let _ = std::process::Command::new("git")
+        let _ = crate::test_env::git_hermetic()
             .args(&["commit", "--allow-empty", "-m", "fix commit 2 at new sha"])
             .current_dir(&wt_dir)
             .output();
-        let out = std::process::Command::new("git")
+        let out = crate::test_env::git_hermetic()
             .args(&["rev-parse", "HEAD"])
             .current_dir(&wt_dir)
             .output()
