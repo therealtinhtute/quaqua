@@ -74,6 +74,7 @@ impl Layout {
                     max_children,
                     naming,
                     members: Vec::new(),
+                    quorum: None,
                 },
             );
         }
@@ -89,6 +90,7 @@ impl Layout {
                 max_children: None,
                 naming: Naming::KindTask,
                 members: Vec::new(),
+                quorum: None,
             },
         );
 

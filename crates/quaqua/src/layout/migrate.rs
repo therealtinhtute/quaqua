@@ -35,10 +35,7 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
             let rest = rest.trim_start();
             if let Some(val_str) = rest.strip_prefix('=') {
                 let val_str = val_str.trim();
-                let num_str: String = val_str
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
+                let num_str: String = val_str.chars().take_while(|c| c.is_ascii_digit()).collect();
                 if let Ok(v) = num_str.parse::<u64>() {
                     detected_version = Some(v);
                     break;
@@ -57,12 +54,14 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
         return Ok(MigrateResult::AlreadyV3);
     }
     if version < 2 {
-        return Err(format!("schema_version {version} is below 2: cannot migrate"));
+        return Err(format!(
+            "schema_version {version} is below 2: cannot migrate"
+        ));
     }
 
     // 2. Parse as v2 Config to inspect role topology
-    let cfg: Config = toml::from_str(input)
-        .map_err(|e| format!("cannot parse team.toml as Config: {e}"))?;
+    let cfg: Config =
+        toml::from_str(input).map_err(|e| format!("cannot parse team.toml as Config: {e}"))?;
 
     let legacy = Layout::from_legacy(&cfg);
     let slp = builtin::get("slp").ok_or_else(|| "slp built-in layout missing".to_string())?;
@@ -235,6 +234,27 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
         out_lines.push("can_spawn = []".to_string());
         out_lines.push("can_prompt = []".to_string());
         out_lines.push("reports_to = \"owner\"".to_string());
+
+        let mut carried_members = Vec::new();
+        if let Some(tf) = cfg.taskforce.get("taskforce") {
+            carried_members.extend(tf.members.clone());
+        } else {
+            for tf in cfg.taskforce.values() {
+                for m in &tf.members {
+                    if !carried_members.contains(m) {
+                        carried_members.push(m.clone());
+                    }
+                }
+            }
+        }
+        if !carried_members.is_empty() {
+            carried_members.truncate(5);
+            let formatted: Vec<String> = carried_members
+                .iter()
+                .map(|m| format!("{{ kind = \"{m}\" }}"))
+                .collect();
+            out_lines.push(format!("members = [{}]", formatted.join(", ")));
+        }
     }
 
     // Keep max_peers in [roles.lead] so cap::owner_cap continues to read it
@@ -252,11 +272,16 @@ pub fn migrate_team_toml(input: &str) -> Result<MigrateResult, String> {
         result.push('\n');
     }
 
-    // 4. Validate rewritten TOML against Config parser
-    let migrated_cfg: Config = toml::from_str(&result)
-        .map_err(|e| format!("migrated TOML failed parse check: {e}"))?;
+    // 4. Validate rewritten TOML against Config parser and Layout validator
+    let migrated_cfg: Config =
+        toml::from_str(&result).map_err(|e| format!("migrated TOML failed parse check: {e}"))?;
     crate::config::validate(&migrated_cfg)
         .map_err(|e| format!("migrated TOML failed validation check: {e}"))?;
+
+    for custom_layout in migrated_cfg.layouts.values() {
+        crate::layout::validate_layout_with_config(custom_layout, &migrated_cfg)
+            .map_err(|e| format!("migrated layout failed validation check: {e}"))?;
+    }
 
     Ok(MigrateResult::Migrated(result))
 }

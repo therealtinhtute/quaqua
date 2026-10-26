@@ -124,7 +124,7 @@ fn layout_council_members_fit_without_touching_taskforce() {
     assert_eq!(council_role.members.len(), 3);
     assert_eq!(council_role.members[0].purpose.as_deref(), Some("review"));
     assert_eq!(council_role.members[1].purpose.as_deref(), Some("review"));
-    assert_eq!(council_role.members[2].purpose.as_deref(), Some("advise"));
+    assert_eq!(council_role.members[2].purpose.as_deref(), Some("design"));
 }
 
 #[test]
