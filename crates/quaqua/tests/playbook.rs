@@ -1312,9 +1312,15 @@ fn p2c_review_findings_leaf_reading_path_and_no_worker_spawn() {
         skill_content.contains("principles/<name>.md"),
         "SKILL.md must name principles/<name>.md path for leaves"
     );
+    // The instruction, not one fixed sentence: a line naming the leaf path that
+    // tells the reader to read it in full.
+    let reads_leaf_in_full = skill_content.lines().any(|line| {
+        let lower = line.to_lowercase();
+        line.contains("principles/<name>.md") && lower.contains("full") && lower.contains("leaf")
+    });
     assert!(
-        skill_content.contains("Read the leaf in full for any principle you cite."),
-        "SKILL.md must instruct reading the leaf in full"
+        reads_leaf_in_full,
+        "SKILL.md must instruct reading the `principles/<name>.md` leaf in full"
     );
 
     // Finding 4: no playbook's Worker section may ask worker to spawn
