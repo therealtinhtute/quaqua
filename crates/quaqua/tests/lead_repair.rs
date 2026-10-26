@@ -285,3 +285,93 @@ fn test_repair_all_leads_repairs_multiple() {
     assert!(res[0].contains("repaired lead 'mu'"));
     assert!(res[1].contains("repaired lead 'llmhub'"));
 }
+
+#[test]
+fn test_repair_lead_fails_closed_when_workspace_root_unresolvable() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_HOME", "HOME"]);
+    let dir = hermetic_temp_dir("no-index-ws");
+    guard.set("QUAQUA_ROOT", dir.to_str().unwrap());
+
+    let herdr = MockRepairHerdr::new("{}", r#"{"result":{"agents":[]}}"#);
+    let err = repair_lead(&herdr, "totally-made-up", Some("wC:p7"))
+        .expect_err("repair_lead must fail closed when workspace INDEX is unresolvable");
+    assert!(
+        err.contains("projects/INDEX.md is missing") || err.contains("no quaqua workspace") || err.contains("cannot resolve workspace root"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn test_repair_lead_rejects_pane_mismatch() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT"]);
+    let ws = hermetic_temp_dir("repair-mismatch-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole parity |\n",
+    ).unwrap();
+
+    let herdr = MockRepairHerdr::new(
+        r#"{"logo":"\ue1a3"}"#,
+        r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#,
+    );
+
+    let err = repair_lead(&herdr, "mu", Some("wC:p7"))
+        .expect_err("repair_lead must refuse when explicit pane does not match agent pane");
+    assert!(
+        err.contains("wC:p7") && err.contains("wB:p1"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn test_repair_all_leads_fails_if_any_lead_fails() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT"]);
+    let ws = hermetic_temp_dir("repair-all-fail-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole |\n| llmhub | ~/Lab/llmhub | llmhub-lead | active | CLI |\n",
+    ).unwrap();
+
+    // Only mu-lead is running; llmhub-lead is offline
+    let herdr = MockRepairHerdr::new(
+        r#"{"logo":"\ue1a3"}"#,
+        r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#,
+    );
+
+    let err = repair_all_leads(&herdr)
+        .expect_err("repair_all_leads must return error when any lead fails to repair");
+    assert!(err.contains("llmhub"), "got: {err}");
+}
+
+#[test]
+fn test_repair_all_leads_ignores_non_matching_lead_owner() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT"]);
+    let ws = hermetic_temp_dir("repair-all-filter-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | other-lead | active | Mole |\n| llmhub | ~/Lab/llmhub | llmhub-lead | active | CLI |\n",
+    ).unwrap();
+
+    // Only llmhub-lead is running
+    let herdr = MockRepairHerdr::new(
+        r#"{"logo":"\ue1a3"}"#,
+        r#"{"result":{"agents":[{"name":"llmhub-lead","pane_id":"wA:p1","tokens":{"logo":"\ue1a3"}}]}}"#,
+    );
+
+    let res = repair_all_leads(&herdr)
+        .expect("repair_all_leads should ignore row where owner is not <slug>-lead and succeed for matching rows");
+    assert_eq!(res.len(), 1);
+    assert!(res[0].contains("repaired lead 'llmhub'"));
+}

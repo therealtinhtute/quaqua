@@ -1207,6 +1207,7 @@ command = ["quaqua", "events", "hook"]
         );
 
         let _ = fs::remove_dir_all(&tmp);
+    }
     struct MockDoctorHerdr(String);
     impl crate::herdr::HerdrOps for MockDoctorHerdr {
         fn run(&self, _args: &[&str]) -> std::io::Result<std::process::Output> {
