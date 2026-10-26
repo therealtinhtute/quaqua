@@ -270,7 +270,8 @@ pub fn is_safe_inbox_name(name: &str) -> bool {
                     && !s.contains('/')
                     && !s.contains('\\')
                     && !s.contains("..")
-                    && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
             } else {
                 false
             }
@@ -280,10 +281,7 @@ pub fn is_safe_inbox_name(name: &str) -> bool {
 }
 
 /// Resolves the sender identity (name, role) strictly from harness (env only under QUAQUA_TEST=1).
-pub fn resolve_sender<H: HerdrOps>(
-    herdr: &H,
-    runs_dir: &Path,
-) -> Result<(String, String), String> {
+pub fn resolve_sender<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result<(String, String), String> {
     let caller = crate::identity::resolve_caller(herdr, runs_dir);
     if caller.role != crate::identity::Role::Unknown {
         return Ok((caller.name, caller.role.to_string()));
@@ -379,9 +377,7 @@ pub fn append_to_markdown_inbox(
         ));
     }
     if !is_safe_inbox_name(to_name) {
-        return Err(format!(
-            "invalid to_name '{to_name}': cannot escape runs/"
-        ));
+        return Err(format!("invalid to_name '{to_name}': cannot escape runs/"));
     }
 
     let inbox_path = runs_dir.join(format!("{target_inbox}.inbox.md"));
@@ -413,7 +409,10 @@ pub fn append_to_markdown_inbox(
         format!("{header}\n{key_marker}\n{to_marker}\n\n")
     } else {
         let escaped = escape_body(body);
-        format!("{header}\n{key_marker}\n{to_marker}\n{}\n", escaped.trim_end())
+        format!(
+            "{header}\n{key_marker}\n{to_marker}\n{}\n",
+            escaped.trim_end()
+        )
     };
     file.write_all(entry.as_bytes())
         .map_err(|e| format!("cannot write to {}: {e}", inbox_path.display()))?;
@@ -491,7 +490,8 @@ pub fn check_unacked_incidents(
             inserted_count += 1;
             let herdr = crate::herdr::Herdr::new();
             let title = "quaqua mail: unacked";
-            let body = format!("Mail #{id} from {from_name} to {to_name} ({kind}) is unacknowledged");
+            let body =
+                format!("Mail #{id} from {from_name} to {to_name} ({kind}) is unacknowledged");
             let _ = herdr.notification_show(title, &body, Some("request"));
         }
     }
@@ -532,11 +532,12 @@ pub fn send_mail<H: HerdrOps>(
     });
 
     let db_path = runs_dir.join("quaqua.db");
-    let fallback_target = if opts.to == "cos" && (from_role == "lead" || from_name.ends_with("-lead")) {
-        from_name.clone()
-    } else {
-        opts.to.clone()
-    };
+    let fallback_target =
+        if opts.to == "cos" && (from_role == "lead" || from_name.ends_with("-lead")) {
+            from_name.clone()
+        } else {
+            opts.to.clone()
+        };
 
     // Try opening database; fallback to markdown append on failure (unless locked)
     let bus = match FarmBus::open(&db_path) {
@@ -624,7 +625,13 @@ pub fn send_mail<H: HerdrOps>(
                     "#,
                 )?;
                 insert_event.execute(rusqlite::params![
-                    now as i64, from_name, opts.to, from_name, project, incident_key, payload,
+                    now as i64,
+                    from_name,
+                    opts.to,
+                    from_name,
+                    project,
+                    incident_key,
+                    payload,
                 ])?;
             }
 
@@ -704,8 +711,12 @@ pub fn send_mail<H: HerdrOps>(
     Ok(result)
 }
 
-/// Reads unacked mail addressed to `to_name`, bumps delivery counts, and updates last_delivered_ms.
-pub fn read_inbox(runs_dir: &Path, to_name: &str) -> Result<Vec<MailMessage>, String> {
+/// Reads unacked mail addressed to `to_name` with id > `since_id`, bumps delivery counts, and updates last_delivered_ms.
+pub fn read_unacked_mail_since(
+    runs_dir: &Path,
+    to_name: &str,
+    since_id: u64,
+) -> Result<Vec<MailMessage>, String> {
     let db_path = runs_dir.join("quaqua.db");
     let bus = FarmBus::open(&db_path).map_err(|e| format!("cannot open database: {e}"))?;
     let conn = bus.conn.lock().unwrap();
@@ -720,14 +731,14 @@ pub fn read_inbox(runs_dir: &Path, to_name: &str) -> Result<Vec<MailMessage>, St
             SELECT id, msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to,
                    body, deliveries, last_delivered_ms, acked_ms, acked_by
             FROM mail
-            WHERE to_name = ?1 AND acked_ms IS NULL
+            WHERE to_name = ?1 AND acked_ms IS NULL AND id > ?2
             ORDER BY id ASC
             "#,
         )
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
-        .query_map(rusqlite::params![to_name], |row| {
+        .query_map(rusqlite::params![to_name, since_id as i64], |row| {
             Ok(MailMessage {
                 id: row.get::<_, i64>(0)? as u64,
                 msg_key: row.get(1)?,
@@ -769,6 +780,11 @@ pub fn read_inbox(runs_dir: &Path, to_name: &str) -> Result<Vec<MailMessage>, St
     }
 
     Ok(messages)
+}
+
+/// Reads unacked mail addressed to `to_name`, bumps delivery counts, and updates last_delivered_ms.
+pub fn read_inbox(runs_dir: &Path, to_name: &str) -> Result<Vec<MailMessage>, String> {
+    read_unacked_mail_since(runs_dir, to_name, 0)
 }
 
 /// Renders unacked inbox messages for `to_name`.
@@ -1257,7 +1273,10 @@ pub fn handle_mail<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, Strin
                 if caller.role != crate::identity::Role::Unknown {
                     caller.name
                 } else {
-                    return Err("cannot determine recipient identity from harness (unresolved caller)".to_string());
+                    return Err(
+                        "cannot determine recipient identity from harness (unresolved caller)"
+                            .to_string(),
+                    );
                 }
             };
 
@@ -1289,7 +1308,10 @@ pub fn handle_mail<H: HerdrOps>(args: &[String], herdr: &H) -> Result<i32, Strin
                 if c.role != crate::identity::Role::Unknown {
                     c.name
                 } else {
-                    return Err("cannot determine caller identity from harness (unresolved caller)".to_string());
+                    return Err(
+                        "cannot determine caller identity from harness (unresolved caller)"
+                            .to_string(),
+                    );
                 }
             };
 
