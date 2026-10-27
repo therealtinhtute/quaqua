@@ -1,6 +1,6 @@
 # quaqua-poll — dọn `scripts/` về 2 file (auditor · usage · pre-commit → Rust)
 
-Status: **ready to execute** — chạy SAU khi `quaqua-clean` merge main (anh iu 2026-10-18) · từ phiên think của CoS
+Status: **done** (2026-10-18) · P1 `ae9a7ef` (`quaqua auditor run`) · P2 `49db2fd` (`quaqua usage`) · P3 `72e54b1` (pre-commit embedded in `quaqua init`) · this file is the record.
 Repo: `~/quaqua` · Base: main sau merge quaqua-clean (`c404f9b`+) · Evidence: phiên think 18/10 + inventory đo trên clean-integ
 
 ## 0. TL;DR (đã chốt cùng anh iu)

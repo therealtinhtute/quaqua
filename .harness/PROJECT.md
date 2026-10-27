@@ -23,4 +23,4 @@
 - entrypoints: `crates/quaqua/src/main.rs`; PreToolUse gate `crates/quaqua/src/gate/`.
 
 ## What are we working on right now?
-- plan: .harness/plans/active/blindside-absence.md (planned)
+- plan: .harness/plans/active/cos-workspace-split.md (planned, high-risk)
