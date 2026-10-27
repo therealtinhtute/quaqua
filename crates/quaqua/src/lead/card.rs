@@ -107,7 +107,10 @@ fn is_reachable_from_main<G: GitOps>(repo: &Path, git: &G, target_sha: &str) -> 
 
 fn pr_merged_in_main<G: GitOps>(repo: &Path, git: &G, pr_num: &str) -> Option<String> {
     for branch in ["main", "origin/main", "master", "origin/master"] {
-        let grep_arg = format!("--grep=#[0-9]*{}\\b", pr_num);
+        // `\b` is a GNU regex extension: git's POSIX ERE engine (macOS libc,
+        // git 2.56) does not honour it, so the pattern matched nothing and no
+        // merged PR was ever detected. `([^0-9]|$)` is a portable boundary.
+        let grep_arg = format!("--grep=#[0-9]*{pr_num}([^0-9]|$)");
         let args = ["log", "-E", "-n", "1", "--format=%H", &grep_arg, branch];
         if let Ok(out) = git.run_in(repo, &args) {
             if out.status.success() {
