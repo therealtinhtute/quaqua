@@ -22,7 +22,10 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 # Usage: quaqua taskforce <advisor|dual-lens|council> <task> <repo> --brief <file> [--base <ref>] [--approve-kind <kind>...]
-#   --approve-kind <kind>  approve a member kind whose team.toml spawn = \"approve\"";
+#   --approve-kind <kind>  approve a member kind whose team.toml spawn = \"approve\"
+#
+# Note: Taskforce execution is durably event-sourced. A finished or failed task cannot be re-executed
+# under the same task name; to rerun or retry, choose a new task name (e.g. <task>-2).";
 
 pub struct TaskforceArgs {
     pub mode: String,

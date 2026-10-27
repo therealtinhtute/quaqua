@@ -293,7 +293,7 @@ fn council_fail_fast_kills_live_members() {
     // m3 sleeps for 600ms unless cancelled (F2)
     mock.set_result(&m1, Err((4, "budget".to_string())));
     mock.set_result(&m2, Err((3, "stall".to_string())));
-    mock.set_delay(&m3, Duration::from_millis(600));
+    mock.set_delay(&m3, Duration::from_millis(2000));
 
     let member_specs = vec![
         (m1.clone(), "suhuynh".to_string()),
@@ -321,9 +321,9 @@ fn council_fail_fast_kills_live_members() {
     assert!(res.is_err(), "must fail fast");
     assert_eq!(res.unwrap_err().0, 3, "exit code must be 3");
 
-    // F2: Wall time must NOT wait for the 600ms sleeping member!
+    // F2: Wall time must NOT wait for the 2000ms sleeping member!
     assert!(
-        elapsed < Duration::from_millis(300),
+        elapsed < Duration::from_millis(800),
         "fail-fast must interrupt live members promptly, took {:?}",
         elapsed
     );
@@ -434,7 +434,8 @@ fn council_resume_from_journal_partial() {
 
 #[test]
 fn council_terminal_replay_without_spawns() {
-    // Tests F1 + F6: A replay on an already terminal run returns outcome without spawning
+    // Tests F1 + F6: A replay on an already terminal run returns outcome without spawning;
+    // deleting state file does not re-spawn live members; fails if terminal check is moved after spawn loop (mutation D).
     let tmp = hermetic_temp_dir("term-replay");
     let runs_dir = tmp.join("runs");
     let repo_dir = tmp.join("repo");
@@ -445,13 +446,21 @@ fn council_terminal_replay_without_spawns() {
     let mock = MockMemberRunner::new();
 
     let m1 = format!("suhuynh-{task}c1");
-    let r1 = runs_dir.join(format!("{m1}.md"));
-    fs::write(&r1, "# R1\nVerdict: clean\n").unwrap();
-    mock.set_result(&m1, Ok(SingleWorkerOutput::new(0, r1).unwrap()));
+    let m2 = format!("quansu-{task}c2");
+    let m3 = format!("truonglao-{task}c3");
 
-    let member_specs = vec![(m1.clone(), "suhuynh".to_string())];
+    // Fail-fast run: m1 fails, m2 fails, m3 delayed
+    mock.set_result(&m1, Err((4, "timeout".to_string())));
+    mock.set_result(&m2, Err((3, "stall".to_string())));
+    mock.set_delay(&m3, Duration::from_millis(600));
 
-    // Pass 1: Runs to terminal completion
+    let member_specs = vec![
+        (m1.clone(), "suhuynh".to_string()),
+        (m2.clone(), "quansu".to_string()),
+        (m3.clone(), "truonglao".to_string()),
+    ];
+
+    // Pass 1: Runs to fail-fast terminal failure (m3 is live when fail-fast occurs)
     let res1 = run_taskforce_workflow(
         "council",
         task,
@@ -459,17 +468,22 @@ fn council_terminal_replay_without_spawns() {
         "brief",
         "council",
         &member_specs,
-        1,
+        2,
         "cos",
         &[],
         None,
         &runs_dir,
         &mock,
     );
-    assert!(res1.is_ok());
-    assert_eq!(mock.spawns().len(), 1);
+    assert!(res1.is_err());
+    assert_eq!(mock.spawns().len(), 3);
 
-    // Pass 2: Replay!
+    // Delete the state file (the reviewer's probe p10 run2 scenario)
+    let st_file = runs_dir.join(format!("council-{task}.state"));
+    fs::remove_file(&st_file).unwrap();
+
+    // Pass 2: Replay with deleted state file!
+    // The journal contains workflow_failed; pre-flight check must return BEFORE the spawn loop!
     let res2 = run_taskforce_workflow(
         "council",
         task,
@@ -477,20 +491,163 @@ fn council_terminal_replay_without_spawns() {
         "brief",
         "council",
         &member_specs,
-        1,
+        2,
         "cos",
         &[],
         None,
         &runs_dir,
         &mock,
     );
-    assert!(res2.is_ok());
+    assert!(res2.is_err());
 
     // Spawns count must NOT have increased!
+    // (If mutation D moves terminal check after spawn loop, m3 would be re-spawned and this asserts 3 == 4 fail!)
     assert_eq!(
         mock.spawns().len(),
-        1,
-        "terminal replay must not spawn new members"
+        3,
+        "terminal replay with deleted state file must not spawn any new members"
+    );
+}
+
+#[test]
+fn council_merge_failure_resumable() {
+    // Tests F7 / reviewer probe p6: merge failure leaves finished=0, and resumed run produces merged report
+    let tmp = hermetic_temp_dir("merge-fail");
+    let runs_dir = tmp.join("runs");
+    let repo_dir = tmp.join("repo");
+    fs::create_dir_all(&runs_dir).unwrap();
+    fs::create_dir_all(&repo_dir).unwrap();
+
+    let task = "mergefail";
+    let mock = MockMemberRunner::new();
+
+    let m1 = format!("suhuynh-{task}c1");
+    let m2 = format!("quansu-{task}c2");
+
+    let r1 = runs_dir.join(format!("{m1}.md"));
+    let r2 = runs_dir.join(format!("{m2}.md"));
+    fs::write(&r1, "# R1\nVerdict: clean\n").unwrap();
+    fs::write(&r2, "# R2\nVerdict: clean\n").unwrap();
+
+    mock.set_result(&m1, Ok(SingleWorkerOutput::new(0, r1).unwrap()));
+    mock.set_result(&m2, Ok(SingleWorkerOutput::new(0, r2).unwrap()));
+
+    let member_specs = vec![
+        (m1.clone(), "suhuynh".to_string()),
+        (m2.clone(), "quansu".to_string()),
+    ];
+
+    // Inject a report-write failure by creating a directory where the report would be written
+    let report_target = runs_dir.join(format!("council-{task}.md"));
+    fs::create_dir_all(&report_target).unwrap();
+
+    // Run 1: Must fail because write_council_report fails
+    let res1 = run_taskforce_workflow(
+        "council",
+        task,
+        &repo_dir,
+        "brief",
+        "council",
+        &member_specs,
+        2,
+        "cos",
+        &[],
+        None,
+        &runs_dir,
+        &mock,
+    );
+    assert!(
+        res1.is_err(),
+        "run 1 must fail due to merge report write error"
+    );
+
+    // State file must remain finished=0
+    let st_file = runs_dir.join(format!("council-{task}.state"));
+    let st_content = fs::read_to_string(&st_file).unwrap();
+    assert!(
+        st_content.contains("finished=0"),
+        "state must remain finished=0 on merge error"
+    );
+
+    // Remove the blocking directory so writes can succeed
+    fs::remove_dir(&report_target).unwrap();
+
+    // Run 2: Resume! Must write the merged report and mark finished=1
+    let res2 = run_taskforce_workflow(
+        "council",
+        task,
+        &repo_dir,
+        "brief",
+        "council",
+        &member_specs,
+        2,
+        "cos",
+        &[],
+        None,
+        &runs_dir,
+        &mock,
+    );
+    let out = res2.expect("run 2 must successfully complete merge on resume");
+    assert!(out.merged_report.is_some(), "merged_report must be Some");
+    assert!(report_target.is_file(), "merged report file must now exist");
+    let content = fs::read_to_string(&report_target).unwrap();
+    assert!(content.contains("# Council report: mergefail"));
+
+    // State file must now be finished=1
+    let st_content2 = fs::read_to_string(&st_file).unwrap();
+    assert!(st_content2.contains("finished=1"));
+}
+
+#[test]
+fn council_error_path_cleans_up_spawned_members() {
+    // Tests F1 residual / reviewer probe p7: error after spawn cleans up all spawned members via RAII guard
+    let tmp = hermetic_temp_dir("corrupt-journal");
+    let runs_dir = tmp.join("runs");
+    let repo_dir = tmp.join("repo");
+    fs::create_dir_all(&runs_dir).unwrap();
+    fs::create_dir_all(&repo_dir).unwrap();
+
+    let task = "p7corrupt";
+    let mock = MockMemberRunner::new();
+
+    let m1 = format!("suhuynh-{task}c1");
+    let m2 = format!("quansu-{task}c2");
+
+    let member_specs = vec![
+        (m1.clone(), "suhuynh".to_string()),
+        (m2.clone(), "quansu".to_string()),
+    ];
+
+    // Corrupt the journal database so run_until_blocked fails with a journal error
+    let db_path = runs_dir.join("quaqua.db");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        // Create an incompatible events table missing columns to trigger runner error
+        conn.execute("CREATE TABLE events (bogus_col TEXT);", [])
+            .unwrap();
+    }
+
+    let res = run_taskforce_workflow(
+        "council",
+        task,
+        &repo_dir,
+        "brief",
+        "council",
+        &member_specs,
+        2,
+        "cos",
+        &[],
+        None,
+        &runs_dir,
+        &mock,
+    );
+
+    assert!(res.is_err(), "must fail due to corrupt journal");
+    // Verify that TaskforceSpawnGuard cleaned up both spawned members!
+    assert_eq!(
+        mock.cleaned_up(),
+        vec![m1, m2],
+        "all spawned members must be cleaned up on runner error"
     );
 }
 

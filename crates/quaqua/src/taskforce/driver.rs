@@ -8,7 +8,7 @@ use super::workflow::{
 use crate::engine::activity::{Activity, ActivityError, ActivityRequest, ActivityResult};
 use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
 use crate::engine::clock::RealClock;
-use crate::engine::journal::{Journal, SnapshotRecord};
+use crate::engine::journal::{EventRecord, Journal, SnapshotRecord};
 use crate::engine::journal_sqlite::SqliteJournal;
 use crate::engine::runner::{self, RunnerOptions, RunnerOutcome};
 use crate::engine::workflow::WorkflowEvent;
@@ -50,6 +50,24 @@ pub trait CouncilMemberRunner: Send + Sync {
     ) -> Result<SingleWorkerOutput, (i32, String)>;
 
     fn cleanup_member(&self, name: &str, repo: &Path) -> Result<(), (i32, String)>;
+}
+
+/// RAII cleanup guard that ensures any spawned members on error paths are cleaned up (F1 residual).
+struct TaskforceSpawnGuard<'a, R: CouncilMemberRunner> {
+    runner: &'a R,
+    repo: &'a Path,
+    spawned: Vec<String>,
+    success: bool,
+}
+
+impl<'a, R: CouncilMemberRunner> Drop for TaskforceSpawnGuard<'a, R> {
+    fn drop(&mut self) {
+        if !self.success {
+            for name in &self.spawned {
+                let _ = self.runner.cleanup_member(name, self.repo);
+            }
+        }
+    }
 }
 
 /// Production member runner using live Quaqua worker functions.
@@ -177,6 +195,66 @@ pub fn build_member_prompt(mode: &str, task: &str, worker_name: &str, brief: &st
     }
 }
 
+/// Reconstruct taskforce state from loaded journal events.
+fn rebuild_state_from_events(
+    initial_state: &TaskforceState,
+    events: &[EventRecord],
+    runs_dir: &Path,
+) -> TaskforceState {
+    let mut st = initial_state.clone();
+    for rec in events {
+        if rec.kind == "child_completed" {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
+                if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
+                    if let Some(m) = st.members.iter_mut().find(|slot| slot.id == id) {
+                        let rpath = data
+                            .get("output")
+                            .and_then(|o| o.get("report_path"))
+                            .and_then(|p| p.as_str())
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| runs_dir.join(format!("{id}.md")));
+                        let v = data
+                            .get("output")
+                            .and_then(|o| o.get("verdict"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let findings = data
+                            .get("output")
+                            .and_then(|o| o.get("findings"))
+                            .and_then(|f| f.as_u64())
+                            .map(|n| n as u32);
+                        let is_challenge = data
+                            .get("output")
+                            .and_then(|o| o.get("is_challenge"))
+                            .and_then(|c| c.as_bool());
+                        m.status = MemberStatus::Completed {
+                            report_path: rpath,
+                            verdict: v,
+                            findings_count: findings,
+                            is_challenge,
+                        };
+                    }
+                }
+            }
+        } else if rec.kind == "child_failed" {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
+                if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
+                    if let Some(m) = st.members.iter_mut().find(|slot| slot.id == id) {
+                        let code = data.get("code").and_then(|c| c.as_i64()).unwrap_or(1) as i32;
+                        let reason = data
+                            .get("reason")
+                            .and_then(|r| r.as_str())
+                            .unwrap_or("failed")
+                            .to_string();
+                        m.status = MemberStatus::Failed { code, reason };
+                    }
+                }
+            }
+        }
+    }
+    st
+}
+
 /// Generalized driver executing advisor, dual-lens, or council workflows.
 pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
     mode: &str,
@@ -212,10 +290,36 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
         snapshot_at_blocked: false,
     };
 
+    let single_worker_inputs: Vec<SingleWorkerInput> = member_specs
+        .iter()
+        .map(|(name, kind)| {
+            let prompt_text = build_member_prompt(mode, task, name, brief);
+            SingleWorkerInput::new(
+                name.clone(),
+                kind.clone(),
+                repo.to_string_lossy().to_string(),
+                prompt_text,
+                2700,
+                None,
+            )
+        })
+        .collect();
+
+    let input = TaskforceInput {
+        mode: mode.to_string(),
+        task: task.to_string(),
+        repo: repo.to_string_lossy().to_string(),
+        brief: brief.to_string(),
+        members: single_worker_inputs,
+        quorum: Some(quorum),
+        role: Some(role_name.to_string()),
+        chair_owner: Some(chair_owner.to_string()),
+    };
+    let initial_state = TaskforceState::from_input(&input);
+
     // 1. Inspect journal BEFORE spawning (F1, F6)
     let past_events = journal.load_events(&workflow_id, 1).unwrap_or_default();
 
-    // Check if the journal already holds a terminal outcome
     let mut already_completed: Option<TaskforceOutput> = None;
     let mut already_failed: Option<(i32, String)> = None;
     let mut settled_members: BTreeSet<String> = BTreeSet::new();
@@ -244,26 +348,58 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
         }
     }
 
-    // Terminal replay check (F1, F6):
-    // If the state file indicates finished=1 and the journal has a terminal result,
-    // return it immediately without spawning any members!
-    let st_finished = if st_file.is_file() {
-        let content = std::fs::read_to_string(&st_file).unwrap_or_default();
-        content.lines().any(|l| l.trim() == "finished=1")
-    } else {
-        false
-    };
-
-    if st_finished {
-        if let Some(out) = already_completed {
-            return Ok(out);
+    // Authoritative journal terminal check BEFORE spawn loop (F6, F7):
+    // If the journal already recorded completion or failure, return it immediately without spawning!
+    if let Some(mut out) = already_completed {
+        if mode == "council" {
+            let merged_path = runs_dir.join(format!("council-{task}.md"));
+            if !merged_path.is_file() {
+                // Idempotent report generation if missing on terminal replay (F7)
+                let final_state = rebuild_state_from_events(&initial_state, &past_events, runs_dir);
+                let written_path =
+                    write_council_report(runs_dir, task, role_name, &final_state, &out)
+                        .map_err(|e| (1, format!("cannot write merged report: {e}\n")))?;
+                out.merged_report = Some(written_path);
+            } else {
+                out.merged_report = Some(merged_path);
+            }
         }
-        if let Some((code, reason)) = already_failed {
-            return Err((code, reason));
-        }
+        let _ = write_state_file(
+            &st_file,
+            mode,
+            task,
+            chair_owner,
+            &member_names,
+            n,
+            quorum,
+            true,
+            pid,
+        );
+        return Ok(out);
+    }
+    if let Some((code, reason)) = already_failed {
+        let _ = write_state_file(
+            &st_file,
+            mode,
+            task,
+            chair_owner,
+            &member_names,
+            n,
+            quorum,
+            true,
+            pid,
+        );
+        return Err((code, reason));
     }
 
-    // 2. Spawn ONLY unsettled members (F1)
+    // 2. Initialize RAII spawn guard to prevent leaks on any error path (F1 residual)
+    let mut guard = TaskforceSpawnGuard {
+        runner,
+        repo,
+        spawned: Vec::new(),
+        success: false,
+    };
+
     write_state_file(
         &st_file,
         mode,
@@ -277,17 +413,13 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
     )
     .map_err(|e| (1, format!("cannot write state file: {e}\n")))?;
 
-    let mut spawned_members: Vec<String> = Vec::new();
+    // Spawn ONLY unsettled members
     for (name, kind) in member_specs {
         if settled_members.contains(name) {
-            // Member already settled in earlier run; skip re-spawning (F1)
             continue;
         }
         let spawn_res = runner.spawn_member(name, kind, repo, task, approve_kinds, base);
         if let Err(e) = spawn_res {
-            for spawned in &spawned_members {
-                let _ = runner.cleanup_member(spawned, repo);
-            }
             let _ = write_state_file(
                 &st_file,
                 mode,
@@ -299,41 +431,13 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
                 true,
                 pid,
             );
-            return Err(e);
+            return Err(e); // guard cleans up already-spawned members on drop
         }
-        spawned_members.push(name.clone());
+        guard.spawned.push(name.clone());
         let _ = WorkerMetadata::save_taskforce(runs_dir, name, task);
     }
 
-    // 3. Setup TaskforceWorkflow
-    let single_worker_inputs: Vec<SingleWorkerInput> = member_specs
-        .iter()
-        .map(|(name, kind)| {
-            let prompt_text = build_member_prompt(mode, task, name, brief);
-            SingleWorkerInput::new(
-                name.clone(),
-                kind.clone(),
-                repo.to_string_lossy().to_string(),
-                prompt_text,
-                2700,
-                None,
-            )
-        })
-        .collect();
-
-    let input = TaskforceInput {
-        mode: mode.to_string(),
-        task: task.to_string(),
-        repo: repo.to_string_lossy().to_string(),
-        brief: brief.to_string(),
-        members: single_worker_inputs,
-        quorum: Some(quorum),
-        role: Some(role_name.to_string()),
-        chair_owner: Some(chair_owner.to_string()),
-    };
-    let initial_state = TaskforceState::from_input(&input);
-
-    // Seed snapshot at seq 0 if none exists to enable deterministic event replay
+    // 3. Setup TaskforceWorkflow and seed initial snapshot
     if journal
         .load_latest_snapshot(&workflow_id)
         .map(|s| s.is_none())
@@ -346,6 +450,7 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
         );
         let _ = journal.append_snapshot(&workflow_id, &snap);
     }
+
     let is_resumed = !past_events.is_empty();
     let start_state = if is_resumed {
         None
@@ -366,7 +471,20 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
     .map_err(|e| (1, format!("runner error: {e}\n")))?;
 
     match first_outcome {
-        RunnerOutcome::Completed(out) => {
+        RunnerOutcome::Completed(mut out) => {
+            if mode == "council" {
+                let merged_path = runs_dir.join(format!("council-{task}.md"));
+                if !merged_path.is_file() {
+                    let final_state =
+                        rebuild_state_from_events(&initial_state, &past_events, runs_dir);
+                    let written_path =
+                        write_council_report(runs_dir, task, role_name, &final_state, &out)
+                            .map_err(|e| (1, format!("cannot write merged report: {e}\n")))?;
+                    out.merged_report = Some(written_path);
+                } else {
+                    out.merged_report = Some(merged_path);
+                }
+            }
             let _ = write_state_file(
                 &st_file,
                 mode,
@@ -378,6 +496,7 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
                 true,
                 pid,
             );
+            guard.success = true;
             return Ok(out);
         }
         RunnerOutcome::Failed { code, reason } => {
@@ -423,6 +542,7 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
 
         while let Ok((name, prompt_res)) = rx.recv() {
             settled_members.insert(name.clone());
+            guard.spawned.retain(|n| n != &name);
 
             let event = match prompt_res {
                 Ok(out) => {
@@ -480,12 +600,12 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
             match step_res {
                 Ok(RunnerOutcome::Failed { code, reason }) => {
                     fail_fast_error = Some((code, reason));
-                    // Signal cancellation to all running member threads immediately! (F2)
+                    // Cancel live threads and clean up live unsettled members immediately (F2, F3)
                     cancel_flag.store(true, Ordering::SeqCst);
-                    // Clean up still-live (unsettled) members only (F2, F3)
                     for (m_name, _) in member_specs {
                         if !settled_members.contains(m_name) {
                             let _ = runner.cleanup_member(m_name, repo);
+                            guard.spawned.retain(|n| n != m_name);
                         }
                     }
                     break;
@@ -496,6 +616,7 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
                     for (m_name, _) in member_specs {
                         if !settled_members.contains(m_name) {
                             let _ = runner.cleanup_member(m_name, repo);
+                            guard.spawned.retain(|n| n != m_name);
                         }
                     }
                     break;
@@ -523,58 +644,7 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
 
     // 6. Reconstruct final state from journal events (F7)
     let final_events = journal.load_events(&workflow_id, 1).unwrap_or_default();
-    let mut final_state = initial_state;
-    for rec in &final_events {
-        if rec.kind == "child_completed" {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
-                if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
-                    if let Some(m) = final_state.members.iter_mut().find(|slot| slot.id == id) {
-                        let rpath = data
-                            .get("output")
-                            .and_then(|o| o.get("report_path"))
-                            .and_then(|p| p.as_str())
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| runs_dir.join(format!("{id}.md")));
-                        let v = data
-                            .get("output")
-                            .and_then(|o| o.get("verdict"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        let findings = data
-                            .get("output")
-                            .and_then(|o| o.get("findings"))
-                            .and_then(|f| f.as_u64())
-                            .map(|n| n as u32);
-                        let is_challenge = data
-                            .get("output")
-                            .and_then(|o| o.get("is_challenge"))
-                            .and_then(|c| c.as_bool());
-                        m.status = MemberStatus::Completed {
-                            report_path: rpath,
-                            verdict: v,
-                            findings_count: findings,
-                            is_challenge,
-                        };
-                    }
-                }
-            }
-        } else if rec.kind == "child_failed" {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
-                if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
-                    if let Some(m) = final_state.members.iter_mut().find(|slot| slot.id == id) {
-                        let code = data.get("code").and_then(|c| c.as_i64()).unwrap_or(1) as i32;
-                        let reason = data
-                            .get("reason")
-                            .and_then(|r| r.as_str())
-                            .unwrap_or("failed")
-                            .to_string();
-                        m.status = MemberStatus::Failed { code, reason };
-                    }
-                }
-            }
-        }
-    }
-
+    let final_state = rebuild_state_from_events(&initial_state, &final_events, runs_dir);
     let mut final_out = build_taskforce_output(&final_state);
 
     // 7. Write merged report BEFORE final state file completion (F7)
@@ -584,7 +654,7 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
         final_out.merged_report = Some(merged_path);
     }
 
-    // Now record completion and finalize state
+    // Mark state finished only after the merged report is on disk (F7)
     let _ = write_state_file(
         &st_file,
         mode,
@@ -597,5 +667,6 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
         pid,
     );
 
+    guard.success = true;
     Ok(final_out)
 }
