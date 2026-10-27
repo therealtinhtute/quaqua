@@ -602,11 +602,18 @@ fn main() {
             IdentityCmd::Heal { pane } => {
                 let runs_dir = default_runs_dir();
                 match quaqua::identity::heal_with_runs_dir(&herdr, &runs_dir, pane.as_deref()) {
-                    Ok(actions) => {
-                        for action in actions {
+                    Ok(report) => {
+                        for action in &report.actions {
                             println!("{action}");
                         }
-                        0
+                        for err in &report.errors {
+                            eprintln!("error: {err}");
+                        }
+                        if report.actions.is_empty() && !report.errors.is_empty() {
+                            1
+                        } else {
+                            0
+                        }
                     }
                     Err(e) => {
                         eprintln!("error: {e}");

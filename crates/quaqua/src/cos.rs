@@ -172,29 +172,38 @@ pub fn tag_cos_pane_in<H: HerdrOps>(
         return Err(format!("herdr pane rename failed for {pane}: {err}"));
     }
 
-    // 3. Record runs/cos.identity.json if agent_session is found
-    record_cos_identity_if_present(herdr, pane, runs_dir);
+    // 3. Record runs/cos.identity.json if agent_session is found, or remove stale record
+    let sess_recorded = record_cos_identity_if_present(herdr, pane, runs_dir)?;
 
     let snippet = sidebar_chip_snippet();
-    let msg = format!(
-        "Tagged pane {pane} as grid_role=cos ({COS_DISPLAY_AGENT})\n\
-         \n\
-         Hint: to display the CoS badge in the herdr sidebar, add this snippet to ~/.config/herdr/config.toml:\n\
-         {snippet}\n\
-         then run `herdr server reload-config`.\n"
-    );
+    let msg = if sess_recorded.is_some() {
+        format!(
+            "Tagged pane {pane} as grid_role=cos ({COS_DISPLAY_AGENT})\n\
+             \n\
+             Hint: to display the CoS badge in the herdr sidebar, add this snippet to ~/.config/herdr/config.toml:\n\
+             {snippet}\n\
+             then run `herdr server reload-config`.\n"
+        )
+    } else {
+        format!(
+            "Tagged pane {pane} as grid_role=cos ({COS_DISPLAY_AGENT}) [no agent_session recorded]\n\
+             \n\
+             Hint: to display the CoS badge in the herdr sidebar, add this snippet to ~/.config/herdr/config.toml:\n\
+             {snippet}\n\
+             then run `herdr server reload-config`.\n"
+        )
+    };
 
     Ok(msg)
 }
 
-/// Record `runs/cos.identity.json = {agent_session, pane_id}` when agent_session is available on the pane.
-pub fn record_cos_identity_if_present<H: HerdrOps>(herdr: &H, pane: &str, runs_dir: &Path) {
-    // Legacy tests/cos.rs asserts exact command calls in herdr.log without agent_session
-    if let Ok(bin) = std::env::var("HERDR_BIN_PATH") {
-        if bin.contains("quaqua-cos-test") {
-            return;
-        }
-    }
+/// Record `runs/cos.identity.json = {agent_session, pane_id}` when agent_session is available on the pane,
+/// or remove the record if the pane carries no agent_session.
+pub fn record_cos_identity_if_present<H: HerdrOps>(
+    herdr: &H,
+    pane: &str,
+    runs_dir: &Path,
+) -> Result<Option<String>, String> {
     let mut session_val = None;
     // Check pane get <pane>
     if let Ok(out) = herdr.run(&["pane", "get", pane]) {
@@ -212,42 +221,26 @@ pub fn record_cos_identity_if_present<H: HerdrOps>(herdr: &H, pane: &str, runs_d
             }
         }
     }
-    // Fall back to agent list
-    if session_val.is_none() {
-        if let Some(agents_val) = crate::lead::tag::get_agent_list_json(herdr) {
-            if let Some(agents) = agents_val
-                .pointer("/result/agents")
-                .and_then(|a| a.as_array())
-            {
-                for agent in agents {
-                    if agent.get("pane_id").and_then(|p| p.as_str()) == Some(pane) {
-                        session_val = agent
-                            .get("agent_session")
-                            .and_then(|s| {
-                                s.get("value")
-                                    .and_then(|v| v.as_str())
-                                    .or_else(|| s.as_str())
-                            })
-                            .map(String::from);
-                        if session_val.is_some() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
 
+    let path = runs_dir.join(COS_IDENTITY_FILE);
     if let Some(sess) = session_val {
-        let _ = std::fs::create_dir_all(runs_dir);
-        let path = runs_dir.join(COS_IDENTITY_FILE);
         let payload = serde_json::json!({
             "agent_session": sess,
             "pane_id": pane,
         });
-        if let Ok(content) = serde_json::to_string_pretty(&payload) {
-            let _ = std::fs::write(path, content);
+        let content = serde_json::to_string_pretty(&payload)
+            .map_err(|e| format!("cannot serialize CoS identity: {e}"))?;
+        crate::state::atomic_write(&path, content.as_bytes()).map_err(|e| {
+            eprintln!("warning: failed to write {}: {e}", path.display());
+            format!("failed to write {}: {e}", path.display())
+        })?;
+        Ok(Some(sess))
+    } else {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
         }
+        eprintln!("warning: pane {pane} carries no agent_session; runs/cos.identity.json removed");
+        Ok(None)
     }
 }
 

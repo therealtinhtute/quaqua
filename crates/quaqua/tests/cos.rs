@@ -122,6 +122,7 @@ fn test_cos_tag_cli_with_explicit_pane() {
         vec![
             "pane report-metadata w1:p1 --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả",
             "pane rename w1:p1 🍑 CoS",
+            "pane get w1:p1",
         ]
     );
 
@@ -153,8 +154,10 @@ fn test_cos_tag_cli_idempotent() {
         vec![
             "pane report-metadata w1:p42 --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả",
             "pane rename w1:p42 🍑 CoS",
+            "pane get w1:p42",
             "pane report-metadata w1:p42 --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả",
             "pane rename w1:p42 🍑 CoS",
+            "pane get w1:p42",
         ]
     );
 
