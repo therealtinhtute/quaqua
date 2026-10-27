@@ -573,72 +573,115 @@ pub fn diff_plugin_hooks(
     Ok(problems)
 }
 
-/// Check registered Leads in `projects/INDEX.md` against running agents in herdr.
-/// Flags any running Lead whose pane tokens are missing `grid_role=orchestrator` or
-/// `grid_owner=<slug>-lead`.
+/// Check pane identity tokens against the live herdr registry.
+///
+/// Problems: a registered Lead in `projects/INDEX.md` whose pane tokens are
+/// missing `grid_role=orchestrator` or `grid_owner=<slug>-lead`.
+/// Warnings: herdr is live but no pane carries `grid_role=cos` (no CoS session
+/// running is a legal state), and a named pane carrying no `grid_*` token at
+/// all. Both warnings are the shape a herdr server restart leaves behind —
+/// herdr does not persist pane tokens, so nothing re-applies `grid_role`.
 pub fn diff_lead_tokens_with<H: crate::herdr::HerdrOps>(
     workspace: &Path,
     herdr: &H,
-) -> Vec<DriftProblem> {
-    let mut problems = Vec::new();
-    let index_file = workspace.join("projects/INDEX.md");
-    let Ok(content) = std::fs::read_to_string(&index_file) else {
-        return problems;
-    };
-    let rows = crate::worker::leadgate::index_rows(&content);
-    let lead_rows: Vec<_> = rows
-        .into_iter()
-        .filter(|r| r.owner == format!("{}-lead", r.slug))
-        .collect();
-    if lead_rows.is_empty() {
-        return problems;
-    }
+) -> WorkspaceDriftReport {
+    let mut report = WorkspaceDriftReport::default();
 
     let Some(agents_val) = crate::lead::tag::get_agent_list_json(herdr) else {
-        return problems;
+        return report;
     };
     let Some(agents) = agents_val
         .pointer("/result/agents")
         .and_then(|a| a.as_array())
     else {
-        return problems;
+        return report;
     };
 
-    for row in lead_rows {
-        for agent in agents {
-            let name = agent.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            if name == row.owner {
-                let pane_id = agent.get("pane_id").and_then(|p| p.as_str()).unwrap_or("");
-                let tokens = agent.get("tokens").and_then(|t| t.as_object());
-                let role = tokens
-                    .and_then(|t| t.get("grid_role"))
-                    .and_then(|v| v.as_str());
-                let owner = tokens
-                    .and_then(|t| t.get("grid_owner"))
-                    .and_then(|v| v.as_str());
-                if role != Some("orchestrator") || owner != Some(&row.owner) {
-                    problems.push(DriftProblem {
-                        drift: format!(
-                            "lead identity drift: registered lead '{}' (pane '{}') is missing orchestrator tokens",
-                            row.slug, pane_id
-                        ),
-                        fix: format!("quaqua lead repair {}", row.slug),
-                    });
+    // One pane tagged `cos` is the CoS identity for this herdr session.
+    let has_cos_pane = agents.iter().any(|agent| {
+        agent
+            .get("tokens")
+            .and_then(|t| t.get("grid_role"))
+            .and_then(|v| v.as_str())
+            == Some("cos")
+    });
+    if !has_cos_pane {
+        report.warnings.push(
+            "identity drift: herdr is live but no pane carries grid_role=cos — if a CoS session \
+             is running, run `quaqua cos tag` in its pane"
+                .to_string(),
+        );
+    }
+
+    let mut flagged_leads: Vec<String> = Vec::new();
+    let index_file = workspace.join("projects/INDEX.md");
+    if let Ok(content) = std::fs::read_to_string(&index_file) {
+        let lead_rows: Vec<_> = crate::worker::leadgate::index_rows(&content)
+            .into_iter()
+            .filter(|r| r.owner == format!("{}-lead", r.slug))
+            .collect();
+
+        for row in lead_rows {
+            for agent in agents {
+                let name = agent.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                if name == row.owner {
+                    let pane_id = agent.get("pane_id").and_then(|p| p.as_str()).unwrap_or("");
+                    let tokens = agent.get("tokens").and_then(|t| t.as_object());
+                    let role = tokens
+                        .and_then(|t| t.get("grid_role"))
+                        .and_then(|v| v.as_str());
+                    let owner = tokens
+                        .and_then(|t| t.get("grid_owner"))
+                        .and_then(|v| v.as_str());
+                    if role != Some("orchestrator") || owner != Some(&row.owner) {
+                        flagged_leads.push(name.to_string());
+                        report.problems.push(DriftProblem {
+                            drift: format!(
+                                "lead identity drift: registered lead '{}' (pane '{}') is missing orchestrator tokens",
+                                row.slug, pane_id
+                            ),
+                            fix: format!("quaqua lead repair {}", row.slug),
+                        });
+                    }
                 }
             }
         }
     }
 
-    problems
+    // A named pane with no `grid_*` token at all lost the whole quaqua block;
+    // a registered Lead already has a problem above, so report each pane once.
+    for agent in agents {
+        let name = agent.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if name.is_empty() || flagged_leads.iter().any(|n| n == name) {
+            continue;
+        }
+        let tokens = agent.get("tokens").and_then(|t| t.as_object());
+        let carries_grid = tokens
+            .map(|t| t.keys().any(|k| k.starts_with("grid_")))
+            .unwrap_or(false);
+        if carries_grid {
+            continue;
+        }
+        let pane_id = agent.get("pane_id").and_then(|p| p.as_str()).unwrap_or("");
+        let repair = match name.strip_suffix("-lead") {
+            Some(slug) => format!(" — run `quaqua lead repair {slug}`"),
+            None => String::new(),
+        };
+        report.warnings.push(format!(
+            "identity drift: named pane '{name}' (pane '{pane_id}') carries no grid_* token{repair}"
+        ));
+    }
+
+    report
 }
 
 /// Default `diff_lead_tokens` using the system Herdr driver.
 /// Skips live daemon lookup during unit tests unless HERDR_BIN_PATH is provided.
-pub fn diff_lead_tokens(workspace: &Path) -> Vec<DriftProblem> {
+pub fn diff_lead_tokens(workspace: &Path) -> WorkspaceDriftReport {
     if std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
         && std::env::var("HERDR_BIN_PATH").is_err()
     {
-        return Vec::new();
+        return WorkspaceDriftReport::default();
     }
     let herdr = crate::herdr::Herdr::new();
     diff_lead_tokens_with(workspace, &herdr)
@@ -794,8 +837,11 @@ pub fn evaluate_workspace(
         }
     }
 
-    // 3. Lead identity token drift
-    report.problems.extend(diff_lead_tokens(&ws));
+    // 3. Pane identity token drift (Lead tokens are problems; a missing CoS
+    //    pane or an untagged named pane is a warning)
+    let identity = diff_lead_tokens(&ws);
+    report.problems.extend(identity.problems);
+    report.warnings.extend(identity.warnings);
 
     // 4. Workspace warnings
     report.warnings.extend(workspace_warnings(Some(&ws)));
@@ -1290,18 +1336,66 @@ command = ["quaqua", "events", "hook"]
             "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole |\n",
         ).unwrap();
 
-        // Case 1: Untagged lead pane -> detected as drift
-        let untagged_json = r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#;
-        let problems = diff_lead_tokens_with(&ws, &MockDoctorHerdr(untagged_json.to_string()));
-        assert_eq!(problems.len(), 1);
-        assert!(problems[0].drift.contains("missing orchestrator tokens"));
-        assert!(problems[0].drift.contains("wB:p1"));
-        assert_eq!(problems[0].fix, "quaqua lead repair mu");
+        // Case 1: Untagged lead pane beside a tagged CoS pane -> detected as drift
+        let untagged_json = r#"{"result":{"agents":[
+            {"pane_id":"w1:p1X","tokens":{"grid_role":"cos","grid_owner":"cos"}},
+            {"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}
+        ]}}"#;
+        let report = diff_lead_tokens_with(&ws, &MockDoctorHerdr(untagged_json.to_string()));
+        assert_eq!(report.problems.len(), 1);
+        assert!(report.problems[0]
+            .drift
+            .contains("missing orchestrator tokens"));
+        assert!(report.problems[0].drift.contains("wB:p1"));
+        assert_eq!(report.problems[0].fix, "quaqua lead repair mu");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
 
-        // Case 2: Correctly tagged lead pane -> 0 problems
-        let tagged_json = r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"grid_role":"orchestrator","grid_owner":"mu-lead","logo":"\ue1a3"}}]}}"#;
+        // Case 2: Correctly tagged lead beside a tagged CoS pane -> silent
+        let tagged_json = r#"{"result":{"agents":[
+            {"pane_id":"w1:p1X","tokens":{"grid_role":"cos","grid_owner":"cos"}},
+            {"name":"mu-lead","pane_id":"wB:p1","tokens":{"grid_role":"orchestrator","grid_owner":"mu-lead","logo":"\ue1a3"}}
+        ]}}"#;
         let clean = diff_lead_tokens_with(&ws, &MockDoctorHerdr(tagged_json.to_string()));
-        assert!(clean.is_empty(), "{clean:?}");
+        assert!(clean.problems.is_empty(), "{:?}", clean.problems);
+        assert!(clean.warnings.is_empty(), "{:?}", clean.warnings);
+
+        // Case 3: herdr is live but no pane carries grid_role=cos (a herdr
+        // restart dropped the CoS token) -> one warning with the repair, no error
+        let no_cos_json = r#"{"result":{"agents":[
+            {"name":"mu-lead","pane_id":"wB:p1","tokens":{"grid_role":"orchestrator","grid_owner":"mu-lead"}},
+            {"name":"sude-task","pane_id":"wC:p2","tokens":{"grid_role":"worker","grid_owner":"mu-lead","grid_name":"sude-task"}}
+        ]}}"#;
+        let no_cos = diff_lead_tokens_with(&ws, &MockDoctorHerdr(no_cos_json.to_string()));
+        assert!(no_cos.problems.is_empty(), "{:?}", no_cos.problems);
+        assert_eq!(no_cos.warnings.len(), 1, "{:?}", no_cos.warnings);
+        assert!(no_cos.warnings[0].contains("no pane carries grid_role=cos"));
+        assert!(no_cos.warnings[0].contains("quaqua cos tag"));
+
+        // Case 4: named panes whose tokens carry no grid_* at all -> warnings,
+        // naming the pane and (for a Lead) the repair; the tagged CoS pane and
+        // the tagged registered lead stay silent
+        let untagged_workers_json = r#"{"result":{"agents":[
+            {"pane_id":"w1:p1X","tokens":{"grid_role":"cos","grid_owner":"cos"}},
+            {"name":"mu-lead","pane_id":"wB:p1","tokens":{"grid_role":"orchestrator","grid_owner":"mu-lead"}},
+            {"name":"sude-task","pane_id":"wC:p2","tokens":{"logo":"\ue1a3"}},
+            {"name":"llmhub-lead","pane_id":"wA:p1","tokens":{"logo":"\ue1a3"}}
+        ]}}"#;
+        let workers =
+            diff_lead_tokens_with(&ws, &MockDoctorHerdr(untagged_workers_json.to_string()));
+        assert!(workers.problems.is_empty(), "{:?}", workers.problems);
+        assert_eq!(workers.warnings.len(), 2, "{:?}", workers.warnings);
+        assert!(
+            workers.warnings[0].contains("'sude-task' (pane 'wC:p2')")
+                && workers.warnings[0].contains("no grid_* token"),
+            "{:?}",
+            workers.warnings
+        );
+        assert!(
+            workers.warnings[1].contains("'llmhub-lead' (pane 'wA:p1')")
+                && workers.warnings[1].contains("quaqua lead repair llmhub"),
+            "{:?}",
+            workers.warnings
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
