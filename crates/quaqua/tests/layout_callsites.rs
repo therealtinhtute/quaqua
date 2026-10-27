@@ -7,7 +7,7 @@
 //! - `spawn_refused_leaves_no_layout_role` (lead spawn rollback)
 //! - `worker_spawn_refused_leaves_no_layout_role` (worker spawn rollback, F4)
 //! - `post_agent_failure_retains_layout_role_marker` (F3 invariant)
-//! - `slug_lead_role_accepts_lead_name_in_worker_spawn` (F2 ii & iii)
+//! - `worker_spawn_rejects_lead_name_even_when_slug_lead_role_exists` (worker spawn rejects -lead names)
 //! - `worker_spawn_and_cleanup_lifecycle`
 
 use std::cell::RefCell;
@@ -815,10 +815,10 @@ effort = "high"
     );
 }
 
-/// F2 ii & iii: A lead-class role with `naming = "slug-lead"` accepts a worker name
-/// ending in `-lead`, which `is_valid_name` would reject.
+/// Worker spawn rejects names ending in `-lead`, even when a lead-class role
+/// with `naming = "slug-lead"` exists in the layout.
 #[test]
-fn slug_lead_role_accepts_lead_name_in_worker_spawn() {
+fn worker_spawn_rejects_lead_name_even_when_slug_lead_role_exists() {
     let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp_root = hermetic_temp_dir("slug-lead-worker");
     let runs_dir = temp_root.join("runs");
@@ -901,10 +901,8 @@ reports_to = "owner"
     let git = DummyGit;
     let herdr = DummyHerdr::new();
 
-    // 1. "arch-lead" ends with "-lead" and is <= 32 chars.
-    // Under is_valid_name, it would be REJECTED (doesn't start with "sude-", ends with "-lead").
-    // Under SlugLead branch, it is ACCEPTED!
-    let opts_slug_lead = SpawnOptions {
+    // 1. "arch-lead" ends with "-lead". Worker spawn must reject it outright.
+    let opts_arch_lead = SpawnOptions {
         name: "arch-lead".to_string(),
         kind: Some("sude".to_string()),
         repo_path: repo_dir.clone(),
@@ -914,20 +912,22 @@ reports_to = "owner"
         approve_kinds: Vec::new(),
         solo: None,
     };
-    let res = spawn_worker(opts_slug_lead, &cfg, &git, &herdr, SpawnOrigin::Cli);
+    let res_arch = spawn_worker(opts_arch_lead, &cfg, &git, &herdr, SpawnOrigin::Cli);
     assert!(
-        res.is_ok(),
-        "worker spawn with -lead name targeting SlugLead role must succeed: {:?}",
-        res.err()
+        res_arch.is_err(),
+        "worker spawn with -lead name (arch-lead) must be rejected even when SlugLead role exists"
     );
-    assert_eq!(
-        read_layout_role(&runs_dir, "arch-lead"),
-        Some("chair".to_string())
+    let (code, msg) = res_arch.unwrap_err();
+    assert_eq!(code, 1);
+    assert!(
+        msg.contains("# Usage: quaqua worker spawn"),
+        "error message must contain usage, got: {msg}"
     );
 
-    // 2. A name exceeding 32 chars on SlugLead role is REJECTED
-    let opts_too_long = SpawnOptions {
-        name: "a-very-long-name-exceeding-thirty-two-chars-maximum-lead".to_string(),
+    // 2. "sude-lead" has valid kind prefix "sude-" but ends with "-lead".
+    // Worker spawn must reject it with exit 1 and USAGE.
+    let opts_sude_lead = SpawnOptions {
+        name: "sude-lead".to_string(),
         kind: Some("sude".to_string()),
         repo_path: repo_dir.clone(),
         base: None,
@@ -936,10 +936,16 @@ reports_to = "owner"
         approve_kinds: Vec::new(),
         solo: None,
     };
-    let res_long = spawn_worker(opts_too_long, &cfg, &git, &herdr, SpawnOrigin::Cli);
+    let res_sude = spawn_worker(opts_sude_lead, &cfg, &git, &herdr, SpawnOrigin::Cli);
     assert!(
-        res_long.is_err(),
-        "name > 32 chars on SlugLead must be rejected"
+        res_sude.is_err(),
+        "worker spawn with -lead name (sude-lead) must be rejected"
+    );
+    let (code, msg) = res_sude.unwrap_err();
+    assert_eq!(code, 1);
+    assert!(
+        msg.contains("# Usage: quaqua worker spawn"),
+        "error message must contain usage, got: {msg}"
     );
 
     // 3. For a KindTask role ("peer"), a name with wrong prefix is REJECTED

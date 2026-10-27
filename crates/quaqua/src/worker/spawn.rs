@@ -407,6 +407,10 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         let line2 = USAGE.lines().next().unwrap_or(USAGE);
         (1, format!("{line2}\n"))
     })?;
+    if !is_valid_name(&opts.name, &kind) {
+        let lines: Vec<&str> = USAGE.lines().take(2).collect();
+        return Err((1, format!("{}\n", lines.join("\n"))));
+    }
 
     // One spawn-policy gate for every spawn path: a kind with
     // `spawn = "approve"` needs its own --approve-kind from the Principal.
@@ -464,8 +468,6 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
     );
     let target_class = if origin == SpawnOrigin::TaskforceMember {
         "taskforce"
-    } else if opts.name.ends_with("-lead") {
-        "lead"
     } else {
         "peer"
     };
