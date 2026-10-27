@@ -1,7 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +47,18 @@ pub struct LayoutRole {
     pub naming: Naming,
     #[serde(default)]
     pub members: Vec<Member>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quorum: Option<usize>,
+}
+
+impl LayoutRole {
+    pub fn effective_quorum(&self) -> Option<usize> {
+        if self.members.is_empty() {
+            None
+        } else {
+            Some(self.quorum.unwrap_or_else(|| self.members.len() / 2 + 1))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -54,9 +54,9 @@ pub fn ensure_lead_pane_tagged<H: HerdrOps>(
     herdr: &H,
     slug: &str,
     pane: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if pane.is_empty() || !pane.contains(':') {
-        return Ok(());
+        return Ok(false);
     }
     let clean_slug = slug.strip_suffix("-lead").unwrap_or(slug);
     let expected_owner = format!("{clean_slug}-lead");
@@ -69,14 +69,14 @@ pub fn ensure_lead_pane_tagged<H: HerdrOps>(
                     let has_owner = tokens.get("grid_owner").and_then(|v| v.as_str())
                         == Some(expected_owner.as_str());
                     if has_role && has_owner {
-                        return Ok(());
+                        return Ok(false);
                     }
                 }
             }
         }
     }
     tag_lead_pane(herdr, clean_slug, pane)?;
-    Ok(())
+    Ok(true)
 }
 
 /// Repair a registered Lead's pane tokens.

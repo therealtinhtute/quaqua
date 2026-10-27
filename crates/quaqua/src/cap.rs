@@ -87,6 +87,29 @@ pub fn check_owner_cap(
         "worker cap exceeded ({slots_used} live worker slots for owner '{owner}'; {what} needs {weight}, {source} is {cap})"
     ))
 }
+/// Derives the effective taskforce weight according to the canonical precedence order:
+/// 1. `[limits.weights.<role>]` in config if explicitly configured
+/// 2. Execution state `n` if present
+/// 3. Execution state `members` count if present and non-empty
+/// 4. Layout role `members` count from the resolved layout
+/// 5. Per-kind legacy default (dual-lens: 2, council: 3, else 1)
+pub fn taskforce_weight(
+    cfg: &Config,
+    state: &crate::state::TaskforceExecutionState,
+    layout: &crate::layout::Layout,
+) -> i64 {
+    if let Some(&w) = cfg.limits.weights.get(&state.kind) {
+        return w;
+    }
+    if let Some(n) = state.n {
+        return n;
+    }
+    if !state.members.is_empty() {
+        return state.members.len() as i64;
+    }
+    crate::config::taskforce_weight_from_layout(cfg, &state.kind, layout)
+}
+
 
 /// Calculate the number of worker slots used by `owner` (defaults to "cos").
 pub fn count_owner_slots<H: HerdrOps>(
@@ -121,13 +144,16 @@ pub fn count_owner_slots<H: HerdrOps>(
         }
     }
     let pipe_weight = cfg.limits.weights.get("pipeline").copied().unwrap_or(2);
-    let dual_lens_weight = cfg
-        .limits
-        .weights
-        .get("dual-lens")
-        .copied()
-        .unwrap_or(2);
 
+    let effective_layout = match crate::config::resolve_project_layout(cfg, None) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!(
+                "warning: [cap count_owner_slots] cannot resolve layout, falling back to legacy: {e}"
+            );
+            crate::layout::Layout::from_legacy(cfg)
+        }
+    };
     let mut total_managed_slots: i64 = 0;
     let mut covered_workers: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(entries) = std::fs::read_dir(runs_dir) {
@@ -178,30 +204,15 @@ pub fn count_owner_slots<H: HerdrOps>(
                     if t.owner() != owner {
                         continue;
                     }
-                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    let weight = if t.kind == "dual-lens" || file_name.starts_with("dual-lens-") {
-                        dual_lens_weight
-                    } else {
-                        cfg.limits
-                            .weights
-                            .get(&t.kind)
-                            .copied()
-                            .unwrap_or(1)
-                    };
+                    let weight = taskforce_weight(cfg, &t, &effective_layout);
 
                     let mut t_alive = false;
                     if !t.pid.is_empty() && is_pid_alive(&t.pid) {
                         t_alive = true;
                     } else if !t.task.is_empty() {
                         for w in &live_workers {
-                            let tf_file = runs_dir.join(format!("{w}.taskforce"));
-                            let w_tf = std::fs::read_to_string(&tf_file)
-                                .map(|s| s.trim().to_string())
-                                .unwrap_or_default();
-                            if w_tf == t.task
-                                || w.ends_with(&format!("-{}", t.task))
-                                || w.ends_with(&format!("-{}dl1", t.task))
-                                || w.ends_with(&format!("-{}dl2", t.task))
+                            if WorkerMetadata::load_taskforce(runs_dir, w).as_deref() == Some(&t.task)
+                                || t.members.iter().any(|m| m == w)
                             {
                                 t_alive = true;
                                 break;
@@ -212,15 +223,9 @@ pub fn count_owner_slots<H: HerdrOps>(
                     if t_alive {
                         let mut t_cur_live: i64 = 0;
                         for w in &o_workers {
-                            let tf_file = runs_dir.join(format!("{w}.taskforce"));
-                            let w_tf = std::fs::read_to_string(&tf_file)
-                                .map(|s| s.trim().to_string())
-                                .unwrap_or_default();
                             if !t.task.is_empty()
-                                && (w_tf == t.task
-                                    || w.ends_with(&format!("-{}", t.task))
-                                    || w.ends_with(&format!("-{}dl1", t.task))
-                                    || w.ends_with(&format!("-{}dl2", t.task)))
+                                && (WorkerMetadata::load_taskforce(runs_dir, w).as_deref() == Some(&t.task)
+                                    || t.members.iter().any(|m| m == w))
                             {
                                 t_cur_live += 1;
                                 covered_workers.insert(w.clone());

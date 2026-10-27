@@ -1,8 +1,10 @@
 //! Tests for `quaqua lead repair <slug>` and token healing.
 
 use quaqua::herdr::HerdrOps;
+use quaqua::identity::heal;
 use quaqua::lead::tag::{repair_all_leads, repair_lead};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn hermetic_temp_dir(prefix: &str) -> PathBuf {
@@ -134,6 +136,175 @@ impl HerdrOps for MockRepairHerdr {
     fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<std::process::Output> {
         let mut args = vec!["pane", "report-metadata", _p];
         args.extend_from_slice(_t);
+        self.run(&args)
+    }
+    fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
+        true
+    }
+    fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+        Ok(String::new())
+    }
+    fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_wait_background(
+        &self,
+        _n: &str,
+        _p: &str,
+        _t: u32,
+        _f: std::fs::File,
+    ) -> std::io::Result<std::process::Child> {
+        unimplemented!()
+    }
+}
+
+#[derive(Clone, Default)]
+struct MockPaneInfo {
+    tokens: HashMap<String, String>,
+    agent_session: Option<String>,
+    label: Option<String>,
+}
+
+struct MockMultiPaneHerdr {
+    panes: RefCell<HashMap<String, MockPaneInfo>>,
+    reported_tokens: RefCell<Vec<(String, Vec<String>)>>,
+    renamed_panes: RefCell<Vec<(String, String)>>,
+    agent_list_json: RefCell<String>,
+    fail_metadata_pane: RefCell<Option<String>>,
+}
+
+impl MockMultiPaneHerdr {
+    fn new(panes: HashMap<String, MockPaneInfo>, agent_list_json: &str) -> Self {
+        Self {
+            panes: RefCell::new(panes),
+            reported_tokens: RefCell::new(Vec::new()),
+            renamed_panes: RefCell::new(Vec::new()),
+            agent_list_json: RefCell::new(agent_list_json.to_string()),
+            fail_metadata_pane: RefCell::new(None),
+        }
+    }
+}
+impl HerdrOps for MockMultiPaneHerdr {
+    fn run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        let stdout = if args.first() == Some(&"pane") && args.get(1) == Some(&"get") {
+            let pane_id = args.get(2).copied().unwrap_or("");
+            let panes = self.panes.borrow();
+            let info = panes.get(pane_id).cloned().unwrap_or_default();
+            let tokens_val = serde_json::to_value(&info.tokens).unwrap_or(serde_json::json!({}));
+            let session_val = info
+                .agent_session
+                .as_ref()
+                .map(|s| serde_json::json!({"value": s}));
+            let mut pane_obj = serde_json::json!({
+                "pane_id": pane_id,
+                "tokens": tokens_val,
+            });
+            if let Some(s) = session_val {
+                pane_obj["agent_session"] = s;
+            }
+            if let Some(lbl) = info.label {
+                pane_obj["label"] = serde_json::json!(lbl);
+            }
+            serde_json::to_string(&serde_json::json!({
+                "result": {
+                    "pane": pane_obj
+                }
+            }))
+            .unwrap()
+        } else if args.first() == Some(&"pane") && args.get(1) == Some(&"report-metadata") {
+            let pane_id = args.get(2).copied().unwrap_or("").to_string();
+            if self.fail_metadata_pane.borrow().as_deref() == Some(&pane_id) {
+                return Ok(std::process::Output {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(256),
+                    stdout: Vec::new(),
+                    stderr: format!("simulated metadata error for {pane_id}").into_bytes(),
+                });
+            }
+            let mut toks = Vec::new();
+            let mut i = 3;
+            while i < args.len() {
+                if args[i] == "--token" && i + 1 < args.len() {
+                    toks.push(args[i + 1].to_string());
+                    if let Some((k, v)) = args[i + 1].split_once('=') {
+                        self.panes
+                            .borrow_mut()
+                            .entry(pane_id.clone())
+                            .or_default()
+                            .tokens
+                            .insert(k.to_string(), v.to_string());
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            self.reported_tokens.borrow_mut().push((pane_id, toks));
+            r#"{"result":{}}"#.to_string()
+        } else if args.first() == Some(&"pane") && args.get(1) == Some(&"rename") {
+            let pane_id = args.get(2).copied().unwrap_or("").to_string();
+            let label = args.get(3).copied().unwrap_or("").to_string();
+            self.renamed_panes
+                .borrow_mut()
+                .push((pane_id.clone(), label.clone()));
+            self.panes.borrow_mut().entry(pane_id).or_default().label = Some(label);
+            r#"{"result":{}}"#.to_string()
+        } else if args.first() == Some(&"agent") && args.get(1) == Some(&"list") {
+            self.agent_list_json.borrow().clone()
+        } else {
+            r#"{"result":{}}"#.to_string()
+        };
+        Ok(std::process::Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: stdout.into_bytes(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn agent_list(&self) -> std::io::Result<String> {
+        Ok(self.agent_list_json.borrow().clone())
+    }
+    fn agent_get(&self, _n: &str) -> std::io::Result<(bool, String)> {
+        unimplemented!()
+    }
+    fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+        Ok(String::new())
+    }
+    fn agent_start(
+        &self,
+        _n: &str,
+        _k: &str,
+        _p: &str,
+        _t: u32,
+        _a: &[&str],
+    ) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn pane_split(
+        &self,
+        _c: &str,
+        _o: &str,
+        _e: &[(&str, &str)],
+    ) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<std::process::Output> {
+        let mut args = vec!["pane", "report-metadata", _p];
+        for t in _t {
+            args.push("--token");
+            args.push(t);
+        }
         self.run(&args)
     }
     fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
@@ -373,4 +544,655 @@ fn test_repair_all_leads_ignores_non_matching_lead_owner() {
         .expect("repair_all_leads should ignore row where owner is not <slug>-lead and succeed for matching rows");
     assert_eq!(res.len(), 1);
     assert!(res[0].contains("repaired lead 'llmhub'"));
+}
+
+#[test]
+fn test_identity_heal_lead_with_owner_file_restores_tokens() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("heal-lead-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    // mu-lead has runs/mu-lead.owner
+    std::fs::write(runs_dir.join("mu-lead.owner"), "cos\n").unwrap();
+
+    let mut panes = HashMap::new();
+    let mut mu_tokens = HashMap::new();
+    mu_tokens.insert("logo".to_string(), "\u{e1a3}".to_string());
+    panes.insert(
+        "wB:p1".to_string(),
+        MockPaneInfo {
+            tokens: mu_tokens,
+            agent_session: None,
+            label: Some("mu-lead".to_string()),
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#;
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    let actions = heal(&herdr).expect("heal should succeed");
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].contains("healed lead 'mu'"));
+
+    // Verify report-metadata was emitted with grid_role=orchestrator and grid_owner=mu-lead
+    let rep = herdr.reported_tokens.borrow();
+    assert_eq!(rep.len(), 1);
+    assert_eq!(rep[0].0, "wB:p1");
+    assert!(rep[0].1.iter().any(|t| t == "grid_role=orchestrator"));
+    assert!(rep[0].1.iter().any(|t| t == "grid_owner=mu-lead"));
+
+    // Verify tokens were updated on the mock pane
+    let p = herdr.panes.borrow();
+    assert_eq!(
+        p["wB:p1"].tokens.get("grid_role").map(String::as_str),
+        Some("orchestrator")
+    );
+    assert_eq!(
+        p["wB:p1"].tokens.get("grid_owner").map(String::as_str),
+        Some("mu-lead")
+    );
+    assert_eq!(
+        p["wB:p1"].tokens.get("logo").map(String::as_str),
+        Some("\u{e1a3}")
+    );
+}
+
+#[test]
+fn test_identity_heal_cos_matching_session_stamps_cos_token() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("heal-cos-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    // CoS identity recorded in runs/cos.identity.json
+    std::fs::write(
+        runs_dir.join("cos.identity.json"),
+        r#"{"agent_session": "ses-cos-target-42", "pane_id": "w1:p1"}"#,
+    )
+    .unwrap();
+
+    let mut panes = HashMap::new();
+    let mut cos_tokens = HashMap::new();
+    cos_tokens.insert("logo".to_string(), "\u{e1a0}".to_string());
+    panes.insert(
+        "w1:p1".to_string(),
+        MockPaneInfo {
+            tokens: cos_tokens,
+            agent_session: Some("ses-cos-target-42".to_string()),
+            label: None,
+        },
+    );
+
+    // Pane has NO herdr agent name, and tokens has only logo (no grid_role)
+    let agents_json = r#"{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude","tokens":{"logo":"\ue1a0"},"agent_session":{"value":"ses-cos-target-42"}}]}}"#;
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    let actions = heal(&herdr).expect("heal should succeed");
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].contains("healed CoS"));
+
+    // Verify report-metadata was emitted with grid_role=cos
+    let rep = herdr.reported_tokens.borrow();
+    assert!(rep
+        .iter()
+        .any(|(p, toks)| p == "w1:p1" && toks.iter().any(|t| t == "grid_role=cos")));
+
+    // Verify tokens were updated on the pane
+    let p = herdr.panes.borrow();
+    assert_eq!(
+        p["w1:p1"].tokens.get("grid_role").map(String::as_str),
+        Some("cos")
+    );
+    assert_eq!(
+        p["w1:p1"].tokens.get("grid_owner").map(String::as_str),
+        Some("cos")
+    );
+    assert_eq!(
+        p["w1:p1"].tokens.get("logo").map(String::as_str),
+        Some("\u{e1a0}")
+    );
+
+    // Verify rename was emitted
+    let renames = herdr.renamed_panes.borrow();
+    assert!(renames
+        .iter()
+        .any(|(p, title)| p == "w1:p1" && title == "🍑 CoS"));
+}
+
+#[test]
+fn test_identity_heal_cos_fails_closed_on_named_pane_or_session_mismatch() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("heal-cos-fail-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    // CoS identity expects ses-cos-target-42
+    std::fs::write(
+        runs_dir.join("cos.identity.json"),
+        r#"{"agent_session": "ses-cos-target-42", "pane_id": "w1:p1"}"#,
+    )
+    .unwrap();
+
+    let mut panes = HashMap::new();
+
+    // Pane 1: Session mismatch (ses-different)
+    panes.insert(
+        "w1:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: Some("ses-different".to_string()),
+            label: None,
+        },
+    );
+
+    // Pane 2: Matching session, BUT has an agent name ("worker-alice")
+    panes.insert(
+        "w2:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: Some("ses-cos-target-42".to_string()),
+            label: Some("worker-alice".to_string()),
+        },
+    );
+
+    // Pane 3: Matching session, no name, BUT already carries grid_role=worker
+    let mut p3_tokens = HashMap::new();
+    p3_tokens.insert("grid_role".to_string(), "worker".to_string());
+    panes.insert(
+        "w3:p1".to_string(),
+        MockPaneInfo {
+            tokens: p3_tokens,
+            agent_session: Some("ses-cos-target-42".to_string()),
+            label: None,
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[
+        {"pane_id":"w1:p1","agent":"claude","agent_session":{"value":"ses-different"}},
+        {"pane_id":"w2:p1","name":"worker-alice","agent":"claude","agent_session":{"value":"ses-cos-target-42"}},
+        {"pane_id":"w3:p1","agent":"claude","tokens":{"grid_role":"worker"},"agent_session":{"value":"ses-cos-target-42"}}
+    ]}}"#;
+
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    let actions = heal(&herdr).expect("heal should succeed without errors");
+    // None of the panes should have been tagged cos
+    assert!(actions.is_empty(), "expected 0 actions, got: {:?}", actions);
+    assert!(herdr.reported_tokens.borrow().is_empty());
+    assert!(herdr.renamed_panes.borrow().is_empty());
+}
+
+#[test]
+fn test_identity_heal_worker_restores_tokens() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("heal-worker-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    // Worker metadata files
+    std::fs::write(runs_dir.join("sude-task.owner"), "mu-lead\n").unwrap();
+    std::fs::write(runs_dir.join("sude-task.grid"), "mu-workers\n").unwrap();
+    std::fs::write(runs_dir.join("sude-task.repo"), "~/Lab/mu\n").unwrap();
+
+    let mut panes = HashMap::new();
+    let mut worker_tokens = HashMap::new();
+    worker_tokens.insert("logo".to_string(), "\u{e1a3}".to_string());
+    panes.insert(
+        "wC:p2".to_string(),
+        MockPaneInfo {
+            tokens: worker_tokens,
+            agent_session: None,
+            label: Some("sude-task".to_string()),
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[{"name":"sude-task","pane_id":"wC:p2","tokens":{"logo":"\ue1a3"}}]}}"#;
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    let actions = heal(&herdr).expect("heal should succeed");
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].contains("healed worker 'sude-task'"));
+
+    let rep = herdr.reported_tokens.borrow();
+    assert_eq!(rep.len(), 1);
+    assert_eq!(rep[0].0, "wC:p2");
+    assert_eq!(rep[0].1.len(), 4);
+    assert!(rep[0].1.iter().any(|t| t == "grid_role=worker"));
+    assert!(rep[0].1.iter().any(|t| t == "grid_group=mu"));
+    assert!(rep[0].1.iter().any(|t| t == "grid_owner=mu-lead"));
+    assert!(rep[0].1.iter().any(|t| t == "grid_tab=mu-workers"));
+    assert!(rep[0].1.iter().all(|t| !t.starts_with("grid_name=")));
+
+    let p = herdr.panes.borrow();
+    assert_eq!(
+        p["wC:p2"].tokens.get("grid_role").map(String::as_str),
+        Some("worker")
+    );
+    assert_eq!(
+        p["wC:p2"].tokens.get("grid_group").map(String::as_str),
+        Some("mu")
+    );
+    assert_eq!(
+        p["wC:p2"].tokens.get("grid_owner").map(String::as_str),
+        Some("mu-lead")
+    );
+    assert_eq!(
+        p["wC:p2"].tokens.get("grid_tab").map(String::as_str),
+        Some("mu-workers")
+    );
+    assert_eq!(p["wC:p2"].tokens.get("grid_name"), None);
+    assert_eq!(
+        p["wC:p2"].tokens.get("grid_group").map(String::as_str),
+        Some("mu")
+    );
+    assert_eq!(
+        p["wC:p2"].tokens.get("logo").map(String::as_str),
+        Some("\u{e1a3}")
+    );
+}
+
+#[test]
+fn test_cos_tag_records_cos_identity_json() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("cos-tag-record-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    let mut panes = HashMap::new();
+    panes.insert(
+        "w1:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: Some("ses-claude-999".to_string()),
+            label: None,
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude","tokens":{},"agent_session":{"value":"ses-claude-999"}}]}}"#;
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    let res = quaqua::cos::tag_cos_pane_in(&herdr, "w1:p1", &runs_dir)
+        .expect("tag_cos_pane_in should succeed");
+    assert!(res.contains("Tagged pane w1:p1 as grid_role=cos"));
+
+    // Verify runs/cos.identity.json was written with agent_session and pane_id
+    let ident_path = runs_dir.join("cos.identity.json");
+    assert!(ident_path.is_file(), "cos.identity.json should be created");
+    let content = std::fs::read_to_string(ident_path).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(val["agent_session"], "ses-claude-999");
+    assert_eq!(val["pane_id"], "w1:p1");
+
+    // Simulate herdr restart: tokens are wiped back to only logo
+    herdr
+        .panes
+        .borrow_mut()
+        .get_mut("w1:p1")
+        .unwrap()
+        .tokens
+        .clear();
+    herdr
+        .panes
+        .borrow_mut()
+        .get_mut("w1:p1")
+        .unwrap()
+        .tokens
+        .insert("logo".to_string(), "\u{e1a0}".to_string());
+    let post_restart_agents = r#"{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude","tokens":{"logo":"\ue1a0"},"agent_session":{"value":"ses-claude-999"}}]}}"#;
+    *herdr.agent_list_json.borrow_mut() = post_restart_agents.to_string();
+
+    // Heal restores the CoS pane
+    let actions = heal(&herdr).expect("heal should restore CoS");
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].contains("healed CoS"));
+    assert_eq!(
+        herdr.panes.borrow()["w1:p1"]
+            .tokens
+            .get("grid_role")
+            .map(String::as_str),
+        Some("cos")
+    );
+}
+
+#[test]
+fn test_identity_heal_cos_two_panes_one_session_crowns_only_matching_pane_id() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("heal-cos-tiebreak-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    // cos.identity.json records pane_id = "w1:p1"
+    std::fs::write(
+        runs_dir.join("cos.identity.json"),
+        r#"{"agent_session": "SES-COS-1", "pane_id": "w1:p1"}"#,
+    )
+    .unwrap();
+
+    let mut panes = HashMap::new();
+    panes.insert(
+        "w1:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: Some("SES-COS-1".to_string()),
+            label: None,
+        },
+    );
+    panes.insert(
+        "w1:p9".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: Some("SES-COS-1".to_string()),
+            label: None,
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[
+        {"pane_id":"w1:p1","agent":"claude","tokens":{},"agent_session":{"value":"SES-COS-1"}},
+        {"pane_id":"w1:p9","agent":"claude","tokens":{},"agent_session":{"value":"SES-COS-1"}}
+    ]}}"#;
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    let report = heal(&herdr).expect("heal should succeed");
+    assert_eq!(
+        report.actions.len(),
+        1,
+        "exactly one CoS pane must be crowned, got {:?}",
+        report.actions
+    );
+    assert!(report.actions[0].contains("pane w1:p1"));
+    assert!(report.errors.is_empty());
+
+    let p = herdr.panes.borrow();
+    // w1:p1 must be crowned
+    assert_eq!(
+        p["w1:p1"].tokens.get("grid_role").map(String::as_str),
+        Some("cos")
+    );
+    // w1:p9 must NOT be crowned
+    assert_eq!(p["w1:p9"].tokens.get("grid_role"), None);
+}
+
+#[test]
+fn test_identity_heal_cos_two_panes_one_session_neither_matching_pane_id_crowns_none() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("heal-cos-ambig-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    // Recorded pane is w1:pOriginal, but current candidate panes are w1:p2 and w1:p9
+    std::fs::write(
+        runs_dir.join("cos.identity.json"),
+        r#"{"agent_session": "SES-COS-1", "pane_id": "w1:pOriginal"}"#,
+    )
+    .unwrap();
+
+    let mut panes = HashMap::new();
+    panes.insert(
+        "w1:p2".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: Some("SES-COS-1".to_string()),
+            label: None,
+        },
+    );
+    panes.insert(
+        "w1:p9".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: Some("SES-COS-1".to_string()),
+            label: None,
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[
+        {"pane_id":"w1:p2","agent":"claude","tokens":{},"agent_session":{"value":"SES-COS-1"}},
+        {"pane_id":"w1:p9","agent":"claude","tokens":{},"agent_session":{"value":"SES-COS-1"}}
+    ]}}"#;
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    let report = heal(&herdr).expect("heal should return report");
+    assert!(
+        report.actions.is_empty(),
+        "expected 0 crowned panes, got: {:?}",
+        report.actions
+    );
+    assert_eq!(report.errors.len(), 1);
+    assert!(report.errors[0].contains("ambiguous CoS identity"));
+    assert!(report.errors[0].contains("run `quaqua cos tag` in the intended CoS pane"));
+
+    let p = herdr.panes.borrow();
+    assert_eq!(p["w1:p2"].tokens.get("grid_role"), None);
+    assert_eq!(p["w1:p9"].tokens.get("grid_role"), None);
+}
+
+#[test]
+fn test_identity_heal_failing_pane_does_not_abort_loop() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("heal-best-effort-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    // Set up: broken worker wC:p1, Lead mu-lead wB:p1, CoS w1:p1
+    std::fs::write(runs_dir.join("broken-worker.owner"), "mu-lead\n").unwrap();
+    std::fs::write(runs_dir.join("broken-worker.grid"), "mu-workers\n").unwrap();
+    std::fs::write(runs_dir.join("broken-worker.repo"), "~/Lab/mu\n").unwrap();
+    std::fs::write(runs_dir.join("mu-lead.owner"), "cos\n").unwrap();
+    std::fs::write(
+        runs_dir.join("cos.identity.json"),
+        r#"{"agent_session": "SES-COS-1", "pane_id": "w1:p1"}"#,
+    )
+    .unwrap();
+
+    let mut panes = HashMap::new();
+    panes.insert(
+        "wC:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: None,
+            label: Some("broken-worker".to_string()),
+        },
+    );
+    panes.insert(
+        "wB:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: None,
+            label: Some("mu-lead".to_string()),
+        },
+    );
+    panes.insert(
+        "w1:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: Some("SES-COS-1".to_string()),
+            label: None,
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[
+        {"name":"broken-worker","pane_id":"wC:p1","tokens":{}},
+        {"name":"mu-lead","pane_id":"wB:p1","tokens":{}},
+        {"pane_id":"w1:p1","agent":"claude","tokens":{},"agent_session":{"value":"SES-COS-1"}}
+    ]}}"#;
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+    *herdr.fail_metadata_pane.borrow_mut() = Some("wC:p1".to_string());
+
+    let report = heal(&herdr).expect("heal should return report");
+    // Both Lead and CoS must have been healed despite worker failure!
+    assert_eq!(
+        report.actions.len(),
+        2,
+        "expected 2 healed panes, got: {:?}",
+        report.actions
+    );
+    assert!(report
+        .actions
+        .iter()
+        .any(|a| a.contains("healed lead 'mu'")));
+    assert!(report.actions.iter().any(|a| a.contains("healed CoS")));
+    assert_eq!(report.errors.len(), 1);
+    assert!(report.errors[0].contains("simulated metadata error for wC:p1"));
+
+    let p = herdr.panes.borrow();
+    assert_eq!(
+        p["wB:p1"].tokens.get("grid_role").map(String::as_str),
+        Some("orchestrator")
+    );
+    assert_eq!(
+        p["w1:p1"].tokens.get("grid_role").map(String::as_str),
+        Some("cos")
+    );
+}
+
+#[test]
+fn test_identity_heal_idempotency_second_run_is_noop() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("heal-idempotency-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    std::fs::write(runs_dir.join("mu-lead.owner"), "cos\n").unwrap();
+    std::fs::write(runs_dir.join("worker-1.owner"), "mu-lead\n").unwrap();
+    std::fs::write(runs_dir.join("worker-1.grid"), "mu-workers\n").unwrap();
+    std::fs::write(runs_dir.join("worker-1.repo"), "~/Lab/mu\n").unwrap();
+    std::fs::write(
+        runs_dir.join("cos.identity.json"),
+        r#"{"agent_session": "SES-COS-1", "pane_id": "w1:p1"}"#,
+    )
+    .unwrap();
+
+    let mut panes = HashMap::new();
+    panes.insert(
+        "wB:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: None,
+            label: Some("mu-lead".to_string()),
+        },
+    );
+    panes.insert(
+        "wC:p2".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: None,
+            label: Some("worker-1".to_string()),
+        },
+    );
+    panes.insert(
+        "w1:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: Some("SES-COS-1".to_string()),
+            label: None,
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[
+        {"name":"mu-lead","pane_id":"wB:p1","tokens":{}},
+        {"name":"worker-1","pane_id":"wC:p2","tokens":{}},
+        {"pane_id":"w1:p1","agent":"claude","tokens":{},"agent_session":{"value":"SES-COS-1"}}
+    ]}}"#;
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    // First run: all 3 healed
+    let report1 = heal(&herdr).expect("first heal should succeed");
+    assert_eq!(report1.actions.len(), 3);
+    assert!(report1.errors.is_empty());
+    let first_call_count = herdr.reported_tokens.borrow().len();
+    assert_eq!(first_call_count, 3);
+
+    // Second run: 0 actions, 0 errors, 0 new calls to report-metadata
+    let report2 = heal(&herdr).expect("second heal should succeed");
+    assert_eq!(
+        report2.actions.len(),
+        0,
+        "second run must be no-op, got: {:?}",
+        report2.actions
+    );
+    assert!(report2.errors.is_empty());
+    let second_call_count = herdr.reported_tokens.borrow().len();
+    assert_eq!(
+        first_call_count, second_call_count,
+        "second run must make no new report-metadata calls"
+    );
+}
+
+#[test]
+fn test_cos_tag_without_session_on_unrelated_pane_keeps_existing_record() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("cos-tag-narrow-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    // Pre-existing valid record for w1:p1
+    let ident_path = runs_dir.join("cos.identity.json");
+    std::fs::write(
+        &ident_path,
+        r#"{"agent_session": "SES-REAL", "pane_id": "w1:p1"}"#,
+    )
+    .unwrap();
+
+    let mut panes = HashMap::new();
+    // w1:p7 has no agent_session
+    panes.insert(
+        "w1:p7".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: None,
+            label: None,
+        },
+    );
+    // w1:p1 also has no agent_session in this mock
+    panes.insert(
+        "w1:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: None,
+            label: None,
+        },
+    );
+
+    let herdr = MockMultiPaneHerdr::new(panes, r#"{"result":{"agents":[]}}"#);
+
+    // Tagging unrelated pane w1:p7 without session must NOT delete the record for w1:p1
+    let res = quaqua::cos::tag_cos_pane_in(&herdr, "w1:p7", &runs_dir)
+        .expect("tag_cos_pane_in should succeed");
+    assert!(res.contains("grid_role=cos"));
+    assert!(
+        ident_path.is_file(),
+        "record for w1:p1 must be kept when tagging unrelated pane"
+    );
+    let content = std::fs::read_to_string(&ident_path).unwrap();
+    assert!(content.contains("SES-REAL"));
+    assert!(content.contains("w1:p1"));
+
+    // Tagging w1:p1 itself without session DOES remove its own stale record
+    let res2 = quaqua::cos::tag_cos_pane_in(&herdr, "w1:p1", &runs_dir)
+        .expect("tag_cos_pane_in should succeed");
+    assert!(res2.contains("grid_role=cos"));
+    assert!(
+        !ident_path.exists(),
+        "record for w1:p1 must be removed when tagging w1:p1 itself without session"
+    );
 }

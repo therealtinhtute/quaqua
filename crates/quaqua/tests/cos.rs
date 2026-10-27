@@ -51,11 +51,16 @@ exit 0
 }
 
 fn hermetic_cmd(bin: &str, stub: &Path) -> Command {
+    let dir = stub.parent().unwrap_or_else(|| Path::new("."));
+    let runs_dir = dir.join("runs");
+    let _ = fs::create_dir_all(&runs_dir);
     let mut cmd = Command::new(bin);
     cmd.env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("HERDR_BIN_PATH", stub);
+        .env("HERDR_BIN_PATH", stub)
+        .env("QUAQUA_RUNS_DIR", &runs_dir)
+        .env("QUAQUA_ROOT", dir);
     cmd
 }
 
@@ -122,6 +127,7 @@ fn test_cos_tag_cli_with_explicit_pane() {
         vec![
             "pane report-metadata w1:p1 --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả",
             "pane rename w1:p1 🍑 CoS",
+            "pane get w1:p1",
         ]
     );
 
@@ -153,8 +159,10 @@ fn test_cos_tag_cli_idempotent() {
         vec![
             "pane report-metadata w1:p42 --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả",
             "pane rename w1:p42 🍑 CoS",
+            "pane get w1:p42",
             "pane report-metadata w1:p42 --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả",
             "pane rename w1:p42 🍑 CoS",
+            "pane get w1:p42",
         ]
     );
 

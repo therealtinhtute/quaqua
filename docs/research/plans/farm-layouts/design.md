@@ -98,6 +98,7 @@ A v2 file then resolves to the same graph the docs already describe, and `valida
 - `quaqua lead spawn` writes `runs/<slug>.layout.toml` (layout + `sha256` + `source=team.toml@<mtime>`) using `state::atomic_write` (`state.rs:9-20`).
 - The gate reads the snapshot for any caller whose owner chain reaches `<slug>-lead`, and the live file for CoS-owned work.
 - `quaqua layout refreeze <slug>` is the explicit way to apply a `team.toml` edit to a running team.
+- A frozen layout snapshot now governs `can_prompt` for a CoS caller too, so a `can_prompt` edit needs `quaqua layout refreeze <slug>` before it takes effect for a running team.
 - Freezing is cheap: a full live resolve of the 2.9 kB `team.toml` measures under 10 ms (`quaqua config get` three times, 0.00 s each). The real cost is semantic, so the snapshot holds **topology only**. Kinds, models, timers and caps stay live (the dynamic-config rule).
 
 **`quaqua config migrate`.**

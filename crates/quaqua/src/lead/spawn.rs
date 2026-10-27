@@ -361,9 +361,6 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     let base_cfg = crate::config::load_team_config()?;
     let cfg = crate::config::resolve(base_cfg.clone(), Some(&slug)).unwrap_or(base_cfg);
 
-    // Freeze layout snapshot in runs/<slug>.layout.toml
-    crate::layout::snapshot::write_layout_snapshot(&runs_dir, &slug, &cfg)
-        .map_err(|e| (1, format!("cannot write layout snapshot for {slug}: {e}\n")))?;
     let lead_env = std::env::var("LEAD_KIND").ok();
     let (lead_kind, launch) = resolve_lead_launch(&cfg, lead_env.as_deref())?;
     let lead_kind_info = cfg.kinds.get(&lead_kind).ok_or_else(|| {
@@ -392,6 +389,15 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         &runs_dir,
         Some(&cfg),
     )?;
+    let mut role_guard = crate::worker::spawn::LayoutRoleGuard {
+        runs_dir: &runs_dir,
+        name: &name,
+        success: false,
+    };
+
+    // Freeze layout snapshot in runs/<slug>.layout.toml after gate allows
+    crate::layout::snapshot::write_layout_snapshot(&runs_dir, &slug, &cfg)
+        .map_err(|e| (1, format!("cannot write layout snapshot for {slug}: {e}\n")))?;
 
     // Herdr workspace create
     let owner_env = format!("QUAQUA_OWNER={name}");
@@ -487,6 +493,11 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     // spawns leave no phantom owner rows for status scanners (issue R1).
     crate::state::WorkerMetadata::save_owner(&runs_dir, &name, &caller_owner)
         .map_err(|e| (1, format!("cannot write owner file for {name}: {e}\n")))?;
+    // Invariant: runs/<name>.layout_role exists iff this spawn produced a live agent.
+    // The Lead agent is confirmed running and ownership is saved. Disarm the guard
+    // so subsequent prompt/index steps do not strip the marker from a live Lead.
+    role_guard.success = true;
+
     // Update projects/INDEX.md with mkdir lock
     update_project_index_owner(&root, &slug, &name)?;
 

@@ -23,4 +23,6 @@ Long answer not visible in read → ask the worker to publish a file atomically 
 2. Run `claude --resume` to restore the CoS session.
 3. Run `quaqua cos tag` to reapply `grid_role=cos`, display agent, and pane title.
 
+- A resumed session is automatically healed on herdr restart via `runs/cos.identity.json`; a brand-new (non-resume) session changes the session id and needs a fresh `quaqua cos tag`.
+
 Panes tagged by older `init` stay `grid_role=orchestrator` until `quaqua cos tag` runs.

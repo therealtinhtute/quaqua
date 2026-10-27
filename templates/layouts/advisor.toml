@@ -1,10 +1,10 @@
 name = "advisor"
-depth = 1
+depth = 2
 
 [roles.cos]
 class = "cos"
-can_spawn = ["advisor"]
-can_prompt = ["advisor"]
+can_spawn = ["lead", "advisor"]
+can_prompt = ["lead", "advisor"]
 
 [roles.lead]
 class = "lead"

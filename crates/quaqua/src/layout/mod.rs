@@ -5,9 +5,12 @@ pub mod migrate;
 pub mod model;
 pub mod snapshot;
 
+pub use builtin::BUILTIN_NAMES;
 pub use gate::{
-    check, check_with_count, check_with_origin, gate, is_shadow_mode, resolve_target_role, shadow,
-    validate_layout, SpawnOrigin,
+    check, check_with_count, check_with_origin, check_with_runs_dir, gate, is_shadow_mode,
+    layout_role_path, read_layout_role, record_layout_role, resolve_caller_role,
+    resolve_target_role, shadow, validate_layout, validate_layout_with_config,
+    validate_user_layout, validate_user_layout_with_config, SpawnOrigin,
 };
 pub use model::{Decision, Layout, LayoutRole, Member, Naming, RoleClass, TraceStep, Verb};
 pub use snapshot::{
@@ -31,7 +34,7 @@ pub fn resolve_layout(cfg: &Config) -> Result<Layout, String> {
         for name in cfg.layouts.keys() {
             if builtin::get(name).is_some() {
                 return Err(format!(
-                    "user layout '{name}' collides with built-in layout"
+                    "layout.shadows_builtin: user layout '{name}' collides with built-in layout"
                 ));
             }
         }
@@ -61,7 +64,7 @@ pub fn resolve_layout(cfg: &Config) -> Result<Layout, String> {
                 if layout.name.is_empty() {
                     layout.name = name.clone();
                 }
-                validate_layout(&layout)?;
+                validate_layout_with_config(&layout, cfg)?;
                 return Ok(layout);
             }
             return Err(format!("unknown layout '{name}'"));
@@ -224,7 +227,23 @@ pub fn run_show(project: Option<&str>, json: bool) -> Result<String, String> {
             let _ = writeln!(out, "    naming:       {}", role.naming);
         }
         if !role.members.is_empty() {
-            let _ = writeln!(out, "    members:      {} configured", role.members.len());
+            let member_descs: Vec<String> = role
+                .members
+                .iter()
+                .map(|m| {
+                    if let Some(p) = &m.purpose {
+                        format!("purpose={p}")
+                    } else if let Some(k) = &m.kind {
+                        format!("kind={k}")
+                    } else {
+                        "empty".to_string()
+                    }
+                })
+                .collect();
+            let _ = writeln!(out, "    members:      [{}]", member_descs.join(", "));
+            if let Some(q) = role.effective_quorum() {
+                let _ = writeln!(out, "    quorum:       {q}");
+            }
         }
         let _ = writeln!(out);
     }
@@ -247,7 +266,8 @@ pub fn run_why(
     let caller = resolve_caller_by_name(caller_name, &runs_dir);
     let (layout, _origin) = snapshot::resolve_effective_layout(caller_name, &runs_dir, &cfg)?;
     let verb: Verb = verb_str.parse()?;
-    let decision = check(&layout, &caller, verb, target);
+    let decision =
+        check_with_runs_dir(&layout, &caller, verb, target, None, false, Some(&runs_dir));
 
     if json {
         let val = serde_json::json!({

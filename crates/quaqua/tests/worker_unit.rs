@@ -30,6 +30,39 @@ fn test_task_worker_name_validation() {
     // Unknown kinds
     assert!(!is_task_worker_name("random-worker", &cfg));
     assert!(!is_task_worker_name("unknown-task", &cfg));
+
+    // Worker spawn rejecting sude-lead with exit 1 and no git/herdr calls
+    let _env_lock = lock_env();
+    let temp = std::env::temp_dir().join(format!("quaqua-naming-test-{}", std::process::id()));
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    let _ = std::fs::create_dir_all(&repo_dir);
+    let _ = std::fs::create_dir_all(&runs_dir);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("GRID_SKIP", "1");
+
+    let spy = MockActivitiesHerdr::new(MockActivities::new());
+    let dummy_git = DummyGit;
+    let opts = parse_spawn_args(&[
+        "sude-lead".to_string(),
+        "sude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+    let res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &dummy_git,
+        &spy,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(res.is_err());
+    let (code, msg) = res.unwrap_err();
+    assert_eq!(code, 1);
+    assert!(msg.contains("# Usage: quaqua worker spawn"));
+    assert_eq!(spy.call_count(), 0);
+    let _ = std::fs::remove_dir_all(&temp);
 }
 
 #[test]
@@ -1468,6 +1501,10 @@ fn test_taskforce_dual_lens_cap_reservation() {
     for w in &solo {
         std::fs::write(tmp.join(format!("{w}.owner")), "cos\n").unwrap();
     }
+    for name in members {
+        std::fs::write(tmp.join(format!("{name}.owner")), "cos\n").unwrap();
+        std::fs::write(tmp.join(format!("{name}.taskforce")), "mytest\n").unwrap();
+    }
     let herdr = herdr_listing(&agent_list_json(&names));
     assert_eq!(
         count_owner_slots(&tmp, "cos", None, &herdr, &cfg),
@@ -1476,6 +1513,10 @@ fn test_taskforce_dual_lens_cap_reservation() {
     );
     for w in &solo {
         std::fs::remove_file(tmp.join(format!("{w}.owner"))).unwrap();
+    }
+    for name in members {
+        std::fs::remove_file(tmp.join(format!("{name}.owner"))).unwrap();
+        std::fs::remove_file(tmp.join(format!("{name}.taskforce"))).unwrap();
     }
 
     // Starting one is refused when the owner cannot find the free slots.
@@ -5009,17 +5050,27 @@ fn lead_gate_warns_on_a_single_signal_and_spawns() {
 
 #[test]
 fn lead_routing_flags_missing_playbook_from_lead_owner() {
-    use quaqua::worker::prompt::{brief_header_warnings, do_check_brief_with_owner, lead_routing_warnings};
-    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-missing-{}", std::process::id()));
+    use quaqua::worker::prompt::{
+        brief_header_warnings, do_check_brief_with_owner, lead_routing_warnings,
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "quaqua-leadroute-test-missing-{}",
+        std::process::id()
+    ));
     let _ = std::fs::create_dir_all(&temp);
 
     let brief = "Topology: lead — test\nGoal: g\nHard constraints: none\nCurrent design: d\n";
     let header_warnings = brief_header_warnings(brief);
-    assert!(header_warnings.iter().any(|w| w.contains("brief has no 'Playbook:' header")));
+    assert!(header_warnings
+        .iter()
+        .any(|w| w.contains("brief has no 'Playbook:' header")));
 
     // lead_routing_warnings does not duplicate the missing Playbook warning
     let lead_warnings = lead_routing_warnings(brief, Some("pstack-lead"), &temp);
-    assert!(lead_warnings.is_empty(), "lead_routing_warnings must not duplicate missing playbook warning: {lead_warnings:?}");
+    assert!(
+        lead_warnings.is_empty(),
+        "lead_routing_warnings must not duplicate missing playbook warning: {lead_warnings:?}"
+    );
 
     // do_check_brief_with_owner succeeds (warn-only)
     assert!(do_check_brief_with_owner(brief, Some("pstack-lead"), &temp).is_ok());
@@ -5030,17 +5081,30 @@ fn lead_routing_flags_missing_playbook_from_lead_owner() {
 #[test]
 fn lead_routing_flags_same_as_lead_without_reason() {
     use quaqua::worker::prompt::lead_routing_warnings;
-    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-same-{}", std::process::id()));
+    let temp =
+        std::env::temp_dir().join(format!("quaqua-leadroute-test-same-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp);
 
     // Pin lead playbook
-    std::fs::write(temp.join(".pstack-lead.playbook"), "name=feature\nids=1,2\n").unwrap();
+    std::fs::write(
+        temp.join(".pstack-lead.playbook"),
+        "name=feature\nids=1,2\n",
+    )
+    .unwrap();
 
     let brief = "Topology: lead — test\nPlaybook: feature\nGoal: g\nHard constraints: none\nCurrent design: d\n";
     let warnings = lead_routing_warnings(brief, Some("pstack-lead"), &temp);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("uses the Lead's own playbook 'feature' without a stated reason"), "{}", warnings[0]);
-    assert!(warnings[0].contains("AGENTS.md '## Coordinator Rules' — Route"), "{}", warnings[0]);
+    assert!(
+        warnings[0].contains("uses the Lead's own playbook 'feature' without a stated reason"),
+        "{}",
+        warnings[0]
+    );
+    assert!(
+        warnings[0].contains("AGENTS.md '## Coordinator Rules' — Route"),
+        "{}",
+        warnings[0]
+    );
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -5048,7 +5112,8 @@ fn lead_routing_flags_same_as_lead_without_reason() {
 #[test]
 fn lead_routing_silent_for_cos_owner() {
     use quaqua::worker::prompt::lead_routing_warnings;
-    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-cos-{}", std::process::id()));
+    let temp =
+        std::env::temp_dir().join(format!("quaqua-leadroute-test-cos-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp);
 
     std::fs::write(temp.join(".cos.playbook"), "name=feature\nids=1,2\n").unwrap();
@@ -5056,12 +5121,18 @@ fn lead_routing_silent_for_cos_owner() {
     // With playbook matching
     let brief = "Topology: solo — test\nPlaybook: feature\nGoal: g\nHard constraints: none\nCurrent design: d\n";
     let warnings = lead_routing_warnings(brief, Some("cos"), &temp);
-    assert!(warnings.is_empty(), "CoS owner must not trigger lead routing warnings: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "CoS owner must not trigger lead routing warnings: {warnings:?}"
+    );
 
     // Without playbook
     let brief_no_pb = "Topology: solo — test\nGoal: g\nHard constraints: none\nCurrent design: d\n";
     let warnings_no_pb = lead_routing_warnings(brief_no_pb, Some("cos"), &temp);
-    assert!(warnings_no_pb.is_empty(), "CoS owner must not trigger lead routing warnings: {warnings_no_pb:?}");
+    assert!(
+        warnings_no_pb.is_empty(),
+        "CoS owner must not trigger lead routing warnings: {warnings_no_pb:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -5069,18 +5140,31 @@ fn lead_routing_silent_for_cos_owner() {
 #[test]
 fn lead_routing_silent_with_stated_reason() {
     use quaqua::worker::prompt::lead_routing_warnings;
-    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-reason-{}", std::process::id()));
+    let temp = std::env::temp_dir().join(format!(
+        "quaqua-leadroute-test-reason-{}",
+        std::process::id()
+    ));
     let _ = std::fs::create_dir_all(&temp);
 
-    std::fs::write(temp.join(".pstack-lead.playbook"), "name=feature\nids=1,2\n").unwrap();
+    std::fs::write(
+        temp.join(".pstack-lead.playbook"),
+        "name=feature\nids=1,2\n",
+    )
+    .unwrap();
 
     let brief = "Topology: lead — test\nPlaybook: feature, peer builds engine slice\nGoal: g\nHard constraints: none\nCurrent design: d\n";
     let warnings = lead_routing_warnings(brief, Some("pstack-lead"), &temp);
-    assert!(warnings.is_empty(), "Stated reason must clear warning: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "Stated reason must clear warning: {warnings:?}"
+    );
 
     let brief_dash = "Topology: lead — test\nPlaybook: feature — peer slice\nGoal: g\nHard constraints: none\nCurrent design: d\n";
     let warnings_dash = lead_routing_warnings(brief_dash, Some("pstack-lead"), &temp);
-    assert!(warnings_dash.is_empty(), "Stated reason with em-dash must clear warning: {warnings_dash:?}");
+    assert!(
+        warnings_dash.is_empty(),
+        "Stated reason with em-dash must clear warning: {warnings_dash:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -5088,14 +5172,22 @@ fn lead_routing_silent_with_stated_reason() {
 #[test]
 fn lead_routing_silent_for_different_playbook() {
     use quaqua::worker::prompt::lead_routing_warnings;
-    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-diff-{}", std::process::id()));
+    let temp =
+        std::env::temp_dir().join(format!("quaqua-leadroute-test-diff-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp);
 
-    std::fs::write(temp.join(".pstack-lead.playbook"), "name=feature\nids=1,2\n").unwrap();
+    std::fs::write(
+        temp.join(".pstack-lead.playbook"),
+        "name=feature\nids=1,2\n",
+    )
+    .unwrap();
 
     let brief = "Topology: lead — test\nPlaybook: refactoring\nGoal: g\nHard constraints: none\nCurrent design: d\n";
     let warnings = lead_routing_warnings(brief, Some("pstack-lead"), &temp);
-    assert!(warnings.is_empty(), "Different playbook must not trigger warning: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "Different playbook must not trigger warning: {warnings:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -5103,13 +5195,19 @@ fn lead_routing_silent_for_different_playbook() {
 #[test]
 fn lead_routing_silent_when_no_lead_playbook_pinned() {
     use quaqua::worker::prompt::lead_routing_warnings;
-    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-nopin-{}", std::process::id()));
+    let temp = std::env::temp_dir().join(format!(
+        "quaqua-leadroute-test-nopin-{}",
+        std::process::id()
+    ));
     let _ = std::fs::create_dir_all(&temp);
 
     // No .pstack-lead.playbook exists
     let brief = "Topology: lead — test\nPlaybook: feature\nGoal: g\nHard constraints: none\nCurrent design: d\n";
     let warnings = lead_routing_warnings(brief, Some("pstack-lead"), &temp);
-    assert!(warnings.is_empty(), "Missing lead pin must not trigger same-as-lead warning: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "Missing lead pin must not trigger same-as-lead warning: {warnings:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -5118,11 +5216,16 @@ fn lead_routing_silent_when_no_lead_playbook_pinned() {
 fn check_brief_with_owner_integration() {
     use quaqua::worker::prompt::do_check_brief_with_owner;
     let _env_lock = lock_env();
-    let temp = std::env::temp_dir().join(format!("quaqua-leadroute-test-cb-{}", std::process::id()));
+    let temp =
+        std::env::temp_dir().join(format!("quaqua-leadroute-test-cb-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp);
 
     // Pin lead playbook
-    std::fs::write(temp.join(".pstack-lead.playbook"), "name=feature\nids=1,2\n").unwrap();
+    std::fs::write(
+        temp.join(".pstack-lead.playbook"),
+        "name=feature\nids=1,2\n",
+    )
+    .unwrap();
 
     // 1. Same-as-lead without reason: exits 0 (warn-only)
     let brief_same = "Topology: lead — test\nPlaybook: feature\nGoal: g\nHard constraints: none\nCurrent design: d\n";
@@ -5138,7 +5241,8 @@ fn check_brief_with_owner_integration() {
     );
 
     // 3. Lead owner with missing playbook: exits 0 (warn-only)
-    let brief_missing = "Topology: lead — test\nGoal: g\nHard constraints: none\nCurrent design: d\n";
+    let brief_missing =
+        "Topology: lead — test\nGoal: g\nHard constraints: none\nCurrent design: d\n";
     assert!(
         do_check_brief_with_owner(brief_missing, Some("pstack-lead"), &temp).is_ok(),
         "missing playbook warns only"

@@ -1,10 +1,10 @@
 name = "council"
-depth = 1
+depth = 2
 
 [roles.cos]
 class = "cos"
-can_spawn = ["council"]
-can_prompt = ["council"]
+can_spawn = ["lead", "council"]
+can_prompt = ["lead", "council"]
 
 [roles.lead]
 class = "lead"
@@ -18,5 +18,5 @@ reports_to = "owner"
 members = [
     { purpose = "review" },
     { purpose = "review" },
-    { purpose = "advise" },
+    { purpose = "design" },
 ]
