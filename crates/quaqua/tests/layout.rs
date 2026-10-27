@@ -9,6 +9,9 @@ use quaqua::layout::{
 };
 use std::path::PathBuf;
 
+#[path = "common/gitfix.rs"]
+mod gitfix;
+
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn hermetic_temp_dir(prefix: &str) -> PathBuf {
@@ -1262,40 +1265,9 @@ fn layout_shadow_evidence_cp3_taskforce_peer_denied_but_proceeds() {
     let temp = hermetic_temp_dir("shadow-cp3");
     let repo_dir = temp.join("repo");
     let runs_dir = temp.join("runs");
-    std::fs::create_dir_all(&repo_dir).unwrap();
     std::fs::create_dir_all(&runs_dir).unwrap();
     std::fs::write(runs_dir.join("mu-lead.owner"), "cos\n").unwrap();
-    let _ = std::process::Command::new("git")
-        .args(["init", repo_dir.to_str().unwrap()])
-        .output();
-    let _ = std::process::Command::new("git")
-        .args([
-            "-C",
-            repo_dir.to_str().unwrap(),
-            "config",
-            "user.name",
-            "Test",
-        ])
-        .output();
-    let _ = std::process::Command::new("git")
-        .args([
-            "-C",
-            repo_dir.to_str().unwrap(),
-            "config",
-            "user.email",
-            "test@test.com",
-        ])
-        .output();
-    let _ = std::process::Command::new("git")
-        .args([
-            "-C",
-            repo_dir.to_str().unwrap(),
-            "commit",
-            "--allow-empty",
-            "-m",
-            "init",
-        ])
-        .output();
+    gitfix::init_repo(&repo_dir);
     let brief_file = temp.join("brief.md");
     std::fs::write(&brief_file, "Brief content").unwrap();
 

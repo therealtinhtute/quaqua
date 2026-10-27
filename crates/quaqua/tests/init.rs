@@ -10,6 +10,9 @@ use std::process::{Command, Output};
 
 use quaqua::hash::md5_hex;
 
+#[path = "common/gitfix.rs"]
+mod gitfix;
+
 /// Stub `herdr` for `HERDR_BIN_PATH`: logs argv, answers the pane queries as an
 /// unregistered `claude` agent in this checkout (the pane the CoS tag is for).
 const HERDR_STUB: &str = r#"#!/bin/sh
@@ -106,7 +109,9 @@ impl Sandbox {
         self.root.join(rel)
     }
 
-    /// A `quaqua` command: fixture template, empty PATH, herdr pinned away.
+    /// A `quaqua` command: fixture template, empty PATH, herdr pinned away, and
+    /// no host git config (a global `core.hooksPath` would change the hooks it
+    /// installs).
     fn cmd(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
         cmd.env("QUAQUA_TEMPLATE_DIR", &self.tpl)
@@ -115,6 +120,7 @@ impl Sandbox {
             .env_remove("HERDR_PANE_ID")
             .env_remove("QUAQUA_HOME")
             .current_dir(&self.root);
+        gitfix::isolate(&mut cmd);
         cmd
     }
 
@@ -495,7 +501,7 @@ fn init_fails_when_it_cannot_wire_hooks() {
     let sb = Sandbox::new("hookfail");
     let ws = sb.target("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let ok = Command::new(&git)
+    let ok = gitfix::cmd(&git)
         .args(["init", "-q"])
         .arg(&ws)
         .status()
@@ -543,7 +549,7 @@ fn init_wires_embedded_hook_and_migrates_legacy() {
     let sb = Sandbox::new("wirehook");
     let ws = sb.target("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let ok = Command::new(&git)
+    let ok = gitfix::cmd(&git)
         .args(["init", "-q"])
         .arg(&ws)
         .status()
@@ -580,7 +586,7 @@ fn init_wires_embedded_hook_and_migrates_legacy() {
     );
     assert!(read(&push_hook).contains("QUAQUA_OWNER"));
 
-    let hooks_path = Command::new(&git)
+    let hooks_path = gitfix::cmd(&git)
         .arg("-C")
         .arg(&ws)
         .args(["config", "--get", "core.hooksPath"])
@@ -604,7 +610,7 @@ fn init_wires_embedded_hook_and_migrates_legacy() {
 
     // 3. Legacy migration: core.hooksPath set to scripts/hooks
     let legacy = ws.join("scripts/hooks");
-    let ok = Command::new(&git)
+    let ok = gitfix::cmd(&git)
         .arg("-C")
         .arg(&ws)
         .args(["config", "core.hooksPath", &legacy.to_string_lossy()])
@@ -712,14 +718,14 @@ fn init_git_hooks_wires_an_existing_repo_only() {
     let sb = Sandbox::new("githooks");
     let repo = sb.target("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    let ok = Command::new(&git)
+    let ok = gitfix::cmd(&git)
         .args(["init", "-q"])
         .arg(&repo)
         .status()
         .expect("git init");
     assert!(ok.success(), "git init failed");
     std::fs::write(repo.join("README.md"), "engine\n").unwrap();
-    assert!(Command::new(&git)
+    assert!(gitfix::cmd(&git)
         .arg("-C")
         .arg(&repo)
         .args(["add", "README.md"])
@@ -755,7 +761,7 @@ fn init_git_hooks_wires_an_existing_repo_only() {
     );
     assert!(read(&push_hook).contains("QUAQUA_OWNER"));
 
-    let hooks_path = Command::new(&git)
+    let hooks_path = gitfix::cmd(&git)
         .arg("-C")
         .arg(&repo)
         .args(["config", "--get", "core.hooksPath"])
@@ -777,7 +783,7 @@ fn init_git_hooks_wires_an_existing_repo_only() {
     ] {
         assert!(!repo.join(rel).exists(), "workspace file written: {rel}");
     }
-    let status = Command::new(&git)
+    let status = gitfix::cmd(&git)
         .arg("-C")
         .arg(&repo)
         .args(["status", "--porcelain"])
@@ -812,13 +818,13 @@ fn init_git_hooks_refuses_a_foreign_hooks_path() {
     let sb = Sandbox::new("githooks-foreign");
     let repo = sb.target("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    assert!(Command::new(&git)
+    assert!(gitfix::cmd(&git)
         .args(["init", "-q"])
         .arg(&repo)
         .status()
         .expect("git init")
         .success());
-    assert!(Command::new(&git)
+    assert!(gitfix::cmd(&git)
         .arg("-C")
         .arg(&repo)
         .args(["config", "core.hooksPath", "/their/hooks"])
@@ -845,7 +851,7 @@ fn init_git_hooks_refuses_a_foreign_hooks_path() {
         "unclear refusal: {}",
         stderr(&out),
     );
-    let hooks_path = Command::new(&git)
+    let hooks_path = gitfix::cmd(&git)
         .arg("-C")
         .arg(&repo)
         .args(["config", "--get", "core.hooksPath"])
@@ -923,7 +929,7 @@ fn worker_push_guard_installs_pre_push_only() {
     let sb = Sandbox::new("pushguard");
     let repo = sb.target("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    assert!(Command::new("git")
+    assert!(gitfix::cmd("git")
         .args(["init", "-q"])
         .arg(&repo)
         .status()
@@ -943,7 +949,7 @@ fn worker_push_guard_installs_pre_push_only() {
         !repo.join(".git/hooks/pre-commit").exists(),
         "spawn installed the opt-in pre-commit",
     );
-    let hooks_path = Command::new("git")
+    let hooks_path = gitfix::cmd("git")
         .arg("-C")
         .arg(&repo)
         .args(["config", "--get", "core.hooksPath"])
@@ -977,14 +983,14 @@ fn worker_push_guard_installs_pre_push_only() {
     // A foreign core.hooksPath: refused with a warning, config and dir untouched.
     let foreign = sb.target("foreign-repo");
     std::fs::create_dir_all(&foreign).unwrap();
-    assert!(Command::new("git")
+    assert!(gitfix::cmd("git")
         .args(["init", "-q"])
         .arg(&foreign)
         .status()
         .unwrap()
         .success());
     let theirs = sb.target("their-hooks");
-    assert!(Command::new("git")
+    assert!(gitfix::cmd("git")
         .arg("-C")
         .arg(&foreign)
         .args(["config", "core.hooksPath", theirs.to_str().unwrap()])
@@ -992,7 +998,7 @@ fn worker_push_guard_installs_pre_push_only() {
         .unwrap()
         .success());
     quaqua::init::ensure_worker_push_guard(&foreign).expect("foreign hooksPath is a no-op");
-    let got = Command::new("git")
+    let got = gitfix::cmd("git")
         .arg("-C")
         .arg(&foreign)
         .args(["config", "--get", "core.hooksPath"])
@@ -1008,7 +1014,7 @@ fn worker_push_guard_installs_pre_push_only() {
     // An existing foreign pre-push is never overwritten.
     let occupied = sb.target("occupied-repo");
     std::fs::create_dir_all(&occupied).unwrap();
-    assert!(Command::new("git")
+    assert!(gitfix::cmd("git")
         .args(["init", "-q"])
         .arg(&occupied)
         .status()
@@ -1036,7 +1042,7 @@ fn pre_push_hook_rejects_workers_only() {
     let sb = Sandbox::new("prepush");
     let repo = sb.target("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    assert!(Command::new(&git)
+    assert!(gitfix::cmd(&git)
         .args(["init", "-q"])
         .arg(&repo)
         .status()
@@ -1471,7 +1477,7 @@ fn pre_commit_hook_refuses_added_machine_paths() {
     std::os::unix::fs::symlink(&git_bin, bin.join("git")).unwrap();
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = gitfix::cmd("git")
             .args(["-C", repo.to_str().unwrap()])
             .args(args)
             .env("PATH", &path)
@@ -1664,13 +1670,13 @@ fn pre_commit_hook_refuses_added_machine_paths() {
     assert_eq!(hook_rc(), 0, "a clean index was refused");
     let fresh = sb.target("fresh");
     std::fs::create_dir_all(&fresh).unwrap();
-    assert!(Command::new("git")
+    assert!(gitfix::cmd("git")
         .args(["-C", fresh.to_str().unwrap(), "init", "-q"])
         .env("PATH", &path)
         .status()
         .expect("git init")
         .success());
-    assert!(Command::new("git")
+    assert!(gitfix::cmd("git")
         .args(["-C", fresh.to_str().unwrap(), "config", "core.hooksPath"])
         .arg(&hookdir)
         .env("PATH", &path)
@@ -1682,7 +1688,7 @@ fn pre_commit_hook_refuses_added_machine_paths() {
         format!("#!/usr/bin/env bash\ncd {home}/dave/x\n"),
     )
     .unwrap();
-    assert!(Command::new("git")
+    assert!(gitfix::cmd("git")
         .args(["-C", fresh.to_str().unwrap(), "add", "-A"])
         .env("PATH", &path)
         .status()
@@ -1724,7 +1730,7 @@ fn pre_commit_hook_refuses_added_machine_paths() {
     //     embedded template, not a second copy that can drift.
     let ws = sb.target("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    assert!(Command::new("git")
+    assert!(gitfix::cmd("git")
         .args(["-C", ws.to_str().unwrap(), "init", "-q"])
         .env("PATH", &path)
         .status()

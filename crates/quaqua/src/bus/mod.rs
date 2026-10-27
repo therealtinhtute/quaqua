@@ -3,13 +3,13 @@
 //! Stores `farm_events` and `cursors` in `runs/quaqua.db`.
 //! Uses shared SQLite connection opener with WAL mode, busy timeout, and retry_while_busy.
 
-pub mod mail;
 pub mod events;
+pub mod mail;
 pub use events::InboxDigest;
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use serde::{Deserialize, Serialize};
 
 /// Returns the current timestamp in milliseconds, respecting virtual clock if set.
 pub fn now_ms() -> u64 {
@@ -123,7 +123,8 @@ impl FarmBus {
                 CREATE INDEX IF NOT EXISTS farm_events_owner ON farm_events(owner, seq);
                 CREATE TABLE IF NOT EXISTS cursors (
                     consumer TEXT PRIMARY KEY,
-                    seq INTEGER NOT NULL
+                    seq INTEGER NOT NULL,
+                    mail_id INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS mail (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,7 +144,35 @@ impl FarmBus {
                 );
                 CREATE INDEX IF NOT EXISTS mail_unacked ON mail(to_name, acked_ms, id);
                 "#,
-            )
+            )?;
+            let has_mail_id: bool = {
+                let mut stmt = conn.prepare("PRAGMA table_info(cursors)")?;
+                let mut rows = stmt.query([])?;
+                let mut found = false;
+                while let Some(row) = rows.next()? {
+                    let col_name: String = row.get(1)?;
+                    if col_name == "mail_id" {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            };
+            if !has_mail_id {
+                conn.execute(
+                    "ALTER TABLE cursors ADD COLUMN mail_id INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+                conn.execute(
+                    r#"
+                    UPDATE cursors
+                    SET mail_id = COALESCE((SELECT MAX(id) FROM mail WHERE to_name = cursors.consumer), 0)
+                    WHERE mail_id = 0
+                    "#,
+                    [],
+                )?;
+            }
+            Ok(())
         })?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -157,7 +186,6 @@ impl FarmBus {
     pub fn conn_for_test(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
         self.conn.lock().unwrap()
     }
-
 
     /// Records an event in `farm_events`.
     ///
@@ -242,11 +270,42 @@ impl FarmBus {
         crate::engine::sqlite::retry_while_busy(|| {
             let mut stmt = conn.prepare_cached(
                 r#"
-                INSERT INTO cursors (consumer, seq) VALUES (?1, ?2)
+                INSERT INTO cursors (consumer, seq, mail_id) VALUES (?1, ?2, 0)
                 ON CONFLICT(consumer) DO UPDATE SET seq = excluded.seq
                 "#,
             )?;
             stmt.execute(rusqlite::params![consumer, seq as i64])?;
+            Ok(())
+        })
+    }
+
+    /// Returns the mail cursor (last seen mail id) for `consumer`, if set.
+    pub fn get_mail_cursor(&self, consumer: &str) -> rusqlite::Result<Option<u64>> {
+        let conn = self.conn.lock().unwrap();
+        crate::engine::sqlite::retry_while_busy(|| {
+            let mut stmt =
+                conn.prepare_cached("SELECT mail_id FROM cursors WHERE consumer = ?1")?;
+            let mut rows = stmt.query(rusqlite::params![consumer])?;
+            if let Some(row) = rows.next()? {
+                let id: i64 = row.get(0)?;
+                Ok(Some(id as u64))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    /// Sets or updates the mail cursor (last seen mail id) for `consumer`.
+    pub fn set_mail_cursor(&self, consumer: &str, mail_id: u64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        crate::engine::sqlite::retry_while_busy(|| {
+            let mut stmt = conn.prepare_cached(
+                r#"
+                INSERT INTO cursors (consumer, seq, mail_id) VALUES (?1, 0, ?2)
+                ON CONFLICT(consumer) DO UPDATE SET mail_id = excluded.mail_id
+                "#,
+            )?;
+            stmt.execute(rusqlite::params![consumer, mail_id as i64])?;
             Ok(())
         })
     }
@@ -266,7 +325,10 @@ pub fn record_event_safely(db_path: &Path, event: &FarmEvent) -> bool {
         Ok(bus) => match bus.record(event) {
             Ok(inserted) => inserted,
             Err(e) => {
-                eprintln!("warning: bus failed to record event '{}': {e}", event.event_type);
+                eprintln!(
+                    "warning: bus failed to record event '{}': {e}",
+                    event.event_type
+                );
                 false
             }
         },
@@ -300,7 +362,8 @@ mod tests {
     fn temp_db(tag: &str) -> (PathBuf, TempDb) {
         static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("quaqua-bus-{tag}-{}-{id}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("quaqua-bus-{tag}-{}-{id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("quaqua.db");
@@ -361,43 +424,80 @@ mod tests {
         let key = "stall:sude-task:1000";
 
         // 1. First insert with incident key must succeed
-        let ev1 = FarmEvent::new("stalled", Some("watchdog"), Some("sude-task"), Some("cos"), Some("quaqua"))
-            .with_incident_key(key)
-            .with_payload_json(r#"{"attempt": 1}"#);
+        let ev1 = FarmEvent::new(
+            "stalled",
+            Some("watchdog"),
+            Some("sude-task"),
+            Some("cos"),
+            Some("quaqua"),
+        )
+        .with_incident_key(key)
+        .with_payload_json(r#"{"attempt": 1}"#);
         let inserted1 = bus.record(&ev1).expect("record ev1");
         assert!(inserted1, "first incident_key insert must return true");
 
         // 2. Duplicate insert with identical incident key must be ignored and return false
-        let ev2 = FarmEvent::new("stalled", Some("watchdog"), Some("sude-task"), Some("cos"), Some("quaqua"))
-            .with_incident_key(key)
-            .with_payload_json(r#"{"attempt": 2}"#);
+        let ev2 = FarmEvent::new(
+            "stalled",
+            Some("watchdog"),
+            Some("sude-task"),
+            Some("cos"),
+            Some("quaqua"),
+        )
+        .with_incident_key(key)
+        .with_payload_json(r#"{"attempt": 2}"#);
         let inserted2 = bus.record(&ev2).expect("record ev2");
-        assert!(!inserted2, "duplicate incident_key insert must return false");
+        assert!(
+            !inserted2,
+            "duplicate incident_key insert must return false"
+        );
 
         // 3. Different incident key must succeed
-        let ev3 = FarmEvent::new("stalled", Some("watchdog"), Some("other-task"), Some("cos"), Some("quaqua"))
-            .with_incident_key("stall:other-task:1000");
+        let ev3 = FarmEvent::new(
+            "stalled",
+            Some("watchdog"),
+            Some("other-task"),
+            Some("cos"),
+            Some("quaqua"),
+        )
+        .with_incident_key("stall:other-task:1000");
         let inserted3 = bus.record(&ev3).expect("record ev3");
         assert!(inserted3, "different incident_key must return true");
 
         // 4. Events with None incident_key must always succeed
-        let ev4 = FarmEvent::new("spawned", Some("cos"), Some("task-a"), Some("cos"), Some("quaqua"));
-        let ev5 = FarmEvent::new("spawned", Some("cos"), Some("task-b"), Some("cos"), Some("quaqua"));
+        let ev4 = FarmEvent::new(
+            "spawned",
+            Some("cos"),
+            Some("task-a"),
+            Some("cos"),
+            Some("quaqua"),
+        );
+        let ev5 = FarmEvent::new(
+            "spawned",
+            Some("cos"),
+            Some("task-b"),
+            Some("cos"),
+            Some("quaqua"),
+        );
         assert!(bus.record(&ev4).expect("record ev4"));
         assert!(bus.record(&ev5).expect("record ev5"));
 
         // Verify total count: 4 events (ev1, ev3, ev4, ev5); ev2 was ignored
         let events = bus.load_events(0).expect("load events");
-        assert_eq!(events.len(), 4, "duplicate incident key must not produce a row");
+        assert_eq!(
+            events.len(),
+            4,
+            "duplicate incident key must not produce a row"
+        );
     }
 
     #[test]
     fn test_quaqua_status_output_unchanged_with_new_tables_present() {
         let _lock = crate::test_env::lock_env();
+        use crate::engine::journal::{EventRecord, Journal};
         use crate::engine::journal_sqlite::SqliteJournal;
-        use crate::engine::journal::{Journal, EventRecord};
-        use crate::status::render_status;
         use crate::herdr::Herdr;
+        use crate::status::render_status;
 
         let (db_path, _cleaner) = temp_db("status-unchanged");
         let runs_dir = db_path.parent().unwrap();
@@ -407,24 +507,44 @@ mod tests {
             let mut journal = SqliteJournal::open(&db_path).expect("open journal");
             let ev1 = EventRecord::new(1, 1000, "workflow_started", "{}");
             let ev2 = EventRecord::new(2, 2000, "workflow_completed", r#"{"exit":0}"#);
-            journal.append_event("wf-status-test", &ev1).expect("append ev1");
-            journal.append_event("wf-status-test", &ev2).expect("append ev2");
+            journal
+                .append_event("wf-status-test", &ev1)
+                .expect("append ev1");
+            journal
+                .append_event("wf-status-test", &ev2)
+                .expect("append ev2");
         }
 
         let mock_herdr = Herdr::new();
-        let status_before = render_status(&db_path, runs_dir, &mock_herdr).expect("render status before");
+        let status_before =
+            render_status(&db_path, runs_dir, &mock_herdr).expect("render status before");
 
         // Now open FarmBus on the same database, creating farm_events and cursors tables,
         // and insert several farm events.
         {
             let bus = FarmBus::open(&db_path).expect("open bus");
-            bus.record(&FarmEvent::new("spawned", Some("cos"), Some("w1"), Some("cos"), Some("proj"))).expect("rec 1");
-            bus.record(&FarmEvent::new("report_written", Some("w1"), Some("w1"), Some("cos"), Some("proj"))).expect("rec 2");
+            bus.record(&FarmEvent::new(
+                "spawned",
+                Some("cos"),
+                Some("w1"),
+                Some("cos"),
+                Some("proj"),
+            ))
+            .expect("rec 1");
+            bus.record(&FarmEvent::new(
+                "report_written",
+                Some("w1"),
+                Some("w1"),
+                Some("cos"),
+                Some("proj"),
+            ))
+            .expect("rec 2");
             bus.set_cursor("cos", 42).expect("set cursor");
         }
 
         // Render status again: must be byte-identical!
-        let status_after = render_status(&db_path, runs_dir, &mock_herdr).expect("render status after");
+        let status_after =
+            render_status(&db_path, runs_dir, &mock_herdr).expect("render status after");
 
         assert_eq!(
             status_before, status_after,

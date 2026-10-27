@@ -13,18 +13,28 @@ use serde_json::Value;
 use std::time::{Duration, Instant};
 
 pub const USAGE: &str = "\
-# Usage: quaqua lead prompt <slug> <msg>
+# Usage: quaqua lead prompt <slug> [--allow-stale-card] <msg>
 #   Clears the input box of the project Lead (<slug>-lead), sends <msg>, and
-#   verifies it landed (input empty + agent status working).";
+#   verifies it landed (input empty + agent status working).
+#   --allow-stale-card    override refusal on stale open items in projects/<slug>.md ## Now";
 
 const DEFAULT_WAIT_MS: u64 = 5000;
 const POLL_MS: u64 = 100;
 
 pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, String)> {
-    if args.len() < 2 {
+    let mut allow_stale_card = false;
+    let mut filtered_args = Vec::new();
+    for a in args {
+        if a == "--allow-stale-card" {
+            allow_stale_card = true;
+        } else {
+            filtered_args.push(a.clone());
+        }
+    }
+    if filtered_args.len() < 2 {
         return Err((1, format!("{USAGE}\n")));
     }
-    let slug = &args[0];
+    let slug = &filtered_args[0];
     if slug.is_empty()
         || !slug
             .chars()
@@ -32,10 +42,11 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
     {
         return Err((1, format!("{USAGE}\n")));
     }
-    let msg = args[1..].join(" ");
+    let msg = filtered_args[1..].join(" ");
     if msg.trim().is_empty() {
         return Err((1, format!("{USAGE}\n")));
     }
+    crate::lead::card::check_card_freshness_default(slug, allow_stale_card)?;
     let name = format!("{slug}-lead");
 
     let runs_dir = crate::worker::cleanup::default_runs_dir();

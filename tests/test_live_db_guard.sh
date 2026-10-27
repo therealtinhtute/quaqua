@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Verifies that when QUAQUA_TEST=1 is set, a test suite that forgets to set HOME
-# or QUAQUA_RUNS_DIR cannot write to the real live workspace DB (~/quaqua/runs/quaqua.db).
+# or QUAQUA_RUNS_DIR cannot write to the real live workspace DB
+# (<passwd home>/quaqua/runs/quaqua.db).
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -19,7 +20,11 @@ file_stat() {
   fi
 }
 
-real_db="$HOME/quaqua/runs/quaqua.db"
+# The live workspace is the passwd home, not `$HOME`: this suite is run with
+# HOME overridden (hermetic CI), while quaqua's guard compares against the real
+# user home, so the DB to watch is the passwd one.
+sys_home="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+real_db="$sys_home/quaqua/runs/quaqua.db"
 before_stat="$(file_stat "$real_db")"
 before_wal_stat="$(file_stat "$real_db-wal")"
 before_shm_stat="$(file_stat "$real_db-shm")"

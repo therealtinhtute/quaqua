@@ -12,6 +12,8 @@
 //! ..."))` instead of the expected `Ok(())`.
 
 use std::ffi::OsStr;
+use std::path::Path;
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -51,4 +53,44 @@ impl Drop for TestEnvVarGuard {
             None => std::env::remove_var(self.key),
         }
     }
+}
+
+/// A `git` command that cannot read the host's global or system config, so a
+/// `commit.gpgsign`, `core.hooksPath`, or `init.defaultBranch` there cannot
+/// change what a fixture repo produces. Mirrors `tests/common/gitfix.rs`, which
+/// integration tests use (this module is `cfg(test)` and not visible there).
+pub fn git_hermetic() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+        cmd.env_remove(key);
+    }
+    cmd
+}
+
+/// A fixture repo on `main` with a local identity and one empty commit.
+/// Returns the commit sha.
+pub fn init_repo(dir: &Path) -> String {
+    let run = |args: &[&str]| {
+        let out = git_hermetic()
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    std::fs::create_dir_all(dir).unwrap();
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.name", "Quaqua Test"]);
+    run(&["config", "user.email", "test@quaqua.local"]);
+    run(&["commit", "-qm", "initial commit", "--allow-empty"]);
+    let out = run(&["rev-parse", "HEAD"]);
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }

@@ -7,11 +7,17 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "common/gitfix.rs"]
+mod gitfix;
+
 struct Fixture {
     root: PathBuf,
     herdr: PathBuf,
     calls: PathBuf,
     state: PathBuf,
+    /// The project repo the card names: this fixture's own `main`, never the
+    /// checkout `cargo test` runs in (CI is a shallow, detached clone).
+    repo: PathBuf,
 }
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -31,18 +37,33 @@ impl Fixture {
         fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
         let calls = root.join("calls");
         fs::write(&calls, "").unwrap();
+        // Own repo with `#153` merged on `main`, so the freshness check reads
+        // this history instead of the host checkout's.
+        let repo = root.join("repo");
+        gitfix::init_repo(&repo);
+        gitfix::git_ok(
+            &repo,
+            &[
+                "commit",
+                "-qm",
+                "Merge pull request #153 from feature",
+                "--allow-empty",
+            ],
+        );
         Fixture {
             root,
             herdr,
             calls,
             state,
+            repo,
         }
     }
 
-    fn cmd(&self) -> Command {
+    /// The binary with the fixture's env and no host git config. Callers add
+    /// their own subcommand and flags.
+    fn base_cmd(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_quaqua"));
-        cmd.args(["lead", "prompt", "baro", "please fix the gate"])
-            .env("HERDR_BIN_PATH", &self.herdr)
+        cmd.env("HERDR_BIN_PATH", &self.herdr)
             .env("QUAQUA_TEST_STATE", &self.state)
             .env("QUAQUA_TEST_CALLS", &self.calls)
             .env("QUAQUA_LEAD_PROMPT_WAIT_MS", "300")
@@ -58,7 +79,31 @@ impl Fixture {
                 cmd.env_remove(&k);
             }
         }
+        gitfix::isolate(&mut cmd);
         cmd
+    }
+
+    fn cmd(&self) -> Command {
+        let mut cmd = self.base_cmd();
+        cmd.args(["lead", "prompt", "baro", "please fix the gate"]);
+        cmd
+    }
+
+    /// `projects/` naming this fixture's repo, with one stale open item.
+    fn write_stale_card(&self) {
+        let projects = self.root.join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let repo = self.repo.display();
+        fs::write(
+            projects.join("INDEX.md"),
+            format!("| slug | repo | owner |\n| baro | {repo} | cos |\n"),
+        )
+        .unwrap();
+        fs::write(
+            projects.join("baro.md"),
+            format!("repo: {repo}\n\n## Now\n- [ ] gatep4 running after #153 merged\n"),
+        )
+        .unwrap();
     }
 
     fn run(&self) -> Output {
@@ -213,6 +258,88 @@ fn a_not_found_lead_still_listed_is_unknown_and_not_prompted() {
     assert!(!f.calls().contains("agent prompt"), "{}", f.calls());
 }
 
+#[test]
+fn prompt_refuses_when_card_has_stale_open_item_unless_allowed() {
+    let f = Fixture::new("stale-card");
+    f.write_stale_card();
+
+    // 1. Without --allow-stale-card: refuses with exit 1
+    let out = f.run();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("projects/baro.md ## Now has open item naming already-merged PR #153:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--allow-stale-card"), "{stderr}");
+
+    // 2. With --allow-stale-card: bypasses card freshness check
+    let mut cmd = f.base_cmd();
+    cmd.args([
+        "lead",
+        "prompt",
+        "baro",
+        "--allow-stale-card",
+        "please fix the gate",
+    ]);
+    let out_allowed = cmd
+        .output()
+        .expect("run quaqua lead prompt --allow-stale-card");
+    let stderr_allowed = String::from_utf8_lossy(&out_allowed.stderr);
+    assert!(
+        !stderr_allowed.contains("already-merged"),
+        "{stderr_allowed}"
+    );
+}
+
+#[test]
+fn spawn_refuses_when_card_has_stale_open_item_unless_allowed() {
+    let f = Fixture::new("spawn-stale");
+    f.write_stale_card();
+    fs::create_dir_all(f.root.join("rules/_all")).unwrap();
+    fs::write(f.state_file("missing"), "").unwrap();
+
+    // 1. Without --allow-stale-card: refuses with exit 1
+    let mut cmd = f.base_cmd();
+    cmd.args(["lead", "spawn", "baro"]);
+    let out = cmd.output().expect("run quaqua lead spawn");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("projects/baro.md ## Now has open item naming already-merged PR #153:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--allow-stale-card"), "{stderr}");
+
+    // 2. With --allow-stale-card: bypasses card freshness check
+    let mut cmd_allowed = f.base_cmd();
+    cmd_allowed.args(["lead", "spawn", "--allow-stale-card", "baro"]);
+    let out_allowed = cmd_allowed
+        .output()
+        .expect("run quaqua lead spawn --allow-stale-card");
+    let stderr_allowed = String::from_utf8_lossy(&out_allowed.stderr);
+    assert!(
+        !stderr_allowed.contains("already-merged"),
+        "{stderr_allowed}"
+    );
+
+    // The integration branch belongs to the project repo the card names — this
+    // repository, not the checkout the test binary ran in.
+    assert!(
+        gitfix::git(
+            &f.repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/quaqua/baro-integ"
+            ]
+        )
+        .status
+        .success(),
+        "spawn did not create quaqua/baro-integ in projects/baro.md's repo"
+    );
+}
 #[allow(dead_code)]
 fn _exists(p: &Path) -> bool {
     p.exists()
