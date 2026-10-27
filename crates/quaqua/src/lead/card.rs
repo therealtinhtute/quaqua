@@ -413,4 +413,51 @@ Rules here
             check_card_freshness(&workspace_dir, "test-slug", Some(&repo_path), true, &git);
         assert!(res_override.is_ok());
     }
+
+    #[test]
+    fn find_stale_items_matches_only_the_exact_pr_number() {
+        struct DirGuard(PathBuf);
+        impl Drop for DirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let base_dir = std::env::temp_dir().join(format!(
+            "quaqua-card-prnum-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let repo_path = base_dir.join("repo");
+        let _guard = DirGuard(base_dir.clone());
+
+        crate::test_env::init_repo(&repo_path);
+        let out = crate::test_env::git_hermetic()
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["commit", "-q", "--allow-empty", "-m"])
+            .arg("Merge pull request #153 from feature")
+            .output()
+            .expect("run git commit");
+        assert!(
+            out.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let git = crate::git::Git::new();
+
+        // The merged PR is named by an open item: stale.
+        let merged = find_stale_items("## Now\n- [ ] waiting on #153\n", &repo_path, &git);
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert_eq!(merged[0].target, "PR #153");
+
+        // A shorter PR number that only prefixes the merged one is not stale.
+        let prefix = find_stale_items("## Now\n- [ ] waiting on #15\n", &repo_path, &git);
+        assert!(prefix.is_empty(), "{prefix:?}");
+    }
 }
