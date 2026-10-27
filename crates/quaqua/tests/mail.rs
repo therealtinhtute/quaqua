@@ -978,3 +978,157 @@ All criteria satisfied.
     let imp2 = mail::import_inbox_file(&runs, &inbox_file).expect("re-import");
     assert_eq!(imp2.imported, 0);
 }
+
+struct MockUntaggedLeadHerdr {
+    tokens_json: std::cell::RefCell<String>,
+    calls: std::cell::RefCell<Vec<String>>,
+}
+
+impl MockUntaggedLeadHerdr {
+    fn new() -> Self {
+        Self {
+            tokens_json: std::cell::RefCell::new(r#"{"logo":"\ue1a3"}"#.to_string()),
+            calls: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl quaqua::herdr::HerdrOps for MockUntaggedLeadHerdr {
+    fn run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        self.calls.borrow_mut().push(args.join(" "));
+        let stdout = if args.first() == Some(&"pane") && args.get(1) == Some(&"get") {
+            format!(
+                r#"{{"result":{{"pane":{{"pane_id":"wB:p1","tokens":{}}}}}}}"#,
+                self.tokens_json.borrow()
+            )
+        } else if args.first() == Some(&"pane") && args.get(1) == Some(&"report-metadata") {
+            let mut role = None;
+            let mut owner = None;
+            for arg in args {
+                if let Some(r) = arg.strip_prefix("grid_role=") {
+                    role = Some(r);
+                } else if let Some(o) = arg.strip_prefix("grid_owner=") {
+                    owner = Some(o);
+                }
+            }
+            if let (Some(r), Some(o)) = (role, owner) {
+                *self.tokens_json.borrow_mut() =
+                    format!(r#"{{"grid_role":"{r}","grid_owner":"{o}","logo":"\ue1a3"}}"#);
+            }
+            r#"{"result":{}}"#.to_string()
+        } else if args.first() == Some(&"agent") && args.get(1) == Some(&"list") {
+            r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#
+                .to_string()
+        } else {
+            r#"{"result":{}}"#.to_string()
+        };
+        Ok(std::process::Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: stdout.into_bytes(),
+            stderr: Vec::new(),
+        })
+    }
+    fn agent_list(&self) -> std::io::Result<String> {
+        Ok(r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#.to_string())
+    }
+    fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
+        Ok((true, r#"{"result":{"agent":{"name":"mu-lead","pane_id":"wB:p1"}}}"#.to_string()))
+    }
+    fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> { Ok(String::new()) }
+    fn agent_start(&self, _n: &str, _k: &str, _p: &str, _t: u32, _a: &[&str]) -> std::io::Result<std::process::Output> {
+        Ok(std::process::Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+    fn pane_split(&self, _c: &str, _o: &str, _e: &[(&str, &str)]) -> std::io::Result<std::process::Output> { unimplemented!() }
+    fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+    fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<std::process::Output> {
+        let mut args = vec!["pane", "report-metadata", _p];
+        args.extend_from_slice(_t);
+        self.run(&args)
+    }
+    fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool { true }
+    fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> { Ok(String::new()) }
+    fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+    fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+    fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> { unimplemented!() }
+    fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<std::process::Output> { unimplemented!() }
+    fn agent_prompt_wait_background(
+        &self,
+        _n: &str,
+        _p: &str,
+        _t: u32,
+        _f: std::fs::File,
+    ) -> std::io::Result<std::process::Child> {
+        unimplemented!()
+    }
+}
+#[test]
+fn test_mail_send_from_untagged_lead_pane_self_heals() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID", "QUAQUA_ROOT", "HOME"]);
+    guard.remove("QUAQUA_OWNER");
+    guard.remove("QUAQUA_TEST");
+    guard.set("HERDR_PANE_ID", "wB:p1");
+
+    let ws = hermetic_temp_dir("untagged-lead-ws");
+    let runs = ws.join("runs");
+    std::fs::create_dir_all(&runs).expect("create runs");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+
+    // Create projects/INDEX.md registering mu-lead
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).expect("create projects");
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|------|------|-------|--------|------|\n| mu | ~/Lab/mu | mu-lead | active | Mole parity |\n",
+    ).expect("write INDEX.md");
+
+    let herdr = MockUntaggedLeadHerdr::new();
+    let opts = SendMailOpts {
+        to: "cos".to_string(),
+        kind: "accept".to_string(),
+        body: "verdict: parity verified".to_string(),
+        project: Some("mu".to_string()),
+        reply_to: None,
+        client_id: None,
+    };
+
+    let res = mail::send_mail(&runs, &opts, &herdr).expect("send_mail must self-heal untagged lead pane");
+    assert!(res.id > 0);
+
+    let bus = FarmBus::open(&runs.join("quaqua.db")).expect("open bus");
+    let sender: String = bus
+        .conn_for_test()
+        .query_row("SELECT from_name FROM mail WHERE id = ?", [res.id], |r| r.get(0))
+        .expect("get sender");
+    assert_eq!(sender, "mu-lead");
+}
+
+#[test]
+fn test_mail_send_unresolvable_error_names_pane_and_repair_command() {
+    let guard = EnvGuard::new(&["QUAQUA_TEST", "QUAQUA_OWNER", "HERDR_PANE_ID", "QUAQUA_ROOT"]);
+    guard.remove("QUAQUA_OWNER");
+    guard.remove("QUAQUA_TEST");
+    guard.set("HERDR_PANE_ID", "wX:p99");
+
+    let ws = hermetic_temp_dir("unresolvable-ws");
+    let runs = ws.join("runs");
+    std::fs::create_dir_all(&runs).expect("create runs");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+
+    let herdr = MockUntaggedLeadHerdr::new();
+    let opts = SendMailOpts {
+        to: "cos".to_string(),
+        kind: "accept".to_string(),
+        body: "verdict: test".to_string(),
+        project: None,
+        reply_to: None,
+        client_id: None,
+    };
+
+    let err = mail::send_mail(&runs, &opts, &herdr).expect_err("unresolvable pane must fail");
+    assert!(err.contains("wX:p99"), "error must name pane wX:p99, got: {err}");
+    assert!(err.contains("quaqua lead repair"), "error must name 'quaqua lead repair', got: {err}");
+}

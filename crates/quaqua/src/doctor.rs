@@ -573,6 +573,76 @@ pub fn diff_plugin_hooks(
     Ok(problems)
 }
 
+/// Check registered Leads in `projects/INDEX.md` against running agents in herdr.
+/// Flags any running Lead whose pane tokens are missing `grid_role=orchestrator` or
+/// `grid_owner=<slug>-lead`.
+pub fn diff_lead_tokens_with<H: crate::herdr::HerdrOps>(
+    workspace: &Path,
+    herdr: &H,
+) -> Vec<DriftProblem> {
+    let mut problems = Vec::new();
+    let index_file = workspace.join("projects/INDEX.md");
+    let Ok(content) = std::fs::read_to_string(&index_file) else {
+        return problems;
+    };
+    let rows = crate::worker::leadgate::index_rows(&content);
+    let lead_rows: Vec<_> = rows
+        .into_iter()
+        .filter(|r| r.owner == format!("{}-lead", r.slug))
+        .collect();
+    if lead_rows.is_empty() {
+        return problems;
+    }
+
+    let Some(agents_val) = crate::lead::tag::get_agent_list_json(herdr) else {
+        return problems;
+    };
+    let Some(agents) = agents_val
+        .pointer("/result/agents")
+        .and_then(|a| a.as_array())
+    else {
+        return problems;
+    };
+
+    for row in lead_rows {
+        for agent in agents {
+            let name = agent.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name == row.owner {
+                let pane_id = agent.get("pane_id").and_then(|p| p.as_str()).unwrap_or("");
+                let tokens = agent.get("tokens").and_then(|t| t.as_object());
+                let role = tokens
+                    .and_then(|t| t.get("grid_role"))
+                    .and_then(|v| v.as_str());
+                let owner = tokens
+                    .and_then(|t| t.get("grid_owner"))
+                    .and_then(|v| v.as_str());
+                if role != Some("orchestrator") || owner != Some(&row.owner) {
+                    problems.push(DriftProblem {
+                        drift: format!(
+                            "lead identity drift: registered lead '{}' (pane '{}') is missing orchestrator tokens",
+                            row.slug, pane_id
+                        ),
+                        fix: format!("quaqua lead repair {}", row.slug),
+                    });
+                }
+            }
+        }
+    }
+
+    problems
+}
+
+/// Default `diff_lead_tokens` using the system Herdr driver.
+/// Skips live daemon lookup during unit tests unless HERDR_BIN_PATH is provided.
+pub fn diff_lead_tokens(workspace: &Path) -> Vec<DriftProblem> {
+    if std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
+        && std::env::var("HERDR_BIN_PATH").is_err()
+    {
+        return Vec::new();
+    }
+    let herdr = crate::herdr::Herdr::new();
+    diff_lead_tokens_with(workspace, &herdr)
+}
 pub fn resolve_engine_from_workspace(ws: &Path) -> Option<PathBuf> {
     let index = ws.join("projects/INDEX.md");
     if let Ok(content) = std::fs::read_to_string(&index) {
@@ -724,7 +794,10 @@ pub fn evaluate_workspace(
         }
     }
 
-    // 3. Workspace warnings
+    // 3. Lead identity token drift
+    report.problems.extend(diff_lead_tokens(&ws));
+
+    // 4. Workspace warnings
     report.warnings.extend(workspace_warnings(Some(&ws)));
 
     report
@@ -1134,5 +1207,102 @@ command = ["quaqua", "events", "hook"]
         );
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+    struct MockDoctorHerdr(String);
+    impl crate::herdr::HerdrOps for MockDoctorHerdr {
+        fn run(&self, _args: &[&str]) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_list(&self) -> std::io::Result<String> {
+            Ok(self.0.clone())
+        }
+        fn agent_get(&self, _n: &str) -> std::io::Result<(bool, String)> {
+            unimplemented!()
+        }
+        fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn agent_start(
+            &self,
+            _n: &str,
+            _k: &str,
+            _p: &str,
+            _t: u32,
+            _a: &[&str],
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_split(
+            &self,
+            _c: &str,
+            _o: &str,
+            _e: &[(&str, &str)],
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_report_metadata(
+            &self,
+            _p: &str,
+            _t: &[&str],
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
+            true
+        }
+        fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_wait_background(
+            &self,
+            _n: &str,
+            _p: &str,
+            _t: u32,
+            _f: std::fs::File,
+        ) -> std::io::Result<std::process::Child> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn diff_lead_tokens_detects_untagged_lead_and_clean_when_tagged() {
+        let dir = temp_dir("diff-lead-tokens");
+        let ws = workspace_dir(&dir);
+        let projects_dir = ws.join("projects");
+        fs::create_dir_all(&projects_dir).unwrap();
+        fs::write(
+            projects_dir.join("INDEX.md"),
+            "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole |\n",
+        ).unwrap();
+
+        // Case 1: Untagged lead pane -> detected as drift
+        let untagged_json = r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#;
+        let problems = diff_lead_tokens_with(&ws, &MockDoctorHerdr(untagged_json.to_string()));
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].drift.contains("missing orchestrator tokens"));
+        assert!(problems[0].drift.contains("wB:p1"));
+        assert_eq!(problems[0].fix, "quaqua lead repair mu");
+
+        // Case 2: Correctly tagged lead pane -> 0 problems
+        let tagged_json = r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"grid_role":"orchestrator","grid_owner":"mu-lead","logo":"\ue1a3"}}]}}"#;
+        let clean = diff_lead_tokens_with(&ws, &MockDoctorHerdr(tagged_json.to_string()));
+        assert!(clean.is_empty(), "{clean:?}");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

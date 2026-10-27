@@ -16,6 +16,7 @@ pub fn handle_lead(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32
         "spawn" => spawn::spawn_lead(&args[1..], git, herdr),
         "prompt" => prompt::prompt_lead(&args[1..], herdr),
         "cleanup" => cleanup::cleanup_lead(&args[1..], herdr),
+        "repair" => tag::handle_repair(&args[1..], herdr),
         "tag" => tag::handle_tag(&args[1..], herdr),
         _ => Err((1, format!("{}\n{}\n", spawn::USAGE, prompt::USAGE))),
     }
