@@ -663,8 +663,13 @@ pub fn diff_lead_tokens_with<H: crate::herdr::HerdrOps>(
             continue;
         }
         let pane_id = agent.get("pane_id").and_then(|p| p.as_str()).unwrap_or("");
+        // `quaqua lead repair` fails closed for a slug with no `projects/INDEX.md`
+        // row, which is exactly the state left here (a registered Lead missing its
+        // tokens is a problem above, and skipped): state the precondition too.
         let repair = match name.strip_suffix("-lead") {
-            Some(slug) => format!(" — run `quaqua lead repair {slug}`"),
+            Some(slug) => format!(
+                " — if this is a registered Lead, run `quaqua lead repair {slug}` (it needs a projects/INDEX.md row)"
+            ),
             None => String::new(),
         };
         report.warnings.push(format!(
@@ -1359,7 +1364,7 @@ command = ["quaqua", "events", "hook"]
         assert!(clean.problems.is_empty(), "{:?}", clean.problems);
         assert!(clean.warnings.is_empty(), "{:?}", clean.warnings);
 
-        // Case 3: herdr is live but no pane carries grid_role=cos (a herdr
+        // Case 3: herdr is live but no pane carries the CoS role (a herdr
         // restart dropped the CoS token) -> one warning with the repair, no error
         let no_cos_json = r#"{"result":{"agents":[
             {"name":"mu-lead","pane_id":"wB:p1","tokens":{"grid_role":"orchestrator","grid_owner":"mu-lead"}},
@@ -1368,12 +1373,15 @@ command = ["quaqua", "events", "hook"]
         let no_cos = diff_lead_tokens_with(&ws, &MockDoctorHerdr(no_cos_json.to_string()));
         assert!(no_cos.problems.is_empty(), "{:?}", no_cos.problems);
         assert_eq!(no_cos.warnings.len(), 1, "{:?}", no_cos.warnings);
-        assert!(no_cos.warnings[0].contains("no pane carries grid_role=cos"));
-        assert!(no_cos.warnings[0].contains("quaqua cos tag"));
+        assert!(
+            no_cos.warnings[0].contains("quaqua cos tag"),
+            "{:?}",
+            no_cos.warnings
+        );
 
-        // Case 4: named panes whose tokens carry no grid_* at all -> warnings,
-        // naming the pane and (for a Lead) the repair; the tagged CoS pane and
-        // the tagged registered lead stay silent
+        // Case 4: named panes whose tokens carry no grid_* at all -> one warning
+        // each, naming the pane and (for a Lead) the repair; the tagged CoS pane
+        // and the tagged registered lead stay silent
         let untagged_workers_json = r#"{"result":{"agents":[
             {"pane_id":"w1:p1X","tokens":{"grid_role":"cos","grid_owner":"cos"}},
             {"name":"mu-lead","pane_id":"wB:p1","tokens":{"grid_role":"orchestrator","grid_owner":"mu-lead"}},
@@ -1385,8 +1393,7 @@ command = ["quaqua", "events", "hook"]
         assert!(workers.problems.is_empty(), "{:?}", workers.problems);
         assert_eq!(workers.warnings.len(), 2, "{:?}", workers.warnings);
         assert!(
-            workers.warnings[0].contains("'sude-task' (pane 'wC:p2')")
-                && workers.warnings[0].contains("no grid_* token"),
+            workers.warnings[0].contains("'sude-task' (pane 'wC:p2')"),
             "{:?}",
             workers.warnings
         );

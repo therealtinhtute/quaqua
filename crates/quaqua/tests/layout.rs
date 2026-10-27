@@ -1839,6 +1839,12 @@ fn test_layout_enforce_peer_spawn_denied_exit_1_no_worktree_or_pane() {
         msg.contains("edge.none"),
         "expected rule_id edge.none in msg: {msg}"
     );
+    // The recovery hint is scoped to identity.unknown: any other deny must not
+    // tell the operator to re-tag a pane that was read fine.
+    assert!(
+        !msg.contains("hint:"),
+        "edge.none deny must carry no identity hint: {msg}"
+    );
     assert!(
         !temp.join(".wt/sude-worker1").exists(),
         "no worktree must be created on deny"
@@ -2062,6 +2068,12 @@ fn test_layout_pre_p3_untagged_lead_pane_reproduction_and_healing() {
     assert!(
         msg1.contains("identity.unknown"),
         "expected identity.unknown: {msg1}"
+    );
+    // An untagged pane gets the recovery hint (pane id + repair command), so
+    // the operator does not have to read the gate source to recover.
+    assert!(
+        msg1.contains("hint:"),
+        "identity.unknown deny must carry the recovery hint: {msg1}"
     );
 
     // Step 2: Heal the Lead pane via tag_lead_pane (setting grid_role=orchestrator, grid_owner=mu-lead)

@@ -865,26 +865,28 @@ pub fn check_with_runs_dir(
 
 /// One-line recovery hint appended to an `identity.unknown` deny.
 ///
-/// The usual cause is a herdr server restart: herdr does not persist pane tokens
-/// (issue: CoS token lost), so the pane has no `grid_role` and the gate cannot
-/// name the caller. Say which pane is unknown and the exact repair instead of
-/// leaving the operator to read this file. `$HERDR_PANE_ID` is read here because
-/// the pure check (`check_with_runs_dir`) has no pane handle and its signature
-/// is not widened for wording.
+/// `Role::Unknown` covers three states: no `grid_role`, an empty one, or a value
+/// that is not `cos`/`orchestrator`/`worker` (the gate's documented `none`). The
+/// hint therefore names the state it can actually read and keeps the herdr
+/// restart as the usual cause, not as a fact. `$HERDR_PANE_ID` is read here
+/// because the pure check (`check_with_runs_dir`) has no pane handle and its
+/// signature is not widened for wording.
 fn identity_unknown_hint() -> String {
     let pane = std::env::var("HERDR_PANE_ID")
         .ok()
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty());
     let subject = match pane {
-        Some(p) => format!("pane '{p}' carries no grid_role"),
-        None => "$HERDR_PANE_ID is unset and the pane carries no grid_role".to_string(),
+        Some(p) => format!("pane '{p}' has {UNUSABLE_ROLE}"),
+        None => format!("$HERDR_PANE_ID is unset and the pane has {UNUSABLE_ROLE}"),
     };
     format!(
-        "hint: {subject} — herdr does not persist pane tokens across a server restart; \
+        "hint: {subject} — usually herdr dropped the pane tokens on a server restart; \
          CoS: run `quaqua cos tag`; Lead: run `quaqua lead repair <slug>`\n"
     )
 }
+
+const UNUSABLE_ROLE: &str = "no usable grid_role (missing, empty, or not cos|orchestrator|worker)";
 
 /// Returns true if layout gate is running in shadow mode.
 ///
