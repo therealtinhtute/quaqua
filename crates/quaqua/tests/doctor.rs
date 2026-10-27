@@ -97,13 +97,21 @@ impl Fixture {
             .expect("run quaqua doctor")
     }
 
+    /// `doctor --workspace` asks `herdr agent list` for pane identity, and
+    /// `herdr::bin_path()` falls back to `herdr` on PATH, so an inherited
+    /// PATH/`HERDR_SOCKET_PATH`/`HERDR_BIN_PATH` would read the operator's live
+    /// daemon and make the asserted stderr depend on live pane tokens. Pin PATH
+    /// to the fixture bin dir (no `herdr` there) and drop both herdr overrides.
     fn run_workspace_flag(&self) -> Output {
         Command::new(env!("CARGO_BIN_EXE_quaqua"))
             .args(["doctor", "--workspace"])
+            .env("PATH", &self.bin_dir)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env_remove("HERDR_CONFIG_DIR")
             .env_remove("HERDR_CONFIG_PATH")
+            .env_remove("HERDR_BIN_PATH")
+            .env_remove("HERDR_SOCKET_PATH")
             .env("QUAQUA_CHECKOUT", &self.checkout)
             .env_remove("QUAQUA_HOME")
             .env_remove("QUAQUA_ROOT")
@@ -115,10 +123,13 @@ impl Fixture {
     fn run_workspace_flag_no_xdg(&self) -> Output {
         Command::new(env!("CARGO_BIN_EXE_quaqua"))
             .args(["doctor", "--workspace"])
+            .env("PATH", &self.bin_dir)
             .env("HOME", &self.home)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("HERDR_CONFIG_DIR")
             .env_remove("HERDR_CONFIG_PATH")
+            .env_remove("HERDR_BIN_PATH")
+            .env_remove("HERDR_SOCKET_PATH")
             .env("QUAQUA_CHECKOUT", &self.checkout)
             .env_remove("QUAQUA_HOME")
             .env_remove("QUAQUA_ROOT")

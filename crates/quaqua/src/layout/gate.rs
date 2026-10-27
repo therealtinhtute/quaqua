@@ -863,6 +863,31 @@ pub fn check_with_runs_dir(
     Decision::allow(rule_id, trace)
 }
 
+/// One-line recovery hint appended to an `identity.unknown` deny.
+///
+/// `Role::Unknown` covers three states: no `grid_role`, an empty one, or a value
+/// that is not `cos`/`orchestrator`/`worker` (the gate's documented `none`). The
+/// hint therefore names the state it can actually read and keeps the herdr
+/// restart as the usual cause, not as a fact. `$HERDR_PANE_ID` is read here
+/// because the pure check (`check_with_runs_dir`) has no pane handle and its
+/// signature is not widened for wording.
+fn identity_unknown_hint() -> String {
+    let pane = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    let subject = match pane {
+        Some(p) => format!("pane '{p}' has {UNUSABLE_ROLE}"),
+        None => format!("$HERDR_PANE_ID is unset and the pane has {UNUSABLE_ROLE}"),
+    };
+    format!(
+        "hint: {subject} — usually herdr dropped the pane tokens on a server restart; \
+         CoS: run `quaqua cos tag`; Lead: run `quaqua lead repair <slug>`\n"
+    )
+}
+
+const UNUSABLE_ROLE: &str = "no usable grid_role (missing, empty, or not cos|orchestrator|worker)";
+
 /// Returns true if layout gate is running in shadow mode.
 ///
 /// In P4, the default is enforce mode (false). Setting `QUAQUA_LAYOUT_SHADOW=1`
@@ -1146,7 +1171,7 @@ fn gate_inner<H: HerdrOps>(
         let _ = std::fs::create_dir_all(runs_dir);
         crate::bus::record_event_safely_in_runs(runs_dir, &event);
 
-        let err_msg = if let Some(tname) = target_name {
+        let mut err_msg = if let Some(tname) = target_name {
             if verb == Verb::Spawn {
                 format!(
                     "error: [{}] {} — cannot spawn {}\n",
@@ -1158,6 +1183,9 @@ fn gate_inner<H: HerdrOps>(
         } else {
             format!("error: [{}] {}\n", decision.rule_id, detail)
         };
+        if decision.rule_id == "identity.unknown" {
+            err_msg.push_str(&identity_unknown_hint());
+        }
 
         return Err((1, err_msg));
     }
