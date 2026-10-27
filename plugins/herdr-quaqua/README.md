@@ -25,6 +25,7 @@ Automatic agent grid layout reconciler for Herdr.
   - Early-exits on `pane.agent_status_changed` events when the status change does not affect layout execution (e.g. non-worker panes or transitions between non-working states `idle`, `done`, `unknown`).
   - Runs in **shadow mode** by default: calculates layout ops using the Rust planner and logs them without modifying panes.
   - When shadow mode is disabled (`HERDR_QUAQUA_SHADOW=0`), applies non-deferred moves itself (was `apply.sh`).
+- **`quaqua identity heal`**: lifecycle hook handler triggered on `[[startup]]` and `pane.agent_detected`. Restores lost identity tokens (`grid_role`, `grid_owner`, `grid_tab`, `grid_group`, `grid_name`) across herdr server restarts for Leads, workers, and CoS.
 
 ## Configuration
 

@@ -120,6 +120,11 @@ enum Command {
         #[command(subcommand)]
         cmd: CosCmd,
     },
+    /// Identity operations: heal.
+    Identity {
+        #[command(subcommand)]
+        cmd: IdentityCmd,
+    },
     /// Topology layout operations: show, why.
     Layout {
         #[command(subcommand)]
@@ -191,6 +196,15 @@ enum CosCmd {
     /// Tag the CoS pane with metadata and label.
     Tag {
         /// Pane ID to tag (default: current pane).
+        #[arg(long)]
+        pane: Option<String>,
+    },
+}
+#[derive(Subcommand)]
+enum IdentityCmd {
+    /// Heal lost pane identity tokens after herdr restart.
+    Heal {
+        /// Optional pane ID to heal (default: all panes).
         #[arg(long)]
         pane: Option<String>,
     },
@@ -583,6 +597,23 @@ fn main() {
                     1
                 }
             },
+        },
+        Some(Command::Identity { cmd }) => match cmd {
+            IdentityCmd::Heal { pane } => {
+                let runs_dir = default_runs_dir();
+                match quaqua::identity::heal_with_runs_dir(&herdr, &runs_dir, pane.as_deref()) {
+                    Ok(actions) => {
+                        for action in actions {
+                            println!("{action}");
+                        }
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
+                }
+            }
         },
         Some(Command::Worker { args }) => match handle_worker(&args, &git, &herdr) {
             Ok(()) => 0,

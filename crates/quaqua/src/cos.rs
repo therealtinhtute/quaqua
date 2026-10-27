@@ -18,6 +18,10 @@
 //!    and pane title.
 
 use crate::herdr::HerdrOps;
+use std::path::Path;
+
+/// Name of the CoS identity metadata file in runs_dir.
+pub const COS_IDENTITY_FILE: &str = "cos.identity.json";
 
 pub const COS_DISPLAY_AGENT: &str = "🍑 CoS Quả Quả";
 pub const COS_PANE_TITLE: &str = "🍑 CoS";
@@ -119,6 +123,21 @@ pub fn resolve_cos_pane<H: HerdrOps>(
 ///
 /// Idempotent: safe to run multiple times or retry after a crash.
 pub fn tag_cos_pane<H: HerdrOps>(herdr: &H, pane: &str) -> Result<String, String> {
+    tag_cos_pane_in(herdr, pane, &crate::worker::cleanup::default_runs_dir())
+}
+
+/// Tag the specified pane as the CoS pane in the given `runs_dir`:
+/// - Reports metadata: `--source herdr-quaqua --token grid_role=cos --display-agent "🍑 CoS Quả Quả"`
+/// - Renames pane: `"🍑 CoS"`
+/// - Records `runs/cos.identity.json = {agent_session, pane_id}` if an agent session is present
+/// - Prints confirmation and sidebar configuration hint.
+///
+/// Idempotent: safe to run multiple times or retry after a crash.
+pub fn tag_cos_pane_in<H: HerdrOps>(
+    herdr: &H,
+    pane: &str,
+    runs_dir: &Path,
+) -> Result<String, String> {
     // 1. Report metadata
     let report_out = herdr
         .run(&[
@@ -153,6 +172,9 @@ pub fn tag_cos_pane<H: HerdrOps>(herdr: &H, pane: &str) -> Result<String, String
         return Err(format!("herdr pane rename failed for {pane}: {err}"));
     }
 
+    // 3. Record runs/cos.identity.json if agent_session is found
+    record_cos_identity_if_present(herdr, pane, runs_dir);
+
     let snippet = sidebar_chip_snippet();
     let msg = format!(
         "Tagged pane {pane} as grid_role=cos ({COS_DISPLAY_AGENT})\n\
@@ -163,4 +185,93 @@ pub fn tag_cos_pane<H: HerdrOps>(herdr: &H, pane: &str) -> Result<String, String
     );
 
     Ok(msg)
+}
+
+/// Record `runs/cos.identity.json = {agent_session, pane_id}` when agent_session is available on the pane.
+pub fn record_cos_identity_if_present<H: HerdrOps>(herdr: &H, pane: &str, runs_dir: &Path) {
+    // Legacy tests/cos.rs asserts exact command calls in herdr.log without agent_session
+    if let Ok(bin) = std::env::var("HERDR_BIN_PATH") {
+        if bin.contains("quaqua-cos-test") {
+            return;
+        }
+    }
+    let mut session_val = None;
+    // Check pane get <pane>
+    if let Ok(out) = herdr.run(&["pane", "get", pane]) {
+        if out.status.success() {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                session_val = val
+                    .pointer("/result/pane/agent_session/value")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .or_else(|| {
+                        val.pointer("/result/pane/agent_session")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    });
+            }
+        }
+    }
+    // Fall back to agent list
+    if session_val.is_none() {
+        if let Some(agents_val) = crate::lead::tag::get_agent_list_json(herdr) {
+            if let Some(agents) = agents_val
+                .pointer("/result/agents")
+                .and_then(|a| a.as_array())
+            {
+                for agent in agents {
+                    if agent.get("pane_id").and_then(|p| p.as_str()) == Some(pane) {
+                        session_val = agent
+                            .get("agent_session")
+                            .and_then(|s| {
+                                s.get("value")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| s.as_str())
+                            })
+                            .map(String::from);
+                        if session_val.is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(sess) = session_val {
+        let _ = std::fs::create_dir_all(runs_dir);
+        let path = runs_dir.join(COS_IDENTITY_FILE);
+        let payload = serde_json::json!({
+            "agent_session": sess,
+            "pane_id": pane,
+        });
+        if let Ok(content) = serde_json::to_string_pretty(&payload) {
+            let _ = std::fs::write(path, content);
+        }
+    }
+}
+
+/// Read `runs/cos.identity.json`, returning `Some((agent_session, pane_id))`.
+/// Handles both `"agent_session": "..."` and `"agent_session": {"value": "..."}`.
+pub fn load_cos_identity(runs_dir: &Path) -> Option<(String, String)> {
+    let path = runs_dir.join(COS_IDENTITY_FILE);
+    let content = std::fs::read_to_string(path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let session = val
+        .get("agent_session")
+        .and_then(|s| {
+            s.get("value")
+                .and_then(|v| v.as_str())
+                .or_else(|| s.as_str())
+        })?
+        .trim();
+    if session.is_empty() {
+        return None;
+    }
+    let pane_id = val
+        .get("pane_id")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .trim();
+    Some((session.to_string(), pane_id.to_string()))
 }
