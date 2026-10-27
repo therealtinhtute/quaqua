@@ -1135,3 +1135,64 @@ fn test_identity_heal_idempotency_second_run_is_noop() {
         "second run must make no new report-metadata calls"
     );
 }
+
+#[test]
+fn test_cos_tag_without_session_on_unrelated_pane_keeps_existing_record() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("cos-tag-narrow-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    // Pre-existing valid record for w1:p1
+    let ident_path = runs_dir.join("cos.identity.json");
+    std::fs::write(
+        &ident_path,
+        r#"{"agent_session": "SES-REAL", "pane_id": "w1:p1"}"#,
+    )
+    .unwrap();
+
+    let mut panes = HashMap::new();
+    // w1:p7 has no agent_session
+    panes.insert(
+        "w1:p7".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: None,
+            label: None,
+        },
+    );
+    // w1:p1 also has no agent_session in this mock
+    panes.insert(
+        "w1:p1".to_string(),
+        MockPaneInfo {
+            tokens: HashMap::new(),
+            agent_session: None,
+            label: None,
+        },
+    );
+
+    let herdr = MockMultiPaneHerdr::new(panes, r#"{"result":{"agents":[]}}"#);
+
+    // Tagging unrelated pane w1:p7 without session must NOT delete the record for w1:p1
+    let res = quaqua::cos::tag_cos_pane_in(&herdr, "w1:p7", &runs_dir)
+        .expect("tag_cos_pane_in should succeed");
+    assert!(res.contains("grid_role=cos"));
+    assert!(
+        ident_path.is_file(),
+        "record for w1:p1 must be kept when tagging unrelated pane"
+    );
+    let content = std::fs::read_to_string(&ident_path).unwrap();
+    assert!(content.contains("SES-REAL"));
+    assert!(content.contains("w1:p1"));
+
+    // Tagging w1:p1 itself without session DOES remove its own stale record
+    let res2 = quaqua::cos::tag_cos_pane_in(&herdr, "w1:p1", &runs_dir)
+        .expect("tag_cos_pane_in should succeed");
+    assert!(res2.contains("grid_role=cos"));
+    assert!(
+        !ident_path.exists(),
+        "record for w1:p1 must be removed when tagging w1:p1 itself without session"
+    );
+}

@@ -236,10 +236,18 @@ pub fn record_cos_identity_if_present<H: HerdrOps>(
         })?;
         Ok(Some(sess))
     } else {
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
+        if let Some((_, existing_pane)) = load_cos_identity(runs_dir) {
+            if existing_pane == pane {
+                let _ = std::fs::remove_file(&path);
+                eprintln!(
+                    "warning: pane {pane} carries no agent_session; runs/cos.identity.json removed"
+                );
+            } else {
+                eprintln!(
+                    "warning: pane {pane} carries no agent_session; keeping existing runs/cos.identity.json for pane '{existing_pane}'"
+                );
+            }
         }
-        eprintln!("warning: pane {pane} carries no agent_session; runs/cos.identity.json removed");
         Ok(None)
     }
 }

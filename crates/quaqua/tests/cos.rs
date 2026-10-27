@@ -51,11 +51,16 @@ exit 0
 }
 
 fn hermetic_cmd(bin: &str, stub: &Path) -> Command {
+    let dir = stub.parent().unwrap_or_else(|| Path::new("."));
+    let runs_dir = dir.join("runs");
+    let _ = fs::create_dir_all(&runs_dir);
     let mut cmd = Command::new(bin);
     cmd.env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("HERDR_BIN_PATH", stub);
+        .env("HERDR_BIN_PATH", stub)
+        .env("QUAQUA_RUNS_DIR", &runs_dir)
+        .env("QUAQUA_ROOT", dir);
     cmd
 }
 
