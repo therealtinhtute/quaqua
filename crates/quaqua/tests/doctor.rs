@@ -49,10 +49,14 @@ impl Fixture {
         f
     }
 
+    /// Link the built binary into the fixture's PATH: doctor only reads the
+    /// installed path's metadata (`find_on_path`, `stale_against`), while a
+    /// private copy costs the binary's full size per test — six of them
+    /// exhausted the CI sandbox's scratch quota (EDQUOT from `fs::copy`).
+    /// `tests/cli.rs` links the binary for the same cases.
     fn install_binary(&self) {
-        let dest = self.bin_dir.join("quaqua");
-        fs::copy(env!("CARGO_BIN_EXE_quaqua"), &dest).unwrap();
-        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_quaqua"), self.bin_dir.join("quaqua"))
+            .expect("link quaqua into the fixture bin dir");
     }
 
     fn run(&self, path: &Path) -> Output {
