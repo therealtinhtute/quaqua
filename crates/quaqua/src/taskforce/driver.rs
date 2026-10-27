@@ -8,14 +8,16 @@ use super::workflow::{
 use crate::engine::activity::{Activity, ActivityError, ActivityRequest, ActivityResult};
 use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
 use crate::engine::clock::RealClock;
-use crate::engine::journal::Journal;
+use crate::engine::journal::{Journal, SnapshotRecord};
 use crate::engine::journal_sqlite::SqliteJournal;
 use crate::engine::runner::{self, RunnerOptions, RunnerOutcome};
 use crate::engine::workflow::WorkflowEvent;
 use crate::state::WorkerMetadata;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 
 struct NoopActivity;
 
@@ -44,6 +46,7 @@ pub trait CouncilMemberRunner: Send + Sync {
         name: &str,
         brief: &str,
         repo: &Path,
+        cancel: Arc<AtomicBool>,
     ) -> Result<SingleWorkerOutput, (i32, String)>;
 
     fn cleanup_member(&self, name: &str, repo: &Path) -> Result<(), (i32, String)>;
@@ -71,7 +74,7 @@ impl<'a, G: crate::git::GitOps + Clone + Send + Sync + 'static> CouncilMemberRun
     ) -> Result<(), (i32, String)> {
         let opts = crate::worker::spawn::SpawnOptions {
             base: base.map(|s| s.to_string()).or_else(|| self.base.clone()),
-            review: false,
+            review: true, // Taskforce members are reviewers (F5)
             name: name.to_string(),
             kind: Some(kind.to_string()),
             purpose: None,
@@ -97,6 +100,7 @@ impl<'a, G: crate::git::GitOps + Clone + Send + Sync + 'static> CouncilMemberRun
         name: &str,
         brief: &str,
         _repo: &Path,
+        _cancel: Arc<AtomicBool>,
     ) -> Result<SingleWorkerOutput, (i32, String)> {
         let prompt_res = crate::worker::prompt::prompt_worker(
             name,
@@ -158,7 +162,7 @@ pub fn write_state_file(
     crate::state::atomic_write(path, content)
 }
 
-/// Build member prompt text for a given taskforce mode.
+/// Build member prompt text for a given taskforce mode (F5).
 pub fn build_member_prompt(mode: &str, task: &str, worker_name: &str, brief: &str) -> String {
     match mode {
         "advisor" => format!(
@@ -168,7 +172,7 @@ pub fn build_member_prompt(mode: &str, task: &str, worker_name: &str, brief: &st
             "Goal: dual-lens assessment for task '{task}'\nHard constraints: read-only — do not edit or create files outside ~/quaqua/runs.\nCurrent design (open to challenge): {brief}\nEvidence: assessment, agreements, and concerns. Write to a temp file and rename it to ~/quaqua/runs/{worker_name}.md — publish atomically, never a partial file."
         ),
         _ => format!(
-            "Goal: council review assessment for task '{task}'\nHard constraints: read-only — do not edit or create files outside ~/quaqua/runs.\nCurrent design (open to challenge): {brief}\nEvidence: assessment, agreements, and concerns. Conclude with exactly one 'Verdict: clean | <N> findings' line followed by '## Lessons\nnone'. Write to a temp file and rename it to ~/quaqua/runs/{worker_name}.md — publish atomically, never a partial file."
+            "Goal: council review assessment for task '{task}'\nHard constraints: read-only — do not edit or create files outside ~/quaqua/runs.\nCurrent design (open to challenge): {brief}\nEvidence: assessment, agreements, and concerns. End with exactly one 'Verdict: clean | <N> findings' line. Write to a temp file and rename it to ~/quaqua/runs/{worker_name}.md — publish atomically, never a partial file."
         ),
     }
 }
@@ -193,7 +197,73 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
     let member_names: Vec<String> = member_specs.iter().map(|(n, _)| n.clone()).collect();
     let st_file = state_file_path(runs_dir, mode, task);
 
-    // Write initial state file (finished = 0)
+    let workflow = TaskforceWorkflow;
+    let workflow_id = format!("{mode}:{task}");
+    let db_path = runs_dir.join("quaqua.db");
+    let mut journal =
+        SqliteJournal::open(&db_path).map_err(|e| (1, format!("sqlite journal error: {e}\n")))?;
+    let mut noop_activity = NoopActivity;
+    let mut clock = RealClock::new();
+
+    // Disable snapshot_at_blocked to prevent UNIQUE constraint duplicate seq errors on resume (F1)
+    let runner_opts = RunnerOptions {
+        max_steps: 10_000,
+        snapshot_interval: 20,
+        snapshot_at_blocked: false,
+    };
+
+    // 1. Inspect journal BEFORE spawning (F1, F6)
+    let past_events = journal.load_events(&workflow_id, 1).unwrap_or_default();
+
+    // Check if the journal already holds a terminal outcome
+    let mut already_completed: Option<TaskforceOutput> = None;
+    let mut already_failed: Option<(i32, String)> = None;
+    let mut settled_members: BTreeSet<String> = BTreeSet::new();
+
+    for rec in &past_events {
+        if rec.kind == "workflow_completed" {
+            if let Ok(out) = serde_json::from_str::<TaskforceOutput>(&rec.payload_json) {
+                already_completed = Some(out);
+            }
+        } else if rec.kind == "workflow_failed" {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
+                let code = val.get("code").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+                let reason = val
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("failed")
+                    .to_string();
+                already_failed = Some((code, reason));
+            }
+        } else if rec.kind == "child_completed" || rec.kind == "child_failed" {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
+                if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
+                    settled_members.insert(id.to_string());
+                }
+            }
+        }
+    }
+
+    // Terminal replay check (F1, F6):
+    // If the state file indicates finished=1 and the journal has a terminal result,
+    // return it immediately without spawning any members!
+    let st_finished = if st_file.is_file() {
+        let content = std::fs::read_to_string(&st_file).unwrap_or_default();
+        content.lines().any(|l| l.trim() == "finished=1")
+    } else {
+        false
+    };
+
+    if st_finished {
+        if let Some(out) = already_completed {
+            return Ok(out);
+        }
+        if let Some((code, reason)) = already_failed {
+            return Err((code, reason));
+        }
+    }
+
+    // 2. Spawn ONLY unsettled members (F1)
     write_state_file(
         &st_file,
         mode,
@@ -209,9 +279,12 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
 
     let mut spawned_members: Vec<String> = Vec::new();
     for (name, kind) in member_specs {
+        if settled_members.contains(name) {
+            // Member already settled in earlier run; skip re-spawning (F1)
+            continue;
+        }
         let spawn_res = runner.spawn_member(name, kind, repo, task, approve_kinds, base);
         if let Err(e) = spawn_res {
-            // Rollback already spawned members
             for spawned in &spawned_members {
                 let _ = runner.cleanup_member(spawned, repo);
             }
@@ -229,25 +302,10 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
             return Err(e);
         }
         spawned_members.push(name.clone());
-
-        // Write .taskforce marker
         let _ = WorkerMetadata::save_taskforce(runs_dir, name, task);
     }
 
-    // 2. Setup engine runner & SqliteJournal
-    let workflow = TaskforceWorkflow;
-    let workflow_id = format!("{mode}:{task}");
-    let db_path = runs_dir.join("quaqua.db");
-    let mut journal =
-        SqliteJournal::open(&db_path).map_err(|e| (1, format!("sqlite journal error: {e}\n")))?;
-    let mut noop_activity = NoopActivity;
-    let mut clock = RealClock::new();
-    let runner_opts = RunnerOptions::default();
-
-    // Check if resuming from existing events
-    let past_events = journal.load_events(&workflow_id, 1).unwrap_or_default();
-    let is_resumed = !past_events.is_empty();
-
+    // 3. Setup TaskforceWorkflow
     let single_worker_inputs: Vec<SingleWorkerInput> = member_specs
         .iter()
         .map(|(name, kind)| {
@@ -275,6 +333,20 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
     };
     let initial_state = TaskforceState::from_input(&input);
 
+    // Seed snapshot at seq 0 if none exists to enable deterministic event replay
+    if journal
+        .load_latest_snapshot(&workflow_id)
+        .map(|s| s.is_none())
+        .unwrap_or(true)
+    {
+        let snap = SnapshotRecord::new(
+            0,
+            serde_json::to_string(&initial_state)
+                .map_err(|e| (1, format!("cannot serialize initial state snapshot: {e}\n")))?,
+        );
+        let _ = journal.append_snapshot(&workflow_id, &snap);
+    }
+    let is_resumed = !past_events.is_empty();
     let start_state = if is_resumed {
         None
     } else {
@@ -293,7 +365,6 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
     )
     .map_err(|e| (1, format!("runner error: {e}\n")))?;
 
-    // If already terminal upon start/resume:
     match first_outcome {
         RunnerOutcome::Completed(out) => {
             let _ = write_state_file(
@@ -326,120 +397,116 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
         RunnerOutcome::Blocked(_) => {}
     }
 
-    // 3. Identify already settled members to avoid re-prompting (A3)
-    let current_events = journal.load_events(&workflow_id, 1).unwrap_or_default();
-    let mut settled_members: BTreeSet<String> = BTreeSet::new();
-    for rec in &current_events {
-        if rec.kind == "child_completed" || rec.kind == "child_failed" {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&rec.payload_json) {
-                if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
-                    settled_members.insert(id.to_string());
-                }
-            }
-        }
-    }
-
-    // 4. Concurrently prompt pending members
+    // 4. Concurrently prompt pending members with real-time fail-fast cancellation (F2, F3)
     let pending_members: Vec<(String, String)> = member_specs
         .iter()
         .filter(|(name, _)| !settled_members.contains(name))
         .cloned()
         .collect();
 
+    let cancel_flag = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
+    let mut fail_fast_error: Option<(i32, String)> = None;
+
     std::thread::scope(|s| {
         for (name, _) in &pending_members {
             let tx_c = tx.clone();
             let name_c = name.clone();
             let brief_text = build_member_prompt(mode, task, name, brief);
+            let cancel_c = cancel_flag.clone();
             s.spawn(move || {
-                let res = runner.prompt_member(&name_c, &brief_text, repo);
+                let res = runner.prompt_member(&name_c, &brief_text, repo, cancel_c);
                 let _ = tx_c.send((name_c, res));
             });
         }
-    });
-    drop(tx);
+        drop(tx);
 
-    let mut fail_fast_error: Option<(i32, String)> = None;
-    let mut terminal_output: Option<TaskforceOutput> = None;
-    while let Ok((name, prompt_res)) = rx.recv() {
-        settled_members.insert(name.clone());
+        while let Ok((name, prompt_res)) = rx.recv() {
+            settled_members.insert(name.clone());
 
-        let event = match prompt_res {
-            Ok(out) => {
-                let report_content = std::fs::read_to_string(&out.report_path).unwrap_or_default();
-                if mode == "council" {
-                    match parse_member_verdict(&report_content) {
-                        Ok((verdict_str, findings, is_challenge)) => {
-                            WorkflowEvent::ChildCompleted {
-                                id: name.clone(),
-                                output: serde_json::json!({
-                                    "exit": 0,
-                                    "report_path": out.report_path,
-                                    "verdict": verdict_str,
-                                    "findings": findings,
-                                    "is_challenge": is_challenge,
-                                }),
+            let event = match prompt_res {
+                Ok(out) => {
+                    let report_content =
+                        std::fs::read_to_string(&out.report_path).unwrap_or_default();
+                    if mode == "council" {
+                        match parse_member_verdict(&report_content) {
+                            Ok((verdict_str, findings, is_challenge)) => {
+                                WorkflowEvent::ChildCompleted {
+                                    id: name.clone(),
+                                    output: serde_json::json!({
+                                        "exit": 0,
+                                        "report_path": out.report_path,
+                                        "verdict": verdict_str,
+                                        "findings": findings,
+                                        "is_challenge": is_challenge,
+                                    }),
+                                }
+                            }
+                            Err(err) => {
+                                // Member report missing/unparseable Verdict -> Failed{6} (F9)
+                                WorkflowEvent::ChildFailed {
+                                    id: name.clone(),
+                                    code: 6,
+                                    reason: format!("unparseable verdict in member report: {err}"),
+                                }
                             }
                         }
-                        Err(err) => {
-                            // Member report unparseable -> Failed{6} (D-P8-5)
-                            WorkflowEvent::ChildFailed {
-                                id: name.clone(),
-                                code: 6,
-                                reason: format!("unparseable verdict in member report: {err}"),
-                            }
+                    } else {
+                        WorkflowEvent::ChildCompleted {
+                            id: name.clone(),
+                            output: serde_json::to_value(&out).unwrap(),
                         }
-                    }
-                } else {
-                    WorkflowEvent::ChildCompleted {
-                        id: name.clone(),
-                        output: serde_json::to_value(&out).unwrap(),
                     }
                 }
-            }
-            Err((code, reason)) => WorkflowEvent::ChildFailed {
-                id: name.clone(),
-                code,
-                reason,
-            },
-        };
+                Err((code, reason)) => WorkflowEvent::ChildFailed {
+                    id: name.clone(),
+                    code,
+                    reason,
+                },
+            };
 
-        let step_res = runner::run_until_blocked(
-            &workflow,
-            &workflow_id,
-            None,
-            &mut journal,
-            &mut noop_activity,
-            &mut clock,
-            &runner_opts,
-            vec![event],
-        )
-        .map_err(|e| (1, format!("runner resume error: {e}\n")))?;
+            let step_res = runner::run_until_blocked(
+                &workflow,
+                &workflow_id,
+                None,
+                &mut journal,
+                &mut noop_activity,
+                &mut clock,
+                &runner_opts,
+                vec![event],
+            )
+            .map_err(|e| (1, format!("runner resume error: {e}\n")));
 
-        match step_res {
-            RunnerOutcome::Failed { code, reason } => {
-                fail_fast_error = Some((code, reason));
-                break;
-            }
-            RunnerOutcome::Completed(out) => {
-                terminal_output = Some(out);
-                break;
-            }
-            RunnerOutcome::Blocked(_) => {
-                // Continue waiting for more members
+            match step_res {
+                Ok(RunnerOutcome::Failed { code, reason }) => {
+                    fail_fast_error = Some((code, reason));
+                    // Signal cancellation to all running member threads immediately! (F2)
+                    cancel_flag.store(true, Ordering::SeqCst);
+                    // Clean up still-live (unsettled) members only (F2, F3)
+                    for (m_name, _) in member_specs {
+                        if !settled_members.contains(m_name) {
+                            let _ = runner.cleanup_member(m_name, repo);
+                        }
+                    }
+                    break;
+                }
+                Err(err) => {
+                    fail_fast_error = Some(err);
+                    cancel_flag.store(true, Ordering::SeqCst);
+                    for (m_name, _) in member_specs {
+                        if !settled_members.contains(m_name) {
+                            let _ = runner.cleanup_member(m_name, repo);
+                        }
+                    }
+                    break;
+                }
+                Ok(RunnerOutcome::Completed(_)) | Ok(RunnerOutcome::Blocked(_)) => {}
             }
         }
-    }
+    });
 
-    // 5. Handle fail-fast: kill/cleanup live members (A2)
+    // 5. Handle fail-fast outcome
     if let Some((code, reason)) = fail_fast_error {
-        // Cleanup live members that haven't settled
-        for (m_name, _) in member_specs {
-            if !settled_members.contains(m_name) {
-                let _ = runner.cleanup_member(m_name, repo);
-            }
-        }
         let _ = write_state_file(
             &st_file,
             mode,
@@ -454,7 +521,7 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
         return Err((code, reason));
     }
 
-    // Reconstruct final_state from journal events to ensure accurate member statuses
+    // 6. Reconstruct final state from journal events (F7)
     let final_events = journal.load_events(&workflow_id, 1).unwrap_or_default();
     let mut final_state = initial_state;
     for rec in &final_events {
@@ -508,14 +575,16 @@ pub fn run_taskforce_workflow<R: CouncilMemberRunner>(
         }
     }
 
-    let mut final_out = terminal_output.unwrap_or_else(|| build_taskforce_output(&final_state));
+    let mut final_out = build_taskforce_output(&final_state);
 
-    // 6. Merged report emission for council mode
+    // 7. Write merged report BEFORE final state file completion (F7)
     if mode == "council" {
         let merged_path = write_council_report(runs_dir, task, role_name, &final_state, &final_out)
             .map_err(|e| (1, format!("cannot write merged report: {e}\n")))?;
         final_out.merged_report = Some(merged_path);
     }
+
+    // Now record completion and finalize state
     let _ = write_state_file(
         &st_file,
         mode,

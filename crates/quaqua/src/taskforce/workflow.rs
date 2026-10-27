@@ -239,8 +239,14 @@ pub fn build_taskforce_output(state: &TaskforceState) -> TaskforceOutput {
                 ..
             } => {
                 report_paths.push(report_path.clone());
-                let v = verdict.clone().unwrap_or_else(|| "clean".to_string());
-                tally.entry(v).or_default().push(m.id.clone());
+                if let Some(v) = verdict {
+                    tally.entry(v.clone()).or_default().push(m.id.clone());
+                } else {
+                    tally
+                        .entry("unspecified".to_string())
+                        .or_default()
+                        .push(m.id.clone());
+                }
             }
             MemberStatus::Failed { .. } => {
                 failed.push(m.id.clone());
@@ -267,9 +273,12 @@ pub fn build_taskforce_output(state: &TaskforceState) -> TaskforceOutput {
                     dissent.extend(ids.clone());
                 }
             }
+        } else if tally.len() > 1 {
+            for ids in tally.values() {
+                dissent.extend(ids.clone());
+            }
         }
     }
-
     TaskforceOutput {
         report_paths,
         quorum_met,

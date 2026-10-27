@@ -15,8 +15,6 @@ pub use workflow::{
 };
 
 use crate::cap::count_owner_slots;
-use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
-use crate::engine::workflow::{StepDecision, Workflow, WorkflowContext, WorkflowEvent};
 use crate::git::Git;
 use crate::herdr::Herdr;
 use crate::worker::cleanup::default_runs_dir;
@@ -276,6 +274,20 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
         }
     };
 
+    // Validate that all member kinds have can_review = true (F5)
+    for (m_name, m_kind) in &member_specs {
+        if let Some(kind_info) = cfg.kinds.get(m_kind) {
+            if !kind_info.can_review {
+                return Err((
+                    1,
+                    format!(
+                        "error: taskforce member '{m_name}' kind '{m_kind}' cannot review (can_review = false in [kinds.{m_kind}]); configure a reviewer kind in [purposes] or the layout's members\n"
+                    ),
+                ));
+            }
+        }
+    }
+
     // Calculate effective weight and check cap
     let weight = crate::config::taskforce_weight_from_layout(&cfg, role_name, &layout);
     let slots_used = count_owner_slots(&runs_dir, &owner, None, herdr, &cfg);
@@ -326,6 +338,8 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::child::{SingleWorkerInput, SingleWorkerOutput};
+    use crate::engine::workflow::{StepDecision, Workflow, WorkflowContext, WorkflowEvent};
 
     #[test]
     fn test_taskforce_dual_lens_quorum_completes_with_both_report_paths() {

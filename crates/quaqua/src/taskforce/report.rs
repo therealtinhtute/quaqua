@@ -33,7 +33,8 @@ pub fn render_council_report(
     out.push_str(&format!("# Council report: {task}\n"));
     out.push_str(&format!(
         "Role: {role} · Quorum: {}/{} ({quorum_status})\n",
-        completed_count, state.quorum
+        completed_count,
+        state.members.len()
     ));
     out.push_str(&format!("Chair: {}\n\n", state.chair_owner));
 
@@ -173,7 +174,7 @@ mod tests {
 
         let rendered = render_council_report("t1", "council", &state, &output);
         assert!(rendered.contains("# Council report: t1"));
-        assert!(rendered.contains("Role: council · Quorum: 3/2 (MET)"));
+        assert!(rendered.contains("Role: council · Quorum: 3/3 (MET)"));
         assert!(rendered.contains("Chair: cos"));
         assert!(rendered.contains("Majority verdict: clean"));
         assert!(rendered.contains("Dissenters: c3"));
