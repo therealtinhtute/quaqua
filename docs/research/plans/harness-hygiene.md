@@ -1,7 +1,7 @@
 # Harness & hygiene — PR specs
 
 Source: brainstorm 2026-10-21 (pstack @ 190d287 vs quaqua main d24be71); review 2026-10-21 by truonglao (c32174b, pi added); anh iu's answers 2026-10-21 applied.
-Status: **draft spec** (chưa giao worker) · spec only, nothing implemented. [F] = verified in repo/CLI, [A] = assumption the PR must confirm first.
+Status: **mostly done** · H1 merged #95 · H2 merged #96 · H3 pi done `64ddc49`, Codex dropped from the roster `1c3d9ae` · H4 merged #99 · H5 (optional) not checked against this spec. [F] = verified in repo/CLI, [A] = assumption the PR must confirm first.
 
 Not from pstack: findings from the 2026-10-21 workspace audit (drift, reviewer sandbox) and the six-concept brief (harness adapter, new harnesses). Runs in parallel with `pstack-integration.md`, except H1 merges before its P1.
 

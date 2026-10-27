@@ -1,6 +1,6 @@
 # quaqua-tidy — dọn nốt tầng test-script (Nhóm 1) + rename fixtures
 
-Status: **ready to execute** · CoS 2026-10-18 · nguồn: audit `raw/2026-10-18-quaqua-sude-testaudit-r2.md` §Proposals
+Status: **done** (2026-10-23) · T1 `5caa96a` (4 Nhóm-1 bash suites retired into Rust tests) · T2 `e519763` (fixtures renamed to `herdr-quaqua`) · this file is the record.
 Repo: `~/quaqua` · Base: main sau PR #49
 
 ## 0. TL;DR
