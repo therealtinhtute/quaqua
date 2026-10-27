@@ -4189,7 +4189,9 @@ pub(crate) mod metrics {
         assert_eq!(
             metrics.merges_per_repo,
             vec![MergeRepoStat {
-                repo: repo.display().to_string(),
+                // The report prints a repo under `$HOME` as `~/...`; that is a
+                // rendering, so expect the display form of the scanned repo.
+                repo: display_repo(&repo),
                 refs: vec![
                     MergeRefStat {
                         target: "origin/main".to_string(),
@@ -4228,7 +4230,7 @@ pub(crate) mod metrics {
         ));
         assert!(text.contains(&format!(
             "  merges {}: 2 merge(s), 2 head(s), 1 without - refs origin/main=1, quaqua/pstack-int2=1\n",
-            repo.display()
+            display_repo(&repo)
         )));
 
         // A journal without an events table cannot zero G1: git still counts.
