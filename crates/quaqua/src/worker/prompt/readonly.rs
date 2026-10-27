@@ -119,15 +119,13 @@ mod tests {
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) {
-        let ok = Command::new("git")
+        let out = crate::test_env::git_hermetic()
             .arg("-C")
             .arg(dir)
             .args(args)
             .output()
-            .unwrap()
-            .status
-            .success();
-        assert!(ok, "git {args:?}");
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
     }
 
     fn tmp(tag: &str) -> PathBuf {
@@ -139,9 +137,7 @@ mod tests {
 
     fn repo(tag: &str) -> PathBuf {
         let d = tmp(tag);
-        git(&d, &["init", "-q"]);
-        git(&d, &["config", "user.email", "t@t"]);
-        git(&d, &["config", "user.name", "t"]);
+        crate::test_env::init_repo(&d);
         std::fs::write(d.join("a.txt"), "a\n").unwrap();
         git(&d, &["add", "."]);
         git(&d, &["commit", "-qm", "init"]);

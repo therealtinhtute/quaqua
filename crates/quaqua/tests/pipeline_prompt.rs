@@ -21,6 +21,9 @@ use std::process::{Command, Output};
 use quaqua::engine::journal::Journal;
 use quaqua::engine::journal_sqlite::SqliteJournal;
 
+#[path = "common/gitfix.rs"]
+mod gitfix;
+
 struct Fixture {
     root: PathBuf,
     home: PathBuf,
@@ -115,30 +118,7 @@ impl Fixture {
     /// Returns the commit sha the worktree sits at.
     fn init_wt(&self, task: &str) -> String {
         let wt = self.root.join(format!(".wt/sude-{task}"));
-        fs::create_dir_all(&wt).unwrap();
-        let _ = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&wt)
-            .status();
-        let _ = Command::new("git")
-            .args([
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-qm",
-                "init",
-                "--allow-empty",
-            ])
-            .current_dir(&wt)
-            .status();
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&wt)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        gitfix::init_repo(&wt)
     }
 
     /// The spawn base the build gate compares HEAD against.
@@ -195,28 +175,8 @@ impl Fixture {
         )
         .unwrap();
         let wt = self.root.join(format!(".wt/sude-{task}"));
-        fs::create_dir_all(&wt).unwrap();
-        let _ = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&self.repo)
-            .status();
-        let _ = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&wt)
-            .status();
-        let _ = Command::new("git")
-            .args([
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-qm",
-                "init",
-                "--allow-empty",
-            ])
-            .current_dir(&wt)
-            .status();
+        gitfix::git_ok(&self.repo, &["init", "-q", "-b", "main"]);
+        gitfix::init_repo(&wt);
     }
 
     fn state_field(&self, task: &str, key: &str) -> String {

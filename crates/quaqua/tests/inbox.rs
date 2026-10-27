@@ -18,6 +18,40 @@ fn hermetic_temp_dir(prefix: &str) -> PathBuf {
     dir
 }
 
+static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    vars: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn new(keys: &[&'static str]) -> Self {
+        let lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let vars = keys.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+        Self { _lock: lock, vars }
+    }
+    fn set(&self, key: &'static str, val: &str) {
+        std::env::set_var(key, val);
+    }
+    fn remove(&self, key: &'static str) {
+        std::env::remove_var(key);
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in &self.vars {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
+
 #[test]
 fn test_inbox_cursor_read_idempotent() {
     let runs_dir = hermetic_temp_dir("cursor-idempotent");
@@ -41,15 +75,32 @@ fn test_inbox_cursor_read_idempotent() {
 
     // First inbox read for 'cos'
     let digest1 = bus.inbox_digest(&runs_dir, "cos").expect("first digest");
-    assert_eq!(digest1.incidents.len(), 1, "first digest must see 1 incident");
-    assert_eq!(digest1.incidents[0].incident_key.as_deref(), Some("blocked:p1:1000"));
-    let cursor_after_first = bus.get_cursor("cos").expect("get cursor").expect("cursor set");
+    assert_eq!(
+        digest1.incidents.len(),
+        1,
+        "first digest must see 1 incident"
+    );
+    assert_eq!(
+        digest1.incidents[0].incident_key.as_deref(),
+        Some("blocked:p1:1000")
+    );
+    let cursor_after_first = bus
+        .get_cursor("cos")
+        .expect("get cursor")
+        .expect("cursor set");
     assert_eq!(cursor_after_first, digest1.incidents[0].seq);
 
     // Repeated inbox read for 'cos' with no new events
     let digest2 = bus.inbox_digest(&runs_dir, "cos").expect("second digest");
-    assert_eq!(digest2.incidents.len(), 0, "repeated read with no new events must yield 0 new incidents");
-    let cursor_after_second = bus.get_cursor("cos").expect("get cursor").expect("cursor set");
+    assert_eq!(
+        digest2.incidents.len(),
+        0,
+        "repeated read with no new events must yield 0 new incidents"
+    );
+    let cursor_after_second = bus
+        .get_cursor("cos")
+        .expect("get cursor")
+        .expect("cursor set");
     assert_eq!(
         cursor_after_second, cursor_after_first,
         "cursor must remain at same sequence across repeated reads"
@@ -67,13 +118,22 @@ fn test_inbox_cursor_read_idempotent() {
 
     // Second consumer 'mu-lead' has isolated cursor
     let digest_lead = bus.inbox_digest(&runs_dir, "mu-lead").expect("lead digest");
-    assert_eq!(digest_lead.incidents.len(), 1, "lead must see its 1 incident");
+    assert_eq!(
+        digest_lead.incidents.len(),
+        1,
+        "lead must see its 1 incident"
+    );
     let lead_cursor = bus.get_cursor("mu-lead").expect("get lead cursor");
     assert_eq!(lead_cursor, Some(ev2_seq(&bus)));
 }
 
 fn ev2_seq(bus: &FarmBus) -> u64 {
-    bus.load_events(0).unwrap().iter().find(|e| e.incident_key.as_deref() == Some("blocked:p2:2000")).unwrap().seq
+    bus.load_events(0)
+        .unwrap()
+        .iter()
+        .find(|e| e.incident_key.as_deref() == Some("blocked:p2:2000"))
+        .unwrap()
+        .seq
 }
 
 #[test]
@@ -83,10 +143,15 @@ fn test_inbox_digest_with_mail_and_incidents() {
     let bus = FarmBus::open(&db_path).expect("open bus");
     let herdr = Herdr::new();
 
-    std::env::set_var("QUAQUA_TEST", "1");
-    std::env::set_var("QUAQUA_OWNER", "mu-lead");
-
-    std::env::remove_var("HERDR_PANE_ID");
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_RUNS_DIR",
+    ]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "mu-lead");
+    guard.remove("HERDR_PANE_ID");
     let opts = SendMailOpts {
         to: "cos".to_string(),
         kind: "accept".to_string(),
@@ -117,8 +182,14 @@ fn test_inbox_digest_with_mail_and_incidents() {
     assert_eq!(digest.incidents.len(), 1, "must have 1 incident");
 
     let rendered = digest.render("cos");
-    assert!(rendered.contains(&format!("#{} mu-lead accept", send_res.id)), "rendered mail header");
-    assert!(rendered.contains("stall:sude-worker:5000"), "rendered incident");
+    assert!(
+        rendered.contains(&format!("#{} mu-lead accept", send_res.id)),
+        "rendered mail header"
+    );
+    assert!(
+        rendered.contains("stall:sude-worker:5000"),
+        "rendered incident"
+    );
 }
 
 #[test]
@@ -128,10 +199,15 @@ fn test_finding_3_inbox_follow_no_duplicate_deliveries_and_only_new_items() {
     let bus = FarmBus::open(&db_path).expect("open bus");
     let herdr = Herdr::new();
 
-    std::env::set_var("QUAQUA_TEST", "1");
-    std::env::set_var("QUAQUA_OWNER", "mu-lead");
-    std::env::remove_var("HERDR_PANE_ID");
-
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_RUNS_DIR",
+    ]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "mu-lead");
+    guard.remove("HERDR_PANE_ID");
     let opts = SendMailOpts {
         to: "cos".to_string(),
         kind: "accept".to_string(),
@@ -160,17 +236,490 @@ fn test_finding_3_inbox_follow_no_duplicate_deliveries_and_only_new_items() {
     // In 2.5 seconds, the follow loop executed tick 0 and tick 1.
     // Finding 3: `--follow` must print only new items and NOT re-print the existing mail,
     // nor bump `deliveries` repeatedly on each tick.
-    let occurrences = stdout.matches(&format!("#{} mu-lead accept", send_res.id)).count();
+    let occurrences = stdout
+        .matches(&format!("#{} mu-lead accept", send_res.id))
+        .count();
     assert_eq!(
         occurrences, 1,
         "mail should be printed exactly once across ticks, but was printed {occurrences} times: {stdout}"
     );
 
-    let deliveries: i64 = bus.conn_for_test()
-        .query_row("SELECT deliveries FROM mail WHERE id = ?1", rusqlite::params![send_res.id as i64], |r| r.get(0))
+    let deliveries: i64 = bus
+        .conn_for_test()
+        .query_row(
+            "SELECT deliveries FROM mail WHERE id = ?1",
+            rusqlite::params![send_res.id as i64],
+            |r| r.get(0),
+        )
         .expect("query deliveries");
     assert_eq!(
         deliveries, 1,
         "follow loop must not bump deliveries on each tick; deliveries was {deliveries}"
+    );
+}
+
+#[test]
+fn test_inbox_noise_filter_drops_consumer_own_pane_blocked_incidents() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_RUNS_DIR",
+    ]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("HERDR_PANE_ID", "w1:p1X");
+
+    let runs_dir = hermetic_temp_dir("noise-filter");
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+    let db_path = runs_dir.join("quaqua.db");
+    let bus = FarmBus::open(&db_path).expect("open bus");
+
+    // Incident 1: consumer's own pane (w1:p1X) blocked on a question -> NOISE
+    let ev_noise1 = quaqua::bus::FarmEvent::new(
+        "blocked",
+        Some("herdr"),
+        Some("w1:p1X"),
+        Some("cos"),
+        None::<String>,
+    )
+    .with_incident_key("blocked:w1:p1X:1792984227318");
+    bus.record(&ev_noise1).expect("record noise1");
+
+    // Incident 2: another worker/lead pane (w7:p2) blocked -> REAL INCIDENT (keep)
+    let ev_real = quaqua::bus::FarmEvent::new(
+        "blocked",
+        Some("herdr"),
+        Some("w7:p2"),
+        Some("cos"),
+        Some("projA"),
+    )
+    .with_incident_key("blocked:w7:p2:1792985802177");
+    bus.record(&ev_real).expect("record real");
+
+    // Incident 3: consumer's own pane blocked again with JSON payload -> NOISE
+    let ev_noise2 = quaqua::bus::FarmEvent::new(
+        "blocked",
+        Some("herdr"),
+        Some("w1:p1X"),
+        Some("cos"),
+        None::<String>,
+    )
+    .with_incident_key("blocked:w1:p1X:1792986671622")
+    .with_payload_json(r#"{"event":"pane_agent_status_changed","data":{"pane_id":"w1:p1X","agent_status":"blocked"}}"#);
+    bus.record(&ev_noise2).expect("record noise2");
+
+    // Read inbox digest for cos:
+    // Must drop ev_noise1 and ev_noise2, but keep ev_real!
+    let digest = bus.inbox_digest(&runs_dir, "cos").expect("digest");
+    assert_eq!(
+        digest.incidents.len(),
+        1,
+        "must only include 1 real incident, dropping 2 noise incidents"
+    );
+    assert_eq!(digest.incidents[0].subject.as_deref(), Some("w7:p2"));
+    assert_eq!(
+        digest.incidents[0].incident_key.as_deref(),
+        Some("blocked:w7:p2:1792985802177")
+    );
+
+    let rendered = digest.render("cos");
+    assert!(
+        rendered.contains("blocked:w7:p2:1792985802177"),
+        "rendered must contain real incident"
+    );
+    assert!(
+        !rendered.contains("w1:p1X"),
+        "rendered must not contain any w1:p1X noise incidents"
+    );
+
+    // Cursor must have advanced to the highest event sequence evaluated
+    let cursor = bus
+        .get_cursor("cos")
+        .expect("get cursor")
+        .expect("cursor set");
+    assert!(cursor >= digest.incidents[0].seq);
+
+    // Repeated call: 0 incidents (idempotent)
+    let digest2 = bus.inbox_digest(&runs_dir, "cos").expect("digest2");
+    assert_eq!(
+        digest2.incidents.len(),
+        0,
+        "repeated digest must yield 0 incidents"
+    );
+}
+
+#[test]
+fn test_inbox_high_water_mark_mail_cursor_advances_and_deduplicates() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_RUNS_DIR",
+    ]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "mu-lead");
+    guard.remove("HERDR_PANE_ID");
+
+    let runs_dir = hermetic_temp_dir("hwm-mail");
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+    let db_path = runs_dir.join("quaqua.db");
+    let bus = FarmBus::open(&db_path).expect("open bus");
+    let herdr = Herdr::new();
+
+    // Initially, mail cursor is 0 or unset
+    assert_eq!(bus.get_mail_cursor("cos").expect("get mail cursor"), None);
+
+    // Send Mail 1
+    let opts1 = SendMailOpts {
+        to: "cos".to_string(),
+        kind: "handoff".to_string(),
+        body: "task 1 complete".to_string(),
+        project: Some("mu".to_string()),
+        reply_to: None,
+        client_id: None,
+    };
+    let res1 = mail::send_mail(&runs_dir, &opts1, &herdr).expect("send mail 1");
+    assert!(res1.id > 0);
+
+    // First inbox read: sees Mail 1
+    let digest1 = bus.inbox_digest(&runs_dir, "cos").expect("digest 1");
+    assert_eq!(
+        digest1.unacked_mail.len(),
+        1,
+        "first digest must see mail 1"
+    );
+    assert_eq!(digest1.unacked_mail[0].id, res1.id);
+    assert_eq!(
+        bus.get_mail_cursor("cos").expect("get cursor"),
+        Some(res1.id)
+    );
+
+    // Second inbox read: returns 0 mail (high-water mark prevents re-delivering)
+    let digest2 = bus.inbox_digest(&runs_dir, "cos").expect("digest 2");
+    assert_eq!(
+        digest2.unacked_mail.len(),
+        0,
+        "repeated digest must not re-yield already seen mail"
+    );
+    assert_eq!(
+        bus.get_mail_cursor("cos").expect("get cursor"),
+        Some(res1.id)
+    );
+
+    // Send Mail 2
+    let opts2 = SendMailOpts {
+        to: "cos".to_string(),
+        kind: "accept".to_string(),
+        body: "review approved".to_string(),
+        project: Some("mu".to_string()),
+        reply_to: None,
+        client_id: None,
+    };
+    let res2 = mail::send_mail(&runs_dir, &opts2, &herdr).expect("send mail 2");
+    assert!(res2.id > res1.id);
+
+    // Third inbox read: sees ONLY Mail 2
+    let digest3 = bus.inbox_digest(&runs_dir, "cos").expect("digest 3");
+    assert_eq!(
+        digest3.unacked_mail.len(),
+        1,
+        "third digest must see only new mail"
+    );
+    assert_eq!(digest3.unacked_mail[0].id, res2.id);
+    assert_eq!(
+        bus.get_mail_cursor("cos").expect("get cursor"),
+        Some(res2.id)
+    );
+}
+
+#[test]
+fn test_e2e_smoke_mail_send_dual_write_hook_digest_idempotent_resend_ack() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_RUNS_DIR",
+        "QUAQUA_BIN",
+    ]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "mu-lead");
+    guard.remove("HERDR_PANE_ID");
+
+    let runs_dir = hermetic_temp_dir("e2e-smoke");
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+    let db_path = runs_dir.join("quaqua.db");
+    let bus = FarmBus::open(&db_path).expect("open bus");
+    let herdr = Herdr::new();
+
+    let quaqua_bin = env!("CARGO_BIN_EXE_quaqua");
+    guard.set("QUAQUA_BIN", quaqua_bin);
+
+    // Step 1: mail send
+    let body_text = "verification passed on sha feedbeef123";
+    let opts = SendMailOpts {
+        to: "cos".to_string(),
+        kind: "handoff".to_string(),
+        body: body_text.to_string(),
+        project: Some("mu".to_string()),
+        reply_to: None,
+        client_id: None,
+    };
+    let res1 = mail::send_mail(&runs_dir, &opts, &herdr).expect("send mail");
+    assert!(res1.id > 0);
+    assert!(!res1.already_sent);
+
+    // Step 2: DB row + md dual-write
+    let row_count: i64 = bus
+        .conn_for_test()
+        .query_row(
+            "SELECT count(*) FROM mail WHERE id = ?1",
+            rusqlite::params![res1.id as i64],
+            |r| r.get(0),
+        )
+        .expect("query mail row");
+    assert_eq!(row_count, 1, "DB row must exist");
+
+    let inbox_md = runs_dir.join("mu-lead.inbox.md");
+    assert!(
+        inbox_md.is_file(),
+        "markdown dual-write file mu-lead.inbox.md must exist"
+    );
+    let md_content = std::fs::read_to_string(&inbox_md).expect("read inbox md");
+    assert!(md_content.contains("## "), "markdown must contain header");
+    assert!(
+        md_content.contains("mu-lead handoff"),
+        "markdown must contain sender and kind"
+    );
+    assert!(md_content.contains(body_text), "markdown must contain body");
+
+    // Step 3: hook digest shows it
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let hook_script = manifest_dir.join("../../templates/workspace/scripts/hooks/cos-inbox.sh");
+    assert!(
+        hook_script.is_file(),
+        "hook script must exist at {}",
+        hook_script.display()
+    );
+
+    let out_hook = std::process::Command::new("sh")
+        .arg(&hook_script)
+        .arg("--user-prompt-submit")
+        .env("QUAQUA_BIN", quaqua_bin)
+        .env("QUAQUA_RUNS_DIR", &runs_dir)
+        .output()
+        .expect("execute cos-inbox.sh");
+
+    assert_eq!(out_hook.status.code(), Some(0), "hook must exit 0");
+    let hook_stdout = String::from_utf8_lossy(&out_hook.stdout);
+    assert!(
+        hook_stdout.contains("UserPromptSubmit"),
+        "hook JSON must specify UserPromptSubmit"
+    );
+    assert!(
+        hook_stdout.contains("additionalContext"),
+        "hook JSON must have additionalContext"
+    );
+    assert!(
+        hook_stdout.contains(&format!("#{} mu-lead handoff", res1.id)),
+        "hook digest must show the new mail"
+    );
+    assert!(
+        hook_stdout.contains(body_text),
+        "hook digest must include the mail body"
+    );
+
+    // Verify digest length is <= 10 lines
+    let val: serde_json::Value = serde_json::from_str(&hook_stdout).expect("parse hook json");
+    let ctx = val
+        .pointer("/hookSpecificOutput/additionalContext")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    let line_count = ctx.lines().count();
+    assert!(
+        line_count <= 10,
+        "digest must be <= 10 lines, but was {line_count}"
+    );
+
+    // Also test Stop hook format:
+    let out_stop = std::process::Command::new("sh")
+        .arg(&hook_script)
+        .arg("--stop")
+        .env("QUAQUA_BIN", quaqua_bin)
+        .env("QUAQUA_RUNS_DIR", &runs_dir)
+        .output()
+        .expect("execute cos-inbox.sh --stop");
+    assert_eq!(out_stop.status.code(), Some(0));
+    // Note: high-water mark already advanced by the first hook run, so output should be silent (nothing new)!
+    assert!(
+        out_stop.stdout.is_empty(),
+        "stop hook must be silent when nothing new"
+    );
+
+    // Step 4: idempotent resend
+    let res2 = mail::send_mail(&runs_dir, &opts, &herdr).expect("resend mail");
+    assert_eq!(res2.id, res1.id, "resend must return same mail id");
+    assert!(res2.already_sent, "resend must report already_sent = true");
+
+    let row_count_after: i64 = bus
+        .conn_for_test()
+        .query_row("SELECT count(*) FROM mail WHERE to_name = 'cos'", [], |r| {
+            r.get(0)
+        })
+        .expect("count mail rows");
+    assert_eq!(
+        row_count_after, 1,
+        "DB mail table must still have exactly 1 row"
+    );
+
+    let md_content2 = std::fs::read_to_string(&inbox_md).expect("read inbox md again");
+    let header_count = md_content2.matches("mu-lead handoff").count();
+    assert_eq!(
+        header_count, 1,
+        "markdown inbox dual-write must not duplicate entries"
+    );
+
+    // Hook run after idempotent resend: must be SILENT (0 new mail since high-water mark advanced)
+    let out_hook2 = std::process::Command::new("sh")
+        .arg(&hook_script)
+        .arg("--user-prompt-submit")
+        .env("QUAQUA_BIN", quaqua_bin)
+        .env("QUAQUA_RUNS_DIR", &runs_dir)
+        .output()
+        .expect("execute cos-inbox.sh again");
+
+    assert_eq!(out_hook2.status.code(), Some(0));
+    assert!(
+        out_hook2.stdout.is_empty(),
+        "hook must be silent on idempotent resend (nothing new)"
+    );
+
+    // Step 5: ack hides it
+    let acked = mail::ack_mail(&runs_dir, "cos", &[res1.id]).expect("ack mail");
+    assert_eq!(acked, vec![res1.id]);
+
+    let acked_ms: Option<i64> = bus
+        .conn_for_test()
+        .query_row(
+            "SELECT acked_ms FROM mail WHERE id = ?1",
+            rusqlite::params![res1.id as i64],
+            |r| r.get(0),
+        )
+        .expect("query acked_ms");
+    assert!(acked_ms.is_some(), "mail must be marked acked in DB");
+
+    // Render inbox (which shows all unacked mail) must now hide it
+    let inbox_view = mail::render_inbox(&runs_dir, "cos").expect("render inbox");
+    assert!(
+        inbox_view.contains("no unacked mail for 'cos'"),
+        "ack hides it from inbox: {inbox_view}"
+    );
+    assert!(!inbox_view.contains(&format!("#{}", res1.id)));
+
+    // Inbox digest also hides it
+    let digest_after_ack = bus
+        .inbox_digest(&runs_dir, "cos")
+        .expect("digest after ack");
+    assert_eq!(digest_after_ack.unacked_mail.len(), 0);
+}
+
+#[test]
+fn test_cos_inbox_hook_stop_blocks_once_and_skips_when_stop_hook_active() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_RUNS_DIR",
+        "QUAQUA_BIN",
+    ]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "arch-lead");
+    guard.remove("HERDR_PANE_ID");
+
+    let runs_dir = hermetic_temp_dir("hook-stop");
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+    let _bus = FarmBus::open(&runs_dir.join("quaqua.db")).expect("open bus");
+    let herdr = Herdr::new();
+
+    let quaqua_bin = env!("CARGO_BIN_EXE_quaqua");
+    guard.set("QUAQUA_BIN", quaqua_bin);
+
+    let opts = SendMailOpts {
+        to: "cos".to_string(),
+        kind: "escalate".to_string(),
+        body: "cost cap exceeded".to_string(),
+        project: Some("arch".to_string()),
+        reply_to: None,
+        client_id: None,
+    };
+    mail::send_mail(&runs_dir, &opts, &herdr).expect("send mail");
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let hook_script = manifest_dir.join("../../templates/workspace/scripts/hooks/cos-inbox.sh");
+
+    // 1. Stop hook with stop_hook_active: false -> must BLOCK with decision: block and reason
+    let stdin_inactive = r#"{"hook_event_name":"Stop","stop_hook_active":false}"#;
+    let mut child = std::process::Command::new("sh")
+        .arg(&hook_script)
+        .arg("--stop")
+        .env("QUAQUA_BIN", quaqua_bin)
+        .env("QUAQUA_RUNS_DIR", &runs_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn hook");
+
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin_inactive.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("wait on hook");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""decision": "block""#) || stdout.contains(r#""decision":"block""#),
+        "must block on stop: {stdout}"
+    );
+    assert!(
+        stdout.contains("arch-lead escalate"),
+        "must mention new mail: {stdout}"
+    );
+
+    // Send another mail to test stop_hook_active: true
+    let opts2 = SendMailOpts {
+        to: "cos".to_string(),
+        kind: "blocked".to_string(),
+        body: "waiting on decision".to_string(),
+        project: Some("arch".to_string()),
+        reply_to: None,
+        client_id: None,
+    };
+    mail::send_mail(&runs_dir, &opts2, &herdr).expect("send mail 2");
+
+    // 2. Stop hook with stop_hook_active: true -> must NOT block (silent exit 0)
+    let stdin_active = r#"{"hook_event_name":"Stop","stop_hook_active":true}"#;
+    let mut child2 = std::process::Command::new("sh")
+        .arg(&hook_script)
+        .arg("--stop")
+        .env("QUAQUA_BIN", quaqua_bin)
+        .env("QUAQUA_RUNS_DIR", &runs_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn hook 2");
+
+    child2
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin_active.as_bytes())
+        .unwrap();
+    let out2 = child2.wait_with_output().expect("wait on hook 2");
+    assert_eq!(out2.status.code(), Some(0));
+    assert!(
+        out2.stdout.is_empty(),
+        "stop hook must not block when stop_hook_active is true"
     );
 }

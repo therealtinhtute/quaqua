@@ -21,6 +21,19 @@ pub struct Report {
     pub checkout_checked: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriftProblem {
+    pub drift: String,
+    pub fix: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorkspaceDriftReport {
+    pub problems: Vec<DriftProblem>,
+    pub warnings: Vec<String>,
+    pub notes: Vec<String>,
+}
+
 /// `quaqua doctor`: print what was found, one `error:` per problem, and exit
 /// non-zero if anything is wrong.
 pub fn run() -> i32 {
@@ -46,6 +59,34 @@ pub fn run() -> i32 {
     } else {
         for problem in &report.problems {
             eprintln!("error: {problem}");
+        }
+        1
+    }
+}
+
+/// `quaqua doctor --workspace`: check workspace rules and herdr plugin event hooks
+/// for drift against engine templates and manifest.
+pub fn run_workspace(
+    workspace: Option<&Path>,
+    checkout: Option<&Path>,
+    plugins_json: Option<&Path>,
+) -> i32 {
+    let report = evaluate_workspace(workspace, checkout, plugins_json);
+    for line in &report.notes {
+        println!("{line}");
+    }
+    for line in &report.warnings {
+        eprintln!("warning: {line}");
+    }
+    if report.problems.is_empty() {
+        println!(
+            "ok: workspace rules and herdr plugin event hooks are in sync with engine templates"
+        );
+        0
+    } else {
+        for problem in &report.problems {
+            eprintln!("error: {}", problem.drift);
+            eprintln!("  fix: {}", problem.fix);
         }
         1
     }
@@ -324,6 +365,444 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, Strin
         .map_err(|e| format!("reading shell output failed: {e}"))
 }
 
+/// Compare workspace rule files under `workspace_rules_dir` against template files
+/// under `template_dir`. Returns a `DriftProblem` for each missing or differing rule.
+pub fn diff_rules(template_dir: &Path, workspace_rules_dir: &Path) -> Vec<DriftProblem> {
+    let mut problems = Vec::new();
+    let Ok(entries) = std::fs::read_dir(template_dir) else {
+        return problems;
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
+        .collect();
+    files.sort();
+
+    for t_path in files {
+        let Some(file_name) = t_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let ws_path = workspace_rules_dir.join(file_name);
+        let t_content = match std::fs::read_to_string(&t_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !ws_path.is_file() {
+            problems.push(DriftProblem {
+                drift: format!(
+                    "rule drift: rules/_all/{} is missing (template exists under {})",
+                    file_name,
+                    t_path.display()
+                ),
+                fix: format!("cp {} {}", t_path.display(), ws_path.display()),
+            });
+        } else {
+            match std::fs::read_to_string(&ws_path) {
+                Ok(ws_content) => {
+                    if ws_content != t_content {
+                        problems.push(DriftProblem {
+                            drift: format!(
+                                "rule drift: rules/_all/{} differs from template {}",
+                                file_name,
+                                t_path.display()
+                            ),
+                            fix: format!("cp {} {}", t_path.display(), ws_path.display()),
+                        });
+                    }
+                }
+                Err(e) => {
+                    problems.push(DriftProblem {
+                        drift: format!("rule drift: rules/_all/{} cannot be read: {e}", file_name),
+                        fix: format!("cp {} {}", t_path.display(), ws_path.display()),
+                    });
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// Fallback when no checkout is found: compare against the embedded template table.
+pub fn diff_embedded_rules(workspace_rules_dir: &Path) -> Vec<DriftProblem> {
+    let mut problems = Vec::new();
+    for entry in crate::init::ENTRIES {
+        if let Some(rel) = entry.path.strip_prefix("rules/_all/") {
+            let ws_file = workspace_rules_dir.join(rel);
+            let t_path_disp = format!("templates/workspace/rules/_all/{rel}");
+            if !ws_file.is_file() {
+                problems.push(DriftProblem {
+                    drift: format!("rule drift: rules/_all/{rel} is missing (template exists under {t_path_disp})"),
+                    fix: format!("cp {t_path_disp} {}", ws_file.display()),
+                });
+            } else {
+                match std::fs::read(&ws_file) {
+                    Ok(bytes) => {
+                        if bytes != entry.bytes {
+                            problems.push(DriftProblem {
+                                drift: format!("rule drift: rules/_all/{rel} differs from template {t_path_disp}"),
+                                fix: format!("cp {t_path_disp} {}", ws_file.display()),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        problems.push(DriftProblem {
+                            drift: format!("rule drift: rules/_all/{rel} cannot be read: {e}"),
+                            fix: format!("cp {t_path_disp} {}", ws_file.display()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// Pure diff function: compare event hooks declared in `manifest_toml` against
+/// registrations in `plugins_json`.
+pub fn diff_plugin_hooks(
+    manifest_toml: &str,
+    manifest_path: &Path,
+    plugins_json: &str,
+) -> Result<Vec<DriftProblem>, String> {
+    let mut problems = Vec::new();
+    let manifest_val: toml::Value =
+        toml::from_str(manifest_toml).map_err(|e| format!("cannot parse manifest TOML: {e}"))?;
+
+    let plugin_id = manifest_val
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("herdr-quaqua");
+
+    let mut declared_events: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(events_arr) = manifest_val.get("events").and_then(|v| v.as_array()) {
+        for ev in events_arr {
+            let on = ev.get("on").and_then(|v| v.as_str()).unwrap_or("");
+            let cmd: Vec<String> = ev
+                .get("command")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !on.is_empty() && !cmd.is_empty() {
+                declared_events.push((on.to_string(), cmd));
+            }
+        }
+    }
+
+    let plugin_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let fix_cmd = format!("herdr plugin link {}", plugin_dir.display());
+
+    let parsed_json: serde_json::Value = match serde_json::from_str(plugins_json) {
+        Ok(v) => v,
+        Err(e) => {
+            problems.push(DriftProblem {
+                drift: format!("plugin registration drift: plugins.json cannot be parsed ({e})"),
+                fix: fix_cmd,
+            });
+            return Ok(problems);
+        }
+    };
+
+    let entries = match parsed_json.as_array() {
+        Some(arr) => arr,
+        None => {
+            problems.push(DriftProblem {
+                drift: "plugin registration drift: plugins.json is not an array".to_string(),
+                fix: fix_cmd,
+            });
+            return Ok(problems);
+        }
+    };
+
+    let matching_plugin = entries.iter().find(|entry| {
+        entry.get("plugin_id").and_then(|v| v.as_str()) == Some(plugin_id)
+            || entry.get("name").and_then(|v| v.as_str()) == Some(plugin_id)
+    });
+
+    let Some(plugin) = matching_plugin else {
+        problems.push(DriftProblem {
+            drift: format!(
+                "plugin hook drift: herdr plugin '{plugin_id}' is not registered in plugins.json"
+            ),
+            fix: fix_cmd,
+        });
+        return Ok(problems);
+    };
+
+    let registered_events = plugin
+        .get("events")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut missing_hooks = Vec::new();
+    for (on, cmd) in &declared_events {
+        let found = registered_events.iter().any(|ev| {
+            let ev_on = ev.get("on").and_then(|v| v.as_str()).unwrap_or("");
+            let ev_cmd: Vec<String> = ev
+                .get("command")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ev_on == on && ev_cmd == *cmd
+        });
+        if !found {
+            missing_hooks.push(format!("{on} -> {cmd:?}"));
+        }
+    }
+
+    if !missing_hooks.is_empty() {
+        problems.push(DriftProblem {
+            drift: format!(
+                "plugin hook drift: herdr plugin '{plugin_id}' lacks event hook(s) declared in {}: {}",
+                manifest_path.display(),
+                missing_hooks.join(", ")
+            ),
+            fix: fix_cmd,
+        });
+    }
+
+    Ok(problems)
+}
+
+/// Check registered Leads in `projects/INDEX.md` against running agents in herdr.
+/// Flags any running Lead whose pane tokens are missing `grid_role=orchestrator` or
+/// `grid_owner=<slug>-lead`.
+pub fn diff_lead_tokens_with<H: crate::herdr::HerdrOps>(
+    workspace: &Path,
+    herdr: &H,
+) -> Vec<DriftProblem> {
+    let mut problems = Vec::new();
+    let index_file = workspace.join("projects/INDEX.md");
+    let Ok(content) = std::fs::read_to_string(&index_file) else {
+        return problems;
+    };
+    let rows = crate::worker::leadgate::index_rows(&content);
+    let lead_rows: Vec<_> = rows
+        .into_iter()
+        .filter(|r| r.owner == format!("{}-lead", r.slug))
+        .collect();
+    if lead_rows.is_empty() {
+        return problems;
+    }
+
+    let Some(agents_val) = crate::lead::tag::get_agent_list_json(herdr) else {
+        return problems;
+    };
+    let Some(agents) = agents_val
+        .pointer("/result/agents")
+        .and_then(|a| a.as_array())
+    else {
+        return problems;
+    };
+
+    for row in lead_rows {
+        for agent in agents {
+            let name = agent.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name == row.owner {
+                let pane_id = agent.get("pane_id").and_then(|p| p.as_str()).unwrap_or("");
+                let tokens = agent.get("tokens").and_then(|t| t.as_object());
+                let role = tokens
+                    .and_then(|t| t.get("grid_role"))
+                    .and_then(|v| v.as_str());
+                let owner = tokens
+                    .and_then(|t| t.get("grid_owner"))
+                    .and_then(|v| v.as_str());
+                if role != Some("orchestrator") || owner != Some(&row.owner) {
+                    problems.push(DriftProblem {
+                        drift: format!(
+                            "lead identity drift: registered lead '{}' (pane '{}') is missing orchestrator tokens",
+                            row.slug, pane_id
+                        ),
+                        fix: format!("quaqua lead repair {}", row.slug),
+                    });
+                }
+            }
+        }
+    }
+
+    problems
+}
+
+/// Default `diff_lead_tokens` using the system Herdr driver.
+/// Skips live daemon lookup during unit tests unless HERDR_BIN_PATH is provided.
+pub fn diff_lead_tokens(workspace: &Path) -> Vec<DriftProblem> {
+    if std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
+        && std::env::var("HERDR_BIN_PATH").is_err()
+    {
+        return Vec::new();
+    }
+    let herdr = crate::herdr::Herdr::new();
+    diff_lead_tokens_with(workspace, &herdr)
+}
+pub fn resolve_engine_from_workspace(ws: &Path) -> Option<PathBuf> {
+    let index = ws.join("projects/INDEX.md");
+    if let Ok(content) = std::fs::read_to_string(&index) {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('|') {
+                let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
+                if parts.len() >= 3 && parts[1] != "slug" && !parts[1].starts_with('-') {
+                    let r = parts[2];
+                    let repo_str = if let Some(stripped) = r.strip_prefix("~/") {
+                        format!("{}/{}", home, stripped)
+                    } else if r == "~" {
+                        home.clone()
+                    } else {
+                        r.to_string()
+                    };
+                    let p = PathBuf::from(repo_str);
+                    if p.join("crates/quaqua/src").is_dir() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let default_engine = PathBuf::from(home).join("Lab/quaqua");
+        if default_engine.join("crates/quaqua/src").is_dir() {
+            return Some(default_engine);
+        }
+    }
+    None
+}
+
+/// Resolve the herdr config directory according to herdr conventions:
+/// 1. `HERDR_CONFIG_DIR` explicit override
+/// 2. `HERDR_CONFIG_PATH` explicit override (parent directory of config file)
+/// 3. `XDG_CONFIG_HOME/herdr`
+/// 4. `$HOME/.config/herdr`
+pub fn resolve_herdr_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("HERDR_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    if let Some(path) = std::env::var_os("HERDR_CONFIG_PATH").filter(|v| !v.is_empty()) {
+        if let Some(parent) = Path::new(&path).parent() {
+            return Some(parent.to_path_buf());
+        }
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(xdg).join("herdr"));
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(home).join(".config/herdr"));
+    }
+    None
+}
+
+pub fn resolve_herdr_plugins_json() -> Option<PathBuf> {
+    resolve_herdr_config_dir().map(|dir| dir.join("plugins.json"))
+}
+
+pub fn evaluate_workspace(
+    workspace: Option<&Path>,
+    checkout: Option<&Path>,
+    plugins_json_path: Option<&Path>,
+) -> WorkspaceDriftReport {
+    let mut report = WorkspaceDriftReport::default();
+    let ws = workspace
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::workspace::workspace_root());
+
+    report.notes.push(format!("workspace: {}", ws.display()));
+
+    let checkout_dir = checkout
+        .map(PathBuf::from)
+        .or_else(checkout_root)
+        .or_else(|| resolve_engine_from_workspace(&ws));
+
+    // 1. Rules drift
+    if let Some(co) = &checkout_dir {
+        report.notes.push(format!("checkout: {}", co.display()));
+        let t_rules = co.join("templates/workspace/rules/_all");
+        let ws_rules = ws.join("rules/_all");
+        let rule_problems = diff_rules(&t_rules, &ws_rules);
+        report.problems.extend(rule_problems);
+    } else {
+        let ws_rules = ws.join("rules/_all");
+        let rule_problems = diff_embedded_rules(&ws_rules);
+        report.problems.extend(rule_problems);
+    }
+
+    // 2. Herdr plugin hook drift
+    let manifest_path = checkout_dir
+        .as_ref()
+        .map(|c| c.join("plugins/herdr-quaqua/herdr-plugin.toml"))
+        .unwrap_or_else(|| PathBuf::from("plugins/herdr-quaqua/herdr-plugin.toml"));
+
+    let manifest_toml = if manifest_path.is_file() {
+        std::fs::read_to_string(&manifest_path).ok()
+    } else {
+        Some(include_str!("../../../plugins/herdr-quaqua/herdr-plugin.toml").to_string())
+    };
+
+    let pjson_path = plugins_json_path
+        .map(PathBuf::from)
+        .or_else(resolve_herdr_plugins_json);
+
+    match (manifest_toml, pjson_path) {
+        (Some(toml_str), Some(pj_path)) => {
+            if pj_path.is_file() {
+                match std::fs::read_to_string(&pj_path) {
+                    Ok(json_str) => match diff_plugin_hooks(&toml_str, &manifest_path, &json_str) {
+                        Ok(probs) => report.problems.extend(probs),
+                        Err(e) => report
+                            .warnings
+                            .push(format!("plugin hook check error: {e}")),
+                    },
+                    Err(e) => {
+                        let plugin_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+                        report.problems.push(DriftProblem {
+                            drift: format!(
+                                "plugin hook drift: herdr plugins.json at {} cannot be read: {e}",
+                                pj_path.display()
+                            ),
+                            fix: format!("herdr plugin link {}", plugin_dir.display()),
+                        });
+                    }
+                }
+            } else {
+                let plugin_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+                report.problems.push(DriftProblem {
+                    drift: format!(
+                        "plugin hook drift: herdr plugins.json not found at {}",
+                        pj_path.display()
+                    ),
+                    fix: format!("herdr plugin link {}", plugin_dir.display()),
+                });
+            }
+        }
+        (None, _) => {
+            report
+                .warnings
+                .push("cannot find herdr-plugin.toml manifest".to_string());
+        }
+        (_, None) => {
+            report
+                .warnings
+                .push("cannot resolve herdr plugins.json path".to_string());
+        }
+    }
+
+    // 3. Lead identity token drift
+    report.problems.extend(diff_lead_tokens(&ws));
+
+    // 4. Workspace warnings
+    report.warnings.extend(workspace_warnings(Some(&ws)));
+
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +1029,280 @@ mod tests {
         assert!(find_on_path("quaqua", Some(path)).is_none());
         let path = dir.as_os_str();
         assert_eq!(find_on_path("quaqua", Some(path)), Some(bin));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diff_rules_detects_content_difference_and_missing_rules() {
+        let dir = temp_dir("diff-rules");
+        let template_dir = dir.join("templates/rules");
+        let ws_rules_dir = dir.join("ws/rules");
+        fs::create_dir_all(&template_dir).unwrap();
+        fs::create_dir_all(&ws_rules_dir).unwrap();
+
+        fs::write(
+            template_dir.join("lead-inbox.md"),
+            "template lead inbox content",
+        )
+        .unwrap();
+        fs::write(template_dir.join("brief.md"), "common brief content").unwrap();
+        fs::write(template_dir.join("missing.md"), "template only content").unwrap();
+
+        // ws has differing lead-inbox, identical brief, and missing.md is absent
+        fs::write(
+            ws_rules_dir.join("lead-inbox.md"),
+            "stale workspace lead inbox",
+        )
+        .unwrap();
+        fs::write(ws_rules_dir.join("brief.md"), "common brief content").unwrap();
+
+        let problems = diff_rules(&template_dir, &ws_rules_dir);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+
+        let diff_lead = problems
+            .iter()
+            .find(|p| p.drift.contains("lead-inbox.md"))
+            .unwrap();
+        assert!(diff_lead.drift.contains("differs from template"));
+        assert!(diff_lead.fix.starts_with("cp "));
+
+        let missing = problems
+            .iter()
+            .find(|p| p.drift.contains("missing.md"))
+            .unwrap();
+        assert!(missing.drift.contains("is missing"));
+        assert!(missing.fix.starts_with("cp "));
+
+        // When workspace is synced: 0 problems
+        fs::write(
+            ws_rules_dir.join("lead-inbox.md"),
+            "template lead inbox content",
+        )
+        .unwrap();
+        fs::write(ws_rules_dir.join("missing.md"), "template only content").unwrap();
+        let clean = diff_rules(&template_dir, &ws_rules_dir);
+        assert!(clean.is_empty(), "{clean:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diff_plugin_hooks_detects_missing_event_hooks() {
+        let dir = temp_dir("diff-hooks");
+        let manifest_path = dir.join("herdr-quaqua/herdr-plugin.toml");
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+
+        let manifest_toml = r#"
+id = "herdr-quaqua"
+name = "herdr-quaqua"
+
+[[events]]
+on = "pane.created"
+command = ["quaqua", "grid", "hook"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["quaqua", "events", "hook"]
+
+[[events]]
+on = "pane.exited"
+command = ["quaqua", "events", "hook"]
+"#;
+
+        // plugins.json has only pane.created
+        let partial_json = r#"[
+  {
+    "plugin_id": "herdr-quaqua",
+    "name": "herdr-quaqua",
+    "events": [
+      {
+        "on": "pane.created",
+        "command": ["quaqua", "grid", "hook"]
+      }
+    ]
+  }
+]"#;
+
+        let problems = diff_plugin_hooks(manifest_toml, &manifest_path, partial_json).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].drift.contains("lacks event hook(s)"));
+        assert!(problems[0].drift.contains("pane.agent_status_changed"));
+        assert!(problems[0].drift.contains("pane.exited"));
+        assert!(problems[0].fix.contains("herdr plugin link"));
+
+        // When plugins.json has all hooks: 0 problems
+        let full_json = r#"[
+  {
+    "plugin_id": "herdr-quaqua",
+    "name": "herdr-quaqua",
+    "events": [
+      {
+        "on": "pane.created",
+        "command": ["quaqua", "grid", "hook"]
+      },
+      {
+        "on": "pane.agent_status_changed",
+        "command": ["quaqua", "events", "hook"]
+      },
+      {
+        "on": "pane.exited",
+        "command": ["quaqua", "events", "hook"]
+      }
+    ]
+  }
+]"#;
+        let clean = diff_plugin_hooks(manifest_toml, &manifest_path, full_json).unwrap();
+        assert!(clean.is_empty(), "{clean:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_herdr_config_dir_resolution_order() {
+        let _env_lock = crate::test_env::lock_env();
+        let _g_dir = crate::test_env::TestEnvVarGuard::remove("HERDR_CONFIG_DIR");
+        let _g_path = crate::test_env::TestEnvVarGuard::remove("HERDR_CONFIG_PATH");
+        let _g_xdg = crate::test_env::TestEnvVarGuard::remove("XDG_CONFIG_HOME");
+        let _g_home = crate::test_env::TestEnvVarGuard::remove("HOME");
+
+        let tmp = temp_dir("herdr-cfg-order");
+
+        // 1. None when all unset
+        assert_eq!(resolve_herdr_config_dir(), None);
+        assert_eq!(resolve_herdr_plugins_json(), None);
+
+        // 2. Fallback to HOME/.config/herdr
+        std::env::set_var("HOME", tmp.join("fake-home"));
+        assert_eq!(
+            resolve_herdr_config_dir(),
+            Some(tmp.join("fake-home/.config/herdr"))
+        );
+        assert_eq!(
+            resolve_herdr_plugins_json(),
+            Some(tmp.join("fake-home/.config/herdr/plugins.json"))
+        );
+
+        // 3. XDG_CONFIG_HOME takes precedence over HOME
+        std::env::set_var("XDG_CONFIG_HOME", tmp.join("fake-xdg"));
+        assert_eq!(resolve_herdr_config_dir(), Some(tmp.join("fake-xdg/herdr")));
+        assert_eq!(
+            resolve_herdr_plugins_json(),
+            Some(tmp.join("fake-xdg/herdr/plugins.json"))
+        );
+
+        // 4. HERDR_CONFIG_PATH takes precedence over XDG
+        std::env::set_var("HERDR_CONFIG_PATH", tmp.join("fake-path/config.toml"));
+        assert_eq!(resolve_herdr_config_dir(), Some(tmp.join("fake-path")));
+        assert_eq!(
+            resolve_herdr_plugins_json(),
+            Some(tmp.join("fake-path/plugins.json"))
+        );
+
+        // 5. HERDR_CONFIG_DIR takes top precedence
+        std::env::set_var("HERDR_CONFIG_DIR", tmp.join("fake-dir"));
+        assert_eq!(resolve_herdr_config_dir(), Some(tmp.join("fake-dir")));
+        assert_eq!(
+            resolve_herdr_plugins_json(),
+            Some(tmp.join("fake-dir/plugins.json"))
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+    struct MockDoctorHerdr(String);
+    impl crate::herdr::HerdrOps for MockDoctorHerdr {
+        fn run(&self, _args: &[&str]) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_list(&self) -> std::io::Result<String> {
+            Ok(self.0.clone())
+        }
+        fn agent_get(&self, _n: &str) -> std::io::Result<(bool, String)> {
+            unimplemented!()
+        }
+        fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn agent_start(
+            &self,
+            _n: &str,
+            _k: &str,
+            _p: &str,
+            _t: u32,
+            _a: &[&str],
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_split(
+            &self,
+            _c: &str,
+            _o: &str,
+            _e: &[(&str, &str)],
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_report_metadata(
+            &self,
+            _p: &str,
+            _t: &[&str],
+        ) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
+            true
+        }
+        fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<std::process::Output> {
+            unimplemented!()
+        }
+        fn agent_prompt_wait_background(
+            &self,
+            _n: &str,
+            _p: &str,
+            _t: u32,
+            _f: std::fs::File,
+        ) -> std::io::Result<std::process::Child> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn diff_lead_tokens_detects_untagged_lead_and_clean_when_tagged() {
+        let dir = temp_dir("diff-lead-tokens");
+        let ws = workspace_dir(&dir);
+        let projects_dir = ws.join("projects");
+        fs::create_dir_all(&projects_dir).unwrap();
+        fs::write(
+            projects_dir.join("INDEX.md"),
+            "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole |\n",
+        ).unwrap();
+
+        // Case 1: Untagged lead pane -> detected as drift
+        let untagged_json = r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#;
+        let problems = diff_lead_tokens_with(&ws, &MockDoctorHerdr(untagged_json.to_string()));
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].drift.contains("missing orchestrator tokens"));
+        assert!(problems[0].drift.contains("wB:p1"));
+        assert_eq!(problems[0].fix, "quaqua lead repair mu");
+
+        // Case 2: Correctly tagged lead pane -> 0 problems
+        let tagged_json = r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"grid_role":"orchestrator","grid_owner":"mu-lead","logo":"\ue1a3"}}]}}"#;
+        let clean = diff_lead_tokens_with(&ws, &MockDoctorHerdr(tagged_json.to_string()));
+        assert!(clean.is_empty(), "{clean:?}");
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

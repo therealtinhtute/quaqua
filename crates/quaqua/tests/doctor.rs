@@ -17,8 +17,16 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str, shell_line: &str) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("quaqua-doctor-cli-{tag}-{}", std::process::id()));
+        static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "quaqua-doctor-cli-{tag}-{}-{n}-{nanos}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         let f = Fixture {
             bin_dir: root.join("bin"),
@@ -28,7 +36,7 @@ impl Fixture {
             shell: root.join("shell"),
             root,
         };
-        for d in [&f.bin_dir, &f.home, &f.cwd] {
+        for d in [&f.root, &f.bin_dir, &f.home, &f.cwd] {
             fs::create_dir_all(d).unwrap();
         }
         fs::create_dir_all(f.checkout.join("crates/quaqua/src")).unwrap();
@@ -41,10 +49,14 @@ impl Fixture {
         f
     }
 
+    /// Link the built binary into the fixture's PATH: doctor only reads the
+    /// installed path's metadata (`find_on_path`, `stale_against`), while a
+    /// private copy costs the binary's full size per test — six of them
+    /// exhausted the CI sandbox's scratch quota (EDQUOT from `fs::copy`).
+    /// `tests/cli.rs` links the binary for the same cases.
     fn install_binary(&self) {
-        let dest = self.bin_dir.join("quaqua");
-        fs::copy(env!("CARGO_BIN_EXE_quaqua"), &dest).unwrap();
-        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_quaqua"), self.bin_dir.join("quaqua"))
+            .expect("link quaqua into the fixture bin dir");
     }
 
     fn run(&self, path: &Path) -> Output {
@@ -52,6 +64,9 @@ impl Fixture {
             .arg("doctor")
             .env("PATH", path)
             .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env_remove("HERDR_CONFIG_DIR")
+            .env_remove("HERDR_CONFIG_PATH")
             .env("QUAQUA_CHECKOUT", &self.checkout)
             .env("QUAQUA_SHELL", &self.shell)
             // `workspace_root()` prefers these over `$HOME`; a caller that has
@@ -70,6 +85,9 @@ impl Fixture {
             .arg("doctor")
             .env("PATH", path)
             .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env_remove("HERDR_CONFIG_DIR")
+            .env_remove("HERDR_CONFIG_PATH")
             .env("QUAQUA_SHELL", &self.shell)
             .env_remove("QUAQUA_CHECKOUT")
             .env_remove("QUAQUA_HOME")
@@ -77,6 +95,36 @@ impl Fixture {
             .current_dir(&self.cwd)
             .output()
             .expect("run quaqua doctor")
+    }
+
+    fn run_workspace_flag(&self) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_quaqua"))
+            .args(["doctor", "--workspace"])
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env_remove("HERDR_CONFIG_DIR")
+            .env_remove("HERDR_CONFIG_PATH")
+            .env("QUAQUA_CHECKOUT", &self.checkout)
+            .env_remove("QUAQUA_HOME")
+            .env_remove("QUAQUA_ROOT")
+            .current_dir(&self.cwd)
+            .output()
+            .expect("run quaqua doctor --workspace")
+    }
+
+    fn run_workspace_flag_no_xdg(&self) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_quaqua"))
+            .args(["doctor", "--workspace"])
+            .env("HOME", &self.home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("HERDR_CONFIG_DIR")
+            .env_remove("HERDR_CONFIG_PATH")
+            .env("QUAQUA_CHECKOUT", &self.checkout)
+            .env_remove("QUAQUA_HOME")
+            .env_remove("QUAQUA_ROOT")
+            .current_dir(&self.cwd)
+            .output()
+            .expect("run quaqua doctor --workspace (no xdg)")
     }
 }
 
@@ -187,4 +235,131 @@ fn a_split_workspace_is_quiet() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("warning:"), "{stderr}");
+}
+
+#[test]
+fn doctor_workspace_drift_reports_problems_and_clean_passes() {
+    let f = Fixture::new("ws-drift", "quaqua is /tmp/bin/quaqua");
+    let ws = f.home.join("quaqua");
+    let ws_rules = ws.join("rules/_all");
+    let t_rules = f.checkout.join("templates/workspace/rules/_all");
+    let plugin_dir = f.checkout.join("plugins/herdr-quaqua");
+    let herdr_config = f.home.join(".config/herdr");
+
+    fs::create_dir_all(&ws_rules).unwrap();
+    fs::create_dir_all(&t_rules).unwrap();
+    fs::create_dir_all(&plugin_dir).unwrap();
+    fs::create_dir_all(&herdr_config).unwrap();
+    fs::create_dir_all(ws.join("projects")).unwrap();
+    fs::write(ws.join("projects/INDEX.md"), "").unwrap();
+    fs::write(ws.join("AGENTS.md"), "@identity.md\n").unwrap();
+
+    // Rule drift
+    fs::write(t_rules.join("lead-inbox.md"), "template lead inbox content").unwrap();
+    fs::write(ws_rules.join("lead-inbox.md"), "stale workspace lead inbox").unwrap();
+
+    // Manifest with 2 hooks
+    let manifest = r#"
+id = "herdr-quaqua"
+name = "herdr-quaqua"
+
+[[events]]
+on = "pane.created"
+command = ["quaqua", "grid", "hook"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["quaqua", "events", "hook"]
+"#;
+    fs::write(plugin_dir.join("herdr-plugin.toml"), manifest).unwrap();
+
+    // plugins.json with only 1 hook (missing pane.agent_status_changed)
+    let plugins_json = r#"[
+  {
+    "plugin_id": "herdr-quaqua",
+    "name": "herdr-quaqua",
+    "events": [
+      {
+        "on": "pane.created",
+        "command": ["quaqua", "grid", "hook"]
+      }
+    ]
+  }
+]"#;
+    fs::write(herdr_config.join("plugins.json"), plugins_json).unwrap();
+
+    // 1. Run doctor --workspace -> should fail with exit 1 and report both drifts
+    let out = f.run_workspace_flag();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("rule drift: rules/_all/lead-inbox.md differs from template"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("cp "), "{stderr}");
+    assert!(
+        stderr.contains("plugin hook drift: herdr plugin 'herdr-quaqua' lacks event hook(s)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("pane.agent_status_changed"), "{stderr}");
+    assert!(stderr.contains("herdr plugin link"), "{stderr}");
+
+    // Also fails when XDG_CONFIG_HOME is unset (fallback to HOME/.config/herdr)
+    let out_no_xdg = f.run_workspace_flag_no_xdg();
+    assert_eq!(out_no_xdg.status.code(), Some(1), "{out_no_xdg:?}");
+    let stderr_no_xdg = String::from_utf8_lossy(&out_no_xdg.stderr);
+    assert!(
+        stderr_no_xdg
+            .contains("plugin hook drift: herdr plugin 'herdr-quaqua' lacks event hook(s)"),
+        "{stderr_no_xdg}"
+    );
+
+    // 2. Fix both drifts
+    fs::write(
+        ws_rules.join("lead-inbox.md"),
+        "template lead inbox content",
+    )
+    .unwrap();
+    let fixed_json = r#"[
+  {
+    "plugin_id": "herdr-quaqua",
+    "name": "herdr-quaqua",
+    "events": [
+      {
+        "on": "pane.created",
+        "command": ["quaqua", "grid", "hook"]
+      },
+      {
+        "on": "pane.agent_status_changed",
+        "command": ["quaqua", "events", "hook"]
+      }
+    ]
+  }
+]"#;
+    fs::write(herdr_config.join("plugins.json"), fixed_json).unwrap();
+
+    // 3. Run doctor --workspace -> should pass with exit 0 (both with XDG_CONFIG_HOME and HOME fallback)
+    let out_clean = f.run_workspace_flag();
+    assert_eq!(out_clean.status.code(), Some(0), "{out_clean:?}");
+    let stdout_clean = String::from_utf8_lossy(&out_clean.stdout);
+    assert!(
+        stdout_clean.contains(
+            "ok: workspace rules and herdr plugin event hooks are in sync with engine templates"
+        ),
+        "{stdout_clean}"
+    );
+
+    let out_clean_no_xdg = f.run_workspace_flag_no_xdg();
+    assert_eq!(
+        out_clean_no_xdg.status.code(),
+        Some(0),
+        "{out_clean_no_xdg:?}"
+    );
+    let stdout_clean_no_xdg = String::from_utf8_lossy(&out_clean_no_xdg.stdout);
+    assert!(
+        stdout_clean_no_xdg.contains(
+            "ok: workspace rules and herdr plugin event hooks are in sync with engine templates"
+        ),
+        "{stdout_clean_no_xdg}"
+    );
 }

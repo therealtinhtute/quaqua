@@ -1,7 +1,7 @@
 //! Event-driven monitoring, inbox digest with per-reader cursors, and herdr event hook.
 
-use std::path::Path;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use super::{FarmBus, FarmEvent, FarmEventRecord};
 use crate::bus::mail::MailMessage;
@@ -14,6 +14,10 @@ pub struct InboxDigest {
     pub incidents: Vec<FarmEventRecord>,
     pub prev_cursor: u64,
     pub new_cursor: u64,
+    #[serde(default)]
+    pub prev_mail_cursor: u64,
+    #[serde(default)]
+    pub new_mail_cursor: u64,
 }
 
 impl InboxDigest {
@@ -27,7 +31,10 @@ impl InboxDigest {
                 } else {
                     String::new()
                 };
-                out.push_str(&format!("#{} {} {}{}\n", msg.id, msg.from_name, msg.kind, tag));
+                out.push_str(&format!(
+                    "#{} {} {}{}\n",
+                    msg.id, msg.from_name, msg.kind, tag
+                ));
                 if !msg.body.trim().is_empty() {
                     out.push_str(&format!("{}\n", msg.body.trim_end()));
                 }
@@ -53,13 +60,89 @@ impl InboxDigest {
     }
 }
 
+/// Resolves the consumer's own pane ID if known (e.g. from HERDR_PANE_ID or herdr query).
+pub fn resolve_consumer_pane(consumer: &str) -> Option<String> {
+    if let Ok(p) = std::env::var("HERDR_PANE_ID") {
+        let trimmed = p.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    if consumer == "cos" {
+        if let Ok(out) = std::process::Command::new(crate::herdr::bin_path())
+            .args(["api", "snapshot"])
+            .output()
+        {
+            if out.status.success() {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    if let Some(panes) = val
+                        .pointer("/result/snapshot/panes")
+                        .and_then(|p| p.as_array())
+                    {
+                        for p in panes {
+                            if p.pointer("/tokens/grid_role").and_then(|r| r.as_str())
+                                == Some("cos")
+                            {
+                                if let Some(pid) = p.get("pane_id").and_then(|id| id.as_str()) {
+                                    return Some(pid.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Returns true if an incident record is noise from the consumer's own pane being blocked on a question.
+pub fn is_consumer_own_pane_blocked_noise(r: &FarmEventRecord, own_pane: Option<&str>) -> bool {
+    let Some(own) = own_pane else {
+        return false;
+    };
+    if r.event_type != "blocked"
+        && !r
+            .incident_key
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("blocked:")
+    {
+        return false;
+    }
+    if r.subject.as_deref() == Some(own) {
+        return true;
+    }
+    if let Some(key) = &r.incident_key {
+        if key.starts_with(&format!("blocked:{own}:")) || key == &format!("blocked:{own}") {
+            return true;
+        }
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload_json) {
+        if let Some(pid) = v
+            .get("pane_id")
+            .or_else(|| v.get("data").and_then(|d| d.get("pane_id")))
+            .and_then(|p| p.as_str())
+        {
+            if pid == own {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl FarmBus {
     /// Loads incidents (events where `incident_key IS NOT NULL`) ordered by `seq` ASC,
     /// strictly after `since_seq`.
     ///
     /// If `consumer` is not `"cos"`, only incidents where `owner` or `project` matches
     /// `consumer`, or where `owner IS NULL`, are returned.
-    pub fn load_incidents(&self, since_seq: u64, consumer: &str) -> rusqlite::Result<Vec<FarmEventRecord>> {
+    pub fn load_incidents(
+        &self,
+        since_seq: u64,
+        consumer: &str,
+    ) -> rusqlite::Result<Vec<FarmEventRecord>> {
         let conn = self.conn_for_test();
         crate::engine::sqlite::retry_while_busy(|| {
             if consumer == "cos" {
@@ -99,19 +182,20 @@ impl FarmBus {
                     ORDER BY seq ASC
                     "#,
                 )?;
-                let rows = stmt.query_map(rusqlite::params![since_seq as i64, consumer], |row| {
-                    Ok(FarmEventRecord {
-                        seq: row.get::<_, i64>(0)? as u64,
-                        ts_ms: row.get::<_, i64>(1)? as u64,
-                        event_type: row.get(2)?,
-                        actor: row.get(3)?,
-                        subject: row.get(4)?,
-                        owner: row.get(5)?,
-                        project: row.get(6)?,
-                        incident_key: row.get(7)?,
-                        payload_json: row.get(8)?,
-                    })
-                })?;
+                let rows =
+                    stmt.query_map(rusqlite::params![since_seq as i64, consumer], |row| {
+                        Ok(FarmEventRecord {
+                            seq: row.get::<_, i64>(0)? as u64,
+                            ts_ms: row.get::<_, i64>(1)? as u64,
+                            event_type: row.get(2)?,
+                            actor: row.get(3)?,
+                            subject: row.get(4)?,
+                            owner: row.get(5)?,
+                            project: row.get(6)?,
+                            incident_key: row.get(7)?,
+                            payload_json: row.get(8)?,
+                        })
+                    })?;
                 let mut res = Vec::new();
                 for r in rows {
                     res.push(r?);
@@ -134,6 +218,11 @@ impl FarmBus {
             .map_err(|e| format!("cannot get cursor: {e}"))?
             .unwrap_or(0);
 
+        let prev_mail_cursor = self
+            .get_mail_cursor(consumer)
+            .map_err(|e| format!("cannot get mail cursor: {e}"))?
+            .unwrap_or(0);
+
         // Check for any unacked mail incidents lazily
         {
             let conn = self.conn_for_test();
@@ -141,21 +230,42 @@ impl FarmBus {
             let _ = crate::bus::mail::check_unacked_incidents(&conn, timeout);
         }
 
-        let unacked_mail = crate::bus::mail::read_inbox(runs_dir, consumer)?;
-        let incidents = self
+        let unacked_mail =
+            crate::bus::mail::read_unacked_mail_since(runs_dir, consumer, prev_mail_cursor)?;
+        let raw_incidents = self
             .load_incidents(prev_cursor, consumer)
             .map_err(|e| format!("cannot load incidents: {e}"))?;
 
-        let new_cursor = if let Some(max_seq) = incidents.iter().map(|e| e.seq).max() {
-            if max_seq > prev_cursor {
-                self.set_cursor(consumer, max_seq)
-                    .map_err(|e| format!("cannot set cursor: {e}"))?;
-                max_seq
-            } else {
-                prev_cursor
-            }
+        let max_evaluated_seq = raw_incidents
+            .iter()
+            .map(|e| e.seq)
+            .max()
+            .unwrap_or(prev_cursor);
+
+        let own_pane = resolve_consumer_pane(consumer);
+        let incidents: Vec<_> = raw_incidents
+            .into_iter()
+            .filter(|r| !is_consumer_own_pane_blocked_noise(r, own_pane.as_deref()))
+            .collect();
+
+        let new_cursor = if max_evaluated_seq > prev_cursor {
+            self.set_cursor(consumer, max_evaluated_seq)
+                .map_err(|e| format!("cannot set cursor: {e}"))?;
+            max_evaluated_seq
         } else {
             prev_cursor
+        };
+
+        let new_mail_cursor = if let Some(max_mail_id) = unacked_mail.iter().map(|m| m.id).max() {
+            if max_mail_id > prev_mail_cursor {
+                self.set_mail_cursor(consumer, max_mail_id)
+                    .map_err(|e| format!("cannot set mail cursor: {e}"))?;
+                max_mail_id
+            } else {
+                prev_mail_cursor
+            }
+        } else {
+            prev_mail_cursor
         };
 
         Ok(InboxDigest {
@@ -163,6 +273,8 @@ impl FarmBus {
             incidents,
             prev_cursor,
             new_cursor,
+            prev_mail_cursor,
+            new_mail_cursor,
         })
     }
     /// Queries the latest event type and incident key recorded for `subject`.
@@ -214,24 +326,27 @@ impl FarmBus {
                 .map_err(|e| e.to_string())?;
 
             let rows = stmt
-                .query_map(rusqlite::params![consumer, *last_seen_mail_id as i64], |row| {
-                    Ok(MailMessage {
-                        id: row.get::<_, i64>(0)? as u64,
-                        msg_key: row.get(1)?,
-                        ts_ms: row.get::<_, i64>(2)? as u64,
-                        from_name: row.get(3)?,
-                        from_role: row.get(4)?,
-                        to_name: row.get(5)?,
-                        kind: row.get(6)?,
-                        project: row.get(7)?,
-                        reply_to: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
-                        body: row.get(9)?,
-                        deliveries: row.get::<_, i64>(10)? as u64,
-                        last_delivered_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
-                        acked_ms: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
-                        acked_by: row.get(13)?,
-                    })
-                })
+                .query_map(
+                    rusqlite::params![consumer, *last_seen_mail_id as i64],
+                    |row| {
+                        Ok(MailMessage {
+                            id: row.get::<_, i64>(0)? as u64,
+                            msg_key: row.get(1)?,
+                            ts_ms: row.get::<_, i64>(2)? as u64,
+                            from_name: row.get(3)?,
+                            from_role: row.get(4)?,
+                            to_name: row.get(5)?,
+                            kind: row.get(6)?,
+                            project: row.get(7)?,
+                            reply_to: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                            body: row.get(9)?,
+                            deliveries: row.get::<_, i64>(10)? as u64,
+                            last_delivered_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+                            acked_ms: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
+                            acked_by: row.get(13)?,
+                        })
+                    },
+                )
                 .map_err(|e| e.to_string())?;
 
             let mut msgs = Vec::new();
@@ -245,18 +360,25 @@ impl FarmBus {
             *last_seen_mail_id = max_mail_id;
         }
 
-        let incidents = self
+        let own_pane = resolve_consumer_pane(consumer);
+        let raw_incidents = self
             .load_incidents(prev_cursor, consumer)
             .map_err(|e| format!("cannot load incidents: {e}"))?;
 
-        let new_cursor = if let Some(max_seq) = incidents.iter().map(|e| e.seq).max() {
-            if max_seq > prev_cursor {
-                self.set_cursor(consumer, max_seq)
-                    .map_err(|e| format!("cannot set cursor: {e}"))?;
-                max_seq
-            } else {
-                prev_cursor
-            }
+        let max_evaluated_seq = raw_incidents
+            .iter()
+            .map(|e| e.seq)
+            .max()
+            .unwrap_or(prev_cursor);
+        let incidents: Vec<_> = raw_incidents
+            .into_iter()
+            .filter(|r| !is_consumer_own_pane_blocked_noise(r, own_pane.as_deref()))
+            .collect();
+
+        let new_cursor = if max_evaluated_seq > prev_cursor {
+            self.set_cursor(consumer, max_evaluated_seq)
+                .map_err(|e| format!("cannot set cursor: {e}"))?;
+            max_evaluated_seq
         } else {
             prev_cursor
         };
@@ -266,9 +388,11 @@ impl FarmBus {
             incidents,
             prev_cursor,
             new_cursor,
+            prev_mail_cursor: *last_seen_mail_id,
+            new_mail_cursor: *last_seen_mail_id,
         })
-}
     }
+}
 
 /// Handles an incoming herdr plugin hook event:
 /// - Extracts pane, agent, and status.
@@ -331,7 +455,10 @@ pub fn handle_event_hook<H: HerdrOps>(
     let bus = match FarmBus::open(&db_path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("quaqua events hook: cannot open bus at {}: {e}", db_path.display());
+            eprintln!(
+                "quaqua events hook: cannot open bus at {}: {e}",
+                db_path.display()
+            );
             return Ok(false);
         }
     };
@@ -344,15 +471,17 @@ pub fn handle_event_hook<H: HerdrOps>(
                 .get("status_since")
                 .or_else(|| val.get("data").and_then(|d| d.get("status_since")))
                 .or_else(|| val.get("state_labels").and_then(|l| l.get("status_since")))
-                .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_i64().map(|n| n.to_string())))
+                .and_then(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .or_else(|| v.as_i64().map(|n| n.to_string()))
+                })
             {
                 format!("blocked:{subject_str}:{ts}")
             } else {
                 let latest = bus.latest_event_for_subject(&subject_str);
                 match &latest {
-                    Some((typ, Some(prev_key))) if typ == "blocked" => {
-                        prev_key.clone()
-                    }
+                    Some((typ, Some(prev_key))) if typ == "blocked" => prev_key.clone(),
                     _ => {
                         let now = crate::bus::now_ms();
                         format!("blocked:{subject_str}:{now}")
@@ -373,7 +502,9 @@ pub fn handle_event_hook<H: HerdrOps>(
                 ev = ev.with_payload_json(ej);
             }
 
-            let inserted = bus.record(&ev).map_err(|e| format!("cannot record event: {e}"))?;
+            let inserted = bus
+                .record(&ev)
+                .map_err(|e| format!("cannot record event: {e}"))?;
             if inserted {
                 let title = "quaqua: blocked";
                 let body = format!("Agent '{subject_str}' is blocked");
@@ -448,7 +579,12 @@ pub fn run_events_hook() -> Result<i32, String> {
     let event_json = std::env::var("HERDR_PLUGIN_EVENT_JSON").ok();
 
     let herdr = crate::herdr::Herdr::new();
-    if let Err(e) = handle_event_hook(&runs_dir, event_name.as_deref(), event_json.as_deref(), &herdr) {
+    if let Err(e) = handle_event_hook(
+        &runs_dir,
+        event_name.as_deref(),
+        event_json.as_deref(),
+        &herdr,
+    ) {
         eprintln!("quaqua events hook error: {e}");
     }
     Ok(0)
