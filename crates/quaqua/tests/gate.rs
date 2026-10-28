@@ -777,3 +777,441 @@ fn binary_warns_on_rule_drift_after_session_start() {
         "{out}"
     );
 }
+
+use quaqua::herdr::HerdrOps;
+use std::collections::HashMap;
+
+static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    vars: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn set(pairs: &[(&'static str, &str)]) -> Self {
+        let lock = TEST_ENV_LOCK.lock().unwrap();
+        let mut vars = Vec::new();
+        for &(k, v) in pairs {
+            vars.push((k, std::env::var(k).ok()));
+            std::env::set_var(k, v);
+        }
+        EnvGuard { _lock: lock, vars }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in &self.vars {
+            match v {
+                Some(prev) => std::env::set_var(k, prev),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
+
+struct FakeSessionStartHerdr {
+    current_pane: Option<String>,
+    panes: RefCell<HashMap<String, (Option<String>, Option<String>)>>,
+    calls: RefCell<Vec<Vec<String>>>,
+    fail_on: Option<String>,
+}
+
+impl FakeSessionStartHerdr {
+    fn new(current_pane: Option<&str>) -> Self {
+        Self {
+            current_pane: current_pane.map(String::from),
+            panes: RefCell::new(HashMap::new()),
+            calls: RefCell::new(Vec::new()),
+            fail_on: None,
+        }
+    }
+
+    fn with_pane(self, pane_id: &str, role: Option<&str>, session: Option<&str>) -> Self {
+        self.panes.borrow_mut().insert(
+            pane_id.to_string(),
+            (role.map(String::from), session.map(String::from)),
+        );
+        self
+    }
+
+    fn with_failure(mut self, fail_subcmd: &str) -> Self {
+        self.fail_on = Some(fail_subcmd.to_string());
+        self
+    }
+}
+
+impl HerdrOps for FakeSessionStartHerdr {
+    fn run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        self.calls
+            .borrow_mut()
+            .push(args.iter().map(|s| s.to_string()).collect());
+
+        if let Some(sub) = &self.fail_on {
+            if args.iter().any(|a| a == sub) {
+                return Ok(std::process::Output {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(256),
+                    stdout: vec![],
+                    stderr: b"simulated herdr failure".to_vec(),
+                });
+            }
+        }
+
+        if args.len() >= 2 && args[0] == "pane" && args[1] == "current" {
+            if let Some(p) = &self.current_pane {
+                let json = format!(r#"{{"result":{{"pane":{{"pane_id":"{p}"}}}}}}"#);
+                return Ok(std::process::Output {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                    stdout: json.into_bytes(),
+                    stderr: vec![],
+                });
+            } else {
+                return Ok(std::process::Output {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(256),
+                    stdout: vec![],
+                    stderr: b"no current pane".to_vec(),
+                });
+            }
+        }
+
+        if args.len() >= 3 && args[0] == "pane" && args[1] == "get" {
+            let pane_id = args[2];
+            let panes = self.panes.borrow();
+            if let Some((role_opt, sess_opt)) = panes.get(pane_id) {
+                let mut tokens_obj = serde_json::Map::new();
+                if let Some(r) = role_opt {
+                    tokens_obj.insert(
+                        "grid_role".to_string(),
+                        serde_json::Value::String(r.clone()),
+                    );
+                }
+                let mut pane_obj = serde_json::Map::new();
+                pane_obj.insert(
+                    "pane_id".to_string(),
+                    serde_json::Value::String(pane_id.to_string()),
+                );
+                pane_obj.insert("tokens".to_string(), serde_json::Value::Object(tokens_obj));
+                if let Some(s) = sess_opt {
+                    pane_obj.insert(
+                        "agent_session".to_string(),
+                        serde_json::json!({ "value": s }),
+                    );
+                }
+                let val = serde_json::json!({
+                    "result": {
+                        "pane": pane_obj
+                    }
+                });
+                return Ok(std::process::Output {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                    stdout: serde_json::to_vec(&val).unwrap(),
+                    stderr: vec![],
+                });
+            } else {
+                return Ok(std::process::Output {
+                    status: std::os::unix::process::ExitStatusExt::from_raw(256),
+                    stdout: vec![],
+                    stderr: b"pane not found".to_vec(),
+                });
+            }
+        }
+
+        if args.len() >= 2
+            && args[0] == "pane"
+            && (args[1] == "report-metadata" || args[1] == "rename")
+        {
+            return Ok(std::process::Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: b"{\"result\":{\"ok\":true}}".to_vec(),
+                stderr: vec![],
+            });
+        }
+
+        Ok(std::process::Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: b"{\"result\":{\"ok\":true}}".to_vec(),
+            stderr: vec![],
+        })
+    }
+
+    fn agent_list(&self) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn agent_get(&self, _: &str) -> std::io::Result<(bool, String)> {
+        unimplemented!()
+    }
+    fn agent_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn agent_start(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: u32,
+        _: &[&str],
+    ) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn pane_split(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[(&str, &str)],
+    ) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn pane_close(&self, _: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn pane_report_metadata(&self, _: &str, _: &[&str]) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn pane_wait_output(&self, _: &str, _: &str, _: u32) -> bool {
+        unimplemented!()
+    }
+    fn pane_read(&self, _: &str, _: &str, _: u32) -> std::io::Result<String> {
+        unimplemented!()
+    }
+    fn pane_send_keys(&self, _: &str, _: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_send_keys(&self, _: &str, _: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_nowait(&self, _: &str, _: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_wait_background(
+        &self,
+        _: &str,
+        _: &str,
+        _: u32,
+        _: std::fs::File,
+    ) -> std::io::Result<std::process::Child> {
+        unimplemented!()
+    }
+}
+
+#[test]
+fn session_start_tags_cos_pane_in_workspace() {
+    let ws = std::env::temp_dir().join(format!("quaqua-cos-tag-ws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join("projects")).unwrap();
+    std::fs::create_dir_all(ws.join("rules/_all")).unwrap();
+    std::fs::write(ws.join("projects/INDEX.md"), "# Projects\n").unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "CoS instructions").unwrap();
+
+    let fake = FakeSessionStartHerdr::new(Some("w1:pCos")).with_pane(
+        "w1:pCos",
+        None,
+        Some("sess-cos-123"),
+    );
+
+    let _env = EnvGuard::set(&[("HERDR_PANE", "w1:pCos")]);
+
+    let code = quaqua::gate::run_session_start_with(
+        &fake,
+        r#"{"session_id":"s1","source":"startup"}"#,
+        &ws,
+        Some(&ws),
+    );
+    assert_eq!(code, 0);
+
+    let calls = fake.calls.borrow();
+    let has_metadata = calls.iter().any(|c| {
+        c.len() >= 4
+            && c[0] == "pane"
+            && c[1] == "report-metadata"
+            && c[2] == "w1:pCos"
+            && c.contains(&"grid_role=cos".to_string())
+    });
+    assert!(
+        has_metadata,
+        "must call pane report-metadata with grid_role=cos: {calls:?}"
+    );
+
+    let has_rename = calls.iter().any(|c| {
+        c.len() >= 4 && c[0] == "pane" && c[1] == "rename" && c[2] == "w1:pCos" && c[3] == "🍑 CoS"
+    });
+    assert!(has_rename, "must rename pane to 🍑 CoS: {calls:?}");
+
+    // Already-cos is an idempotent no-op or harmless retag
+    let fake_already_cos = FakeSessionStartHerdr::new(Some("w1:pCos")).with_pane(
+        "w1:pCos",
+        Some("cos"),
+        Some("sess-cos-123"),
+    );
+    let code = quaqua::gate::run_session_start_with(
+        &fake_already_cos,
+        r#"{"session_id":"s2","source":"startup"}"#,
+        &ws,
+        Some(&ws),
+    );
+    assert_eq!(code, 0);
+    let calls2 = fake_already_cos.calls.borrow();
+    let has_metadata2 = calls2.iter().any(|c| {
+        c.len() >= 4
+            && c[0] == "pane"
+            && c[1] == "report-metadata"
+            && c[2] == "w1:pCos"
+            && c.contains(&"grid_role=cos".to_string())
+    });
+    assert!(
+        has_metadata2,
+        "must retag already-cos pane idempotently: {calls2:?}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn session_start_skips_worker_and_lead_pane() {
+    let ws = std::env::temp_dir().join(format!("quaqua-cos-worker-ws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join("projects")).unwrap();
+    std::fs::create_dir_all(ws.join("rules/_all")).unwrap();
+    std::fs::write(ws.join("projects/INDEX.md"), "# Projects\n").unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "CoS instructions").unwrap();
+
+    // Worker pane
+    {
+        let fake = FakeSessionStartHerdr::new(Some("w1:pWorker")).with_pane(
+            "w1:pWorker",
+            Some("worker"),
+            Some("sess-worker-1"),
+        );
+
+        let _env = EnvGuard::set(&[("HERDR_PANE", "w1:pWorker")]);
+
+        let code = quaqua::gate::run_session_start_with(
+            &fake,
+            r#"{"session_id":"s1","source":"startup"}"#,
+            &ws,
+            Some(&ws),
+        );
+        assert_eq!(code, 0);
+
+        let calls = fake.calls.borrow();
+        let has_metadata = calls
+            .iter()
+            .any(|c| c.get(1).map(|s| s.as_str()) == Some("report-metadata"));
+        assert!(!has_metadata, "must not tag worker pane: {calls:?}");
+    }
+
+    // Orchestrator / Lead pane
+    {
+        let fake = FakeSessionStartHerdr::new(Some("w1:pLead")).with_pane(
+            "w1:pLead",
+            Some("orchestrator"),
+            Some("sess-lead-1"),
+        );
+
+        let _env = EnvGuard::set(&[("HERDR_PANE", "w1:pLead")]);
+
+        let code = quaqua::gate::run_session_start_with(
+            &fake,
+            r#"{"session_id":"s2","source":"startup"}"#,
+            &ws,
+            Some(&ws),
+        );
+        assert_eq!(code, 0);
+
+        let calls = fake.calls.borrow();
+        let has_metadata = calls
+            .iter()
+            .any(|c| c.get(1).map(|s| s.as_str()) == Some("report-metadata"));
+        assert!(
+            !has_metadata,
+            "must not tag lead/orchestrator pane: {calls:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn session_start_skips_outside_workspace_and_in_worktree() {
+    let ws = std::env::temp_dir().join(format!("quaqua-cos-outside-ws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join("projects")).unwrap();
+    std::fs::create_dir_all(ws.join("rules/_all")).unwrap();
+    std::fs::write(ws.join("projects/INDEX.md"), "# Projects\n").unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "CoS instructions").unwrap();
+
+    // Case A: cwd is in a worker worktree (.wt/sude-test)
+    let wt = ws.join(".wt/sude-test");
+    std::fs::create_dir_all(&wt).unwrap();
+    {
+        let fake =
+            FakeSessionStartHerdr::new(Some("w1:p1")).with_pane("w1:p1", None, Some("sess-1"));
+        let _env = EnvGuard::set(&[("HERDR_PANE", "w1:p1")]);
+
+        let code = quaqua::gate::run_session_start_with(
+            &fake,
+            r#"{"session_id":"s1","source":"startup"}"#,
+            &ws,
+            Some(&wt),
+        );
+        assert_eq!(code, 0);
+        let calls = fake.calls.borrow();
+        let has_metadata = calls
+            .iter()
+            .any(|c| c.get(1).map(|s| s.as_str()) == Some("report-metadata"));
+        assert!(!has_metadata, "must not tag in worker worktree: {calls:?}");
+    }
+
+    // Case B: cwd is outside workspace altogether
+    let outside = std::env::temp_dir().join(format!("quaqua-cos-other-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    {
+        let fake =
+            FakeSessionStartHerdr::new(Some("w1:p1")).with_pane("w1:p1", None, Some("sess-1"));
+        let _env = EnvGuard::set(&[("HERDR_PANE", "w1:p1")]);
+
+        let code = quaqua::gate::run_session_start_with(
+            &fake,
+            r#"{"session_id":"s1","source":"startup"}"#,
+            &ws,
+            Some(&outside),
+        );
+        assert_eq!(code, 0);
+        let calls = fake.calls.borrow();
+        let has_metadata = calls
+            .iter()
+            .any(|c| c.get(1).map(|s| s.as_str()) == Some("report-metadata"));
+        assert!(!has_metadata, "must not tag outside workspace: {calls:?}");
+    }
+
+    let _ = std::fs::remove_dir_all(&ws);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
+fn session_start_herdr_error_still_exits_zero() {
+    let ws = std::env::temp_dir().join(format!("quaqua-cos-err-ws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join("projects")).unwrap();
+    std::fs::create_dir_all(ws.join("rules/_all")).unwrap();
+    std::fs::write(ws.join("projects/INDEX.md"), "# Projects\n").unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "CoS instructions").unwrap();
+
+    let fake = FakeSessionStartHerdr::new(Some("w1:pCos"))
+        .with_pane("w1:pCos", None, Some("sess-cos-1"))
+        .with_failure("report-metadata");
+
+    let _env = EnvGuard::set(&[("HERDR_PANE", "w1:pCos")]);
+
+    let code = quaqua::gate::run_session_start_with(
+        &fake,
+        r#"{"session_id":"s1","source":"startup"}"#,
+        &ws,
+        Some(&ws),
+    );
+    assert_eq!(
+        code, 0,
+        "must still exit 0 even if herdr report-metadata fails"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
