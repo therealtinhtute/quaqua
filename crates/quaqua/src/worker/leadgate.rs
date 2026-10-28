@@ -26,9 +26,6 @@ use crate::state::WorkerMetadata;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Kinds that build (`models.md` roster). A live one holds a build slot.
-pub const BUILD_KINDS: &[&str] = &["tieude", "sude", "ni"];
-
 /// `--solo` needs a real reason, not a word.
 pub const SOLO_MIN_CHARS: usize = 10;
 
@@ -62,7 +59,7 @@ impl Signal {
     pub fn describe(&self) -> String {
         match self {
             Signal::LiveBuildWorkers(n) => format!(
-                "worker count: {n} live build worker slots after this spawn (>= 3; kinds tieude/sude/ni, a pipeline counts as 2)"
+                "worker count: {n} live build worker slots after this spawn (>= 3; team.toml strategy.build_kinds, a pipeline counts as 2)"
             ),
             Signal::PhasesLeft { left, plan } => format!(
                 "active plan: phases_left {left} (> 1) in {}",
@@ -395,20 +392,23 @@ pub struct LivePipeline {
 /// Build-worker slots on `repo` after the candidate spawn.
 ///
 /// Members of a live pipeline on the repo count together as at least
-/// `pipeline_weight`; every other live build worker counts 1. Reviewers hold
-/// no build slot, and a worker whose repo cannot be attributed counts for
-/// nothing (it is not evidence about this repo).
+/// `pipeline_weight`; every other live build worker counts 1. A kind holds a
+/// build slot only when `team.toml` says so (`strategy.build_kinds`), so
+/// review-only and advisory kinds hold none. A worker whose repo cannot be
+/// attributed counts for nothing (it is not evidence about this repo).
 ///
 /// `own_pipeline` is the pipeline the candidate spawn belongs to
 /// (`PIPELINE_TASK`): re-spawning one of its members does not add a concurrent
 /// slot, so that whole group is left out of the count.
 pub fn count_build_slots(
+    cfg: &Config,
     workers: &[LiveWorker],
     pipelines: &[LivePipeline],
     repo: &Path,
     pipeline_weight: i64,
     own_pipeline: Option<&str>,
 ) -> i64 {
+    let build_kinds = cfg.build_kinds();
     let mut covered: HashSet<&str> = HashSet::new();
     let mut slots = 0i64;
     for pipeline in pipelines {
@@ -434,7 +434,7 @@ pub fn count_build_slots(
         if worker.pipeline.as_deref() == own_pipeline && own_pipeline.is_some() {
             continue;
         }
-        if !BUILD_KINDS.contains(&worker.kind.as_str()) {
+        if !build_kinds.contains(&worker.kind.as_str()) {
             continue;
         }
         match worker.repo.as_deref() {
@@ -638,7 +638,14 @@ pub fn gather_facts<H: HerdrOps>(input: &GateInput<'_>, cfg: &Config, herdr: &H)
 
     let (workers, pipelines) = gather_live(input.runs_dir, input.name, cfg, herdr);
     let weight = cfg.limits.weights.get("pipeline").copied().unwrap_or(2);
-    let slots = count_build_slots(&workers, &pipelines, input.repo, weight, input.pipeline) + 1;
+    let slots = count_build_slots(
+        cfg,
+        &workers,
+        &pipelines,
+        input.repo,
+        weight,
+        input.pipeline,
+    ) + 1;
     if slots >= 3 {
         signals.push(Signal::LiveBuildWorkers(slots));
     }
@@ -923,6 +930,9 @@ mod tests {
 
     #[test]
     fn build_slots_count_reviewers_for_nothing_and_pipelines_as_weight() {
+        // The template's own set: `tieude`, `sude` and `ni` hold a slot,
+        // `suhuynh` and `truonglao` do not.
+        let cfg = crate::config::embedded_team_config().expect("embedded team.toml");
         let repo = PathBuf::from("/r");
         let worker = |name: &str, kind: &str, review: bool, pipeline: Option<&str>| LiveWorker {
             name: name.to_string(),
@@ -940,15 +950,18 @@ mod tests {
         ];
         // No pipeline state on disk: every live build worker counts alone, so
         // the pipeline builder is not swallowed by a pipeline we cannot see.
-        assert_eq!(count_build_slots(&workers, &[], &repo, 2, None), 3);
+        assert_eq!(count_build_slots(&cfg, &workers, &[], &repo, 2, None), 3);
         let pipelines = vec![LivePipeline {
             task: "p1".to_string(),
             repo: repo.clone(),
         }];
-        assert_eq!(count_build_slots(&workers, &pipelines, &repo, 2, None), 4);
+        assert_eq!(
+            count_build_slots(&cfg, &workers, &pipelines, &repo, 2, None),
+            4
+        );
         // Re-spawning a member of that pipeline adds no concurrent slot.
         assert_eq!(
-            count_build_slots(&workers, &pipelines, &repo, 2, Some("p1")),
+            count_build_slots(&cfg, &workers, &pipelines, &repo, 2, Some("p1")),
             2
         );
         // A pipeline on another repo does not count here.
@@ -956,7 +969,57 @@ mod tests {
             task: "p1".to_string(),
             repo: PathBuf::from("/elsewhere"),
         }];
-        assert_eq!(count_build_slots(&workers, &elsewhere, &repo, 2, None), 3);
+        assert_eq!(
+            count_build_slots(&cfg, &workers, &elsewhere, &repo, 2, None),
+            3
+        );
+    }
+
+    /// A fixture team.toml whose kinds are `sude2` and `suhuynh`; `strategy`
+    /// is the lines under `[strategy]` beyond `default_kind`.
+    fn cfg_with_strategy(strategy: &str) -> Config {
+        let doc = format!(
+            r#"
+schema_version = 2
+[limits]
+max_workers_per_orchestrator = 4
+[strategy]
+default_kind = "sude2"
+{strategy}
+[kinds.sude2]
+harness = "omp"
+model = "m"
+[kinds.suhuynh]
+harness = "claude"
+model = "m"
+"#
+        );
+        toml::from_str(&doc).expect("fixture team.toml")
+    }
+
+    #[test]
+    fn build_slot_kinds_come_from_team_toml() {
+        let repo = PathBuf::from("/r");
+        let worker = |name: &str, kind: &str| LiveWorker {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            repo: Some(repo.clone()),
+            review: false,
+            pipeline: None,
+        };
+        let workers = vec![worker("sude2-a", "sude2"), worker("suhuynh-b", "suhuynh")];
+
+        // A workspace that renames its builder kind: the renamed kind holds a
+        // slot, the reviewer kind does not.
+        let renamed = cfg_with_strategy(r#"build_kinds = ["sude2"]"#);
+        assert_eq!(
+            count_build_slots(&renamed, &workers, &[], &repo, 2, None),
+            1
+        );
+
+        // No `strategy.build_kinds`: every configured kind holds a slot.
+        let bare = cfg_with_strategy("");
+        assert_eq!(count_build_slots(&bare, &workers, &[], &repo, 2, None), 2);
     }
 
     #[test]
