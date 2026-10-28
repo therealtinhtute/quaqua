@@ -5405,3 +5405,28 @@ fn test_cap_count_owner_slots_ignores_foreign_farm_workers() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn test_cap_count_owner_slots_ignores_live_agent_with_pipeline_but_no_owner() {
+    let tmp = std::env::temp_dir().join(format!("quaqua-cap-pipe-no-owner-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let cfg = config::embedded_team_config().expect("embedded team.toml");
+
+    // Live agent has .pipeline file, but no .owner file in runs_dir
+    std::fs::write(tmp.join("tieude-pipe.pipeline"), "build\n").unwrap();
+
+    let mock = MockActivitiesHerdr::with_agent_list(
+        r#"{"result":{"agents":[
+            {"name":"tieude-pipe","agent_status":"working"}
+        ]}}"#,
+    );
+
+    let slots = count_owner_slots(&tmp, "cos", None, &mock, &cfg);
+    assert_eq!(
+        slots, 0,
+        "a live agent with .pipeline but no .owner file in runs_dir must not count against cos cap"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

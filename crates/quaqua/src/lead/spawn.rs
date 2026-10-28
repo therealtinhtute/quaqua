@@ -450,6 +450,8 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
         })?;
 
     // Tag Lead pane as orchestrator
+    let farm_id = crate::workspace::farm_of_runs_dir(&runs_dir);
+    let grid_farm_tok = format!("grid_farm={farm_id}");
     let grid_owner_tok = format!("grid_owner={name}");
     let meta_out = herdr
         .run(&[
@@ -462,6 +464,8 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
             "grid_role=orchestrator",
             "--token",
             &grid_owner_tok,
+            "--token",
+            &grid_farm_tok,
         ])
         .map_err(|e| (1, format!("herdr pane report-metadata failed: {e}\n")))?;
     if !meta_out.status.success() {
