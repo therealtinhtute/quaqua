@@ -19,7 +19,12 @@ fn contains_prefix_digit(w: &str, prefix: &str) -> bool {
     let mut search = w;
     while let Some(idx) = search.find(prefix) {
         let after = &search[idx + prefix.len()..];
-        if after.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if after
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
             return true;
         }
         search = &search[idx + prefix.len()..];
@@ -110,7 +115,6 @@ pub fn taskforce_weight(
     crate::config::taskforce_weight_from_layout(cfg, &state.kind, layout)
 }
 
-
 /// Calculate the number of worker slots used by `owner` (defaults to "cos").
 pub fn count_owner_slots<H: HerdrOps>(
     runs_dir: &Path,
@@ -122,14 +126,23 @@ pub fn count_owner_slots<H: HerdrOps>(
     let mut live_workers = Vec::new();
     if let Ok(agent_list_json) = herdr.agent_list() {
         if let Ok(json) = serde_json::from_str::<Value>(&agent_list_json) {
-            if let Some(agents) = json.get("result").and_then(|r| r.get("agents")).and_then(|a| a.as_array()) {
+            if let Some(agents) = json
+                .get("result")
+                .and_then(|r| r.get("agents"))
+                .and_then(|a| a.as_array())
+            {
                 for agent in agents {
-                    let status = agent.get("agent_status").and_then(|s| s.as_str()).unwrap_or("");
+                    let status = agent
+                        .get("agent_status")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
                     let name = agent.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    if status != "dead" && !name.is_empty() && is_task_worker_name(name, cfg) {
-                        if Some(name) != exclude_worker {
-                            live_workers.push(name.to_string());
-                        }
+                    if status != "dead"
+                        && !name.is_empty()
+                        && is_task_worker_name(name, cfg)
+                        && Some(name) != exclude_worker
+                    {
+                        live_workers.push(name.to_string());
                     }
                 }
             }
@@ -138,6 +151,9 @@ pub fn count_owner_slots<H: HerdrOps>(
 
     let mut o_workers = Vec::new();
     for w in &live_workers {
+        if !WorkerMetadata::owner_path(runs_dir, w).is_file() {
+            continue;
+        }
         let w_owner = WorkerMetadata::load_owner(runs_dir, w);
         if w_owner == owner {
             o_workers.push(w.clone());
@@ -189,17 +205,18 @@ pub fn count_owner_slots<H: HerdrOps>(
                                 .map(|s| s.trim().to_string())
                                 .unwrap_or_default();
                             let is_reviewer = matches_pipeline_reviewer(w, &p.task);
-                            if (!p.task.is_empty() && (w_pipe == p.task || w.ends_with(&format!("-{}", p.task))))
-                                 || w == &p_bname
-                                 || is_reviewer
-                             {
-                                 p_cur_live += 1;
-                                 covered_workers.insert(w.clone());
-                             }
-                         }
-                         total_managed_slots += p_cur_live.max(pipe_weight);
-                     }
-                 }
+                            if (!p.task.is_empty()
+                                && (w_pipe == p.task || w.ends_with(&format!("-{}", p.task))))
+                                || w == &p_bname
+                                || is_reviewer
+                            {
+                                p_cur_live += 1;
+                                covered_workers.insert(w.clone());
+                            }
+                        }
+                        total_managed_slots += p_cur_live.max(pipe_weight);
+                    }
+                }
                 ExecutionState::Taskforce(t) => {
                     if t.owner() != owner {
                         continue;
@@ -211,7 +228,8 @@ pub fn count_owner_slots<H: HerdrOps>(
                         t_alive = true;
                     } else if !t.task.is_empty() {
                         for w in &live_workers {
-                            if WorkerMetadata::load_taskforce(runs_dir, w).as_deref() == Some(&t.task)
+                            if WorkerMetadata::load_taskforce(runs_dir, w).as_deref()
+                                == Some(&t.task)
                                 || t.members.iter().any(|m| m == w)
                             {
                                 t_alive = true;
@@ -224,7 +242,8 @@ pub fn count_owner_slots<H: HerdrOps>(
                         let mut t_cur_live: i64 = 0;
                         for w in &o_workers {
                             if !t.task.is_empty()
-                                && (WorkerMetadata::load_taskforce(runs_dir, w).as_deref() == Some(&t.task)
+                                && (WorkerMetadata::load_taskforce(runs_dir, w).as_deref()
+                                    == Some(&t.task)
                                     || t.members.iter().any(|m| m == w))
                             {
                                 t_cur_live += 1;

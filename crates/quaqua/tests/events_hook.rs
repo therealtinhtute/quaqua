@@ -606,3 +606,70 @@ exit 0
         "must fail open and notify when herdr pane get fails"
     );
 }
+
+#[test]
+fn test_events_hook_stamps_owner_project_farm_from_pane_tokens() {
+    let runs_dir = hermetic_temp_dir("tokens-stamp");
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let notif_log = runs_dir.join("notifications.log");
+
+    let bin_dir = runs_dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    let herdr_bin = bin_dir.join("herdr");
+
+    let db_path = runs_dir.join("quaqua.db");
+    let bus = FarmBus::open(&db_path).expect("open bus");
+    let local_farm = bus.farm().to_string();
+
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "pane" ] && [ "$2" = "get" ]; then
+    if [ "$3" = "w1:pA8" ]; then
+        echo '{{"id":"cli:pane:get","result":{{"pane":{{"cwd":"/other/path","tokens":{{"grid_farm":"{local_farm}","grid_owner":"mu-lead","grid_group":"myproj"}}}}}}}}'
+        exit 0
+    fi
+fi
+if [ "$1" = "notification" ] && [ "$2" = "show" ]; then
+    echo "$*" >> "{}"
+    exit 0
+fi
+exit 0
+"#,
+        notif_log.display()
+    );
+    fs::write(&herdr_bin, script).expect("write stub herdr");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&herdr_bin).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&herdr_bin, perms).expect("chmod");
+    }
+
+    std::env::set_var("HERDR_BIN_PATH", &herdr_bin);
+    let herdr_ops = Herdr::new();
+
+    let payload = serde_json::json!({
+        "type": "pane_agent_status_changed",
+        "pane_id": "w1:pA8",
+        "agent": "worker-lead",
+        "agent_status": "blocked",
+        "status_since": "1793173518000"
+    })
+    .to_string();
+
+    let res = quaqua::bus::events::handle_event_hook(
+        &runs_dir,
+        Some("pane.agent_status_changed"),
+        Some(&payload),
+        &herdr_ops,
+    );
+    assert_eq!(res, Ok(true));
+
+    let events = bus.load_events(0).expect("load events");
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_eq!(ev.owner.as_deref(), Some("mu-lead"));
+    assert_eq!(ev.project.as_deref(), Some("myproj"));
+    assert_eq!(ev.farm.as_deref(), Some(local_farm.as_str()));
+}
