@@ -3,6 +3,7 @@
 pub mod brief;
 pub mod cost;
 pub mod observer;
+pub mod outcome;
 pub mod playbook_check;
 pub mod readonly;
 pub mod verdict;
@@ -16,13 +17,13 @@ pub use brief::{
 };
 pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
 pub use observer::{lead_waiting, report_ready};
-pub use watchdog::{is_lessons_heading, nap, prepend_header, validate_report_content};
-
+pub use outcome::{parse_report_outcome, OutcomeLevel, OutcomeParseError};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
+pub use watchdog::{is_lessons_heading, nap, prepend_header, validate_report_content};
 
 use crate::engine::activities::SystemActivities;
 use crate::engine::activity::{
@@ -1467,7 +1468,10 @@ esac
             TestEnvVarGuard::set("QUAQUA_PLAYBOOKS_DIR", playbooks.to_str().unwrap());
         let _g_principles =
             TestEnvVarGuard::set("QUAQUA_PRINCIPLES_DIR", principles.to_str().unwrap());
-        let _g_report = TestEnvVarGuard::set("FAKE_REPORT", "# Report\n\n## Lessons\nnone\n");
+        let _g_report = TestEnvVarGuard::set(
+            "FAKE_REPORT",
+            "Outcome: COMPLETE\n# Report\n\n## Lessons\nnone\n",
+        );
         let _g_fake_runs = TestEnvVarGuard::set("FAKE_RUNS", tmp.to_str().unwrap());
         let _g_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
         let _g_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
@@ -1529,7 +1533,7 @@ esac
             TestEnvVarGuard::set("QUAQUA_PRINCIPLES_DIR", principles.to_str().unwrap());
         let _g_report = TestEnvVarGuard::set(
             "FAKE_REPORT",
-            "# Report\n\n## Playbook\n1: done\n2: skip: unsupported on stub\n\n## Lessons\nnone\n",
+            "Outcome: COMPLETE\n# Report\n\n## Playbook\n1: done\n2: skip: unsupported on stub\n\n## Lessons\nnone\n",
         );
         let _g_fake_runs = TestEnvVarGuard::set("FAKE_RUNS", tmp.to_str().unwrap());
         let _g_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
@@ -1603,7 +1607,7 @@ esac
         let _g_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub.to_str().unwrap());
         let name = "sude-gapfix";
         let report = tmp.join(format!("{name}.md"));
-        fs::write(&report, "# Report\n\n## Lessons\nnone\n").unwrap();
+        fs::write(&report, "Outcome: COMPLETE\n# Report\n\n## Lessons\nnone\n").unwrap();
         fs::write(
             tmp.join(format!(".{name}.playbook")),
             "name=feature\nids=1,2\n",
@@ -1626,7 +1630,7 @@ esac
         let pending = tmp.join(format!(".{name}.md.tmp"));
         fs::write(
             &pending,
-            "# Report\n\n## Playbook\n1: done\n2: done\n\n## Lessons\nnone\n",
+            "Outcome: COMPLETE\n# Report\n\n## Playbook\n1: done\n2: done\n\n## Lessons\nnone\n",
         )
         .unwrap();
         fs::rename(&pending, &report).unwrap();

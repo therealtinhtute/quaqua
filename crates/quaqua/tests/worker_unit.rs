@@ -1629,39 +1629,22 @@ fn test_pipeline_rounds_raise_only_on_resume() {
 
 #[test]
 fn test_pipeline_outcome_no_changes_detection() {
+    use quaqua::worker::prompt::{parse_report_outcome, OutcomeLevel};
+
     let content = "Outcome: no changes\n\n## Lessons\n- none\n";
-    let is_no_changes = content.lines().any(|line| {
-        let t = line.trim();
-        if let Some(rest) = t
-            .strip_prefix("Outcome:")
-            .or_else(|| t.strip_prefix("outcome:"))
-        {
-            let rest_upper = rest.trim().to_ascii_uppercase();
-            rest_upper.starts_with("NO CHANGES")
-                || rest_upper.starts_with("NO-OP")
-                || rest_upper.starts_with("NO OP")
-        } else {
-            false
-        }
-    });
-    assert!(is_no_changes);
+    assert_eq!(parse_report_outcome(content), Ok(OutcomeLevel::NoChanges));
+
+    let content_screaming = "Outcome: NO_CHANGES\n\n## Lessons\n- none\n";
+    assert_eq!(
+        parse_report_outcome(content_screaming),
+        Ok(OutcomeLevel::NoChanges)
+    );
 
     let content_changes = "Outcome: modified 2 files\n\n## Lessons\n- none\n";
-    let is_no_changes = content_changes.lines().any(|line| {
-        let t = line.trim();
-        if let Some(rest) = t
-            .strip_prefix("Outcome:")
-            .or_else(|| t.strip_prefix("outcome:"))
-        {
-            let rest_upper = rest.trim().to_ascii_uppercase();
-            rest_upper.starts_with("NO CHANGES")
-                || rest_upper.starts_with("NO-OP")
-                || rest_upper.starts_with("NO OP")
-        } else {
-            false
-        }
-    });
-    assert!(!is_no_changes);
+    assert_ne!(
+        parse_report_outcome(content_changes),
+        Ok(OutcomeLevel::NoChanges)
+    );
 }
 
 #[test]
@@ -4006,35 +3989,182 @@ fn test_report_lessons_heading_matcher_and_numbered_headings() {
     assert!(!is_lessons_heading("## LessonsLearned"));
     assert!(!is_lessons_heading("Just text with ## 5. Lessons in body"));
 
-    // 2. Full report validation: standard worker report
-    let report_exact = "# run report\n\n## Blockers\nnone\n\n## Lessons\n- none\n";
+    // 2. Full report validation: builder report requires Outcome: and ## Lessons
+    let report_no_outcome = "# run report\n\n## Blockers\nnone\n\n## Lessons\n- none\n";
+    let err_no_outcome = validate_report_content(report_no_outcome, false).unwrap_err();
+    assert!(err_no_outcome.contains("'Outcome:' line"));
+    assert!(err_no_outcome.contains("COMPLETE"));
+
+    let report_exact = "Outcome: COMPLETE\n\n## Blockers\nnone\n\n## Lessons\n- none\n";
     assert_eq!(validate_report_content(report_exact, false), Ok(()));
 
-    let report_numbered = "# run report\n\n## 1. Summary\nDone\n\n## 2. Blockers\nnone\n\n## 5. Lessons\n- lesson learned\n";
+    let report_numbered = "Outcome: COMPLETE\n\n## 1. Summary\nDone\n\n## 2. Blockers\nnone\n\n## 5. Lessons\n- lesson learned\n";
     assert_eq!(validate_report_content(report_numbered, false), Ok(()));
 
+    // Each of the six allowed tokens passes validation
+    for tok in [
+        "COMPLETE",
+        "NO_CHANGES",
+        "no changes",
+        "BLOCKED",
+        "DISPUTED",
+        "REOPEN_REQUEST",
+        "DEPENDENCY_REQUEST",
+    ] {
+        let rep = format!("Outcome: {tok}\n\n## Lessons\nnone\n");
+        assert_eq!(
+            validate_report_content(&rep, false),
+            Ok(()),
+            "token {tok} must be valid"
+        );
+    }
+
+    // Invalid token bounced
+    let report_invalid = "Outcome: approved-ish\n\n## Lessons\n- none\n";
+    let err_invalid = validate_report_content(report_invalid, false).unwrap_err();
+    assert!(err_invalid.contains("'Outcome:' line"));
+    assert!(err_invalid.contains("COMPLETE"));
+
     let report_missing_lessons =
-        "# run report\n\n## Blockers\nnone\n\n## Summary\nNo lessons section\n";
+        "Outcome: COMPLETE\n\n## Blockers\nnone\n\n## Summary\nNo lessons section\n";
     assert_eq!(
         validate_report_content(report_missing_lessons, false),
-        Err("'## Lessons' section")
+        Err("'## Lessons' section".to_string())
     );
 
     let report_h3_only =
-        "# run report\n\n## Blockers\nnone\n\n### 5. Lessons\n- sub-heading only\n";
+        "Outcome: COMPLETE\n\n## Blockers\nnone\n\n### 5. Lessons\n- sub-heading only\n";
     assert_eq!(
         validate_report_content(report_h3_only, false),
-        Err("'## Lessons' section")
+        Err("'## Lessons' section".to_string())
     );
 
-    // 3. Reviewer report validation: requires Verdict:
+    // 3. Reviewer report validation: requires Verdict:, does not require Outcome:
     let reviewer_valid = "# review report\n\nVerdict: approved\n";
     assert_eq!(validate_report_content(reviewer_valid, true), Ok(()));
 
     let reviewer_missing = "# review report\n\n## Lessons\n- none\n";
     assert_eq!(
         validate_report_content(reviewer_missing, true),
-        Err("'Verdict:' line")
+        Err("'Verdict:' line".to_string())
+    );
+}
+#[test]
+fn test_report_outcome_validation_bounced_with_allowed_values() {
+    use quaqua::worker::prompt::validate_report_content;
+
+    // Missing Outcome line -> bounced with allowed values in error
+    let missing_outcome = "# run report\n\n## Blockers\nnone\n\n## Lessons\n- none\n";
+    let err =
+        validate_report_content(missing_outcome, false).expect_err("missing Outcome must fail");
+    assert!(
+        err.contains("'Outcome:' line"),
+        "must name 'Outcome:' line, got: {err}"
+    );
+    assert!(
+        err.contains("COMPLETE"),
+        "must contain allowed values, got: {err}"
+    );
+    assert!(
+        err.contains("NO_CHANGES"),
+        "must contain allowed values, got: {err}"
+    );
+}
+
+#[test]
+fn test_outcome_enum_parsing() {
+    use quaqua::worker::prompt::{parse_report_outcome, OutcomeLevel, OutcomeParseError};
+
+    assert_eq!(
+        parse_report_outcome("Outcome: COMPLETE\n"),
+        Ok(OutcomeLevel::Complete)
+    );
+    assert_eq!(
+        parse_report_outcome("outcome: complete\n"),
+        Ok(OutcomeLevel::Complete)
+    );
+    assert_eq!(
+        parse_report_outcome("Outcome: NO_CHANGES\n"),
+        Ok(OutcomeLevel::NoChanges)
+    );
+    assert_eq!(
+        parse_report_outcome("Outcome: no changes\n"),
+        Ok(OutcomeLevel::NoChanges)
+    );
+    assert_eq!(
+        parse_report_outcome("Outcome: no changes - nothing to touch\n"),
+        Ok(OutcomeLevel::NoChanges)
+    );
+    assert_eq!(
+        parse_report_outcome("Outcome: BLOCKED\n"),
+        Ok(OutcomeLevel::Blocked)
+    );
+    assert_eq!(
+        parse_report_outcome("outcome: blocked\n"),
+        Ok(OutcomeLevel::Blocked)
+    );
+    assert_eq!(
+        parse_report_outcome("Outcome: DISPUTED\n"),
+        Ok(OutcomeLevel::Disputed)
+    );
+    assert_eq!(
+        parse_report_outcome("outcome: disputed\n"),
+        Ok(OutcomeLevel::Disputed)
+    );
+    assert_eq!(
+        parse_report_outcome("Outcome: REOPEN_REQUEST\n"),
+        Ok(OutcomeLevel::ReopenRequest)
+    );
+    assert_eq!(
+        parse_report_outcome("Outcome: reopen_request\n"),
+        Ok(OutcomeLevel::ReopenRequest)
+    );
+    assert_eq!(
+        parse_report_outcome("Outcome: DEPENDENCY_REQUEST\n"),
+        Ok(OutcomeLevel::DependencyRequest)
+    );
+    assert_eq!(
+        parse_report_outcome("outcome: dependency_request\n"),
+        Ok(OutcomeLevel::DependencyRequest)
+    );
+
+    // Invalid token
+    assert_eq!(
+        parse_report_outcome("Outcome: approved-ish\n"),
+        Err(OutcomeParseError::Invalid("approved-ish".to_string()))
+    );
+    assert_eq!(
+        parse_report_outcome("Outcome: \n"),
+        Err(OutcomeParseError::Invalid(String::new()))
+    );
+
+    // Missing Outcome
+    assert_eq!(
+        parse_report_outcome("# run report\n\n## Lessons\nnone\n"),
+        Err(OutcomeParseError::Missing)
+    );
+
+    // Not column 1
+    assert_eq!(
+        parse_report_outcome("  Outcome: COMPLETE\n"),
+        Err(OutcomeParseError::Missing)
+    );
+}
+
+#[test]
+fn test_outcome_vocabulary_documented_in_report_contract() {
+    use quaqua::worker::prompt::OutcomeLevel;
+    use std::fs;
+    use std::path::PathBuf;
+
+    let brief = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../templates/workspace/rules/_all/brief.md");
+    let doc = fs::read_to_string(&brief)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", brief.display()));
+    let vocabulary = OutcomeLevel::vocabulary();
+    assert!(
+        doc.contains(&vocabulary),
+        "rules/_all/brief.md `## Report format` must list Outcome values as `{vocabulary}`"
     );
 }
 

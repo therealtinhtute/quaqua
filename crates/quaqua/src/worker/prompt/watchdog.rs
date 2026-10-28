@@ -3,7 +3,9 @@
 /// Sleep or advance the test-only virtual clock.
 pub fn nap(sec: u64) {
     if let Ok(sleep_cmd) = std::env::var("PROMPT_WORKER_SLEEP_CMD") {
-        let _ = std::process::Command::new(sleep_cmd).arg(sec.to_string()).status();
+        let _ = std::process::Command::new(sleep_cmd)
+            .arg(sec.to_string())
+            .status();
     } else {
         std::thread::sleep(std::time::Duration::from_secs(sec));
     }
@@ -54,21 +56,34 @@ pub fn is_lessons_heading(line: &str) -> bool {
 }
 
 /// Validates the structure of the finished run report.
-pub fn validate_report_content(
-    report_content: &str,
-    expect_verdict: bool,
-) -> Result<(), &'static str> {
+pub fn validate_report_content(report_content: &str, expect_verdict: bool) -> Result<(), String> {
     if expect_verdict {
         let has_verdict = report_content
             .lines()
             .any(|l| l.trim_start().starts_with("Verdict:"));
         if !has_verdict {
-            return Err("'Verdict:' line");
+            return Err("'Verdict:' line".to_string());
         }
     } else {
-        let has_lessons = report_content.lines().any(|l| is_lessons_heading(l));
+        match crate::worker::prompt::outcome::parse_report_outcome(report_content) {
+            Ok(_) => {}
+            Err(crate::worker::prompt::outcome::OutcomeParseError::Missing) => {
+                return Err(format!(
+                    "'Outcome:' line (allowed: {})",
+                    crate::worker::prompt::outcome::OutcomeLevel::allowed_list()
+                ));
+            }
+            Err(crate::worker::prompt::outcome::OutcomeParseError::Invalid(val)) => {
+                let token = val.split_whitespace().next().unwrap_or(&val);
+                return Err(format!(
+                    "'Outcome:' line (unknown value '{token}'; allowed: {})",
+                    crate::worker::prompt::outcome::OutcomeLevel::allowed_list()
+                ));
+            }
+        }
+        let has_lessons = report_content.lines().any(is_lessons_heading);
         if !has_lessons {
-            return Err("'## Lessons' section");
+            return Err("'## Lessons' section".to_string());
         }
     }
     Ok(())

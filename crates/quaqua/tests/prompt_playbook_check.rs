@@ -250,7 +250,7 @@ fn brief_with_playbook() -> String {
 fn playbook_check_missing_section_rejects_the_report() {
     let _lock = env_lock();
     let h = Harness::new("section");
-    h.set_report("# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
+    h.set_report("Outcome: COMPLETE\n# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
     assert_eq!(
         fs::read_to_string(h.runs.join(".sude-s5a.playbook")).ok(),
         None,
@@ -286,7 +286,9 @@ fn playbook_check_missing_section_rejects_the_report() {
 fn playbook_check_missing_step_and_unreasoned_skip_report_a_gap() {
     let _lock = env_lock();
     let h = Harness::new("steps");
-    h.set_report("# Report\n\n## Playbook\n\n1: done\n3: skip:\n\n## Lessons\nnone\n");
+    h.set_report(
+        "Outcome: COMPLETE\n# Report\n\n## Playbook\n\n1: done\n3: skip:\n\n## Lessons\nnone\n",
+    );
 
     let res = h.prompt("sude-s5b", Some(&brief_with_playbook()), false);
 
@@ -304,7 +306,7 @@ fn playbook_check_unsupported_harness_skip_is_accepted() {
     let _lock = env_lock();
     let h = Harness::new("harness");
     h.set_report(
-        "# Report\n\n## Playbook\n\n1: done\n2: skip: unsupported on omp, no browser\n3: skip: unsupported on omp, read-only\n\n## Lessons\nnone\n",
+        "Outcome: COMPLETE\n# Report\n\n## Playbook\n\n1: done\n2: skip: unsupported on omp, no browser\n3: skip: unsupported on omp, read-only\n\n## Lessons\nnone\n",
     );
 
     let res = h.prompt("sude-s5c", Some(&brief_with_playbook()), false);
@@ -322,7 +324,7 @@ fn playbook_check_unsupported_harness_skip_is_accepted() {
 fn playbook_check_report_without_a_pin_behaves_as_today() {
     let _lock = env_lock();
     let h = Harness::new("nopin");
-    h.set_report("# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
+    h.set_report("Outcome: COMPLETE\n# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
 
     let res = h.prompt("sude-s5d", Some(BRIEF), false);
 
@@ -337,7 +339,7 @@ fn playbook_check_report_without_a_pin_behaves_as_today() {
 fn playbook_check_resume_accepts_the_fixed_report() {
     let _lock = env_lock();
     let h = Harness::new("resume");
-    h.set_report("# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
+    h.set_report("Outcome: COMPLETE\n# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
 
     let res = h.prompt("sude-s5e", Some(&brief_with_playbook()), false);
     assert_eq!(res, Err((6, String::new())));
@@ -348,7 +350,7 @@ fn playbook_check_resume_accepts_the_fixed_report() {
     let pending = h.runs.join(".sude-s5e.md.tmp");
     fs::write(
         &pending,
-        "# Report\n\n## Playbook\n\n1: done\n2: done\n3: done\n\n## Lessons\nnone\n",
+        "Outcome: COMPLETE\n# Report\n\n## Playbook\n\n1: done\n2: done\n3: done\n\n## Lessons\nnone\n",
     )
     .unwrap();
     fs::rename(&pending, &run_report).unwrap();
@@ -368,7 +370,7 @@ fn playbook_check_resume_accepts_the_fixed_report() {
 fn playbook_check_cli_exits_6_for_a_builder_gap() {
     let _lock = env_lock();
     let h = Harness::new("cli");
-    h.set_report("# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
+    h.set_report("Outcome: COMPLETE\n# Report\n\n## Changes\n\ndid things\n\n## Lessons\nnone\n");
 
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_quaqua"));
     cmd.args(["worker", "prompt", "sude-s5f", &brief_with_playbook()])
