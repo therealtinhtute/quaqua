@@ -370,6 +370,139 @@ fn test_repair_lead_success_stamps_tokens() {
     assert!(res2.contains("already tagged"));
 }
 
+/// A Lead started before `lead spawn` wrote `runs/<name>.owner` (pre-2026-10-24)
+/// has no owner file: `identity::depth_walk` then fails and every spawn/mail from
+/// that Lead is denied with `depth.owner_missing`. `lead repair` must restore the
+/// file so the live Lead works again.
+#[test]
+fn test_repair_lead_restores_missing_owner_file() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "HERDR_PANE_ID", "QUAQUA_OWNER"]);
+    let ws = hermetic_temp_dir("repair-owner-missing-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    std::env::remove_var("HERDR_PANE_ID");
+    std::env::remove_var("QUAQUA_OWNER");
+
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole parity |\n",
+    ).unwrap();
+
+    let herdr = MockRepairHerdr::new(
+        r#"{"logo":"\ue1a3"}"#,
+        r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#,
+    );
+
+    repair_lead(&herdr, "mu", None).expect("repair_lead should succeed");
+
+    let owner = ws.join("runs/mu-lead.owner");
+    let content = std::fs::read_to_string(&owner)
+        .unwrap_or_else(|e| panic!("repair must restore {}: {e}", owner.display()));
+    assert_eq!(
+        content.trim(),
+        "cos",
+        "restored owner must be the caller owner that lead spawn would record"
+    );
+}
+
+/// The pane tokens may already be correct (e.g. `lead prompt` backfilled them)
+/// while the owner file is still missing: repair reports "already tagged", so the
+/// owner restore must happen before that early return.
+#[test]
+fn test_repair_lead_restores_missing_owner_when_pane_already_tagged() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "HERDR_PANE_ID", "QUAQUA_OWNER"]);
+    let ws = hermetic_temp_dir("repair-owner-tagged-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    std::env::remove_var("HERDR_PANE_ID");
+    std::env::remove_var("QUAQUA_OWNER");
+
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole parity |\n",
+    ).unwrap();
+
+    let herdr = MockRepairHerdr::new(
+        r#"{"grid_role":"orchestrator","grid_owner":"mu-lead","logo":"\ue1a3"}"#,
+        r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"grid_role":"orchestrator","grid_owner":"mu-lead"}}]}}"#,
+    );
+
+    repair_lead(&herdr, "mu", None).expect("repair_lead should succeed");
+
+    let owner = ws.join("runs/mu-lead.owner");
+    let content = std::fs::read_to_string(&owner)
+        .unwrap_or_else(|e| panic!("repair must restore {}: {e}", owner.display()));
+    assert_eq!(content.trim(), "cos");
+}
+
+/// An existing owner file is authoritative: repair never rewrites it.
+#[test]
+fn test_repair_lead_keeps_existing_owner_file() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "HERDR_PANE_ID", "QUAQUA_OWNER"]);
+    let ws = hermetic_temp_dir("repair-owner-kept-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    std::env::remove_var("HERDR_PANE_ID");
+    std::env::remove_var("QUAQUA_OWNER");
+
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole parity |\n",
+    ).unwrap();
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    std::fs::write(runs_dir.join("mu-lead.owner"), "arch-lead\n").unwrap();
+
+    let herdr = MockRepairHerdr::new(
+        r#"{"logo":"\ue1a3"}"#,
+        r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#,
+    );
+
+    repair_lead(&herdr, "mu", None).expect("repair_lead should succeed");
+
+    assert_eq!(
+        std::fs::read_to_string(runs_dir.join("mu-lead.owner"))
+            .unwrap()
+            .trim(),
+        "arch-lead",
+        "repair must not overwrite an existing owner file"
+    );
+}
+
+/// A Lead must never become its own owner: `depth_walk` would report a cycle, so
+/// the restore refuses instead of writing `mu-lead -> mu-lead`.
+#[test]
+fn test_repair_lead_refuses_to_own_itself() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "HERDR_PANE_ID", "QUAQUA_OWNER"]);
+    let ws = hermetic_temp_dir("repair-owner-self-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    std::env::remove_var("HERDR_PANE_ID");
+    guard.set("QUAQUA_OWNER", "mu-lead");
+
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole parity |\n",
+    ).unwrap();
+
+    let herdr = MockRepairHerdr::new(
+        r#"{"logo":"\ue1a3"}"#,
+        r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#,
+    );
+
+    let err = repair_lead(&herdr, "mu", None)
+        .expect_err("repair must refuse to make a Lead its own owner");
+    assert!(err.contains("own itself"), "got: {err}");
+    assert!(
+        !ws.join("runs/mu-lead.owner").exists(),
+        "refused restore must not write an owner file"
+    );
+}
+
 #[test]
 fn test_repair_lead_rejects_unregistered_slug() {
     let guard = EnvGuard::new(&["QUAQUA_ROOT"]);
