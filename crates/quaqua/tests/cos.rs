@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use quaqua::cos::{is_cos_pane_token, is_cos_tokens, pane_is_cos};
+use quaqua::cos::{is_cos_pane_token, is_cos_tokens, pane_is_cos, sidebar_chip_snippet};
 use quaqua::gate::policy::{
     check_with_lookups, OfflinePrLookup, PaneLookup, RealHerdrPaneLookup, Verdict,
 };
@@ -88,6 +88,128 @@ fn test_is_cos_pane_token_helper() {
     let empty_json = serde_json::json!({});
     assert!(!is_cos_tokens(&empty_json));
 }
+#[test]
+fn test_sidebar_chip_snippet_format() {
+    let snippet = sidebar_chip_snippet();
+    let val: toml::Value = toml::from_str(snippet).expect("snippet must parse as valid TOML");
+
+    // No grid_role chip
+    assert!(
+        !snippet.contains("grid_role"),
+        "snippet must not contain grid_role: {snippet}"
+    );
+    assert!(
+        !snippet.contains("$grid_role"),
+        "snippet must not contain $grid_role: {snippet}"
+    );
+
+    // ui.sidebar.agents table
+    let agents = val
+        .get("ui")
+        .and_then(|u| u.get("sidebar"))
+        .and_then(|s| s.get("agents"))
+        .expect("must contain [ui.sidebar.agents]");
+
+    assert_eq!(agents.get("row_gap").and_then(|g| g.as_integer()), Some(0));
+
+    // rows structure
+    let rows = agents
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .expect("must contain rows array");
+    assert_eq!(rows.len(), 2, "rows must have 2 rows");
+
+    // Row 1: state_icon, $logo, agent name with coloring rules
+    let row1 = rows[0].as_array().expect("row 1 must be array");
+    assert_eq!(row1.len(), 3, "row 1 must have 3 cells");
+    assert_eq!(row1[0].as_str(), Some("state_icon"));
+    assert_eq!(row1[1].as_str(), Some("$logo"));
+
+    let agent_cell = row1[2].as_table().expect("agent cell must be a table");
+    assert_eq!(
+        agent_cell.get("token").and_then(|t| t.as_str()),
+        Some("agent")
+    );
+    assert_eq!(
+        agent_cell.get("fg").and_then(|f| f.as_str()),
+        Some("#888888")
+    );
+
+    let rules = agent_cell
+        .get("rules")
+        .and_then(|r| r.as_array())
+        .expect("agent cell must have rules array");
+    assert_eq!(rules.len(), 2);
+    // contains CoS -> #ff5fa2 bold
+    assert_eq!(
+        rules[0].get("contains").and_then(|c| c.as_str()),
+        Some("CoS")
+    );
+    assert_eq!(rules[0].get("fg").and_then(|f| f.as_str()), Some("#ff5fa2"));
+    assert_eq!(rules[0].get("bold").and_then(|b| b.as_bool()), Some(true));
+    // contains -lead -> #ff9f43
+    assert_eq!(
+        rules[1].get("contains").and_then(|c| c.as_str()),
+        Some("-lead")
+    );
+    assert_eq!(rules[1].get("fg").and_then(|f| f.as_str()), Some("#ff9f43"));
+
+    // Row 2: workspace, tab
+    let row2 = rows[1].as_array().expect("row 2 must be array");
+    assert_eq!(row2.len(), 2, "row 2 must have 2 cells");
+    assert_eq!(row2[0].as_str(), Some("workspace"));
+    assert_eq!(row2[1].as_str(), Some("tab"));
+
+    // rows_by_agent
+    let rows_by_agent = agents
+        .get("rows_by_agent")
+        .and_then(|r| r.as_table())
+        .expect("must contain rows_by_agent table");
+
+    let expected_agents = [
+        ("claude", "#d97757"),
+        ("gemini", "#4285f4"),
+        ("kimi", "#1783ff"),
+        ("qwen", "#615ced"),
+        ("kiro", "#9046ff"),
+        ("cline", "#586876"),
+        ("kilo", "#9a9808"),
+    ];
+
+    for (agent_name, expected_fg) in expected_agents {
+        let agent_rows = rows_by_agent
+            .get(agent_name)
+            .and_then(|r| r.as_array())
+            .unwrap_or_else(|| panic!("missing rows_by_agent for {agent_name}"));
+        assert_eq!(agent_rows.len(), 2, "{agent_name} rows length");
+        let r1 = agent_rows[0].as_array().expect("row 1 must be array");
+        assert_eq!(r1[0].as_str(), Some("state_icon"));
+        let logo_cell = r1[1].as_table().expect("logo cell must be table");
+        assert_eq!(
+            logo_cell.get("token").and_then(|t| t.as_str()),
+            Some("$logo")
+        );
+        assert_eq!(
+            logo_cell.get("fg").and_then(|f| f.as_str()),
+            Some(expected_fg)
+        );
+        let r2 = agent_rows[1].as_array().expect("row 2 must be array");
+        assert_eq!(r2[0].as_str(), Some("workspace"));
+        assert_eq!(r2[1].as_str(), Some("tab"));
+    }
+
+    let template_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../templates/workspace/herdr/sidebar-chip.toml");
+    if template_path.exists() {
+        let template_content = fs::read_to_string(&template_path).expect("read sidebar-chip.toml");
+        let template_val: toml::Value =
+            toml::from_str(&template_content).expect("template must parse as valid TOML");
+        assert_eq!(
+            val, template_val,
+            "template and snippet TOML values must match"
+        );
+    }
+}
 
 #[test]
 fn test_cos_tag_cli_with_explicit_pane() {
@@ -112,8 +234,12 @@ fn test_cos_tag_cli_with_explicit_pane() {
         "stdout lacks sidebar hint: {stdout}"
     );
     assert!(
-        stdout.contains("$grid_role"),
-        "stdout lacks $grid_role in hint: {stdout}"
+        stdout.contains("rows_by_agent"),
+        "stdout lacks rows_by_agent in hint: {stdout}"
+    );
+    assert!(
+        !stdout.contains("$grid_role"),
+        "stdout must not contain $grid_role: {stdout}"
     );
     assert!(
         stdout.contains("herdr server reload-config"),
