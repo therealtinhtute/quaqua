@@ -17,6 +17,7 @@ pub use policy::{
     check, check_ctx, check_segments, check_with_lookups, check_with_pr, OfflinePaneLookup,
     OfflinePrLookup, PaneLookup, PrFacts, PrLookup, RealGh, RealHerdrPaneLookup, Verdict,
 };
+use std::path::{Path, PathBuf};
 
 const BLOCK_MESSAGE: &str = "blocked: spawn/move panes and workspaces only via quaqua worker spawn / quaqua lead spawn / quaqua worker cleanup / quaqua lead cleanup or `quaqua grid reconcile` — rules/_all/fanout-agent-grid.md";
 
@@ -106,13 +107,105 @@ pub fn run_session_start() -> i32 {
         use std::io::Read;
         let _ = std::io::stdin().read_to_string(&mut buf);
     }
-    let v: serde_json::Value = serde_json::from_str(&buf).unwrap_or_default();
+    let herdr = crate::herdr::Herdr::new();
+    let ws_root = crate::workspace::workspace_root();
+    run_session_start_with(&herdr, &buf, &ws_root, None)
+}
+
+/// Testable entrypoint for `run_session_start` with injectable HerdrOps, workspace root, and cwd override.
+pub fn run_session_start_with<H: crate::herdr::HerdrOps>(
+    herdr: &H,
+    buf: &str,
+    ws_root: &Path,
+    cwd_override: Option<&Path>,
+) -> i32 {
+    let v: serde_json::Value = serde_json::from_str(buf).unwrap_or_default();
     let sid = v.get("session_id").and_then(|x| x.as_str()).unwrap_or("");
     let source = v.get("source").and_then(|x| x.as_str()).unwrap_or("");
-    if let Some(text) = drift::session_start(&crate::workspace::workspace_root(), sid, source) {
+    if let Some(text) = drift::session_start(ws_root, sid, source) {
         println!("{text}");
     }
+
+    auto_tag_cos_pane_if_eligible(herdr, &v, ws_root, cwd_override);
+
     0
+}
+
+fn is_worker_worktree(path: &Path) -> bool {
+    if path.components().any(|c| c.as_os_str() == ".wt") {
+        return true;
+    }
+    if path.join(".git").is_file() {
+        return true;
+    }
+    false
+}
+
+fn is_same_path(a: &Path, b: &Path) -> bool {
+    if let (Ok(ca), Ok(cb)) = (a.canonicalize(), b.canonicalize()) {
+        ca == cb
+    } else {
+        a == b
+    }
+}
+
+fn is_eligible_workspace(cwd: &Path, ws_root: &Path) -> bool {
+    if is_worker_worktree(cwd) || is_worker_worktree(ws_root) {
+        return false;
+    }
+    if !ws_root.join("projects/INDEX.md").is_file() {
+        return false;
+    }
+    is_same_path(cwd, ws_root)
+}
+
+fn auto_tag_cos_pane_if_eligible<H: crate::herdr::HerdrOps>(
+    herdr: &H,
+    v: &serde_json::Value,
+    ws_root: &Path,
+    cwd_override: Option<&Path>,
+) {
+    let cwd = cwd_override
+        .map(PathBuf::from)
+        .or_else(|| {
+            v.get("cwd")
+                .and_then(|c| c.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // Condition 1: hook cwd/workspace root is the quaqua workspace (not a worker worktree)
+    if !is_eligible_workspace(&cwd, ws_root) {
+        return;
+    }
+
+    // Condition 2: HERDR_PANE (or herdr pane current) resolves
+    let pane = match crate::cos::resolve_cos_pane(herdr, None) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    // Condition 3: Pane does not already carry a grid_role token other than cos
+    match crate::cos::pane_grid_role(herdr, &pane) {
+        Ok(Some(role)) if !crate::cos::is_cos_pane_token(&role) => {
+            // Already carries grid_role other than cos (e.g. worker, orchestrator) -> skip
+            return;
+        }
+        Ok(_) => {
+            // No grid_role or grid_role=cos -> proceed to tag
+        }
+        Err(e) => {
+            eprintln!("quaqua: auto-tag CoS pane failed: {e}");
+            return;
+        }
+    }
+
+    // Tag pane as CoS (idempotent / harmless retag)
+    if let Err(e) = crate::cos::tag_cos_pane(herdr, &pane) {
+        eprintln!("quaqua: auto-tag CoS pane failed: {e}");
+    }
 }
 
 /// The hook contract: `{"tool_name":"Bash","tool_input":{"command":"…"},"cwd":"…"}`.

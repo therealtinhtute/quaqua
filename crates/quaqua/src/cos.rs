@@ -62,6 +62,32 @@ pub fn pane_is_cos<H: HerdrOps>(herdr: &H, pane: &str) -> bool {
     false
 }
 
+/// Query `herdr pane get <pane>` and return `Ok(Some(grid_role))` if a `grid_role` token exists,
+/// `Ok(None)` if no `grid_role` token is set on the pane, or `Err(reason)` on failure.
+pub fn pane_grid_role<H: HerdrOps>(herdr: &H, pane: &str) -> Result<Option<String>, String> {
+    if pane.is_empty() {
+        return Err("pane is empty".to_string());
+    }
+    let out = herdr
+        .run(&["pane", "get", pane])
+        .map_err(|e| format!("herdr pane get failed for {pane}: {e}"))?;
+
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("herdr pane get failed for {pane}: {err}"));
+    }
+
+    let val: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("invalid JSON from herdr pane get {pane}: {e}"))?;
+
+    let role = val
+        .pointer("/result/pane/tokens/grid_role")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    Ok(role)
+}
+
 /// The opt-in sidebar chip template snippet for ~/.config/herdr/config.toml.
 pub fn sidebar_chip_snippet() -> &'static str {
     r##"[ui.sidebar.agents]
@@ -74,7 +100,7 @@ rows = [
 
 /// Resolve the target pane for CoS tagging:
 /// 1. Explicit pane if given.
-/// 2. `$HERDR_PANE_ID` environment variable if set and non-empty.
+/// 2. `$HERDR_PANE` or `$HERDR_PANE_ID` environment variable if set and non-empty.
 /// 3. Query `herdr pane current` via HerdrOps.
 pub fn resolve_cos_pane<H: HerdrOps>(
     herdr: &H,
@@ -87,11 +113,16 @@ pub fn resolve_cos_pane<H: HerdrOps>(
         }
     }
 
-    if let Ok(env_pane) = std::env::var("HERDR_PANE_ID") {
-        let trimmed = env_pane.trim().to_string();
-        if !trimmed.is_empty() {
-            return Ok(trimmed);
-        }
+    let env_pane = std::env::var("HERDR_PANE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("HERDR_PANE_ID")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        });
+    if let Some(p) = env_pane {
+        return Ok(p.trim().to_string());
     }
 
     let out = herdr
