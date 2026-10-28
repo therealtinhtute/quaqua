@@ -337,41 +337,12 @@ impl FarmBus {
                     r#"
                     SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
                     FROM farm_events
-                    WHERE seq > ?1 AND incident_key IS NOT NULL
-                    ORDER BY seq ASC
-                    "#,
-                )?;
-                let rows = stmt.query_map(rusqlite::params![since_seq as i64], |row| {
-                    Ok(FarmEventRecord {
-                        seq: row.get::<_, i64>(0)? as u64,
-                        ts_ms: row.get::<_, i64>(1)? as u64,
-                        event_type: row.get(2)?,
-                        actor: row.get(3)?,
-                        subject: row.get(4)?,
-                        owner: row.get(5)?,
-                        project: row.get(6)?,
-                        incident_key: row.get(7)?,
-                        payload_json: row.get(8)?,
-                        farm: row.get(9)?,
-                    })
-                })?;
-                let mut res = Vec::new();
-                for r in rows {
-                    res.push(r?);
-                }
-                Ok(res)
-            } else {
-                let mut stmt = conn.prepare_cached(
-                    r#"
-                    SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
-                    FROM farm_events
-                    WHERE seq > ?1 AND incident_key IS NOT NULL
-                      AND (owner = ?2 OR project = ?2 OR owner IS NULL)
+                    WHERE seq > ?1 AND incident_key IS NOT NULL AND farm = ?2
                     ORDER BY seq ASC
                     "#,
                 )?;
                 let rows =
-                    stmt.query_map(rusqlite::params![since_seq as i64, consumer], |row| {
+                    stmt.query_map(rusqlite::params![since_seq as i64, &self.farm], |row| {
                         Ok(FarmEventRecord {
                             seq: row.get::<_, i64>(0)? as u64,
                             ts_ms: row.get::<_, i64>(1)? as u64,
@@ -385,6 +356,38 @@ impl FarmBus {
                             farm: row.get(9)?,
                         })
                     })?;
+                let mut res = Vec::new();
+                for r in rows {
+                    res.push(r?);
+                }
+                Ok(res)
+            } else {
+                let mut stmt = conn.prepare_cached(
+                    r#"
+                    SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
+                    FROM farm_events
+                    WHERE seq > ?1 AND incident_key IS NOT NULL AND farm = ?2
+                      AND owner = ?3
+                    ORDER BY seq ASC
+                    "#,
+                )?;
+                let rows = stmt.query_map(
+                    rusqlite::params![since_seq as i64, &self.farm, consumer],
+                    |row| {
+                        Ok(FarmEventRecord {
+                            seq: row.get::<_, i64>(0)? as u64,
+                            ts_ms: row.get::<_, i64>(1)? as u64,
+                            event_type: row.get(2)?,
+                            actor: row.get(3)?,
+                            subject: row.get(4)?,
+                            owner: row.get(5)?,
+                            project: row.get(6)?,
+                            incident_key: row.get(7)?,
+                            payload_json: row.get(8)?,
+                            farm: row.get(9)?,
+                        })
+                    },
+                )?;
                 let mut res = Vec::new();
                 for r in rows {
                     res.push(r?);
@@ -416,7 +419,7 @@ impl FarmBus {
         {
             let conn = self.conn_for_test();
             let timeout = crate::bus::mail::get_mail_ack_timeout_ms();
-            let _ = crate::bus::mail::check_unacked_incidents(&conn, timeout);
+            let _ = crate::bus::mail::check_unacked_incidents(&conn, timeout, &self.farm);
         }
 
         let unacked_mail =
@@ -498,7 +501,7 @@ impl FarmBus {
         {
             let conn = self.conn_for_test();
             let timeout = crate::bus::mail::get_mail_ack_timeout_ms();
-            let _ = crate::bus::mail::check_unacked_incidents(&conn, timeout);
+            let _ = crate::bus::mail::check_unacked_incidents(&conn, timeout, &self.farm);
         }
 
         let new_mail = {
@@ -509,7 +512,7 @@ impl FarmBus {
                     SELECT id, msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to,
                            body, deliveries, last_delivered_ms, acked_ms, acked_by
                     FROM mail
-                    WHERE to_name = ?1 AND acked_ms IS NULL AND id > ?2
+                    WHERE to_name = ?1 AND acked_ms IS NULL AND id > ?2 AND farm = ?3
                     ORDER BY id ASC
                     "#,
                 )
@@ -517,7 +520,7 @@ impl FarmBus {
 
             let rows = stmt
                 .query_map(
-                    rusqlite::params![consumer, *last_seen_mail_id as i64],
+                    rusqlite::params![consumer, *last_seen_mail_id as i64, &self.farm],
                     |row| {
                         Ok(MailMessage {
                             id: row.get::<_, i64>(0)? as u64,
