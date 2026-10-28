@@ -218,6 +218,10 @@ pub struct Strategy {
     pub builder_reviewer_differ: String,
     #[serde(default)]
     pub lead_kind: Option<String>,
+    /// Kinds whose live task workers hold a build slot in the Lead gate
+    /// (`worker/leadgate.rs`). Absent: every kind in `[kinds]` counts.
+    #[serde(default)]
+    pub build_kinds: Option<Vec<String>>,
 }
 
 impl Default for Strategy {
@@ -227,6 +231,7 @@ impl Default for Strategy {
             default_reviewer: Vec::new(),
             builder_reviewer_differ: default_differ(),
             lead_kind: None,
+            build_kinds: None,
         }
     }
 }
@@ -303,6 +308,16 @@ impl std::ops::Deref for ModelVariants {
 }
 
 impl Config {
+    /// The kinds whose live task workers hold a build slot in the Lead gate:
+    /// `strategy.build_kinds`, or — when the key is absent, as in a `team.toml`
+    /// written before it existed — every configured kind.
+    pub fn build_kinds(&self) -> Vec<&str> {
+        match &self.strategy.build_kinds {
+            Some(kinds) => kinds.iter().map(String::as_str).collect(),
+            None => self.kinds.keys().map(String::as_str).collect(),
+        }
+    }
+
     pub fn opencode_model_variants(&self, model: &str) -> Option<ModelVariants> {
         let model_id = model.rsplit('/').next().unwrap_or(model);
         self.opencode_models
@@ -843,6 +858,11 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             return Err(format!("purpose '{purpose}': unknown kind '{kind}'"));
         }
     }
+    for kind in cfg.strategy.build_kinds.iter().flatten() {
+        if !cfg.kinds.contains_key(kind) {
+            return Err(format!("strategy.build_kinds: unknown kind '{kind}'"));
+        }
+    }
 
 
     // team.toml is the only source of harness/model/effort: fail closed on a kind
@@ -993,6 +1013,7 @@ pub fn get(raw: &Config, key: &str, project: Option<&str>) -> Result<String, Str
             .map(|v| v.join("\n"))
             .ok_or_else(unknown)?,
         ["strategy", "default_reviewer"] => cfg.strategy.default_reviewer.join("\n"),
+        ["strategy", "build_kinds"] => cfg.build_kinds().join("\n"),
         ["strategy", "builder_reviewer_differ"] => cfg.strategy.builder_reviewer_differ.clone(),
         ["kinds", k, field] => {
             let kind = cfg.kinds.get(*k).ok_or_else(unknown)?;
@@ -1102,6 +1123,40 @@ workers_tab = "workers"
     #[test]
     fn valid_base_passes() {
         assert!(validate(&base()).is_ok());
+    }
+
+    #[test]
+    fn build_kinds_default_to_every_configured_kind() {
+        // R4: a team.toml written before the key existed still parses and
+        // counts every kind as a build kind.
+        assert_eq!(base().build_kinds(), vec!["suhuynh", "tieude"]);
+    }
+
+    #[test]
+    fn build_kinds_from_team_toml_win_and_must_name_kinds() {
+        let mut c = base();
+        c.strategy.build_kinds = Some(vec!["tieude".to_string()]);
+        assert!(validate(&c).is_ok());
+        assert_eq!(c.build_kinds(), vec!["tieude"]);
+
+        c.strategy
+            .build_kinds
+            .as_mut()
+            .unwrap()
+            .push("ghost-kind".to_string());
+        let err = validate(&c).unwrap_err();
+        assert!(
+            err.contains("strategy.build_kinds: unknown kind 'ghost-kind'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn template_counts_the_builder_roster() {
+        // The Lead gate used to hardcode these three; the template now says so.
+        let cfg = embedded_team_config().expect("embedded team.toml");
+        assert_eq!(validate(&cfg), Ok(()), "template must validate");
+        assert_eq!(cfg.build_kinds(), vec!["tieude", "sude", "ni"]);
     }
 
     #[test]

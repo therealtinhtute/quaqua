@@ -36,6 +36,8 @@ reports_to = "owner"
 default_kind = "tieude"
 lead_kind = "ni"
 default_reviewer = ["suhuynh"]
+# Kinds whose live workers hold a build slot in the Lead gate (`quaqua worker spawn`).
+build_kinds = ["tieude", "sude", "ni"]
 builder_reviewer_differ = "harness"
 
 [purposes]
