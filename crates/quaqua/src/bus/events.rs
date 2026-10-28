@@ -399,6 +399,167 @@ impl FarmBus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneAttribution {
+    Local {
+        owner: Option<String>,
+        project: Option<String>,
+        farm: String,
+    },
+    Foreign,
+}
+
+/// Evaluates the pane attribution ladder to determine if a pane is Local or Foreign.
+/// Ladder order:
+/// 1. token `grid_farm == local` -> Local
+/// 2. token `grid_farm != local` -> Foreign
+/// 3. `cwd` canonical-prefixed by local root -> Local
+/// 4. `basename(cwd)` has `runs/<basename>.owner` -> Local
+/// 5. `pane get` answers `pane_not_found` / no `result.pane` -> Foreign
+/// 6. `pane get` fails or is unparseable -> Local (fail-open)
+pub fn attribute_pane<H: HerdrOps>(
+    herdr: &H,
+    pane: &str,
+    local: &str,
+    runs_dir: &Path,
+) -> PaneAttribution {
+    let (_ok, text) = match herdr.pane_get(pane) {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!(
+                "warning: [attribute_pane] cannot get pane {pane}: {e}; failing open to local"
+            );
+            return PaneAttribution::Local {
+                owner: None,
+                project: None,
+                farm: local.to_string(),
+            };
+        }
+    };
+
+    let val: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!(
+                "warning: [attribute_pane] unparseable JSON for pane {pane}; failing open to local"
+            );
+            return PaneAttribution::Local {
+                owner: None,
+                project: None,
+                farm: local.to_string(),
+            };
+        }
+    };
+
+    // Ladder 5: pane_not_found / no result.pane -> Foreign
+    if val
+        .get("error")
+        .and_then(|e| e.get("code"))
+        .and_then(|c| c.as_str())
+        == Some("pane_not_found")
+    {
+        return PaneAttribution::Foreign;
+    }
+
+    let pane_obj = match val.get("result").and_then(|r| r.get("pane")) {
+        Some(p) => p,
+        None => return PaneAttribution::Foreign,
+    };
+
+    let tokens = pane_obj.get("tokens");
+    let cwd_str = pane_obj.get("cwd").and_then(|c| c.as_str()).unwrap_or("");
+    let base_name = if !cwd_str.is_empty() {
+        Path::new(cwd_str)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+    } else {
+        ""
+    };
+
+    // Ladder 1 & 2: token grid_farm
+    let grid_farm_opt = tokens
+        .and_then(|t| t.get("grid_farm"))
+        .and_then(|f| f.as_str());
+    let is_local = if let Some(grid_farm) = grid_farm_opt {
+        if grid_farm == local {
+            true
+        } else {
+            return PaneAttribution::Foreign;
+        }
+    } else {
+        // Ladder 3: cwd canonical-prefixed by local root
+        let local_root = runs_dir.parent().unwrap_or(runs_dir);
+        let canonical_local = local_root
+            .canonicalize()
+            .unwrap_or_else(|_| local_root.to_path_buf());
+        let in_local_root = if !cwd_str.is_empty() {
+            let cwd_path = Path::new(cwd_str);
+            let canonical_cwd = cwd_path
+                .canonicalize()
+                .unwrap_or_else(|_| cwd_path.to_path_buf());
+            canonical_cwd.starts_with(&canonical_local)
+        } else {
+            false
+        };
+
+        if in_local_root {
+            true
+        } else if !base_name.is_empty() && runs_dir.join(format!("{base_name}.owner")).is_file() {
+            // Ladder 4: basename(cwd) has runs/<basename>.owner -> Local
+            true
+        } else {
+            // Ladder 5 / none -> Foreign
+            return PaneAttribution::Foreign;
+        }
+    };
+
+    if is_local {
+        let owner = tokens
+            .and_then(|t| t.get("grid_owner"))
+            .and_then(|o| o.as_str())
+            .map(String::from)
+            .or_else(|| {
+                if !base_name.is_empty() {
+                    let owner_file = runs_dir.join(format!("{base_name}.owner"));
+                    std::fs::read_to_string(&owner_file)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                } else {
+                    None
+                }
+            });
+
+        let project = tokens
+            .and_then(|t| t.get("grid_group"))
+            .and_then(|g| g.as_str())
+            .map(String::from)
+            .or_else(|| {
+                if !base_name.is_empty() {
+                    let repo_file = runs_dir.join(format!("{base_name}.repo"));
+                    std::fs::read_to_string(&repo_file).ok().and_then(|s| {
+                        let trimmed = s.trim();
+                        Path::new(trimmed)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(String::from)
+                    })
+                } else {
+                    None
+                }
+            });
+
+        PaneAttribution::Local {
+            owner,
+            project,
+            farm: local.to_string(),
+        }
+    } else {
+        PaneAttribution::Foreign
+    }
+}
+
 /// Handles an incoming herdr plugin hook event:
 /// - Extracts pane, agent, and status.
 /// - On `pane.agent_status_changed` where status is `blocked`, records an incident with
@@ -468,6 +629,27 @@ pub fn handle_event_hook<H: HerdrOps>(
         }
     };
 
+    let local_farm = bus.farm().to_string();
+    let attribution = if !pid.is_empty() {
+        attribute_pane(herdr, pid, &local_farm, runs_dir)
+    } else {
+        PaneAttribution::Local {
+            owner: None,
+            project: None,
+            farm: local_farm.clone(),
+        }
+    };
+
+    let (owner, project, farm) = match attribution {
+        PaneAttribution::Local {
+            owner,
+            project,
+            farm,
+        } => (owner, project, farm),
+        PaneAttribution::Foreign => {
+            return Ok(false);
+        }
+    };
     if ev_name == "pane.agent_status_changed" || ev_name == "pane_agent_status_changed" {
         if agent_status == "blocked" {
             let incident_key = if let Some(k) = val.get("incident_key").and_then(|v| v.as_str()) {
@@ -498,10 +680,11 @@ pub fn handle_event_hook<H: HerdrOps>(
                 "blocked",
                 Some("herdr"),
                 Some(&subject_str),
-                None::<String>,
-                None::<String>,
+                owner.as_deref(),
+                project.as_deref(),
             )
-            .with_incident_key(incident_key);
+            .with_incident_key(incident_key)
+            .with_farm(&farm);
 
             if !ej.is_empty() && ej != "{}" {
                 ev = ev.with_payload_json(ej);
@@ -525,10 +708,11 @@ pub fn handle_event_hook<H: HerdrOps>(
                         "agent_status",
                         Some("herdr"),
                         Some(&subject_str),
-                        None::<String>,
-                        None::<String>,
+                        owner.as_deref(),
+                        project.as_deref(),
                     )
-                    .with_payload_json(ej);
+                    .with_payload_json(ej)
+                    .with_farm(&farm);
                     let _ = bus.record(&ev);
                 }
             }
@@ -544,9 +728,10 @@ pub fn handle_event_hook<H: HerdrOps>(
             "agent_exited",
             Some("herdr"),
             Some(&subject_str),
-            None::<String>,
-            None::<String>,
-        );
+            owner.as_deref(),
+            project.as_deref(),
+        )
+        .with_farm(&farm);
         if let Some(key) = incident_key {
             ev = ev.with_incident_key(key);
         }

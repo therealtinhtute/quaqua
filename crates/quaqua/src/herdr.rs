@@ -21,6 +21,15 @@ pub trait HerdrOps {
     fn pane_wait_output(&self, pane: &str, pattern: &str, timeout_ms: u32) -> bool;
     fn pane_read(&self, pane: &str, source: &str, lines: u32) -> std::io::Result<String>;
     fn pane_send_keys(&self, pane: &str, key: &str) -> std::io::Result<Output>;
+    fn pane_get(&self, pane: &str) -> std::io::Result<(bool, String)> {
+        let out = self.run(&["pane", "get", pane])?;
+        let text = if out.stdout.is_empty() {
+            String::from_utf8_lossy(&out.stderr).to_string()
+        } else {
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        Ok((out.status.success(), text))
+    }
     fn agent_send_keys(&self, name: &str, key: &str) -> std::io::Result<Output>;
     fn agent_wait_idle(&self, name: &str, timeout_ms: u32) -> std::io::Result<Output> {
         self.agent_wait(name, &["idle"], timeout_ms as u64)
@@ -28,12 +37,7 @@ pub trait HerdrOps {
     fn agent_prompt_nowait(&self, name: &str, prompt: &str) -> std::io::Result<Output>;
     /// One blocking wait. Default implementation drives `run`; the live
     /// `Herdr` also has inherent methods with the same behaviour.
-    fn agent_wait(
-        &self,
-        name: &str,
-        until: &[&str],
-        timeout_ms: u64,
-    ) -> std::io::Result<Output> {
+    fn agent_wait(&self, name: &str, until: &[&str], timeout_ms: u64) -> std::io::Result<Output> {
         if timeout_ms == 0 {
             return self.run(&["agent", "get", name]);
         }
@@ -236,7 +240,9 @@ impl HerdrOps for Herdr {
 
     fn agent_read(&self, name: &str, source: &str, lines: u32) -> std::io::Result<String> {
         let lines_str = lines.to_string();
-        let out = self.run(&["agent", "read", name, "--source", source, "--lines", &lines_str])?;
+        let out = self.run(&[
+            "agent", "read", name, "--source", source, "--lines", &lines_str,
+        ])?;
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
@@ -250,14 +256,33 @@ impl HerdrOps for Herdr {
     ) -> std::io::Result<Output> {
         let mut cmd = Command::new(&self.bin);
         let timeout_str = timeout_ms.to_string();
-        cmd.args(["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", &timeout_str]);
+        cmd.args([
+            "agent",
+            "start",
+            name,
+            "--kind",
+            kind,
+            "--pane",
+            pane,
+            "--timeout",
+            &timeout_str,
+        ]);
         cmd.args(extra_args);
         cmd.output()
     }
 
     fn pane_split(&self, cwd: &str, owner: &str, envs: &[(&str, &str)]) -> std::io::Result<Output> {
         let mut cmd = Command::new(&self.bin);
-        cmd.args(["pane", "split", "--current", "--direction", "right", "--no-focus", "--cwd", cwd]);
+        cmd.args([
+            "pane",
+            "split",
+            "--current",
+            "--direction",
+            "right",
+            "--no-focus",
+            "--cwd",
+            cwd,
+        ]);
         cmd.args(["--env", "QUAQUA_SANDBOX=1"]);
         let owner_env = format!("QUAQUA_OWNER={}", owner);
         cmd.args(["--env", &owner_env]);
@@ -283,7 +308,15 @@ impl HerdrOps for Herdr {
 
     fn pane_wait_output(&self, pane: &str, pattern: &str, timeout_ms: u32) -> bool {
         let t_str = timeout_ms.to_string();
-        match self.run(&["pane", "wait-output", pane, "--match", pattern, "--timeout", &t_str]) {
+        match self.run(&[
+            "pane",
+            "wait-output",
+            pane,
+            "--match",
+            pattern,
+            "--timeout",
+            &t_str,
+        ]) {
             Ok(out) => out.status.success(),
             Err(_) => false,
         }
@@ -291,7 +324,9 @@ impl HerdrOps for Herdr {
 
     fn pane_read(&self, pane: &str, source: &str, lines: u32) -> std::io::Result<String> {
         let lines_str = lines.to_string();
-        let out = self.run(&["pane", "read", pane, "--source", source, "--lines", &lines_str])?;
+        let out = self.run(&[
+            "pane", "read", pane, "--source", source, "--lines", &lines_str,
+        ])?;
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
@@ -485,6 +520,9 @@ mod tests {
             unimplemented!()
         }
         fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<Output> {
+            unimplemented!()
+        }
+        fn pane_get(&self, _p: &str) -> std::io::Result<(bool, String)> {
             unimplemented!()
         }
         fn agent_send_keys(&self, _n: &str, _k: &str) -> std::io::Result<Output> {
