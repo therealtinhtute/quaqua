@@ -148,7 +148,7 @@ impl FarmBus {
             if consumer == "cos" {
                 let mut stmt = conn.prepare_cached(
                     r#"
-                    SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json
+                    SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
                     FROM farm_events
                     WHERE seq > ?1 AND incident_key IS NOT NULL
                     ORDER BY seq ASC
@@ -165,6 +165,7 @@ impl FarmBus {
                         project: row.get(6)?,
                         incident_key: row.get(7)?,
                         payload_json: row.get(8)?,
+                        farm: row.get(9)?,
                     })
                 })?;
                 let mut res = Vec::new();
@@ -175,7 +176,7 @@ impl FarmBus {
             } else {
                 let mut stmt = conn.prepare_cached(
                     r#"
-                    SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json
+                    SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
                     FROM farm_events
                     WHERE seq > ?1 AND incident_key IS NOT NULL
                       AND (owner = ?2 OR project = ?2 OR owner IS NULL)
@@ -194,6 +195,7 @@ impl FarmBus {
                             project: row.get(6)?,
                             incident_key: row.get(7)?,
                             payload_json: row.get(8)?,
+                            farm: row.get(9)?,
                         })
                     })?;
                 let mut res = Vec::new();

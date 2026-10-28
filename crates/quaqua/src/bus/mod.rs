@@ -37,6 +37,7 @@ pub struct FarmEvent {
     pub project: Option<String>,
     pub incident_key: Option<String>,
     pub payload_json: String,
+    pub farm: Option<String>,
 }
 
 impl FarmEvent {
@@ -56,7 +57,13 @@ impl FarmEvent {
             project: project.map(Into::into),
             incident_key: None,
             payload_json: "{}".to_string(),
+            farm: None,
         }
+    }
+
+    pub fn with_farm(mut self, farm: impl Into<String>) -> Self {
+        self.farm = Some(farm.into());
+        self
     }
 
     pub fn with_incident_key(mut self, key: impl Into<String>) -> Self {
@@ -82,14 +89,15 @@ pub struct FarmEventRecord {
     pub project: Option<String>,
     pub incident_key: Option<String>,
     pub payload_json: String,
+    pub farm: Option<String>,
 }
 
 /// SQLite-backed event bus.
 pub struct FarmBus {
     conn: Mutex<rusqlite::Connection>,
     path: PathBuf,
+    farm: String,
 }
-
 impl FarmBus {
     pub fn default_path() -> PathBuf {
         crate::worker::cleanup::default_runs_dir().join("quaqua.db")
@@ -105,6 +113,9 @@ impl FarmBus {
         if crate::workspace::is_test_environment() && crate::workspace::is_live_workspace_db(path) {
             return Err(rusqlite::Error::InvalidPath(path.to_path_buf()));
         }
+        let runs_dir = path.parent().unwrap_or(path);
+        let local_farm = crate::workspace::farm_of_runs_dir(runs_dir);
+
         let conn = crate::engine::sqlite::open_conn(path)?;
         crate::engine::sqlite::retry_while_busy(|| {
             conn.execute_batch(
@@ -118,7 +129,8 @@ impl FarmBus {
                     owner TEXT,
                     project TEXT,
                     incident_key TEXT UNIQUE,
-                    payload_json TEXT NOT NULL DEFAULT '{}'
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    farm TEXT
                 );
                 CREATE INDEX IF NOT EXISTS farm_events_owner ON farm_events(owner, seq);
                 CREATE TABLE IF NOT EXISTS cursors (
@@ -140,7 +152,8 @@ impl FarmBus {
                     deliveries  INTEGER NOT NULL DEFAULT 0,
                     last_delivered_ms INTEGER,
                     acked_ms    INTEGER,
-                    acked_by    TEXT
+                    acked_by    TEXT,
+                    farm        TEXT
                 );
                 CREATE INDEX IF NOT EXISTS mail_unacked ON mail(to_name, acked_ms, id);
                 "#,
@@ -172,16 +185,65 @@ impl FarmBus {
                     [],
                 )?;
             }
+            let has_events_farm: bool = {
+                let mut stmt = conn.prepare("PRAGMA table_info(farm_events)")?;
+                let mut rows = stmt.query([])?;
+                let mut found = false;
+                while let Some(row) = rows.next()? {
+                    let col_name: String = row.get(1)?;
+                    if col_name == "farm" {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            };
+            if !has_events_farm {
+                conn.execute("ALTER TABLE farm_events ADD COLUMN farm TEXT", [])?;
+            }
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS farm_events_farm ON farm_events(farm, seq)",
+                [],
+            )?;
+            let has_mail_farm: bool = {
+                let mut stmt = conn.prepare("PRAGMA table_info(mail)")?;
+                let mut rows = stmt.query([])?;
+                let mut found = false;
+                while let Some(row) = rows.next()? {
+                    let col_name: String = row.get(1)?;
+                    if col_name == "farm" {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            };
+            if !has_mail_farm {
+                conn.execute("ALTER TABLE mail ADD COLUMN farm TEXT", [])?;
+            }
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS mail_farm ON mail(farm, to_name, acked_ms, id)",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE farm_events SET farm = ?1 WHERE farm IS NULL AND owner IS NOT NULL",
+                rusqlite::params![&local_farm],
+            )?;
             Ok(())
         })?;
         Ok(Self {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
+            farm: local_farm,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn farm(&self) -> &str {
+        &self.farm
     }
     pub fn conn_for_test(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
         self.conn.lock().unwrap()
@@ -194,12 +256,13 @@ impl FarmBus {
     /// Otherwise, the event is inserted and this method returns `Ok(true)`.
     pub fn record(&self, event: &FarmEvent) -> rusqlite::Result<bool> {
         let conn = self.conn.lock().unwrap();
+        let farm_str = event.farm.as_deref().unwrap_or(&self.farm);
         crate::engine::sqlite::retry_while_busy(|| {
             let mut stmt = conn.prepare_cached(
                 r#"
                 INSERT OR IGNORE INTO farm_events (
-                    ts_ms, type, actor, subject, owner, project, incident_key, payload_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                 "#,
             )?;
             let rows = stmt.execute(rusqlite::params![
@@ -211,6 +274,7 @@ impl FarmBus {
                 event.project,
                 event.incident_key,
                 event.payload_json,
+                farm_str,
             ])?;
             Ok(rows > 0)
         })
@@ -222,7 +286,7 @@ impl FarmBus {
         crate::engine::sqlite::retry_while_busy(|| {
             let mut stmt = conn.prepare_cached(
                 r#"
-                SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json
+                SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
                 FROM farm_events
                 WHERE seq > ?1
                 ORDER BY seq ASC
@@ -239,6 +303,7 @@ impl FarmBus {
                     project: row.get(6)?,
                     incident_key: row.get(7)?,
                     payload_json: row.get(8)?,
+                    farm: row.get(9)?,
                 })
             })?;
             let mut res = Vec::new();
@@ -550,5 +615,120 @@ mod tests {
             status_before, status_after,
             "quaqua status output must be byte-unchanged when farm_events/cursors tables and rows exist"
         );
+    }
+
+    #[test]
+    fn test_farm_bus_schema_migration_and_backfill() {
+        let (db_path, _cleaner) = temp_db("bus-migration");
+        let _ = std::fs::remove_file(&db_path);
+
+        // 1. Manually initialize a database with legacy schema (no farm column)
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("open legacy db");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE farm_events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_ms INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    actor TEXT,
+                    subject TEXT,
+                    owner TEXT,
+                    project TEXT,
+                    incident_key TEXT UNIQUE,
+                    payload_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TABLE mail (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    msg_key     TEXT NOT NULL UNIQUE,
+                    ts_ms       INTEGER NOT NULL,
+                    from_name   TEXT NOT NULL,
+                    from_role   TEXT NOT NULL,
+                    to_name     TEXT NOT NULL,
+                    kind        TEXT NOT NULL,
+                    project     TEXT,
+                    reply_to    INTEGER REFERENCES mail(id),
+                    body        TEXT NOT NULL CHECK (length(body) <= 4096),
+                    deliveries  INTEGER NOT NULL DEFAULT 0,
+                    last_delivered_ms INTEGER,
+                    acked_ms    INTEGER,
+                    acked_by    TEXT
+                );
+                INSERT INTO farm_events (ts_ms, type, actor, subject, owner, project, incident_key)
+                VALUES (1000, 'blocked', 'herdr', 'w1:p1', 'cos', 'projA', 'k1');
+                INSERT INTO farm_events (ts_ms, type, actor, subject, owner, project, incident_key)
+                VALUES (2000, 'blocked', 'herdr', 'w7:p2', NULL, NULL, 'k2');
+                "#,
+            )
+            .expect("create legacy schema");
+        }
+
+        // Count rows before open
+        let count_before: i64 = {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.query_row("SELECT count(*) FROM farm_events", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(count_before, 2);
+
+        // 2. Open via FarmBus -> triggers migration & backfill
+        let bus = FarmBus::open(&db_path).expect("open bus and migrate");
+
+        // Invariant: no row deleted
+        let count_after: i64 = bus
+            .conn_for_test()
+            .query_row("SELECT count(*) FROM farm_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count_after, count_before,
+            "migration must not delete any row"
+        );
+
+        // Row with owner='cos' backfilled with local farm
+        let farm_owner: Option<String> = bus
+            .conn_for_test()
+            .query_row(
+                "SELECT farm FROM farm_events WHERE incident_key = 'k1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(farm_owner.as_deref(), Some(bus.farm()));
+
+        // Row with owner=NULL remains NULL
+        let farm_null: Option<String> = bus
+            .conn_for_test()
+            .query_row(
+                "SELECT farm FROM farm_events WHERE incident_key = 'k2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(farm_null, None, "owner=NULL row must remain farm=NULL");
+
+        // Record with default stamps farm, with custom farm keeps custom
+        let ev1 = FarmEvent::new(
+            "test",
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            None::<String>,
+        );
+        bus.record(&ev1).expect("record ev1");
+        let ev2 = FarmEvent::new(
+            "test",
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            None::<String>,
+        )
+        .with_farm("custom-farm");
+        bus.record(&ev2).expect("record ev2");
+
+        let events = bus.load_events(0).expect("load events");
+        let rec1 = events.iter().find(|e| e.seq == 3).unwrap();
+        assert_eq!(rec1.farm.as_deref(), Some(bus.farm()));
+        let rec2 = events.iter().find(|e| e.seq == 4).unwrap();
+        assert_eq!(rec2.farm.as_deref(), Some("custom-farm"));
     }
 }

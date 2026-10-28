@@ -25,8 +25,7 @@ pub fn is_test_environment() -> bool {
     if cfg!(test) {
         return true;
     }
-    std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
-        || is_running_in_cargo_test()
+    std::env::var("QUAQUA_TEST").as_deref() == Ok("1") || is_running_in_cargo_test()
 }
 
 fn is_running_in_cargo_test() -> bool {
@@ -124,7 +123,10 @@ pub fn is_live_workspace_db(path: &Path) -> bool {
             return false;
         }
     }
-    if path.starts_with("/tmp") || path.starts_with("/private/tmp") || path.starts_with("/private/var") {
+    if path.starts_with("/tmp")
+        || path.starts_with("/private/tmp")
+        || path.starts_with("/private/var")
+    {
         return false;
     }
 
@@ -201,6 +203,53 @@ fn ensure_workspace_root(root: PathBuf) -> Result<PathBuf, (i32, String)> {
     }
 }
 
+/// Sanitizes a string to `[a-z0-9_-]` (lowercase, everything else -> `-`).
+pub fn sanitize_farm_id(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let sanitized: String = lower
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Derives the farm id from a workspace root: the last path component
+/// of the canonicalized root, sanitized to `[a-z0-9_-]`.
+pub fn farm_id_of(root: &Path) -> String {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let last = canonical
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("quaqua");
+    sanitize_farm_id(last)
+}
+
+/// Derives the local farm id from `workspace_root()`.
+pub fn farm_id() -> String {
+    farm_id_of(&workspace_root())
+}
+
+/// Derives the farm id for a given runs directory.
+/// If `runs_dir` ends with `runs`, resolves from its parent workspace root.
+pub fn farm_of_runs_dir(runs_dir: &Path) -> String {
+    let target = if runs_dir.file_name().and_then(|s| s.to_str()) == Some("runs") {
+        runs_dir.parent().unwrap_or(runs_dir)
+    } else {
+        runs_dir
+    };
+    farm_id_of(target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +291,22 @@ mod tests {
         assert_eq!(ensure_workspace_root(dir.clone()).unwrap(), dir);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_sanitize_farm_id() {
+        assert_eq!(sanitize_farm_id("quaqua"), "quaqua");
+        assert_eq!(sanitize_farm_id("TTDVKH"), "ttdvkh");
+        assert_eq!(sanitize_farm_id("My Farm.v1"), "my-farm-v1");
+        assert_eq!(sanitize_farm_id("farm_2"), "farm_2");
+    }
+
+    #[test]
+    fn test_farm_of_runs_dir() {
+        let runs = Path::new("/path/to/myworkspace/runs");
+        assert_eq!(farm_of_runs_dir(runs), "myworkspace");
+
+        let standalone = Path::new("/tmp/my-standalone-test");
+        assert_eq!(farm_of_runs_dir(standalone), "my-standalone-test");
     }
 }
