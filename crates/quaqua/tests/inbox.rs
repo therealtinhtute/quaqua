@@ -723,3 +723,60 @@ fn test_cos_inbox_hook_stop_blocks_once_and_skips_when_stop_hook_active() {
         "stop hook must not block when stop_hook_active is true"
     );
 }
+
+#[test]
+fn test_inbox_foreign_farm_rows_never_reach_cos_or_lead() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_RUNS_DIR",
+    ]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.remove("HERDR_PANE_ID");
+
+    let runs_dir = hermetic_temp_dir("foreign-farm");
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+    let db_path = runs_dir.join("quaqua.db");
+    let bus = FarmBus::open(&db_path).expect("open bus");
+
+    // Add farm column if not present yet so we can insert a foreign-farm row
+    let _ = bus
+        .conn_for_test()
+        .execute("ALTER TABLE farm_events ADD COLUMN farm TEXT", []);
+
+    let now = quaqua::bus::now_ms();
+    // Foreign row 1: farm='TTDVKH', owner='cos'
+    bus.conn_for_test().execute(
+        r#"
+        INSERT INTO farm_events (ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm)
+        VALUES (?1, 'blocked', 'herdr', 'w7:p2', 'cos', NULL, 'blocked:w7:p2:foreign_cos', '{}', 'TTDVKH')
+        "#,
+        rusqlite::params![now as i64],
+    ).expect("insert foreign cos row");
+
+    // Foreign row 2: farm='TTDVKH', owner=NULL (unattributed foreign incident)
+    bus.conn_for_test().execute(
+        r#"
+        INSERT INTO farm_events (ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm)
+        VALUES (?1, 'blocked', 'herdr', 'w7:p25', NULL, NULL, 'blocked:w7:p25:foreign_null', '{}', 'TTDVKH')
+        "#,
+        rusqlite::params![now as i64],
+    ).expect("insert foreign null row");
+
+    // 1. cos digest must NOT see foreign-farm row
+    let cos_digest = bus.inbox_digest(&runs_dir, "cos").expect("cos digest");
+    assert_eq!(
+        cos_digest.incidents.len(),
+        0,
+        "foreign farm row (farm='TTDVKH') must not reach cos inbox digest"
+    );
+
+    // 2. mu-lead digest must NOT see owner=NULL row or foreign-farm row
+    let lead_digest = bus.inbox_digest(&runs_dir, "mu-lead").expect("lead digest");
+    assert_eq!(
+        lead_digest.incidents.len(),
+        0,
+        "foreign rows with owner=NULL or foreign farm must not reach mu-lead inbox digest"
+    );
+}
