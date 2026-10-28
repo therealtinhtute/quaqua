@@ -97,6 +97,8 @@ pub struct FarmBus {
     conn: Mutex<rusqlite::Connection>,
     path: PathBuf,
     farm: String,
+    events_watermark: u64,
+    mail_watermark: u64,
 }
 impl FarmBus {
     pub fn default_path() -> PathBuf {
@@ -156,6 +158,10 @@ impl FarmBus {
                     farm        TEXT
                 );
                 CREATE INDEX IF NOT EXISTS mail_unacked ON mail(to_name, acked_ms, id);
+                CREATE TABLE IF NOT EXISTS bus_migration (
+                    name TEXT PRIMARY KEY,
+                    watermark INTEGER NOT NULL
+                );
                 "#,
             )?;
             let has_mail_id: bool = {
@@ -198,8 +204,24 @@ impl FarmBus {
                 }
                 found
             };
+            let mut just_added_events_farm = false;
             if !has_events_farm {
-                conn.execute("ALTER TABLE farm_events ADD COLUMN farm TEXT", [])?;
+                let max_seq: i64 = conn
+                    .query_row("SELECT COALESCE(MAX(seq), 0) FROM farm_events", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap_or(0);
+                match conn.execute("ALTER TABLE farm_events ADD COLUMN farm TEXT", []) {
+                    Ok(_) => {
+                        just_added_events_farm = true;
+                    }
+                    Err(e) if e.to_string().contains("duplicate column name") => {}
+                    Err(e) => return Err(e),
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO bus_migration (name, watermark) VALUES ('farm_events_seq', ?1)",
+                    [max_seq],
+                )?;
             }
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS farm_events_farm ON farm_events(farm, seq)",
@@ -219,22 +241,54 @@ impl FarmBus {
                 found
             };
             if !has_mail_farm {
-                conn.execute("ALTER TABLE mail ADD COLUMN farm TEXT", [])?;
+                let max_mail_id: i64 = conn
+                    .query_row("SELECT COALESCE(MAX(id), 0) FROM mail", [], |r| r.get(0))
+                    .unwrap_or(0);
+                match conn.execute("ALTER TABLE mail ADD COLUMN farm TEXT", []) {
+                    Ok(_) => {}
+                    Err(e) if e.to_string().contains("duplicate column name") => {}
+                    Err(e) => return Err(e),
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO bus_migration (name, watermark) VALUES ('mail_id', ?1)",
+                    [max_mail_id],
+                )?;
             }
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS mail_farm ON mail(farm, to_name, acked_ms, id)",
                 [],
             )?;
-            conn.execute(
-                "UPDATE farm_events SET farm = ?1 WHERE farm IS NULL AND owner IS NOT NULL",
-                rusqlite::params![&local_farm],
-            )?;
+            if just_added_events_farm {
+                conn.execute(
+                    "UPDATE farm_events SET farm = ?1 WHERE farm IS NULL AND owner IS NOT NULL",
+                    rusqlite::params![&local_farm],
+                )?;
+            }
             Ok(())
         })?;
+
+        let events_watermark: u64 = conn
+            .query_row(
+                "SELECT watermark FROM bus_migration WHERE name = 'farm_events_seq'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as u64;
+
+        let mail_watermark: u64 = conn
+            .query_row(
+                "SELECT watermark FROM bus_migration WHERE name = 'mail_id'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as u64;
+
         Ok(Self {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
             farm: local_farm,
+            events_watermark,
+            mail_watermark,
         })
     }
 
@@ -244,6 +298,14 @@ impl FarmBus {
 
     pub fn farm(&self) -> &str {
         &self.farm
+    }
+
+    pub fn events_watermark(&self) -> u64 {
+        self.events_watermark
+    }
+
+    pub fn mail_watermark(&self) -> u64 {
+        self.mail_watermark
     }
     pub fn conn_for_test(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
         self.conn.lock().unwrap()

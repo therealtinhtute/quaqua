@@ -30,6 +30,17 @@ fn stub(runs: &PathBuf, pane_get_body: &str) -> Herdr {
     Herdr::new()
 }
 
+fn stub_herdr(runs: &PathBuf, body: &str) -> Herdr {
+    let bin = runs.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let p = bin.join("herdr");
+    fs::write(&p, format!("#!/bin/sh\n{body}\nexit 0\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("HERDR_BIN_PATH", &p);
+    Herdr::new()
+}
+
 fn count(runs: &PathBuf, typ: &str) -> i64 {
     let bus = FarmBus::open(&runs.join("quaqua.db")).unwrap();
     let c = bus.conn_for_test();
@@ -144,4 +155,49 @@ fn r5_migration_idempotent() {
         )
         .unwrap();
     assert_eq!(cols, 1);
+}
+
+// F5: treat "duplicate column name" as success.
+#[test]
+fn r6_migration_duplicate_column_name_treated_as_success() {
+    let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let runs = tmp("dupcol");
+    let db = runs.join("quaqua.db");
+    {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch(
+            "CREATE TABLE farm_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL, type TEXT NOT NULL, actor TEXT, subject TEXT, owner TEXT, project TEXT, incident_key TEXT UNIQUE, payload_json TEXT NOT NULL DEFAULT '{}');
+             CREATE TABLE mail (id INTEGER PRIMARY KEY AUTOINCREMENT, msg_key TEXT NOT NULL UNIQUE, ts_ms INTEGER NOT NULL, from_name TEXT NOT NULL, from_role TEXT NOT NULL, to_name TEXT NOT NULL, kind TEXT NOT NULL, project TEXT, reply_to INTEGER, body TEXT NOT NULL, deliveries INTEGER NOT NULL DEFAULT 0, last_delivered_ms INTEGER, acked_ms INTEGER, acked_by TEXT);"
+        ).unwrap();
+        c.execute("ALTER TABLE farm_events ADD COLUMN farm TEXT", [])
+            .unwrap();
+    }
+    let bus = FarmBus::open(&db);
+    assert!(
+        bus.is_ok(),
+        "FarmBus::open must succeed even if column was already added"
+    );
+}
+
+// F7: a live agent with .pipeline but no .owner must not count against owner capacity.
+#[test]
+fn r7_cap_live_agent_with_pipeline_but_no_owner() {
+    let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let runs = tmp("pipenowner");
+    fs::write(runs.join("tieude-pipe.pipeline"), "build\n").unwrap();
+    let h = stub_herdr(
+        &runs,
+        r#"
+if [ "$1" = agent ] && [ "$2" = list ]; then
+    echo '{"result":{"agents":[{"name":"tieude-pipe","agent_status":"working","status":"running"}]}}'
+    exit 0
+fi
+"#,
+    );
+    let cfg = quaqua::config::Config::default();
+    let count = quaqua::cap::count_owner_slots(&runs, "cos", None, &h, &cfg);
+    assert_eq!(
+        count, 0,
+        "live agent with .pipeline but no .owner must not count against cap"
+    );
 }

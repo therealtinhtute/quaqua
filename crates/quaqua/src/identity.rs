@@ -431,6 +431,7 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
                     .to_string();
 
                 if !owner.is_empty() && !grid_tab.is_empty() && !group.is_empty() {
+                    let farm_id = crate::workspace::farm_of_runs_dir(runs_dir);
                     let mut already_tagged = false;
                     if let Ok(out) = herdr.run(&["pane", "get", pane_id]) {
                         if out.status.success() {
@@ -448,7 +449,9 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
                                     let has_group =
                                         tokens.get("grid_group").and_then(|v| v.as_str())
                                             == Some(&group);
-                                    if has_role && has_owner && has_tab && has_group {
+                                    let has_farm = tokens.get("grid_farm").and_then(|v| v.as_str())
+                                        == Some(&farm_id);
+                                    if has_role && has_owner && has_tab && has_group && has_farm {
                                         already_tagged = true;
                                     }
                                 }
@@ -460,6 +463,7 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
                         let owner_tok = format!("grid_owner={owner}");
                         let tab_tok = format!("grid_tab={grid_tab}");
                         let group_tok = format!("grid_group={group}");
+                        let farm_tok = format!("grid_farm={farm_id}");
 
                         match herdr.run(&[
                             "pane",
@@ -475,6 +479,8 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
                             &owner_tok,
                             "--token",
                             &tab_tok,
+                            "--token",
+                            &farm_tok,
                         ]) {
                             Ok(out) if out.status.success() => {
                                 actions.push(format!(

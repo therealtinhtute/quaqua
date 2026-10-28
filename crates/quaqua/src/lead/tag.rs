@@ -26,6 +26,8 @@ pub fn get_agent_list_json<H: HerdrOps>(herdr: &H) -> Option<serde_json::Value> 
 pub fn tag_lead_pane<H: HerdrOps>(herdr: &H, slug: &str, pane: &str) -> Result<String, String> {
     let clean_slug = slug.strip_suffix("-lead").unwrap_or(slug);
     let lead_name = format!("{clean_slug}-lead");
+    let farm_id = crate::workspace::farm_id();
+    let farm_tok = format!("grid_farm={farm_id}");
     let role_tok = "grid_role=orchestrator";
     let owner_tok = format!("grid_owner={lead_name}");
     let out = herdr
@@ -39,6 +41,8 @@ pub fn tag_lead_pane<H: HerdrOps>(herdr: &H, slug: &str, pane: &str) -> Result<S
             role_tok,
             "--token",
             &owner_tok,
+            "--token",
+            &farm_tok,
         ])
         .map_err(|e| format!("herdr pane report-metadata failed for {pane}: {e}"))?;
     if !out.status.success() {
@@ -64,11 +68,14 @@ pub fn ensure_lead_pane_tagged<H: HerdrOps>(
         if out.status.success() {
             if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
                 if let Some(tokens) = val.pointer("/result/pane/tokens") {
+                    let farm_id = crate::workspace::farm_id();
                     let has_role =
                         tokens.get("grid_role").and_then(|v| v.as_str()) == Some("orchestrator");
                     let has_owner = tokens.get("grid_owner").and_then(|v| v.as_str())
                         == Some(expected_owner.as_str());
-                    if has_role && has_owner {
+                    let has_farm =
+                        tokens.get("grid_farm").and_then(|v| v.as_str()) == Some(&farm_id);
+                    if has_role && has_owner && has_farm {
                         return Ok(false);
                     }
                 }
@@ -173,7 +180,10 @@ pub fn repair_lead<H: HerdrOps>(
                         tokens.get("grid_role").and_then(|v| v.as_str()) == Some("orchestrator");
                     let has_owner =
                         tokens.get("grid_owner").and_then(|v| v.as_str()) == Some(&lead_name);
-                    if has_role && has_owner {
+                    let farm_id = crate::workspace::farm_id();
+                    let has_farm =
+                        tokens.get("grid_farm").and_then(|v| v.as_str()) == Some(&farm_id);
+                    if has_role && has_owner && has_farm {
                         return Ok(format!(
                             "lead '{clean_slug}' (pane {pane}) already tagged as grid_role=orchestrator grid_owner={lead_name}{owner_note}"
                         ));

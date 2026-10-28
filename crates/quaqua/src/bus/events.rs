@@ -150,12 +150,14 @@ impl FarmBus {
                     r#"
                     SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
                     FROM farm_events
-                    WHERE seq > ?1 AND incident_key IS NOT NULL AND farm = ?2
+                    WHERE seq > ?1 AND incident_key IS NOT NULL
+                      AND (farm = ?2 OR (farm IS NULL AND seq <= ?3))
                     ORDER BY seq ASC
                     "#,
                 )?;
-                let rows =
-                    stmt.query_map(rusqlite::params![since_seq as i64, &self.farm], |row| {
+                let rows = stmt.query_map(
+                    rusqlite::params![since_seq as i64, &self.farm, self.events_watermark as i64],
+                    |row| {
                         Ok(FarmEventRecord {
                             seq: row.get::<_, i64>(0)? as u64,
                             ts_ms: row.get::<_, i64>(1)? as u64,
@@ -168,7 +170,8 @@ impl FarmBus {
                             payload_json: row.get(8)?,
                             farm: row.get(9)?,
                         })
-                    })?;
+                    },
+                )?;
                 let mut res = Vec::new();
                 for r in rows {
                     res.push(r?);
@@ -179,13 +182,19 @@ impl FarmBus {
                     r#"
                     SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
                     FROM farm_events
-                    WHERE seq > ?1 AND incident_key IS NOT NULL AND farm = ?2
-                      AND owner = ?3
+                    WHERE seq > ?1 AND incident_key IS NOT NULL
+                      AND (farm = ?2 OR (farm IS NULL AND seq <= ?3))
+                      AND owner = ?4
                     ORDER BY seq ASC
                     "#,
                 )?;
                 let rows = stmt.query_map(
-                    rusqlite::params![since_seq as i64, &self.farm, consumer],
+                    rusqlite::params![
+                        since_seq as i64,
+                        &self.farm,
+                        self.events_watermark as i64,
+                        consumer
+                    ],
                     |row| {
                         Ok(FarmEventRecord {
                             seq: row.get::<_, i64>(0)? as u64,
@@ -324,7 +333,8 @@ impl FarmBus {
                     SELECT id, msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to,
                            body, deliveries, last_delivered_ms, acked_ms, acked_by
                     FROM mail
-                    WHERE to_name = ?1 AND acked_ms IS NULL AND id > ?2 AND farm = ?3
+                    WHERE to_name = ?1 AND acked_ms IS NULL AND id > ?2
+                      AND (farm = ?3 OR farm IS NULL)
                     ORDER BY id ASC
                     "#,
                 )
@@ -451,31 +461,50 @@ pub fn attribute_pane<H: HerdrOps>(
         }
     };
 
-    // Ladder 5: pane_not_found / no result.pane -> Foreign
-    if val
-        .get("error")
-        .and_then(|e| e.get("code"))
-        .and_then(|c| c.as_str())
-        == Some("pane_not_found")
-    {
-        return PaneAttribution::Foreign;
+    // F1: Foreign only on error.code == pane_not_found; any other error code or shape -> Local (fail-open)
+    if let Some(err) = val.get("error") {
+        if err.get("code").and_then(|c| c.as_str()) == Some("pane_not_found") {
+            return PaneAttribution::Foreign;
+        }
+        return PaneAttribution::Local {
+            owner: None,
+            project: None,
+            farm: local.to_string(),
+        };
     }
 
     let pane_obj = match val.get("result").and_then(|r| r.get("pane")) {
         Some(p) => p,
-        None => return PaneAttribution::Foreign,
+        None => {
+            return PaneAttribution::Local {
+                owner: None,
+                project: None,
+                farm: local.to_string(),
+            };
+        }
     };
 
     let tokens = pane_obj.get("tokens");
     let cwd_str = pane_obj.get("cwd").and_then(|c| c.as_str()).unwrap_or("");
+    let cwd_path = Path::new(cwd_str);
     let base_name = if !cwd_str.is_empty() {
-        Path::new(cwd_str)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
+        cwd_path.file_name().and_then(|n| n.to_str()).unwrap_or("")
     } else {
         ""
     };
+
+    // F2: check ancestors of cwd for runs/<name>.owner
+    let mut ancestor_worker_name: Option<String> = None;
+    if !cwd_str.is_empty() {
+        for ancestor in cwd_path.ancestors() {
+            if let Some(comp) = ancestor.file_name().and_then(|c| c.to_str()) {
+                if !comp.is_empty() && runs_dir.join(format!("{comp}.owner")).is_file() {
+                    ancestor_worker_name = Some(comp.to_string());
+                    break;
+                }
+            }
+        }
+    }
 
     // Ladder 1 & 2: token grid_farm
     let grid_farm_opt = tokens
@@ -494,7 +523,6 @@ pub fn attribute_pane<H: HerdrOps>(
             .canonicalize()
             .unwrap_or_else(|_| local_root.to_path_buf());
         let in_local_root = if !cwd_str.is_empty() {
-            let cwd_path = Path::new(cwd_str);
             let canonical_cwd = cwd_path
                 .canonicalize()
                 .unwrap_or_else(|_| cwd_path.to_path_buf());
@@ -505,23 +533,24 @@ pub fn attribute_pane<H: HerdrOps>(
 
         if in_local_root {
             true
-        } else if !base_name.is_empty() && runs_dir.join(format!("{base_name}.owner")).is_file() {
-            // Ladder 4: basename(cwd) has runs/<basename>.owner -> Local
+        } else if ancestor_worker_name.is_some() {
+            // Ladder 4: ancestor of cwd has runs/<ancestor>.owner -> Local
             true
         } else {
-            // Ladder 5 / none -> Foreign
+            // None matched -> Foreign
             return PaneAttribution::Foreign;
         }
     };
 
     if is_local {
+        let worker_name = ancestor_worker_name.as_deref().unwrap_or(base_name);
         let owner = tokens
             .and_then(|t| t.get("grid_owner"))
             .and_then(|o| o.as_str())
             .map(String::from)
             .or_else(|| {
-                if !base_name.is_empty() {
-                    let owner_file = runs_dir.join(format!("{base_name}.owner"));
+                if !worker_name.is_empty() {
+                    let owner_file = runs_dir.join(format!("{worker_name}.owner"));
                     std::fs::read_to_string(&owner_file)
                         .ok()
                         .map(|s| s.trim().to_string())
@@ -536,8 +565,8 @@ pub fn attribute_pane<H: HerdrOps>(
             .and_then(|g| g.as_str())
             .map(String::from)
             .or_else(|| {
-                if !base_name.is_empty() {
-                    let repo_file = runs_dir.join(format!("{base_name}.repo"));
+                if !worker_name.is_empty() {
+                    let repo_file = runs_dir.join(format!("{worker_name}.repo"));
                     std::fs::read_to_string(&repo_file).ok().and_then(|s| {
                         let trimmed = s.trim();
                         Path::new(trimmed)
@@ -630,7 +659,43 @@ pub fn handle_event_hook<H: HerdrOps>(
     };
 
     let local_farm = bus.farm().to_string();
-    let attribution = if !pid.is_empty() {
+    let attribution = if ev_name == "pane.exited" || ev_name == "pane_exited" {
+        let (owner, project) = if let Some(a) = agent.filter(|s| !s.is_empty()) {
+            let owner = runs_dir
+                .join(format!("{a}.owner"))
+                .is_file()
+                .then(|| {
+                    std::fs::read_to_string(runs_dir.join(format!("{a}.owner")))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+                .flatten();
+            let project = runs_dir
+                .join(format!("{a}.repo"))
+                .is_file()
+                .then(|| {
+                    std::fs::read_to_string(runs_dir.join(format!("{a}.repo")))
+                        .ok()
+                        .and_then(|s| {
+                            let trimmed = s.trim();
+                            Path::new(trimmed)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(String::from)
+                        })
+                })
+                .flatten();
+            (owner, project)
+        } else {
+            (None, None)
+        };
+        PaneAttribution::Local {
+            owner,
+            project,
+            farm: local_farm.clone(),
+        }
+    } else if !pid.is_empty() {
         attribute_pane(herdr, pid, &local_farm, runs_dir)
     } else {
         PaneAttribution::Local {

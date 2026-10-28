@@ -77,17 +77,24 @@ impl HerdrOps for MockRepairHerdr {
         } else if args.first() == Some(&"pane") && args.get(1) == Some(&"report-metadata") {
             let mut role = None;
             let mut owner = None;
+            let mut farm = None;
             for arg in args {
                 self.reported_tokens.borrow_mut().push(arg.to_string());
                 if let Some(r) = arg.strip_prefix("grid_role=") {
                     role = Some(r);
                 } else if let Some(o) = arg.strip_prefix("grid_owner=") {
                     owner = Some(o);
+                } else if let Some(f) = arg.strip_prefix("grid_farm=") {
+                    farm = Some(f);
                 }
             }
             if let (Some(r), Some(o)) = (role, owner) {
-                *self.tokens_json.borrow_mut() =
-                    format!(r#"{{"grid_role":"{r}","grid_owner":"{o}","logo":"\ue1a3"}}"#);
+                let farm_part = farm
+                    .map(|f| format!(r#","grid_farm":"{f}""#))
+                    .unwrap_or_default();
+                *self.tokens_json.borrow_mut() = format!(
+                    r#"{{"grid_role":"{r}","grid_owner":"{o}"{farm_part},"logo":"\ue1a3"}}"#
+                );
             }
             r#"{"result":{}}"#.to_string()
         } else if args.first() == Some(&"agent") && args.get(1) == Some(&"list") {
@@ -360,9 +367,12 @@ fn test_repair_lead_success_stamps_tokens() {
     assert!(res.contains("grid_owner=mu-lead"));
 
     // Verify token was stamped
+    let farm_id = quaqua::workspace::farm_id();
     assert_eq!(
         *herdr.tokens_json.borrow(),
-        r#"{"grid_role":"orchestrator","grid_owner":"mu-lead","logo":"\ue1a3"}"#
+        format!(
+            r#"{{"grid_role":"orchestrator","grid_owner":"mu-lead","grid_farm":"{farm_id}","logo":"\ue1a3"}}"#
+        )
     );
 
     // Running repair a second time reports already tagged
@@ -898,13 +908,13 @@ fn test_identity_heal_worker_restores_tokens() {
     let rep = herdr.reported_tokens.borrow();
     assert_eq!(rep.len(), 1);
     assert_eq!(rep[0].0, "wC:p2");
-    assert_eq!(rep[0].1.len(), 4);
+    assert_eq!(rep[0].1.len(), 5);
     assert!(rep[0].1.iter().any(|t| t == "grid_role=worker"));
     assert!(rep[0].1.iter().any(|t| t == "grid_group=mu"));
     assert!(rep[0].1.iter().any(|t| t == "grid_owner=mu-lead"));
     assert!(rep[0].1.iter().any(|t| t == "grid_tab=mu-workers"));
+    assert!(rep[0].1.iter().any(|t| t.starts_with("grid_farm=")));
     assert!(rep[0].1.iter().all(|t| !t.starts_with("grid_name=")));
-
     let p = herdr.panes.borrow();
     assert_eq!(
         p["wC:p2"].tokens.get("grid_role").map(String::as_str),

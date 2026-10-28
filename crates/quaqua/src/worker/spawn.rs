@@ -659,11 +659,14 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         // tab label, which need not equal the repo-derived group) so the planner,
         // the repair and the pre-prompt check can accept that tab by its exact
         // label instead of guessing from the group token.
+        let farm_id = crate::workspace::farm_of_runs_dir(&runs_dir);
+        let farm_tok = format!("grid_farm={farm_id}");
         let initial_tokens = [
             "grid_role=worker",
             &format!("grid_group={repo_name}"),
             &format!("grid_owner={owner}"),
             &format!("grid_tab={grid_tab}"),
+            &farm_tok,
         ];
         let rep_res = herdr.pane_report_metadata(&pane, &initial_tokens);
         if rep_res.is_err() || !rep_res.unwrap().status.success() {
