@@ -207,6 +207,9 @@ enum IdentityCmd {
         /// Optional pane ID to heal (default: all panes).
         #[arg(long)]
         pane: Option<String>,
+        /// Preview actions without modifying panes or files.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 #[derive(Subcommand)]
@@ -599,15 +602,23 @@ fn main() {
             },
         },
         Some(Command::Identity { cmd }) => match cmd {
-            IdentityCmd::Heal { pane } => {
+            IdentityCmd::Heal { pane, dry_run } => {
                 let runs_dir = default_runs_dir();
-                match quaqua::identity::heal_with_runs_dir(&herdr, &runs_dir, pane.as_deref()) {
+                match quaqua::identity::heal_with_runs_dir(
+                    &herdr,
+                    &runs_dir,
+                    pane.as_deref(),
+                    dry_run,
+                ) {
                     Ok(report) => {
                         for action in &report.actions {
                             println!("{action}");
                         }
                         for err in &report.errors {
                             eprintln!("error: {err}");
+                        }
+                        if dry_run && report.actions.is_empty() {
+                            println!("ok: no panes need healing");
                         }
                         if report.actions.is_empty() && !report.errors.is_empty() {
                             1

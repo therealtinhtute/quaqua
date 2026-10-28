@@ -1472,3 +1472,59 @@ fn test_identity_heal_recovers_lead_and_cos_from_live_agent_list_fixture() {
         .expect("sender should resolve after heal");
     assert_eq!(sender, ("mu-lead".to_string(), "lead".to_string()));
 }
+
+#[test]
+fn test_identity_heal_dry_run_previews_actions_without_mutation() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("dry-run-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole |\n",
+    ).unwrap();
+
+    let mut panes = HashMap::new();
+    let mut mu_tokens = HashMap::new();
+    mu_tokens.insert("logo".to_string(), "\u{e1a3}".to_string());
+    panes.insert(
+        "wB:p1".to_string(),
+        MockPaneInfo {
+            tokens: mu_tokens,
+            agent_session: None,
+            label: Some("mu-lead".to_string()),
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#;
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    let report = quaqua::identity::heal_dry_run(&herdr).expect("heal_dry_run should succeed");
+    assert_eq!(report.actions.len(), 1);
+    assert!(
+        report.actions[0].starts_with("[dry-run] healed lead 'mu'"),
+        "got: {}",
+        report.actions[0]
+    );
+
+    // Ensure nothing was mutated on the pane or filesystem
+    assert!(
+        herdr.reported_tokens.borrow().is_empty(),
+        "dry-run must make no report-metadata calls"
+    );
+    let p = herdr.panes.borrow();
+    assert_eq!(
+        p["wB:p1"].tokens.get("grid_role"),
+        None,
+        "pane must not be modified in dry-run"
+    );
+    assert!(
+        !runs_dir.join("mu-lead.owner").exists(),
+        "owner file must not be created in dry-run"
+    );
+}
