@@ -337,10 +337,19 @@ impl Workflow for SingleWorkerWorkflow {
                             err,
                         ),
                         _ => {
-                            return StepDecision::Fail {
-                                code: 1,
-                                reason: format!("wake {index}: unexpected activity result"),
+                            state.errors += 1;
+                            state.gone_since_ms = 0;
+                            state.wait_err = format!("wake {index}: unexpected activity result");
+                            if now >= state.cap_deadline_ms {
+                                return complete_step(state, now, 2);
                             }
+                            if state.errors >= 3 {
+                                return complete_step(state, now, 3);
+                            }
+                            let backoff = (30_000u64).min(state.config.poll_sec * 1000);
+                            let t = wait_interval(state, now, now + backoff);
+                            schedule_wake(state, ctx, index + 1, Vec::new(), t);
+                            return StepDecision::Continue;
                         }
                     };
 
@@ -534,10 +543,7 @@ fn default_until(state: &SingleWorkerState) -> Vec<String> {
 
 fn wait_interval(state: &SingleWorkerState, now: u64, next_deadline: u64) -> u64 {
     let heartbeat = now + state.config.poll_sec * 1000;
-    next_deadline
-        .min(heartbeat)
-        .saturating_sub(now)
-        .max(1000)
+    next_deadline.min(heartbeat).saturating_sub(now).max(1000)
 }
 
 fn nudge_deadline_ms(state: &SingleWorkerState) -> u64 {
@@ -580,8 +586,7 @@ fn evaluate(
     if now >= state.allowance_deadline_ms {
         if !state.overrun_granted
             && state.last_progress_ms > 0
-            && now.saturating_sub(state.last_progress_ms)
-                <= state.config.poll_sec * 2 * 1000
+            && now.saturating_sub(state.last_progress_ms) <= state.config.poll_sec * 2 * 1000
         {
             let mut grace_ms = (state.input.time_budget_sec / 4).max(1) * 1000;
             if state.allowance_deadline_ms + grace_ms > state.cap_deadline_ms {
@@ -674,9 +679,7 @@ fn evaluate(
     }
     if state.agent_status == "idle" || state.agent_status == "done" {
         if !state.lead_waiting {
-            deadline = deadline.min(
-                state.idle_since_ms + state.idle_limit_ms() * 1000,
-            );
+            deadline = deadline.min(state.idle_since_ms + state.idle_limit_ms() * 1000);
         }
     } else if state.agent_status == "working" && !state.lead_waiting && state.has_progress_source()
     {
@@ -799,7 +802,11 @@ mod tests {
         budget: u64,
         cfg: WatchdogConfig,
         polls: Vec<Poll>,
-    ) -> (SingleWorkerOutput, u64, Vec<crate::engine::journal::EventRecord>) {
+    ) -> (
+        SingleWorkerOutput,
+        u64,
+        Vec<crate::engine::journal::EventRecord>,
+    ) {
         let workflow = SingleWorkerWorkflow::new();
         let mut clock = VirtualClock::new(100_000);
         let mut activities = MockActivities::new();
@@ -818,7 +825,11 @@ mod tests {
         )
         .expect("workflow completes");
         let now = clock.now_ms();
-        (out, now, journal.all_events(&format!("test-{name}")).to_vec())
+        (
+            out,
+            now,
+            journal.all_events(&format!("test-{name}")).to_vec(),
+        )
     }
 
     #[test]
@@ -1063,10 +1074,16 @@ mod tests {
         );
         let wake_1_sched = events
             .iter()
-            .find(|e| e.kind == "activity_scheduled" && e.payload_json.contains("AgentWait") && e.payload_json.contains("\"timeout_ms\":30000"))
+            .find(|e| {
+                e.kind == "activity_scheduled"
+                    && e.payload_json.contains("AgentWait")
+                    && e.payload_json.contains("\"timeout_ms\":30000")
+            })
             .expect("wake_1 AgentWait must be scheduled");
         assert!(
-            wake_1_sched.payload_json.contains("\"until\":[\"blocked\",\"done\"]"),
+            wake_1_sched
+                .payload_json
+                .contains("\"until\":[\"blocked\",\"done\"]"),
             "wake_1 while working must specify --until blocked --until done, got: {}",
             wake_1_sched.payload_json
         );
@@ -1166,5 +1183,66 @@ mod tests {
         assert_eq!(out1, out2);
         assert_eq!(now1, now2);
         assert_eq!(events1, events2);
+    }
+
+    #[test]
+    fn unexpected_wake_activity_result_retries_and_recovers() {
+        let workflow = SingleWorkerWorkflow::new();
+        let mut clock = VirtualClock::new(100_000);
+        let mut activities = MockActivities::new();
+        let mut journal = InMemoryJournal::new();
+
+        // wake_0 returns unexpected activity result (e.g. ActivityResult::Unknown)
+        activities.register("wake_0", ActivityResult::Unknown);
+        // wake_1 returns normal poll with report
+        register_poll(
+            &mut activities,
+            "worker-rec",
+            1,
+            Poll {
+                report_mtime: 1000,
+                report: Some("# Report\nRecovered\n\n## Lessons\n- none\n"),
+                ..Poll::default()
+            },
+        );
+
+        let state =
+            SingleWorkerState::new(sample_input("worker-rec", 1800)).with_config(config(20, 1800));
+        let outcome = run_to_completion(
+            &workflow,
+            "test-worker-rec",
+            state,
+            &mut clock,
+            &mut activities,
+            &mut journal,
+        );
+        let out = outcome.expect("workflow must recover via retry rather than failing");
+        assert_eq!(out.exit, 0);
+    }
+
+    #[test]
+    fn unexpected_wake_activity_result_exhausts_retries_to_exit_3() {
+        let workflow = SingleWorkerWorkflow::new();
+        let mut clock = VirtualClock::new(100_000);
+        let mut activities = MockActivities::new();
+        let mut journal = InMemoryJournal::new();
+
+        activities.register("wake_0", ActivityResult::Unknown);
+        activities.register("wake_1", ActivityResult::Unknown);
+        activities.register("wake_2", ActivityResult::Unknown);
+        activities.register("wake_3", ActivityResult::Unknown);
+
+        let state =
+            SingleWorkerState::new(sample_input("worker-fail", 1800)).with_config(config(20, 1800));
+        let outcome = run_to_completion(
+            &workflow,
+            "test-worker-fail",
+            state,
+            &mut clock,
+            &mut activities,
+            &mut journal,
+        );
+        let out = outcome.expect("workflow must complete with exit 3 when wake retries exhausted");
+        assert_eq!(out.exit, 3);
     }
 }

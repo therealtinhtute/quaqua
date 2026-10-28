@@ -10,13 +10,13 @@ pub mod watchdog;
 pub mod workflow;
 
 pub use crate::util::now_sec;
-pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
-pub use observer::{lead_waiting, report_ready};
-pub use watchdog::{is_lessons_heading, nap, prepend_header, validate_report_content};
 pub use brief::{
     brief_header_warnings, lead_routing_warnings, named_playbook_with_reason, warn_brief_headers,
     warn_lead_routing,
 };
+pub use cost::{brief_cost_budget, read_worker_cost, resolve_cost_budget};
+pub use observer::{lead_waiting, report_ready};
+pub use watchdog::{is_lessons_heading, nap, prepend_header, validate_report_content};
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -761,7 +761,11 @@ pub fn prompt_worker<G: GitOps>(
         // append the named playbook's Worker steps + cited leaves to the prompt.
         brief::warn_brief_headers(task_str);
         let owner_str = crate::state::WorkerMetadata::load_owner(&runs_dir, name);
-        let owner = if owner_str.is_empty() { None } else { Some(owner_str.as_str()) };
+        let owner = if owner_str.is_empty() {
+            None
+        } else {
+            Some(owner_str.as_str())
+        };
         brief::warn_lead_routing(task_str, owner, &runs_dir);
         let injection = brief::prepare_injection_in_workspace(task_str)?;
 
@@ -1022,41 +1026,6 @@ pub fn prompt_worker<G: GitOps>(
         ),
     };
 
-    let single_output = match outcome {
-        Ok(RunnerOutcome::Completed(o)) => o,
-        Ok(RunnerOutcome::Blocked(reason)) => {
-            return Err((1, format!("workflow blocked: {reason}\n")))
-        }
-        Ok(RunnerOutcome::Failed { code, reason }) => {
-            return Err((code, format!("workflow failed: {reason}\n")))
-        }
-        Err(e) => return Err((1, format!("runner error: {e}\n"))),
-    };
-
-    // Check if grace or autoext was granted during this execution
-    if let Ok(Some(snap)) = journal.load_latest_snapshot(&active_wf_id) {
-        if let Ok(state) = serde_json::from_str::<SingleWorkerState>(&snap.state_json) {
-            let prior_grace = last_snap
-                .as_ref()
-                .map(|s| s.overrun_granted)
-                .unwrap_or(false);
-            if state.overrun_granted && !prior_grace {
-                let grace_sec = (active_budget / 4).max(1);
-                eprintln!("WATCHDOG grace +{grace_sec}s (progressing)");
-            }
-            let prior_autoext = last_snap
-                .as_ref()
-                .map(|s| s.extension_total_ms / 1000)
-                .unwrap_or(0);
-            let cur_autoext = state.extension_total_ms / 1000;
-            if cur_autoext > prior_autoext {
-                let diff = cur_autoext - prior_autoext;
-                let max_autoext = active_budget / 2;
-                eprintln!("WATCHDOG auto-extend +{diff}s (diff progressing, cap {max}s, total +{cur_autoext}s/+{max_autoext}s)");
-            }
-        }
-    }
-
     let final_wait = acts.last_wait.lock().unwrap().clone().unwrap_or_default();
     let change_ts = *acts.last_progress.lock().unwrap();
 
@@ -1103,6 +1072,62 @@ pub fn prompt_worker<G: GitOps>(
         }
         crate::bus::record_event_safely_in_runs(&runs_dir, &ev);
     };
+
+    let single_output = match outcome {
+        Ok(RunnerOutcome::Completed(o)) => o,
+        Ok(RunnerOutcome::Blocked(reason)) => {
+            let r = format!("workflow blocked: {reason}");
+            record_bus_event(
+                "stalled",
+                Some(format!("stall:{name}:{start_sec}")),
+                serde_json::json!({ "reason": &r }),
+            );
+            return Err(watchdog_exit(3, &r));
+        }
+        Ok(RunnerOutcome::Failed { code, reason }) => {
+            let exit_code = if code != 0 { code } else { 3 };
+            let r = format!("workflow failed: {reason}");
+            record_bus_event(
+                "stalled",
+                Some(format!("stall:{name}:{start_sec}")),
+                serde_json::json!({ "reason": &r }),
+            );
+            return Err(watchdog_exit(exit_code, &r));
+        }
+        Err(e) => {
+            let r = format!("runner error: {e}");
+            record_bus_event(
+                "stalled",
+                Some(format!("stall:{name}:{start_sec}")),
+                serde_json::json!({ "reason": &r }),
+            );
+            return Err(watchdog_exit(3, &r));
+        }
+    };
+
+    // Check if grace or autoext was granted during this execution
+    if let Ok(Some(snap)) = journal.load_latest_snapshot(&active_wf_id) {
+        if let Ok(state) = serde_json::from_str::<SingleWorkerState>(&snap.state_json) {
+            let prior_grace = last_snap
+                .as_ref()
+                .map(|s| s.overrun_granted)
+                .unwrap_or(false);
+            if state.overrun_granted && !prior_grace {
+                let grace_sec = (active_budget / 4).max(1);
+                eprintln!("WATCHDOG grace +{grace_sec}s (progressing)");
+            }
+            let prior_autoext = last_snap
+                .as_ref()
+                .map(|s| s.extension_total_ms / 1000)
+                .unwrap_or(0);
+            let cur_autoext = state.extension_total_ms / 1000;
+            if cur_autoext > prior_autoext {
+                let diff = cur_autoext - prior_autoext;
+                let max_autoext = active_budget / 2;
+                eprintln!("WATCHDOG auto-extend +{diff}s (diff progressing, cap {max}s, total +{cur_autoext}s/+{max_autoext}s)");
+            }
+        }
+    }
 
     match single_output.exit {
         0 => {
@@ -1660,6 +1685,60 @@ esac
         let parsed: serde_json::Value = serde_json::from_str(&malformed_ev.payload_json)
             .expect("payload_json must be valid JSON even when error message contains special characters and newlines");
         assert!(parsed.get("readonly").is_some());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_worker_prompt_runner_error_gives_non_zero_watchdog_exit() {
+        let _env_lock = lock_env();
+
+        let tmp = std::env::temp_dir().join(format!("quaqua-wp-runner-err-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let _guard_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _guard_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _guard_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _guard_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+
+        let name = "sude-runner-err";
+        let stub_herdr = tmp.join("herdr-stub");
+        fs::write(
+            &stub_herdr,
+            r#"#!/bin/sh
+echo '{"result": {"agent": {"agent_status": "working"}}}'
+exit 0
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&stub_herdr).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub_herdr, perms).unwrap();
+        let _guard_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub_herdr.to_str().unwrap());
+
+        let herdr = Herdr {
+            bin: stub_herdr.to_string_lossy().to_string(),
+        };
+        let git = crate::git::Git::new();
+
+        let db_path = tmp.join("quaqua.db");
+        {
+            let mut j = SqliteJournal::open(&db_path).unwrap();
+            let snap = crate::engine::journal::SnapshotRecord::new(1, "{ corrupt json");
+            j.append_snapshot(&format!("worker:{name}#1"), &snap)
+                .unwrap();
+        }
+
+        // Calling resume on a worker with corrupt state triggers RunnerError::Serialization
+        let res = prompt_worker(name, None, true, None, &git, &herdr);
+        // Runner failure must return a non-zero WATCHDOG exit (code 3), never exit 0 without a report
+        assert_eq!(
+            res,
+            Err((3, String::new())),
+            "runner failure must return watchdog exit 3"
+        );
+
         let _ = fs::remove_dir_all(&tmp);
     }
 }

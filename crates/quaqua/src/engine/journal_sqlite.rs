@@ -308,100 +308,155 @@ impl SqliteJournal {
             .lock()
             .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
-        conn.execute_batch("BEGIN IMMEDIATE;")
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
-
-        // 1. Check deduplication by (branch, sha, source, verifier)
-        let is_duplicate = {
-            let mut stmt =
-                match conn.prepare("SELECT payload_json FROM events WHERE kind = 'verdict';") {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
-                        return Err(JournalError::StorageError(e.to_string()));
-                    }
-                };
-            let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    return Err(JournalError::StorageError(e.to_string()));
-                }
-            };
-            let mut dup = false;
-            for row in rows {
-                if let Ok(payload) = row {
-                    if let Ok(v) = serde_json::from_str::<VerdictRecord>(&payload) {
-                        if v.branch == verdict.branch
-                            && v.sha == verdict.sha
-                            && v.source == verdict.source
-                            && v.verifier == verdict.verifier
-                        {
-                            dup = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            dup
-        };
-
-        if is_duplicate {
-            let _ = conn.execute_batch("COMMIT;");
-            return Ok(false);
-        }
-
-        // 2. Assign next seq for this workflow_id
-        let current_max: u64 = match conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM events WHERE workflow_id = ?1;",
-            rusqlite::params![workflow_id],
-            |row| {
-                let v: i64 = row.get(0)?;
-                Ok(v as u64)
-            },
-        ) {
-            Ok(v) => v,
+        let payload_json = match serde_json::to_string(verdict) {
+            Ok(s) => s,
             Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK;");
-                return Err(JournalError::StorageError(e.to_string()));
+                return Err(JournalError::SerializationError(e.to_string()));
             }
         };
 
-        let next_seq = current_max + 1;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let payload_json = match serde_json::to_string(verdict) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK;");
-                return Err(JournalError::SerializationError(e.to_string()));
+        let timeout = crate::engine::sqlite::busy_timeout_ms();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout);
+
+        loop {
+            let _ = conn.execute_batch("ROLLBACK;");
+
+            match conn.execute_batch("BEGIN IMMEDIATE;") {
+                Ok(_) => {}
+                Err(e)
+                    if crate::engine::sqlite::is_lock_error(&e)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => return Err(JournalError::StorageError(e.to_string())),
             }
-        };
 
-        let insert_res = conn.execute(
-            "INSERT INTO events (workflow_id, seq, ts_ms, kind, payload_json) VALUES (?1, ?2, ?3, 'verdict', ?4);",
-            rusqlite::params![
-                workflow_id,
-                next_seq as i64,
-                now_ms as i64,
-                &payload_json,
-            ],
-        );
+            // 1. Check deduplication by (branch, sha, source, verifier)
+            let is_duplicate = {
+                let mut stmt =
+                    match conn.prepare("SELECT payload_json FROM events WHERE kind = 'verdict';") {
+                        Ok(s) => s,
+                        Err(e)
+                            if crate::engine::sqlite::is_lock_error(&e)
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            let _ = conn.execute_batch("ROLLBACK;");
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(e) => {
+                            let _ = conn.execute_batch("ROLLBACK;");
+                            return Err(JournalError::StorageError(e.to_string()));
+                        }
+                    };
+                let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+                    Ok(r) => r,
+                    Err(e)
+                        if crate::engine::sqlite::is_lock_error(&e)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        return Err(JournalError::StorageError(e.to_string()));
+                    }
+                };
+                let mut dup = false;
+                for row in rows {
+                    if let Ok(payload) = row {
+                        if let Ok(v) = serde_json::from_str::<VerdictRecord>(&payload) {
+                            if v.branch == verdict.branch
+                                && v.sha == verdict.sha
+                                && v.source == verdict.source
+                                && v.verifier == verdict.verifier
+                            {
+                                dup = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                dup
+            };
 
-        match insert_res {
-            Ok(_) => {
-                if let Err(e) = conn.execute_batch("COMMIT;") {
+            if is_duplicate {
+                let _ = conn.execute_batch("COMMIT;");
+                return Ok(false);
+            }
+
+            // 2. Assign next seq for this workflow_id
+            let current_max: u64 = match conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE workflow_id = ?1;",
+                rusqlite::params![workflow_id],
+                |row| {
+                    let v: i64 = row.get(0)?;
+                    Ok(v as u64)
+                },
+            ) {
+                Ok(v) => v,
+                Err(e)
+                    if crate::engine::sqlite::is_lock_error(&e)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK;");
                     return Err(JournalError::StorageError(e.to_string()));
                 }
-                Ok(true)
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK;");
-                Err(JournalError::StorageError(e.to_string()))
+            };
+
+            let next_seq = current_max + 1;
+            let insert_res = conn.execute(
+                "INSERT INTO events (workflow_id, seq, ts_ms, kind, payload_json) VALUES (?1, ?2, ?3, 'verdict', ?4);",
+                rusqlite::params![
+                    workflow_id,
+                    next_seq as i64,
+                    now_ms as i64,
+                    &payload_json,
+                ],
+            );
+
+            match insert_res {
+                Ok(_) => match conn.execute_batch("COMMIT;") {
+                    Ok(_) => return Ok(true),
+                    Err(e)
+                        if crate::engine::sqlite::is_lock_error(&e)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        return Err(JournalError::StorageError(e.to_string()));
+                    }
+                },
+                Err(e)
+                    if crate::engine::sqlite::is_lock_error(&e)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(JournalError::StorageError(e.to_string()));
+                }
             }
         }
     }
@@ -417,30 +472,30 @@ impl SqliteJournal {
             .lock()
             .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
-        let mut stmt = conn
-            .prepare("SELECT seq, ts_ms, payload_json FROM events WHERE kind = 'verdict' ORDER BY seq ASC;")
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+        retry_while_busy(|| {
+            let mut stmt = conn.prepare(
+                "SELECT seq, ts_ms, payload_json FROM events WHERE kind = 'verdict' ORDER BY seq ASC;",
+            )?;
 
-        let rows = stmt
-            .query_map([], |row| {
+            let rows = stmt.query_map([], |row| {
                 let seq: i64 = row.get(0)?;
                 let ts_ms: i64 = row.get(1)?;
                 let payload: String = row.get(2)?;
                 Ok((seq as u64, ts_ms as u64, payload))
-            })
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+            })?;
 
-        let mut list = Vec::new();
-        for row in rows {
-            let (_seq, _ts_ms, payload) =
-                row.map_err(|e| JournalError::StorageError(e.to_string()))?;
-            if let Ok(v) = serde_json::from_str::<VerdictRecord>(&payload) {
-                if v.branch == branch && v.sha == sha {
-                    list.push(v);
+            let mut list = Vec::new();
+            for row in rows {
+                let (_seq, _ts_ms, payload) = row?;
+                if let Ok(v) = serde_json::from_str::<VerdictRecord>(&payload) {
+                    if v.branch == branch && v.sha == sha {
+                        list.push(v);
+                    }
                 }
             }
-        }
-        Ok(list)
+            Ok(list)
+        })
+        .map_err(|e| JournalError::StorageError(e.to_string()))
     }
 
     /// Returns the strongest verdict for the specified branch and SHA, if any.
@@ -463,22 +518,23 @@ impl SqliteJournal {
             .lock()
             .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
-        let mut stmt = conn
-            .prepare("SELECT seq, ts_ms, payload_json FROM events WHERE kind = 'verdict' ORDER BY seq ASC;")
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+        retry_while_busy(|| {
+            let mut stmt = conn.prepare(
+                "SELECT seq, ts_ms, payload_json FROM events WHERE kind = 'verdict' ORDER BY seq ASC;",
+            )?;
 
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(2))
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(2))?;
 
-        let mut list = Vec::new();
-        for row in rows {
-            let payload = row.map_err(|e| JournalError::StorageError(e.to_string()))?;
-            if let Ok(v) = serde_json::from_str::<VerdictRecord>(&payload) {
-                list.push(v);
+            let mut list = Vec::new();
+            for row in rows {
+                let payload = row?;
+                if let Ok(v) = serde_json::from_str::<VerdictRecord>(&payload) {
+                    list.push(v);
+                }
             }
-        }
-        Ok(list)
+            Ok(list)
+        })
+        .map_err(|e| JournalError::StorageError(e.to_string()))
     }
 }
 
@@ -493,63 +549,100 @@ impl Journal for SqliteJournal {
             .lock()
             .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
-        // Use BEGIN IMMEDIATE so that SQLite acquires a write reservation lock
-        // immediately, preventing concurrent connections from interleaving between
-        // reading MAX(seq) and inserting the new event.
-        conn.execute_batch("BEGIN IMMEDIATE;")
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+        let timeout = crate::engine::sqlite::busy_timeout_ms();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout);
 
-        let current_max: u64 = match conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM events WHERE workflow_id = ?1;",
-            rusqlite::params![workflow_id],
-            |row| {
-                let v: i64 = row.get(0)?;
-                Ok(v as u64)
-            },
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK;");
-                return Err(JournalError::StorageError(e.to_string()));
-            }
-        };
-
-        let next_seq = current_max + 1;
-        let assigned_seq = if event.seq == 0 {
-            next_seq
-        } else if event.seq != next_seq {
+        loop {
             let _ = conn.execute_batch("ROLLBACK;");
-            return Err(JournalError::SequenceConflict {
-                workflow_id: workflow_id.to_string(),
-                expected_seq: next_seq,
-                actual_seq: event.seq,
-            });
-        } else {
-            event.seq
-        };
 
-        let insert_res = conn.execute(
-            "INSERT INTO events (workflow_id, seq, ts_ms, kind, payload_json) VALUES (?1, ?2, ?3, ?4, ?5);",
-            rusqlite::params![
-                workflow_id,
-                assigned_seq as i64,
-                event.ts_ms as i64,
-                &event.kind,
-                &event.payload_json,
-            ],
-        );
+            match conn.execute_batch("BEGIN IMMEDIATE;") {
+                Ok(_) => {}
+                Err(e)
+                    if crate::engine::sqlite::is_lock_error(&e)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => return Err(JournalError::StorageError(e.to_string())),
+            }
 
-        match insert_res {
-            Ok(_) => {
-                if let Err(e) = conn.execute_batch("COMMIT;") {
+            let current_max: u64 = match conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE workflow_id = ?1;",
+                rusqlite::params![workflow_id],
+                |row| {
+                    let v: i64 = row.get(0)?;
+                    Ok(v as u64)
+                },
+            ) {
+                Ok(v) => v,
+                Err(e)
+                    if crate::engine::sqlite::is_lock_error(&e)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK;");
                     return Err(JournalError::StorageError(e.to_string()));
                 }
-                Ok(assigned_seq)
-            }
-            Err(e) => {
+            };
+
+            let next_seq = current_max + 1;
+            let assigned_seq = if event.seq == 0 {
+                next_seq
+            } else if event.seq != next_seq {
                 let _ = conn.execute_batch("ROLLBACK;");
-                Err(JournalError::StorageError(e.to_string()))
+                return Err(JournalError::SequenceConflict {
+                    workflow_id: workflow_id.to_string(),
+                    expected_seq: next_seq,
+                    actual_seq: event.seq,
+                });
+            } else {
+                event.seq
+            };
+
+            let insert_res = conn.execute(
+                "INSERT INTO events (workflow_id, seq, ts_ms, kind, payload_json) VALUES (?1, ?2, ?3, ?4, ?5);",
+                rusqlite::params![
+                    workflow_id,
+                    assigned_seq as i64,
+                    event.ts_ms as i64,
+                    &event.kind,
+                    &event.payload_json,
+                ],
+            );
+
+            match insert_res {
+                Ok(_) => match conn.execute_batch("COMMIT;") {
+                    Ok(_) => return Ok(assigned_seq),
+                    Err(e)
+                        if crate::engine::sqlite::is_lock_error(&e)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        return Err(JournalError::StorageError(e.to_string()));
+                    }
+                },
+                Err(e)
+                    if crate::engine::sqlite::is_lock_error(&e)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(JournalError::StorageError(e.to_string()));
+                }
             }
         }
     }
@@ -564,10 +657,12 @@ impl Journal for SqliteJournal {
             .lock()
             .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
-        conn.execute(
-            "INSERT INTO snapshots (workflow_id, seq, state_json) VALUES (?1, ?2, ?3);",
-            rusqlite::params![workflow_id, snapshot.seq as i64, &snapshot.state_json,],
-        )
+        retry_while_busy(|| {
+            conn.execute(
+                "INSERT INTO snapshots (workflow_id, seq, state_json) VALUES (?1, ?2, ?3);",
+                rusqlite::params![workflow_id, snapshot.seq as i64, &snapshot.state_json,],
+            )
+        })
         .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
         Ok(())
@@ -583,14 +678,12 @@ impl Journal for SqliteJournal {
             .lock()
             .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
-        let mut stmt = conn
-            .prepare(
+        retry_while_busy(|| {
+            let mut stmt = conn.prepare(
                 "SELECT seq, ts_ms, kind, payload_json FROM events WHERE workflow_id = ?1 AND seq >= ?2 ORDER BY seq ASC;",
-            )
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+            )?;
 
-        let rows = stmt
-            .query_map(rusqlite::params![workflow_id, since_seq as i64], |row| {
+            let rows = stmt.query_map(rusqlite::params![workflow_id, since_seq as i64], |row| {
                 let seq: i64 = row.get(0)?;
                 let ts_ms: i64 = row.get(1)?;
                 let kind: String = row.get(2)?;
@@ -601,15 +694,16 @@ impl Journal for SqliteJournal {
                     kind,
                     payload_json,
                 ))
-            })
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+            })?;
 
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(row.map_err(|e| JournalError::StorageError(e.to_string()))?);
-        }
+            let mut events = Vec::new();
+            for row in rows {
+                events.push(row?);
+            }
 
-        Ok(events)
+            Ok(events)
+        })
+        .map_err(|e| JournalError::StorageError(e.to_string()))
     }
 
     fn load_latest_snapshot(
@@ -621,25 +715,22 @@ impl Journal for SqliteJournal {
             .lock()
             .map_err(|e| JournalError::StorageError(e.to_string()))?;
 
-        let mut stmt = conn
-            .prepare(
+        retry_while_busy(|| {
+            let mut stmt = conn.prepare(
                 "SELECT seq, state_json FROM snapshots WHERE workflow_id = ?1 ORDER BY seq DESC LIMIT 1;",
-            )
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
+            )?;
 
-        let mut rows = stmt
-            .query_map(rusqlite::params![workflow_id], |row| {
+            let mut rows = stmt.query(rusqlite::params![workflow_id])?;
+
+            if let Some(row) = rows.next()? {
                 let seq: i64 = row.get(0)?;
                 let state_json: String = row.get(1)?;
-                Ok(SnapshotRecord::new(seq as u64, state_json))
-            })
-            .map_err(|e| JournalError::StorageError(e.to_string()))?;
-
-        match rows.next() {
-            Some(Ok(rec)) => Ok(Some(rec)),
-            Some(Err(e)) => Err(JournalError::StorageError(e.to_string())),
-            None => Ok(None),
-        }
+                Ok(Some(SnapshotRecord::new(seq as u64, state_json)))
+            } else {
+                Ok(None)
+            }
+        })
+        .map_err(|e| JournalError::StorageError(e.to_string()))
     }
 }
 
@@ -848,6 +939,42 @@ mod tests {
         let reader = SqliteJournal::open(&path).expect("reopen reader");
         let events = reader.load_events("wf-open", 1).expect("load events");
         assert_eq!(events.len(), writers * 10);
+    }
+
+    #[test]
+    fn test_two_concurrent_watchers_on_one_journal_both_survive() {
+        let path = temp_db_path("two-watchers-busy");
+        let _cleaner = TempDbCleaner(path.clone());
+
+        {
+            let _init = SqliteJournal::open(&path).expect("init db");
+        }
+
+        let holder = rusqlite::Connection::open(&path).expect("open holder");
+        holder.execute_batch("BEGIN IMMEDIATE;").expect("hold lock");
+
+        let release = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(150));
+            holder.execute_batch("COMMIT;").expect("commit holder");
+        });
+
+        let mut j2 = SqliteJournal::open(&path).expect("open j2");
+        // Lower j2's busy timeout to 50ms so that without journal retry,
+        // it fails with "database is locked" while holder holds the lock for 150ms.
+        j2.conn
+            .lock()
+            .unwrap()
+            .pragma_update(None, "busy_timeout", 50u64)
+            .unwrap();
+
+        let ev = EventRecord::new(0, 1001, "wake", "{}");
+        let res = j2.append_event("wf-watcher2", &ev);
+        release.join().expect("release thread");
+
+        assert!(
+            res.is_ok(),
+            "concurrent watcher append_event must survive a locked database via retry, got: {res:?}"
+        );
     }
 
     #[test]
