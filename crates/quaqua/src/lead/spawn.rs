@@ -68,6 +68,20 @@ pub fn resolve_lead_launch(
     let launch = crate::launch::resolve_launch(kind_info, &kind_name, cfg)?;
     Ok((kind_name, launch))
 }
+
+/// The owner `lead spawn` records in `runs/<lead>.owner`: QUAQUA_OWNER when set
+/// (the Lead/CoS pane env), else the resolved caller's name, else "cos".
+pub fn owner_from_caller(caller: &crate::identity::Caller) -> String {
+    if let Some(owner) = std::env::var("QUAQUA_OWNER").ok().filter(|o| !o.is_empty()) {
+        return owner;
+    }
+    if caller.name != "unknown" {
+        caller.name.clone()
+    } else {
+        "cos".to_string()
+    }
+}
+
 pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     args: &[String],
     git: &G,
@@ -321,17 +335,7 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
 
     // Resolve caller identity and log at spawn
     let mut caller = crate::identity::resolve_caller(herdr, &runs_dir);
-    let env_owner = std::env::var("QUAQUA_OWNER").ok().filter(|o| !o.is_empty());
-    let caller_owner = match &env_owner {
-        Some(o) => o.clone(),
-        None => {
-            if caller.name != "unknown" {
-                caller.name.clone()
-            } else {
-                "cos".to_string()
-            }
-        }
-    };
+    let caller_owner = owner_from_caller(&caller);
     if caller.role == crate::identity::Role::Unknown
         && (std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
             || std::env::var("HERDR_BIN_PATH").is_ok()

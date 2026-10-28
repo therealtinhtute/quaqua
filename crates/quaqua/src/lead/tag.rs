@@ -142,6 +142,28 @@ pub fn repair_lead<H: HerdrOps>(
     }
     let pane = agent_pane;
 
+    // `runs/<lead>.owner` is the parent link `identity::depth_walk` follows, and
+    // only `lead spawn` writes it. A Lead started before that write existed has
+    // none, so every spawn/mail from it is denied with `depth.owner_missing`.
+    // Restore it here, never overwriting an owner already recorded.
+    let runs_dir = root.join("runs");
+    let owner_path = crate::state::WorkerMetadata::owner_path(&runs_dir, &lead_name);
+    let owner_note = if owner_path.is_file() {
+        String::new()
+    } else {
+        let owner = crate::lead::spawn::owner_from_caller(&crate::identity::resolve_caller(
+            herdr, &runs_dir,
+        ));
+        if owner == lead_name {
+            return Err(format!(
+                "cannot restore {lead_name}.owner from the Lead's own pane: '{owner}' would own itself (depth.cycle) — run `quaqua lead repair {clean_slug}` from the CoS pane"
+            ));
+        }
+        crate::state::WorkerMetadata::save_owner(&runs_dir, &lead_name, &owner)
+            .map_err(|e| format!("cannot write {}: {e}", owner_path.display()))?;
+        format!("; restored {lead_name}.owner={owner}")
+    };
+
     // Check if pane is already correctly tagged
     if let Ok(out) = herdr.run(&["pane", "get", &pane]) {
         if out.status.success() {
@@ -153,7 +175,7 @@ pub fn repair_lead<H: HerdrOps>(
                         tokens.get("grid_owner").and_then(|v| v.as_str()) == Some(&lead_name);
                     if has_role && has_owner {
                         return Ok(format!(
-                            "lead '{clean_slug}' (pane {pane}) already tagged as grid_role=orchestrator grid_owner={lead_name}"
+                            "lead '{clean_slug}' (pane {pane}) already tagged as grid_role=orchestrator grid_owner={lead_name}{owner_note}"
                         ));
                     }
                 }
@@ -163,7 +185,7 @@ pub fn repair_lead<H: HerdrOps>(
 
     tag_lead_pane(herdr, clean_slug, &pane)?;
     Ok(format!(
-        "repaired lead '{clean_slug}' (pane {pane}): tagged grid_role=orchestrator grid_owner={lead_name}"
+        "repaired lead '{clean_slug}' (pane {pane}): tagged grid_role=orchestrator grid_owner={lead_name}{owner_note}"
     ))
 }
 
