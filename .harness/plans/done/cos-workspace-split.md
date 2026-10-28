@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 lane: high-risk
 ---
 # Split the CoS workspace from the engine checkout
@@ -32,18 +32,18 @@ lane: high-risk
 - approach: copy branches locally into `~/Lab/quaqua` first (no push needed), then a one-shot CoS migration once agents are idle; the doctor guard runs in parallel as a normal worker PR. Rejected: a staged multi-day move, since R6 found only one code fallback and 7 INDEX rows.
 - inventory (R6, 2026-10-24): code has `doctor.rs:120` fallback and `$HOME/quaqua/runs` for review workers (workspace path, stays); `worker spawn` takes `<repo-path>` explicitly; `projects/INDEX.md` rows 12–20 name `~/quaqua` as repo; `rules/_all/lead-inbox.md` and `.claude/` refer to `~/quaqua` as the workspace (stay); 31 local `quaqua/*` branches; 2 clean worktrees in `~/Lab/.wt/` (farm-p0, farm-briefs) hang off `~/quaqua/.git`.
 - phase_slug: `prep`
-  status: planned
+  status: done
   - goal: R2, R8 | depends_on: none
   - steps: `git -C ~/Lab/quaqua pull --ff-only`; `git -C ~/Lab/quaqua fetch ~/quaqua 'refs/heads/quaqua/*:refs/heads/quaqua/*'`; copy `.harness/` to `~/Lab/quaqua/.harness/`
   - phase check: branch diff script prints nothing missing; `~/Lab/quaqua` HEAD == `origin/main`; `~/Lab/quaqua/.harness/PROJECT.md` exists
 - phase_slug: `doctor`
-  status: planned
+  status: done
   - goal: R7 | depends_on: prep
   - owner: one worker spawned with repo `~/Lab/quaqua`, PR to main
   - surfaces: `crates/quaqua/src/doctor.rs`, its tests | avoided: everything else
   - phase check: new doctor tests red on main, green on branch; `cargo test --locked`
 - phase_slug: `migrate`
-  status: planned
+  status: done
   - goal: R1, R3, R4, R5, R6 | depends_on: prep, gate-lead done
   - steps: confirm R1; recreate farm-p0/farm-briefs worktrees from `~/Lab/quaqua` (both clean); `trash` engine paths and `.git` in `~/quaqua`; copy `templates/workspace/AGENTS.md` from `~/Lab/quaqua` to `~/quaqua/AGENTS.md`; set INDEX repo column to `~/Lab/quaqua`; add memory note "spawn workers with repo ~/Lab/quaqua"
   - phase check: R3 before/after listing; `quaqua status` reads `runs/quaqua.db`; `grep -c '^@identity.md$' ~/quaqua/AGENTS.md` = 1; new session in `~/quaqua` answers em/anh iu before and after `/compact`; probe worker from `~/Lab/quaqua` has no persona
@@ -52,12 +52,13 @@ lane: high-risk
 - 2026-10-24 prep done: Lab on origin/main, 31 quaqua/* branches copied locally, plan + PROJECT.md copied
 - 2026-10-25 doctor done: PR #142 merged (1727f51), review suhuynh 2 findings fixed
 - 2026-10-25 migrate done: gate PR #143 merged + gate-lead cleaned (R1); stash kept as quaqua/stash-cos-guard-wip-1017; farm worktrees re-homed to ~/Lab/quaqua; .git + engine files trashed; `quaqua init --update` adopted workspace AGENTS.md + settings.json; INDEX repo column -> ~/Lab/quaqua; `quaqua doctor` in ~/quaqua quiet
+- 2026-10-28 persona check passed after /compact in CoS session; .quaqua/pending gone
 
 ## Validation
 
 ## Current State and Next Action
-- active_phase: migrate
-- lifecycle_status: verifying
+- active_phase: none
+- lifecycle_status: done
 - blockers: none
-- open_items: persona check in a fresh session before/after /compact; .quaqua/pending models.md + team.toml conflicts for anh iu
-- exact_next_action: open a new CoS session in ~/quaqua and confirm em/anh iu, then move plan to done
+- open_items: none
+- exact_next_action: none — closed 2026-10-28, plan moved to `.harness/plans/done/`

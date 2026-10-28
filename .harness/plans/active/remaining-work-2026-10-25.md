@@ -11,13 +11,13 @@ Owner: CoS. Source of truth for what is left; each row ends in a check.
 | Lead per-Peer routing rule | tieude-leadroute | template AGENTS.md | DONE 5951d54 (tests 29+11 ok) |
 
 ## Wave 2 (gated)
-- P4 gate enforce: after Wave 1 hermeticity merges, collect a clean shadow window (≥2 days real use) with 0 false denies (CP3). gate-lead.
-- P8 user layouts + council: after P4 (CP4). freeze-lead.
-- #138 report frontmatter: brainstorm after verdict vocabulary lands (overlaps `status`).
-- S0 baseline: start a closed measurement window now so G1–G3 get a delta next time.
+- S0 baseline: DROPPED (anh iu 2026-10-28) — no measurement window; no G1–G3 delta to compute.
+- P4 gate enforce: SKIPPED (anh iu 2026-10-28) — no shadow window, no enforce flip.
+- P8 user layouts + council: DONE — gate (P4) skipped, so CP4 no longer gated it.
+- #138 report frontmatter: IN PROGRESS (sude-rptenum) — verdict vocabulary landed (3e09c7e), unblocked.
 
 ## Needs anh iu (irreversible / preference)
-- Push + PR: quaqua/tieude-s8close (3d04669), quaqua/tieude-leadroute (5951d54), quaqua/tieude-verdictlvl (3e09c7e), later Wave 1 branches.
-- Delete stale remotes: `pstack-integ` (dup), `quaqua/gate-integ` (3691090).
-- Clean the 342 fixture rows from live runs/quaqua.db after the fix (data delete).
-- `.quaqua/pending/models.md`, `team.toml` conflicts.
+- Push + PR: DONE 2026-10-28 — commits are in main (3d04669, 5951d54, 3e09c7e, fa5144f).
+- Delete stale remotes: DONE — `pstack-integ` and `quaqua/gate-integ` are gone from the remote.
+- Clean the fixture rows from live runs/quaqua.db: DONE 2026-10-28 — 110 fixture rows deleted, backup at `raw/2026-10-28-quaqua.db.bak`.
+- `.quaqua/pending/models.md`, `team.toml` conflicts: DONE — `.quaqua/pending` no longer exists.
