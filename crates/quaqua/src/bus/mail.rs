@@ -345,6 +345,29 @@ pub fn resolve_sender<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result<(String
     Err("cannot determine sender identity from harness (unresolved caller); run 'quaqua lead repair <slug>' to re-stamp tokens".to_string())
 }
 
+/// Refuses mail when the caller's pane belongs to another farm than `runs_dir`.
+///
+/// The farm answer comes from the same ladder ingest uses (`bus::events::attribute_pane`),
+/// so a pane carrying `grid_farm`, a pane whose `cwd` sits in another workspace, and a
+/// dead pane are all rejected — while a caller with no pane (`HERDR_PANE_ID` unset) and a
+/// pane herdr cannot describe pass through, because the ladder fails open on an unreadable
+/// answer and the notification/mail channel must not go dark when herdr hiccups.
+fn refuse_foreign_caller_farm<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result<(), String> {
+    let pane_id = match std::env::var("HERDR_PANE_ID") {
+        Ok(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => return Ok(()),
+    };
+    let db_farm = crate::workspace::farm_of_runs_dir(runs_dir);
+    match super::events::attribute_pane(herdr, &pane_id, &db_farm, runs_dir) {
+        super::events::PaneAttribution::Foreign => Err(format!(
+            "error: mail send refused: caller pane {pane_id} is not in farm '{db_farm}' \
+             (database: {}); set QUAQUA_HOME to the caller's workspace, or send from inside it",
+            runs_dir.join("quaqua.db").display()
+        )),
+        super::events::PaneAttribution::Local { .. } => Ok(()),
+    }
+}
+
 /// Escapes a single line of mail body so that lines starting with `## ` or `<!--`
 /// cannot be mistaken for markdown entry headers or metadata comments.
 pub fn escape_body_line(line: &str) -> String {
@@ -571,6 +594,11 @@ pub fn send_mail<H: HerdrOps>(
             opts.body.chars().count()
         ));
     }
+
+    // A pane from another farm must not write into this database, not even through the
+    // markdown fallback: `mail send` typed in a foreign workspace's pane resolves the DB
+    // from *this* workspace (`default_runs_dir` is QUAQUA_HOME-aware, never pane-aware).
+    refuse_foreign_caller_farm(herdr, runs_dir)?;
 
     let (from_name, from_role) = resolve_sender(herdr, runs_dir)?;
     let now = crate::bus::now_ms();
