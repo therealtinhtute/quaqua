@@ -358,7 +358,11 @@ fn refuse_foreign_caller_farm<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result
         _ => return Ok(()),
     };
     let db_farm = crate::workspace::farm_of_runs_dir(runs_dir);
-    match super::events::attribute_pane(herdr, &pane_id, &db_farm, runs_dir) {
+    let attribution = match super::events::resolve_pane_value(herdr, &pane_id) {
+        Some(val) => super::events::attribute_pane(&val, &db_farm, runs_dir),
+        None => return Ok(()),
+    };
+    match attribution {
         super::events::PaneAttribution::Foreign => Err(format!(
             "error: mail send refused: caller pane {pane_id} is not in farm '{db_farm}' \
              (database: {}); set QUAQUA_HOME to the caller's workspace, or send from inside it",

@@ -722,7 +722,11 @@ pub fn resolve_pane_value<H: HerdrOps>(herdr: &H, pane: &str) -> Option<serde_js
 /// 3. `cwd` canonical-prefixed by local root -> Local
 /// 4. `basename(cwd)` has `runs/<basename>.owner` -> Local
 /// 5. no `result.pane` -> Local (fail-open)
-fn attribute_pane(val: &serde_json::Value, local: &str, runs_dir: &Path) -> PaneAttribution {
+pub(crate) fn attribute_pane(
+    val: &serde_json::Value,
+    local: &str,
+    runs_dir: &Path,
+) -> PaneAttribution {
     // F1: Foreign only on error.code == pane_not_found; any other error code or shape -> Local (fail-open)
     if let Some(err) = val.get("error") {
         if err.get("code").and_then(|c| c.as_str()) == Some("pane_not_found") {
