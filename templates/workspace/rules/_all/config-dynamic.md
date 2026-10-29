@@ -22,6 +22,7 @@ Cấu hình đổi **không cần sửa code**: mọi giá trị nằm trong `te
 - `LEAD_KIND=<kind>` cho lead spawn.
 - `QUAQUA_TEAM_TOML=<path>` trỏ file config khác (test/experiment).
 - `GRID_TAB`, `QUAQUA_OWNER` — định vị grid.
+- `QUAQUA_LAYOUT_SHADOW=1` — escape hatch đưa layout gate về shadow mode (ghi would_deny, không chặn).
 
 ## Profile "Claude out" (mẫu đã chạy)
 Khi hết token Claude: `suhuynh` → `opencode · opencode-go/deepseek-v4.1-flash · max`; `ni`/`truonglao` pause; builder = `sude` (omp) để reviewer khác harness; CoS chạy trên opencode. Quay lại bảng gốc = sửa lại kind, không build lại.

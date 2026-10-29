@@ -2342,4 +2342,100 @@ fn test_layout_gate_cos_token_loss_after_herdr_restart_self_heals() {
         "pane tokens must be healed with grid_role=cos: {}",
         herdr.tokens_json.borrow()
     );
+
+    // Also verify spawn_worker directly succeeds using the self-healed identity
+    let git = DummyGit;
+    let opts = quaqua::worker::spawn::parse_spawn_args(&[
+        "sude-worker-repro2".to_string(),
+        "sude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+
+    let spawn_res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(
+        spawn_res.is_ok(),
+        "spawn_worker from self-healed CoS pane must succeed: {:?}",
+        spawn_res.err()
+    );
+}
+
+#[test]
+fn test_layout_gate_unknown_pane_mismatched_session_fails_closed() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("cos-mismatch-fails-closed");
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    let root = temp.join("workspace");
+    std::fs::create_dir_all(root.join("projects")).unwrap();
+    std::fs::create_dir_all(root.join("rules/_all")).unwrap();
+    std::fs::write(root.join("team.toml"), test_slp_team_toml()).unwrap();
+
+    // Record legitimate CoS identity
+    std::fs::write(
+        runs_dir.join("cos.identity.json"),
+        r#"{"agent_session": "ses-real-cos", "pane_id": "w1:p1"}"#,
+    )
+    .unwrap();
+
+    let _env = EnvGuard::set(&[
+        ("QUAQUA_HOME", root.to_str().unwrap().to_string()),
+        ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
+        ("QUAQUA_TEST", "1".to_string()),
+        ("GRID_SKIP", "1".to_string()),
+        ("HERDR_PANE_ID", "w1:p1".to_string()),
+    ]);
+    std::env::remove_var("QUAQUA_OWNER");
+    std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
+
+    let cfg = test_slp_cfg();
+
+    // The pane has a DIFFERENT session ("ses-impostor")
+    let agents_json = r#"{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude","tokens":{"logo":"\ue1a0"},"agent_session":{"value":"ses-impostor"}}]}}"#;
+    let herdr = MockHerdrTokens::with_session(r#"{"logo":"\ue1a0"}"#, "ses-impostor", agents_json);
+
+    let res = quaqua::layout::gate(
+        None,
+        Some(&herdr),
+        quaqua::layout::Verb::Spawn,
+        "peer",
+        Some("sude-worker-fail"),
+        quaqua::layout::SpawnOrigin::Cli,
+        Some("cos"),
+        Some("repo"),
+        &runs_dir,
+        Some(&cfg),
+    );
+
+    // Mismatched session must FAIL closed: denied with identity.unknown
+    assert!(
+        res.is_err(),
+        "unmatched pane session must fail closed with identity denial"
+    );
+    let (code, msg) = res.unwrap_err();
+    assert_eq!(code, 1);
+    assert!(
+        msg.contains("identity.unknown"),
+        "must deny with identity.unknown: {msg}"
+    );
+    assert!(
+        msg.contains("escape hatch: QUAQUA_LAYOUT_SHADOW=1"),
+        "hint must carry QUAQUA_LAYOUT_SHADOW escape hatch: {msg}"
+    );
+
+    // Tokens must NOT have been modified to cos
+    assert!(
+        !herdr.tokens_json.borrow().contains(r#""grid_role":"cos""#),
+        "unmatched pane must not receive cos token: {}",
+        herdr.tokens_json.borrow()
+    );
 }
