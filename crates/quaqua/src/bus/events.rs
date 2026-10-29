@@ -203,6 +203,133 @@ pub fn resolve_pane_tokens_from_record(
     None
 }
 
+/// Helper to query pane cwd from payload or herdr.
+pub fn resolve_pane_cwd_from_record(r: &FarmEventRecord) -> Option<String> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload_json) {
+        if let Some(cwd) = v
+            .get("cwd")
+            .or_else(|| v.get("data").and_then(|d| d.get("cwd")))
+            .and_then(|t| t.as_str())
+        {
+            return Some(cwd.to_string());
+        }
+    }
+    let pid = if let Some(subj) = &r.subject {
+        subj.as_str()
+    } else {
+        ""
+    };
+    let pid_from_payload = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload_json)
+    {
+        v.get("pane_id")
+            .or_else(|| v.get("data").and_then(|d| d.get("pane_id")))
+            .and_then(|p| p.as_str())
+            .map(String::from)
+    } else {
+        None
+    };
+    let target_pid = if !pid.is_empty() && pid.contains(':') {
+        Some(pid)
+    } else {
+        pid_from_payload.as_deref()
+    };
+    if let Some(p) = target_pid {
+        if let Ok(out) = std::process::Command::new(crate::herdr::bin_path())
+            .args(["pane", "get", p])
+            .output()
+        {
+            if out.status.success() {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    if let Some(cwd) = v.pointer("/result/pane/cwd").and_then(|t| t.as_str()) {
+                        return Some(cwd.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Checks whether a pane belongs to the workspace corresponding to `runs_dir`.
+pub fn is_pane_in_runs_workspace(
+    pid: &str,
+    pane_cwd: Option<&str>,
+    runs_dir: &Path,
+    tokens_val: Option<&serde_json::Value>,
+) -> bool {
+    // 1. Check if it matches this workspace's recorded CoS pane
+    if let Ok(content) = std::fs::read_to_string(runs_dir.join(crate::cos::COS_IDENTITY_FILE)) {
+        if let Ok(ident) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(recorded_pane) = ident.get("pane_id").and_then(|p| p.as_str()) {
+                if recorded_pane == pid {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 2. Check worker metadata
+    if crate::state::WorkerMetadata::owner_path(runs_dir, pid).is_file() {
+        return true;
+    }
+
+    let ws_root = runs_dir.parent().unwrap_or(runs_dir);
+
+    // 3. Check pane_cwd if known
+    if let Some(cwd_str) = pane_cwd {
+        let cwd_path = Path::new(cwd_str);
+        if let (Ok(can_cwd), Ok(can_ws)) = (cwd_path.canonicalize(), ws_root.canonicalize()) {
+            if can_cwd.starts_with(&can_ws) {
+                return true;
+            }
+        } else if cwd_path.starts_with(ws_root) {
+            return true;
+        }
+
+        // Check project repos from projects/INDEX.md
+        for repo in crate::merge::resolve_project_repos_from_workspace(ws_root) {
+            if let (Ok(can_cwd), Ok(can_repo)) = (cwd_path.canonicalize(), repo.canonicalize()) {
+                if can_cwd.starts_with(&can_repo) {
+                    return true;
+                }
+            } else if cwd_path.starts_with(&repo) {
+                return true;
+            }
+        }
+
+        // Check if cwd is inside a worker worktree of this workspace (<repo>/.wt/<name>)
+        if let Some(name) = cwd_path.file_name().and_then(|n| n.to_str()) {
+            if crate::state::WorkerMetadata::owner_path(runs_dir, name).is_file() {
+                return true;
+            }
+        }
+
+        // cwd is known and does not belong to ws_root or any of its repos/worktrees
+        return false;
+    }
+
+    // 4. If cwd is unknown but grid_role is cos:
+    // If cos.identity.json exists with a different pane_id, then this pane is definitely not the local CoS
+    if tokens_val
+        .as_ref()
+        .and_then(|t| t.get("grid_role"))
+        .and_then(|v| v.as_str())
+        == Some("cos")
+    {
+        if let Ok(content) = std::fs::read_to_string(runs_dir.join(crate::cos::COS_IDENTITY_FILE)) {
+            if let Ok(ident) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(recorded_pane) = ident.get("pane_id").and_then(|p| p.as_str()) {
+                    if recorded_pane != pid {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    true
+}
+
 /// Checks whether an incident record belongs to the consumer's own group (quaqua-owned panes).
 pub fn is_incident_in_consumer_group(r: &FarmEventRecord, consumer: &str, runs_dir: &Path) -> bool {
     let (known_leads, known_projects) = resolve_known_leads_and_projects(runs_dir);
@@ -639,28 +766,49 @@ pub fn handle_event_hook<H: HerdrOps>(
     } else {
         format!("anon-{}", crate::bus::now_ms())
     };
-    let tokens_val = val
+    let mut pane_cwd = val
+        .get("cwd")
+        .or_else(|| val.get("data").and_then(|d| d.get("cwd")))
+        .and_then(|c| c.as_str())
+        .map(String::from);
+
+    let mut tokens_val = val
         .get("tokens")
         .or_else(|| val.get("data").and_then(|d| d.get("tokens")))
-        .cloned()
-        .or_else(|| {
-            if !pid.is_empty() {
-                if let Ok(out) = herdr.run(&["pane", "get", pid]) {
-                    if out.status.success() {
-                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                            return v.pointer("/result/pane/tokens").cloned();
-                        }
+        .cloned();
+
+    if (pane_cwd.is_none() || tokens_val.is_none()) && !pid.is_empty() {
+        if let Ok(out) = herdr.run(&["pane", "get", pid]) {
+            if out.status.success() {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    if pane_cwd.is_none() {
+                        pane_cwd = v
+                            .pointer("/result/pane/cwd")
+                            .and_then(|c| c.as_str())
+                            .map(String::from);
+                    }
+                    if tokens_val.is_none() {
+                        tokens_val = v.pointer("/result/pane/tokens").cloned();
                     }
                 }
             }
-            None
-        });
+        }
+    }
 
     if let Some(tok_map) = tokens_val.as_ref().and_then(|t| t.as_object()) {
         let is_quaqua_pane = tok_map.contains_key("grid_role")
             || tok_map.contains_key("grid_owner")
             || tok_map.contains_key("grid_group");
         if !is_quaqua_pane {
+            return Ok(false);
+        }
+    }
+
+    if !pid.is_empty() {
+        let tok_val = tokens_val
+            .as_ref()
+            .map(|t| serde_json::Value::Object(t.as_object().cloned().unwrap_or_default()));
+        if !is_pane_in_runs_workspace(pid, pane_cwd.as_deref(), runs_dir, tok_val.as_ref()) {
             return Ok(false);
         }
     }
