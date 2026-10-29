@@ -109,6 +109,62 @@ pub fn parse_taskforce_args(args: &[String]) -> Result<TaskforceArgs, (i32, Stri
     })
 }
 
+/// Resolves council members and quorum:
+/// 1. `[taskforce.council]` in team.toml if configured and non-empty
+/// 2. Active layout role members if defined
+/// 3. Sane default fallback: 3 members (`review`, `review`, `design`)
+pub fn resolve_council_members(
+    cfg: &crate::config::Config,
+    role_opt: Option<&crate::layout::LayoutRole>,
+    task: &str,
+) -> (Vec<(String, String)>, usize) {
+    let mut members = Vec::new();
+    if let Some(tf) = cfg.taskforce.get("council") {
+        for (i, kind) in tf.members.iter().enumerate() {
+            let member_name = format!("{kind}-{}c{}", task, i + 1);
+            members.push((member_name, kind.clone()));
+        }
+    }
+    if members.is_empty() {
+        if let Some(r) = role_opt {
+            for (i, m) in r.members.iter().enumerate() {
+                let kind = if let Some(p) = &m.purpose {
+                    cfg.purposes
+                        .get(p)
+                        .cloned()
+                        .unwrap_or_else(|| cfg.strategy.default_kind.clone())
+                } else if let Some(k) = &m.kind {
+                    k.clone()
+                } else {
+                    cfg.strategy.default_kind.clone()
+                };
+                let member_name = format!("{kind}-{}c{}", task, i + 1);
+                members.push((member_name, kind));
+            }
+        }
+    }
+    if members.is_empty() {
+        // Default fallback: 3 members
+        let r1 = cfg
+            .purposes
+            .get("review")
+            .cloned()
+            .unwrap_or_else(|| cfg.strategy.default_kind.clone());
+        let r2 = cfg
+            .purposes
+            .get("design")
+            .cloned()
+            .unwrap_or_else(|| cfg.strategy.default_kind.clone());
+        members.push((format!("{r1}-{}c1", task), r1.clone()));
+        members.push((format!("{r1}-{}c2", task), r1));
+        members.push((format!("{r2}-{}c3", task), r2));
+    }
+    let q = role_opt
+        .and_then(|r| r.effective_quorum())
+        .unwrap_or_else(|| members.len() / 2 + 1);
+    (members, q)
+}
+
 pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), (i32, String)> {
     let targs = parse_taskforce_args(args)?;
     let owner = std::env::var("QUAQUA_OWNER").unwrap_or_else(|_| "cos".to_string());
@@ -185,45 +241,7 @@ pub fn handle_taskforce(args: &[String], git: &Git, herdr: &Herdr) -> Result<(),
 
     // Resolve members and quorum based on mode
     let (member_specs, quorum) = match targs.mode.as_str() {
-        "council" => {
-            let mut members = Vec::new();
-            if let Some(r) = role_opt {
-                for (i, m) in r.members.iter().enumerate() {
-                    let kind = if let Some(p) = &m.purpose {
-                        cfg.purposes
-                            .get(p)
-                            .cloned()
-                            .unwrap_or_else(|| cfg.strategy.default_kind.clone())
-                    } else if let Some(k) = &m.kind {
-                        k.clone()
-                    } else {
-                        cfg.strategy.default_kind.clone()
-                    };
-                    let member_name = format!("{kind}-{}c{}", targs.task, i + 1);
-                    members.push((member_name, kind));
-                }
-            }
-            if members.is_empty() {
-                // Default fallback: 3 members
-                let r1 = cfg
-                    .purposes
-                    .get("review")
-                    .cloned()
-                    .unwrap_or_else(|| cfg.strategy.default_kind.clone());
-                let r2 = cfg
-                    .purposes
-                    .get("design")
-                    .cloned()
-                    .unwrap_or_else(|| cfg.strategy.default_kind.clone());
-                members.push((format!("{r1}-{}c1", targs.task), r1.clone()));
-                members.push((format!("{r1}-{}c2", targs.task), r1));
-                members.push((format!("{r2}-{}c3", targs.task), r2));
-            }
-            let q = role_opt
-                .and_then(|r| r.effective_quorum())
-                .unwrap_or_else(|| members.len() / 2 + 1);
-            (members, q)
-        }
+        "council" => resolve_council_members(&cfg, role_opt, &targs.task),
         "dual-lens" => {
             let default_lens1 = cfg
                 .purposes
@@ -794,5 +812,47 @@ mod tests {
             .unwrap()
             .approve_kinds
             .is_empty());
+    }
+
+    #[test]
+    fn test_resolve_council_members_from_taskforce_config() {
+        let mut cfg = crate::config::Config::default();
+        cfg.taskforce.insert(
+            "council".to_string(),
+            crate::config::Taskforce {
+                members: vec!["truonglao".to_string(), "suhuynh".to_string()],
+                read_only: true,
+            },
+        );
+
+        let (members, quorum) = resolve_council_members(&cfg, None, "t1");
+        assert_eq!(
+            members,
+            vec![
+                ("truonglao-t1c1".to_string(), "truonglao".to_string()),
+                ("suhuynh-t1c2".to_string(), "suhuynh".to_string()),
+            ]
+        );
+        assert_eq!(quorum, 2);
+    }
+
+    #[test]
+    fn test_resolve_council_members_fallback_when_taskforce_absent() {
+        let mut cfg = crate::config::Config::default();
+        cfg.purposes
+            .insert("review".to_string(), "suhuynh".to_string());
+        cfg.purposes
+            .insert("design".to_string(), "truonglao".to_string());
+
+        let (members, quorum) = resolve_council_members(&cfg, None, "t2");
+        assert_eq!(
+            members,
+            vec![
+                ("suhuynh-t2c1".to_string(), "suhuynh".to_string()),
+                ("suhuynh-t2c2".to_string(), "suhuynh".to_string()),
+                ("truonglao-t2c3".to_string(), "truonglao".to_string()),
+            ]
+        );
+        assert_eq!(quorum, 2);
     }
 }
