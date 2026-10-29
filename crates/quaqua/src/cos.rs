@@ -244,7 +244,7 @@ pub fn resolve_cos_runs_dir(ws_dir: &Path) -> std::path::PathBuf {
 }
 
 /// Tag the specified pane as the CoS pane for a specific workspace directory:
-/// - Reports metadata: `--source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent "<display_agent>"`
+/// - Reports metadata: `--source herdr-quaqua --token grid_role=cos --token grid_owner=cos --token grid_farm=<farm> --display-agent "<display_agent>"`
 /// - Renames pane: `"<pane_title>"`
 /// - Records `<runs_dir>/cos.identity.json = {agent_session, pane_id}` if an agent session is present
 pub fn tag_cos_pane_for_workspace<H: HerdrOps>(
@@ -258,7 +258,7 @@ pub fn tag_cos_pane_for_workspace<H: HerdrOps>(
 }
 
 /// Tag the specified pane as the CoS pane:
-/// - Reports metadata: `--source herdr-quaqua --token grid_role=cos --display-agent "🍑 CoS Quả Quả"`
+/// - Reports metadata: `--source herdr-quaqua --token grid_role=cos --token grid_owner=cos --token grid_farm=<farm> --display-agent "🍑 CoS Quả Quả"`
 /// - Renames pane: `"🍑 CoS"`
 /// - Prints confirmation and sidebar configuration hint.
 ///
@@ -268,7 +268,7 @@ pub fn tag_cos_pane<H: HerdrOps>(herdr: &H, pane: &str) -> Result<String, String
 }
 
 /// Tag the specified pane as the CoS pane in the given `runs_dir`:
-/// - Reports metadata: `--source herdr-quaqua --token grid_role=cos --display-agent "🍑 CoS Quả Quả"`
+/// - Reports metadata: `--source herdr-quaqua --token grid_role=cos --token grid_owner=cos --token grid_farm=<farm> --display-agent "🍑 CoS Quả Quả"`
 /// - Renames pane: `"🍑 CoS"`
 /// - Records `runs/cos.identity.json = {agent_session, pane_id}` if an agent session is present
 /// - Prints confirmation and sidebar configuration hint.
@@ -291,6 +291,7 @@ pub fn tag_cos_pane_with<H: HerdrOps>(
     pane_title: &str,
 ) -> Result<String, String> {
     // 1. Report metadata
+    let farm_tok = format!("grid_farm={}", crate::workspace::farm_id());
     let report_out = herdr
         .run(&[
             "pane",
@@ -302,6 +303,8 @@ pub fn tag_cos_pane_with<H: HerdrOps>(
             COS_ROLE_TOKEN,
             "--token",
             COS_OWNER_TOKEN,
+            "--token",
+            &farm_tok,
             "--display-agent",
             display_agent,
         ])

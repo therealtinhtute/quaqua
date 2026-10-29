@@ -663,18 +663,22 @@ fn init_resolves_herdr_through_herdr_bin_path_only() {
         .expect("spawn");
     assert!(out.status.success(), "init failed: {}", stderr(&out));
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
-    for want in [
-        "pane current",
-        "pane get w1:p1",
-        "agent list",
-        "pane report-metadata w1:p1 --source herdr-quaqua \
-         --token grid_role=cos --token grid_owner=cos",
-    ] {
+    for want in ["pane current", "pane get w1:p1", "agent list"] {
         assert!(
             calls.contains(want),
             "HERDR_BIN_PATH binary missed '{want}': {calls}",
         );
     }
+    // The CoS tag carries the farm of the workspace `init` just created.
+    let want_metadata = format!(
+        "pane report-metadata w1:p1 --source herdr-quaqua \
+         --token grid_role=cos --token grid_owner=cos --token grid_farm={}",
+        quaqua::workspace::farm_id_of(&ws),
+    );
+    assert!(
+        calls.contains(&want_metadata),
+        "HERDR_BIN_PATH binary missed '{want_metadata}': {calls}",
+    );
 
     // 2. A decoy herdr FIRST on PATH: with HERDR_BIN_PATH set it must never be
     //    executed, and the tag must still come from the stub.

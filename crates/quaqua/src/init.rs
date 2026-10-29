@@ -917,9 +917,14 @@ fn tag_cos_pane(root: &Path) {
     if !is_cos_pane(&pane, root) {
         return;
     }
+    let farm_tok = format!("grid_farm={}", crate::workspace::farm_id_of(root));
     let _ = Herdr::new().pane_report_metadata(
         &pane,
-        &[crate::cos::COS_ROLE_TOKEN, crate::cos::COS_OWNER_TOKEN],
+        &[
+            crate::cos::COS_ROLE_TOKEN,
+            crate::cos::COS_OWNER_TOKEN,
+            &farm_tok,
+        ],
     );
 }
 
