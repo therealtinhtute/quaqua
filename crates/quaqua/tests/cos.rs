@@ -64,6 +64,18 @@ fn hermetic_cmd(bin: &str, stub: &Path) -> Command {
     cmd
 }
 
+/// The exact `pane report-metadata` line `quaqua cos tag` must issue for
+/// `pane`: role + owner + the farm of the workspace it tags. `hermetic_cmd`
+/// pins `QUAQUA_ROOT` to the test's temp dir, so the farm the child derives is
+/// `farm_id_of(dir)`.
+fn expected_metadata_call(dir: &Path, pane: &str) -> String {
+    format!(
+        "pane report-metadata {pane} --source herdr-quaqua --token grid_role=cos \
+         --token grid_owner=cos --token grid_farm={} --display-agent 🍑 CoS Quả Quả",
+        quaqua::workspace::farm_id_of(dir)
+    )
+}
+
 #[test]
 fn test_is_cos_pane_token_helper() {
     assert!(is_cos_pane_token("cos"));
@@ -248,13 +260,10 @@ fn test_cos_tag_cli_with_explicit_pane() {
 
     let calls = fs::read_to_string(&log).expect("read log");
     let lines: Vec<&str> = calls.lines().collect();
+    let meta = expected_metadata_call(&dir, "w1:p1");
     assert_eq!(
         lines,
-        vec![
-            "pane report-metadata w1:p1 --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả",
-            "pane rename w1:p1 🍑 CoS",
-            "pane get w1:p1",
-        ]
+        vec![meta.as_str(), "pane rename w1:p1 🍑 CoS", "pane get w1:p1",]
     );
 
     let _ = fs::remove_dir_all(&dir);
@@ -280,13 +289,14 @@ fn test_cos_tag_cli_idempotent() {
 
     let calls = fs::read_to_string(&log).expect("read log");
     let lines: Vec<&str> = calls.lines().collect();
+    let meta = expected_metadata_call(&dir, "w1:p42");
     assert_eq!(
         lines,
         vec![
-            "pane report-metadata w1:p42 --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả",
+            meta.as_str(),
             "pane rename w1:p42 🍑 CoS",
             "pane get w1:p42",
-            "pane report-metadata w1:p42 --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả",
+            meta.as_str(),
             "pane rename w1:p42 🍑 CoS",
             "pane get w1:p42",
         ]
@@ -313,7 +323,8 @@ fn test_cos_tag_cli_resolves_env_pane() {
     assert!(stdout.contains("Tagged pane w1:pEnv as grid_role=cos (🍑 CoS Quả Quả)"));
 
     let calls = fs::read_to_string(&log).expect("read log");
-    assert!(calls.contains("pane report-metadata w1:pEnv --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả"));
+    let meta = expected_metadata_call(&dir, "w1:pEnv");
+    assert!(calls.contains(&meta), "calls: {calls}");
     assert!(calls.contains("pane rename w1:pEnv 🍑 CoS"));
 
     let _ = fs::remove_dir_all(&dir);
@@ -337,7 +348,8 @@ fn test_cos_tag_cli_resolves_current_pane() {
 
     let calls = fs::read_to_string(&log).expect("read log");
     assert!(calls.contains("pane current"));
-    assert!(calls.contains("pane report-metadata w1:pCurrent --source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent 🍑 CoS Quả Quả"));
+    let meta = expected_metadata_call(&dir, "w1:pCurrent");
+    assert!(calls.contains(&meta), "calls: {calls}");
 
     let _ = fs::remove_dir_all(&dir);
 }
