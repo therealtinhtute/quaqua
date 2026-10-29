@@ -8,6 +8,32 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(1);
+static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    vars: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn new(keys: &[&'static str]) -> Self {
+        let lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let vars = keys.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+        Self { _lock: lock, vars }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in &self.vars {
+            if let Some(val) = v {
+                std::env::set_var(k, val);
+            } else {
+                std::env::remove_var(k);
+            }
+        }
+    }
+}
 
 fn hermetic_temp_dir(prefix: &str) -> PathBuf {
     let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -1116,4 +1142,194 @@ members = ["tieude"]
     let (code, msg) = res.unwrap_err();
     assert_eq!(code, 1);
     assert!(msg.contains("cannot review (can_review = false in [kinds.tieude])"));
+}
+
+#[test]
+fn council_uses_taskforce_council_config_from_team_toml() {
+    let tmp = hermetic_temp_dir("council-cfg");
+    let repo_dir = tmp.join("repo");
+    let runs_dir = tmp.join("runs");
+    fs::create_dir_all(&repo_dir).unwrap();
+    fs::create_dir_all(&runs_dir).unwrap();
+
+    let brief = tmp.join("brief.md");
+    fs::write(
+        &brief,
+        "Goal: test brief\nHard constraints: none\nEvidence: clean\n",
+    )
+    .unwrap();
+
+    let team_toml = tmp.join("team.toml");
+    let team_content = r#"
+schema_version = 2
+
+[strategy]
+default_kind = "sude"
+default_reviewer = ["sude"]
+
+[kinds.suhuynh]
+harness = "opencode"
+model = "deepseek-v4.1-flash"
+effort = "max"
+can_review = true
+
+[kinds.truonglao]
+harness = "claude"
+model = "opus-5.5"
+effort = "high"
+can_review = true
+
+[kinds.sude]
+harness = "omp"
+model = "gemini-3.8-flash"
+effort = "medium"
+can_review = true
+
+[purposes]
+review = "sude"
+design = "sude"
+
+[taskforce.council]
+members = ["suhuynh", "truonglao"]
+"#;
+    fs::write(&team_toml, team_content).unwrap();
+
+    let _env = EnvGuard::new(&[
+        "QUAQUA_TEAM_TOML",
+        "QUAQUA_RUNS_DIR",
+        "QUAQUA_OWNER",
+        "QUAQUA_TEST",
+        "HERDR_SOCKET_PATH",
+    ]);
+
+    std::env::set_var("QUAQUA_TEAM_TOML", &team_toml);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("HERDR_SOCKET_PATH", "/dev/null/none");
+    let git = quaqua::git::Git::new();
+    let herdr = quaqua::herdr::Herdr::new();
+
+    let args = vec![
+        "council".to_string(),
+        "mycouncil".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+        "--brief".to_string(),
+        brief.to_str().unwrap().to_string(),
+    ];
+
+    let _ = quaqua::taskforce::handle_taskforce(&args, &git, &herdr);
+
+    let state_file = runs_dir.join("council-mycouncil.state");
+    assert!(
+        state_file.is_file(),
+        "council state file must be written before member spawn"
+    );
+    let state_content = fs::read_to_string(&state_file).unwrap();
+    assert!(
+        state_content.contains("members=suhuynh-mycouncilc1,truonglao-mycouncilc2"),
+        "expected configured members suhuynh,truonglao, but state had:\n{state_content}"
+    );
+    assert!(
+        state_content.contains("n=2"),
+        "expected n=2 members, but state had:\n{state_content}"
+    );
+    assert!(
+        state_content.contains("quorum=2"),
+        "expected majority quorum=2, but state had:\n{state_content}"
+    );
+}
+
+#[test]
+fn council_uses_sane_fallback_when_taskforce_council_absent() {
+    let tmp = hermetic_temp_dir("council-fallback");
+    let repo_dir = tmp.join("repo");
+    let runs_dir = tmp.join("runs");
+    fs::create_dir_all(&repo_dir).unwrap();
+    fs::create_dir_all(&runs_dir).unwrap();
+
+    let brief = tmp.join("brief.md");
+    fs::write(
+        &brief,
+        "Goal: test brief\nHard constraints: none\nEvidence: clean\n",
+    )
+    .unwrap();
+
+    let team_toml = tmp.join("team.toml");
+    let team_content = r#"
+schema_version = 2
+
+[strategy]
+default_kind = "sude"
+default_reviewer = ["sude"]
+
+[kinds.suhuynh]
+harness = "opencode"
+model = "deepseek-v4.1-flash"
+effort = "max"
+can_review = true
+
+[kinds.truonglao]
+harness = "claude"
+model = "opus-5.5"
+effort = "high"
+can_review = true
+
+[kinds.sude]
+harness = "omp"
+model = "gemini-3.8-flash"
+effort = "medium"
+can_review = true
+
+[purposes]
+review = "truonglao"
+design = "suhuynh"
+"#;
+    fs::write(&team_toml, team_content).unwrap();
+
+    let _env = EnvGuard::new(&[
+        "QUAQUA_TEAM_TOML",
+        "QUAQUA_RUNS_DIR",
+        "QUAQUA_OWNER",
+        "QUAQUA_TEST",
+        "HERDR_SOCKET_PATH",
+    ]);
+
+    std::env::set_var("QUAQUA_TEAM_TOML", &team_toml);
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+    std::env::set_var("QUAQUA_OWNER", "cos");
+    std::env::set_var("QUAQUA_TEST", "1");
+    std::env::set_var("HERDR_SOCKET_PATH", "/dev/null/none");
+    let git = quaqua::git::Git::new();
+    let herdr = quaqua::herdr::Herdr::new();
+
+    let args = vec![
+        "council".to_string(),
+        "myfallback".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+        "--brief".to_string(),
+        brief.to_str().unwrap().to_string(),
+    ];
+
+    let _ = quaqua::taskforce::handle_taskforce(&args, &git, &herdr);
+
+    let state_file = runs_dir.join("council-myfallback.state");
+    assert!(
+        state_file.is_file(),
+        "council state file must be written before member spawn"
+    );
+    let state_content = fs::read_to_string(&state_file).unwrap();
+    assert!(
+        state_content
+            .contains("members=truonglao-myfallbackc1,truonglao-myfallbackc2,suhuynh-myfallbackc3"),
+        "expected fallback 3 members (review, review, design), but state had:\n{state_content}"
+    );
+    assert!(
+        state_content.contains("n=3"),
+        "expected n=3 members, but state had:\n{state_content}"
+    );
+    assert!(
+        state_content.contains("quorum=2"),
+        "expected majority quorum=2, but state had:\n{state_content}"
+    );
 }
