@@ -310,9 +310,33 @@ pub fn resolve_caller_from_tokens(
 }
 
 /// Resolves the caller identity from herdr pane tokens, environment fallback, and owner chains.
+/// If caller role is unknown but a caller pane is present (tokens lost after herdr restart),
+/// attempts self-healing via `heal_with_runs_dir` to recover pane tokens from persisted identity.
 pub fn resolve_caller<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Caller {
     let tokens = caller_pane_tokens(herdr);
-    resolve_caller_from_tokens(tokens.as_ref(), runs_dir)
+    let caller = resolve_caller_from_tokens(tokens.as_ref(), runs_dir);
+    if caller.role != Role::Unknown {
+        return caller;
+    }
+
+    // Only attempt healing when a caller pane actually exists in herdr
+    // and carries no grid_role token (tokens lost after a herdr restart).
+    let has_grid_role = tokens
+        .as_ref()
+        .and_then(|t| t.get("grid_role"))
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
+    if tokens.is_some() && !has_grid_role {
+        let _ = heal_with_runs_dir(herdr, runs_dir, None);
+        let healed_tokens = caller_pane_tokens(herdr);
+        let healed_caller = resolve_caller_from_tokens(healed_tokens.as_ref(), runs_dir);
+        if healed_caller.role != Role::Unknown {
+            return healed_caller;
+        }
+    }
+
+    caller
 }
 
 #[derive(Debug, Clone, Default)]
@@ -702,7 +726,7 @@ mod tests {
             })
         }
         fn agent_list(&self) -> std::io::Result<String> {
-            unimplemented!()
+            Ok(r#"{"result":{"agents":[]}}"#.to_string())
         }
         fn agent_get(&self, _name: &str) -> std::io::Result<(bool, String)> {
             unimplemented!()

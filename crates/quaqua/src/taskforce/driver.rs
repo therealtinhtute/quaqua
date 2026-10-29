@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::Duration;
 
 struct NoopActivity;
 
@@ -118,22 +119,63 @@ impl<'a, G: crate::git::GitOps + Clone + Send + Sync + 'static> CouncilMemberRun
         name: &str,
         brief: &str,
         _repo: &Path,
-        _cancel: Arc<AtomicBool>,
+        cancel: Arc<AtomicBool>,
     ) -> Result<SingleWorkerOutput, (i32, String)> {
-        let prompt_res = crate::worker::prompt::prompt_worker(
-            name,
-            Some(brief),
-            false,
-            None,
-            self.git,
-            self.herdr,
-        );
-        let runs_dir = crate::worker::cleanup::default_runs_dir();
-        let report_path = runs_dir.join(format!("{name}.md"));
+        if cancel.load(Ordering::SeqCst) {
+            return Err((1, format!("cancelled by fail-fast: {name}")));
+        }
 
-        match prompt_res {
-            Ok(()) => Ok(SingleWorkerOutput::new(0, report_path).unwrap()),
-            Err((code, msg)) => Err((code, msg)),
+        let name_owned = name.to_string();
+        let brief_owned = brief.to_string();
+        let git = self.git.clone();
+        let herdr = self.herdr.clone();
+
+        let (tx, rx) = mpsc::channel();
+        let spawn_res = std::thread::Builder::new()
+            .name(format!("prompt-{name}"))
+            .spawn(move || {
+                let res = crate::worker::prompt::prompt_worker(
+                    &name_owned,
+                    Some(&brief_owned),
+                    false,
+                    None,
+                    &git,
+                    &herdr,
+                );
+                let _ = tx.send(res);
+            });
+
+        if let Err(e) = spawn_res {
+            return Err((
+                1,
+                format!("failed to spawn prompt thread for member '{name}': {e}"),
+            ));
+        }
+
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                return Err((1, format!("cancelled by fail-fast: {name}")));
+            }
+            match rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(prompt_res) => {
+                    let runs_dir = crate::worker::cleanup::default_runs_dir();
+                    let report_path = runs_dir.join(format!("{name}.md"));
+
+                    return match prompt_res {
+                        Ok(()) => Ok(SingleWorkerOutput::new(0, report_path).unwrap()),
+                        Err((code, msg)) => Err((code, msg)),
+                    };
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err((
+                        1,
+                        format!(
+                            "prompt worker thread disconnected unexpectedly for member '{name}'"
+                        ),
+                    ));
+                }
+            }
         }
     }
 

@@ -132,6 +132,193 @@ pub fn is_consumer_own_pane_blocked_noise(r: &FarmEventRecord, own_pane: Option<
     false
 }
 
+/// Helper to extract registered leads and projects from projects/INDEX.md.
+pub fn resolve_known_leads_and_projects(runs_dir: &Path) -> (Vec<String>, Vec<String>) {
+    let ws_root = runs_dir.parent().unwrap_or(runs_dir);
+    let index_file = ws_root.join("projects/INDEX.md");
+    let mut leads = Vec::new();
+    let mut projects = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(&index_file) {
+        let rows = crate::worker::leadgate::index_rows(&content);
+        for row in rows {
+            if row.owner != "cos" && !row.owner.is_empty() && !leads.contains(&row.owner) {
+                leads.push(row.owner);
+            }
+            if !row.slug.is_empty() && !projects.contains(&row.slug) {
+                projects.push(row.slug);
+            }
+        }
+    }
+    (leads, projects)
+}
+
+/// Helper to query pane tokens from payload or herdr.
+pub fn resolve_pane_tokens_from_record(
+    r: &FarmEventRecord,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload_json) {
+        if let Some(tokens) = v
+            .get("tokens")
+            .or_else(|| v.get("data").and_then(|d| d.get("tokens")))
+            .and_then(|t| t.as_object())
+        {
+            return Some(tokens.clone());
+        }
+    }
+    let pid = if let Some(subj) = &r.subject {
+        subj.as_str()
+    } else {
+        ""
+    };
+    let pid_from_payload = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload_json)
+    {
+        v.get("pane_id")
+            .or_else(|| v.get("data").and_then(|d| d.get("pane_id")))
+            .and_then(|p| p.as_str())
+            .map(String::from)
+    } else {
+        None
+    };
+    let target_pid = if !pid.is_empty() && pid.contains(':') {
+        Some(pid)
+    } else {
+        pid_from_payload.as_deref()
+    };
+    if let Some(p) = target_pid {
+        if let Ok(out) = std::process::Command::new(crate::herdr::bin_path())
+            .args(["pane", "get", p])
+            .output()
+        {
+            if out.status.success() {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    if let Some(tokens) =
+                        v.pointer("/result/pane/tokens").and_then(|t| t.as_object())
+                    {
+                        return Some(tokens.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Checks whether an incident record belongs to the consumer's own group (quaqua-owned panes).
+pub fn is_incident_in_consumer_group(r: &FarmEventRecord, consumer: &str, runs_dir: &Path) -> bool {
+    let (known_leads, known_projects) = resolve_known_leads_and_projects(runs_dir);
+
+    if consumer == "cos" {
+        // Direct match with cos owner
+        if r.owner.as_deref() == Some("cos") {
+            return true;
+        }
+        // Direct match with internal bus
+        if r.actor.as_deref() == Some("quaqua-bus") {
+            return true;
+        }
+        // Check if owner is a registered Lead or any *-lead
+        if let Some(owner) = &r.owner {
+            if known_leads.contains(owner) || owner.ends_with("-lead") {
+                return true;
+            }
+            if known_projects.contains(owner) {
+                return true;
+            }
+            return false;
+        }
+        // Project match
+        if let Some(project) = &r.project {
+            if known_projects.contains(project) {
+                return true;
+            }
+        }
+
+        // When owner is None: check worker metadata in runs_dir
+        if let Some(subj) = &r.subject {
+            if crate::state::WorkerMetadata::owner_path(runs_dir, subj).is_file() {
+                let o = crate::state::WorkerMetadata::load_owner(runs_dir, subj);
+                if !o.is_empty() && (o == "cos" || known_leads.contains(&o) || o.ends_with("-lead"))
+                {
+                    return true;
+                }
+            }
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload_json) {
+            if let Some(agent) = v
+                .get("agent")
+                .or_else(|| v.get("data").and_then(|d| d.get("agent")))
+                .and_then(|a| a.as_str())
+            {
+                if crate::state::WorkerMetadata::owner_path(runs_dir, agent).is_file() {
+                    let o = crate::state::WorkerMetadata::load_owner(runs_dir, agent);
+                    if !o.is_empty()
+                        && (o == "cos" || known_leads.contains(&o) || o.ends_with("-lead"))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // When owner is None: check tokens
+        if let Some(tokens) = resolve_pane_tokens_from_record(r) {
+            let has_grid_tokens = tokens.contains_key("grid_role")
+                || tokens.contains_key("grid_owner")
+                || tokens.contains_key("grid_group");
+            if !has_grid_tokens {
+                return false;
+            }
+            if let Some(o) = tokens.get("grid_owner").and_then(|v| v.as_str()) {
+                if o == "cos" || known_leads.iter().any(|l| l == o) || o.ends_with("-lead") {
+                    return true;
+                }
+            }
+            if let Some(role) = tokens.get("grid_role").and_then(|v| v.as_str()) {
+                if role == "cos" || role == "orchestrator" || role == "worker" {
+                    return true;
+                }
+            }
+            if let Some(grp) = tokens.get("grid_group").and_then(|v| v.as_str()) {
+                if known_projects.iter().any(|p| p == grp) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        false
+    } else {
+        // Consumer is a Lead (e.g. "mu-lead")
+        if r.owner.as_deref() == Some(consumer) {
+            return true;
+        }
+        if let Some(project) = &r.project {
+            if project == consumer || known_projects.contains(project) {
+                return true;
+            }
+        }
+        if let Some(owner) = &r.owner {
+            if owner != consumer {
+                return false;
+            }
+        }
+        if let Some(subj) = &r.subject {
+            if crate::state::WorkerMetadata::owner_path(runs_dir, subj).is_file() {
+                let o = crate::state::WorkerMetadata::load_owner(runs_dir, subj);
+                if o == consumer {
+                    return true;
+                }
+            }
+        }
+        if let Some(tokens) = resolve_pane_tokens_from_record(r) {
+            if let Some(o) = tokens.get("grid_owner").and_then(|v| v.as_str()) {
+                return o == consumer;
+            }
+        }
+        false
+    }
+}
+
 impl FarmBus {
     /// Loads incidents (events where `incident_key IS NOT NULL`) ordered by `seq` ASC,
     /// strictly after `since_seq`.
@@ -246,6 +433,7 @@ impl FarmBus {
         let incidents: Vec<_> = raw_incidents
             .into_iter()
             .filter(|r| !is_consumer_own_pane_blocked_noise(r, own_pane.as_deref()))
+            .filter(|r| is_incident_in_consumer_group(r, consumer, runs_dir))
             .collect();
 
         let new_cursor = if max_evaluated_seq > prev_cursor {
@@ -296,7 +484,7 @@ impl FarmBus {
     /// and new incidents since cursor.
     pub fn follow_tick(
         &self,
-        _runs_dir: &Path,
+        runs_dir: &Path,
         consumer: &str,
         last_seen_mail_id: &mut u64,
     ) -> Result<InboxDigest, String> {
@@ -373,6 +561,7 @@ impl FarmBus {
         let incidents: Vec<_> = raw_incidents
             .into_iter()
             .filter(|r| !is_consumer_own_pane_blocked_noise(r, own_pane.as_deref()))
+            .filter(|r| is_incident_in_consumer_group(r, consumer, runs_dir))
             .collect();
 
         let new_cursor = if max_evaluated_seq > prev_cursor {
@@ -450,6 +639,69 @@ pub fn handle_event_hook<H: HerdrOps>(
     } else {
         format!("anon-{}", crate::bus::now_ms())
     };
+    let tokens_val = val
+        .get("tokens")
+        .or_else(|| val.get("data").and_then(|d| d.get("tokens")))
+        .cloned()
+        .or_else(|| {
+            if !pid.is_empty() {
+                if let Ok(out) = herdr.run(&["pane", "get", pid]) {
+                    if out.status.success() {
+                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                            return v.pointer("/result/pane/tokens").cloned();
+                        }
+                    }
+                }
+            }
+            None
+        });
+
+    if let Some(tok_map) = tokens_val.as_ref().and_then(|t| t.as_object()) {
+        let is_quaqua_pane = tok_map.contains_key("grid_role")
+            || tok_map.contains_key("grid_owner")
+            || tok_map.contains_key("grid_group");
+        if !is_quaqua_pane {
+            return Ok(false);
+        }
+    }
+
+    let owner = tokens_val
+        .as_ref()
+        .and_then(|t| t.get("grid_owner"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            if tokens_val
+                .as_ref()
+                .and_then(|t| t.get("grid_role"))
+                .and_then(|v| v.as_str())
+                == Some("cos")
+            {
+                Some("cos".to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            agent.and_then(|a| {
+                if crate::state::WorkerMetadata::owner_path(runs_dir, a).is_file() {
+                    let o = crate::state::WorkerMetadata::load_owner(runs_dir, a);
+                    if o.is_empty() {
+                        None
+                    } else {
+                        Some(o)
+                    }
+                } else {
+                    None
+                }
+            })
+        });
+
+    let project = tokens_val
+        .as_ref()
+        .and_then(|t| t.get("grid_group"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let db_path = runs_dir.join("quaqua.db");
     let bus = match FarmBus::open(&db_path) {
@@ -493,8 +745,8 @@ pub fn handle_event_hook<H: HerdrOps>(
                 "blocked",
                 Some("herdr"),
                 Some(&subject_str),
-                None::<String>,
-                None::<String>,
+                owner.clone(),
+                project.clone(),
             )
             .with_incident_key(incident_key);
 
@@ -520,8 +772,8 @@ pub fn handle_event_hook<H: HerdrOps>(
                         "agent_status",
                         Some("herdr"),
                         Some(&subject_str),
-                        None::<String>,
-                        None::<String>,
+                        owner.clone(),
+                        project.clone(),
                     )
                     .with_payload_json(ej);
                     let _ = bus.record(&ev);
@@ -539,8 +791,8 @@ pub fn handle_event_hook<H: HerdrOps>(
             "agent_exited",
             Some("herdr"),
             Some(&subject_str),
-            None::<String>,
-            None::<String>,
+            owner,
+            project,
         );
         if let Some(key) = incident_key {
             ev = ev.with_incident_key(key);

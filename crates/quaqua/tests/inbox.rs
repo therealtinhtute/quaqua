@@ -723,3 +723,68 @@ fn test_cos_inbox_hook_stop_blocks_once_and_skips_when_stop_hook_active() {
         "stop hook must not block when stop_hook_active is true"
     );
 }
+
+#[test]
+fn test_inbox_drops_foreign_blocked_pane_incidents_and_keeps_real_incidents() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_RUNS_DIR",
+    ]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("HERDR_PANE_ID", "w1:p1X");
+
+    let runs_dir = hermetic_temp_dir("foreign-pane");
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+    let db_path = runs_dir.join("quaqua.db");
+    let bus = FarmBus::open(&db_path).expect("open bus");
+
+    // Incident 1: real worker pane belonging to CoS (w1:p2) blocked -> KEEP
+    let ev_real = quaqua::bus::FarmEvent::new(
+        "blocked",
+        Some("herdr"),
+        Some("w1:p2"),
+        Some("cos"),
+        Some("quaqua"),
+    )
+    .with_incident_key("blocked:w1:p2:1792985802000");
+    bus.record(&ev_real).expect("record real");
+
+    // Incident 2: foreign pane (w7:p2) from another workspace/project (tokens only logo, no grid_owner/grid_role)
+    // went blocked on 2026-10-29 -> MUST DROP (never surface to CoS)
+    let ev_foreign = quaqua::bus::FarmEvent::new(
+        "blocked",
+        Some("herdr"),
+        Some("w7:p2"),
+        None::<String>,
+        None::<String>,
+    )
+    .with_incident_key("blocked:w7:p2:1792985802999")
+    .with_payload_json(r#"{"event":"pane.agent_status_changed","data":{"pane_id":"w7:p2","agent":"claude","agent_status":"blocked","workspace_id":"w7","tokens":{"logo":"\ue1a3"}}}"#);
+    bus.record(&ev_foreign).expect("record foreign");
+
+    // Read inbox digest for cos:
+    let digest = bus.inbox_digest(&runs_dir, "cos").expect("digest");
+
+    assert_eq!(
+        digest.incidents.len(),
+        1,
+        "must only surface 1 real incident, dropping foreign pane incident"
+    );
+    assert_eq!(digest.incidents[0].subject.as_deref(), Some("w1:p2"));
+    assert_eq!(
+        digest.incidents[0].incident_key.as_deref(),
+        Some("blocked:w1:p2:1792985802000")
+    );
+
+    let rendered = digest.render("cos");
+    assert!(
+        rendered.contains("w1:p2"),
+        "rendered digest must contain real incident for w1:p2"
+    );
+    assert!(
+        !rendered.contains("w7:p2"),
+        "rendered digest must never surface foreign pane w7:p2"
+    );
+}
