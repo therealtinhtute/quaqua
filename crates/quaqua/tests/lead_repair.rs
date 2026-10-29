@@ -27,12 +27,29 @@ struct EnvGuard {
     vars: Vec<(&'static str, Option<String>)>,
 }
 
+/// Vars that decide *caller* identity for `repair_lead`, `repair_all_leads` and `heal`:
+/// `identity::resolve_caller` reads `HERDR_PANE_ID` to find the caller's pane and falls back
+/// to `QUAQUA_OWNER`. A herdr session exports both, so a test that does not pin them resolves
+/// the caller to the pane it happens to run in — the mock's `pane get` then hands it the
+/// fixture's tokens, and `repair_lead` correctly refuses to let that Lead own itself
+/// (`depth.cycle`). `EnvGuard` always pins them so no test inherits ambient identity.
+const AMBIENT_IDENTITY_VARS: &[&str] = &["HERDR_PANE_ID", "QUAQUA_OWNER"];
+
 impl EnvGuard {
     fn new(keys: &[&'static str]) -> Self {
         let lock = TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let vars = keys.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+        let mut all: Vec<&'static str> = AMBIENT_IDENTITY_VARS.to_vec();
+        for &k in keys {
+            if !all.contains(&k) {
+                all.push(k);
+            }
+        }
+        let vars = all.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+        for k in AMBIENT_IDENTITY_VARS {
+            std::env::remove_var(k);
+        }
         Self { _lock: lock, vars }
     }
     fn set(&self, key: &'static str, val: &str) {
@@ -386,11 +403,9 @@ fn test_repair_lead_success_stamps_tokens() {
 /// file so the live Lead works again.
 #[test]
 fn test_repair_lead_restores_missing_owner_file() {
-    let guard = EnvGuard::new(&["QUAQUA_ROOT", "HERDR_PANE_ID", "QUAQUA_OWNER"]);
+    let guard = EnvGuard::new(&["QUAQUA_ROOT"]);
     let ws = hermetic_temp_dir("repair-owner-missing-ws");
     guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
-    std::env::remove_var("HERDR_PANE_ID");
-    std::env::remove_var("QUAQUA_OWNER");
 
     let projects_dir = ws.join("projects");
     std::fs::create_dir_all(&projects_dir).unwrap();
@@ -421,11 +436,9 @@ fn test_repair_lead_restores_missing_owner_file() {
 /// owner restore must happen before that early return.
 #[test]
 fn test_repair_lead_restores_missing_owner_when_pane_already_tagged() {
-    let guard = EnvGuard::new(&["QUAQUA_ROOT", "HERDR_PANE_ID", "QUAQUA_OWNER"]);
+    let guard = EnvGuard::new(&["QUAQUA_ROOT"]);
     let ws = hermetic_temp_dir("repair-owner-tagged-ws");
     guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
-    std::env::remove_var("HERDR_PANE_ID");
-    std::env::remove_var("QUAQUA_OWNER");
 
     let projects_dir = ws.join("projects");
     std::fs::create_dir_all(&projects_dir).unwrap();
@@ -450,11 +463,9 @@ fn test_repair_lead_restores_missing_owner_when_pane_already_tagged() {
 /// An existing owner file is authoritative: repair never rewrites it.
 #[test]
 fn test_repair_lead_keeps_existing_owner_file() {
-    let guard = EnvGuard::new(&["QUAQUA_ROOT", "HERDR_PANE_ID", "QUAQUA_OWNER"]);
+    let guard = EnvGuard::new(&["QUAQUA_ROOT"]);
     let ws = hermetic_temp_dir("repair-owner-kept-ws");
     guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
-    std::env::remove_var("HERDR_PANE_ID");
-    std::env::remove_var("QUAQUA_OWNER");
 
     let projects_dir = ws.join("projects");
     std::fs::create_dir_all(&projects_dir).unwrap();
@@ -486,7 +497,7 @@ fn test_repair_lead_keeps_existing_owner_file() {
 /// the restore refuses instead of writing `mu-lead -> mu-lead`.
 #[test]
 fn test_repair_lead_refuses_to_own_itself() {
-    let guard = EnvGuard::new(&["QUAQUA_ROOT", "HERDR_PANE_ID", "QUAQUA_OWNER"]);
+    let guard = EnvGuard::new(&["QUAQUA_ROOT"]);
     let ws = hermetic_temp_dir("repair-owner-self-ws");
     guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
     std::env::remove_var("HERDR_PANE_ID");
