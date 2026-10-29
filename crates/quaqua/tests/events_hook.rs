@@ -19,7 +19,6 @@ fn hermetic_temp_dir(prefix: &str) -> PathBuf {
 }
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-
 #[test]
 fn test_herdr_notification_exactly_one_per_incident_key() {
     let runs_dir = hermetic_temp_dir("notif-dedup");
@@ -70,11 +69,18 @@ exit 0
         Some(&event_payload),
         &herdr_ops,
     );
-    assert_eq!(res1, Ok(true), "first hook call must record incident and notify");
+    assert_eq!(
+        res1,
+        Ok(true),
+        "first hook call must record incident and notify"
+    );
 
     // Verify 1 notification logged
     let log1 = fs::read_to_string(&notif_log).unwrap_or_default();
-    let count1 = log1.lines().filter(|l| l.contains("notification show")).count();
+    let count1 = log1
+        .lines()
+        .filter(|l| l.contains("notification show"))
+        .count();
     assert_eq!(count1, 1, "exactly 1 notification on first call");
 
     // Call hook second time with the exact same payload / incident_key
@@ -84,12 +90,22 @@ exit 0
         Some(&event_payload),
         &herdr_ops,
     );
-    assert_eq!(res2, Ok(false), "second hook call must recognize duplicate and return false");
+    assert_eq!(
+        res2,
+        Ok(false),
+        "second hook call must recognize duplicate and return false"
+    );
 
     // Verify notification count is STILL exactly 1
     let log2 = fs::read_to_string(&notif_log).unwrap_or_default();
-    let count2 = log2.lines().filter(|l| l.contains("notification show")).count();
-    assert_eq!(count2, 1, "must NOT send duplicate notification on repeated hook call");
+    let count2 = log2
+        .lines()
+        .filter(|l| l.contains("notification show"))
+        .count();
+    assert_eq!(
+        count2, 1,
+        "must NOT send duplicate notification on repeated hook call"
+    );
 
     // Call hook third time
     let res3 = quaqua::bus::events::handle_event_hook(
@@ -100,8 +116,14 @@ exit 0
     );
     assert_eq!(res3, Ok(false));
     let log3 = fs::read_to_string(&notif_log).unwrap_or_default();
-    let count3 = log3.lines().filter(|l| l.contains("notification show")).count();
-    assert_eq!(count3, 1, "must remain exactly 1 notification across 3 calls");
+    let count3 = log3
+        .lines()
+        .filter(|l| l.contains("notification show"))
+        .count();
+    assert_eq!(
+        count3, 1,
+        "must remain exactly 1 notification across 3 calls"
+    );
 
     // A different incident key (different status_since or pane) should trigger a new notification
     let event_payload_2 = serde_json::json!({
@@ -121,8 +143,14 @@ exit 0
     );
     assert_eq!(res4, Ok(true), "different incident key must notify");
     let log4 = fs::read_to_string(&notif_log).unwrap_or_default();
-    let count4 = log4.lines().filter(|l| l.contains("notification show")).count();
-    assert_eq!(count4, 2, "must have exactly 2 notifications total (1 per incident key)");
+    let count4 = log4
+        .lines()
+        .filter(|l| l.contains("notification show"))
+        .count();
+    assert_eq!(
+        count4, 2,
+        "must have exactly 2 notifications total (1 per incident key)"
+    );
 }
 
 #[test]
@@ -187,7 +215,8 @@ exit 0
         "agent": "worker-1",
         "agent_status": "blocked",
         "workspace_id": "w9"
-    }).to_string();
+    })
+    .to_string();
 
     let res1 = quaqua::bus::events::handle_event_hook(
         &runs_dir,
@@ -204,9 +233,17 @@ exit 0
         Some(&payload_blocked_1),
         &herdr_ops,
     );
-    assert_eq!(res1_dup, Ok(false), "repeated delivery in episode 1 must be deduped");
+    assert_eq!(
+        res1_dup,
+        Ok(false),
+        "repeated delivery in episode 1 must be deduped"
+    );
 
-    let count1 = fs::read_to_string(&notif_log).unwrap_or_default().lines().filter(|l| l.contains("notification show")).count();
+    let count1 = fs::read_to_string(&notif_log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("notification show"))
+        .count();
     assert_eq!(count1, 1, "exactly 1 notification after episode 1");
 
     // Unblock: worker transitions to working
@@ -215,7 +252,8 @@ exit 0
         "agent": "worker-1",
         "agent_status": "working",
         "workspace_id": "w9"
-    }).to_string();
+    })
+    .to_string();
     let _ = quaqua::bus::events::handle_event_hook(
         &runs_dir,
         Some("pane.agent_status_changed"),
@@ -232,8 +270,15 @@ exit 0
     );
     assert_eq!(res2, Ok(true), "episode 2 must notify after unblocking");
 
-    let count2 = fs::read_to_string(&notif_log).unwrap_or_default().lines().filter(|l| l.contains("notification show")).count();
-    assert_eq!(count2, 2, "second blocked episode must send a second notification");
+    let count2 = fs::read_to_string(&notif_log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("notification show"))
+        .count();
+    assert_eq!(
+        count2, 2,
+        "second blocked episode must send a second notification"
+    );
 
     // Missing pane_id: two different agents with empty pane_id must not collapse farm-wide
     let payload_nopane_a = serde_json::json!({
@@ -241,7 +286,8 @@ exit 0
         "agent": "agent-A",
         "agent_status": "blocked",
         "workspace_id": "w9"
-    }).to_string();
+    })
+    .to_string();
     let res_a = quaqua::bus::events::handle_event_hook(
         &runs_dir,
         Some("pane.agent_status_changed"),
@@ -255,14 +301,19 @@ exit 0
         "agent": "agent-B",
         "agent_status": "blocked",
         "workspace_id": "w9"
-    }).to_string();
+    })
+    .to_string();
     let res_b = quaqua::bus::events::handle_event_hook(
         &runs_dir,
         Some("pane.agent_status_changed"),
         Some(&payload_nopane_b),
         &herdr_ops,
     );
-    assert_eq!(res_b, Ok(true), "second pane-less agent must notify, not collapse into blocked:");
+    assert_eq!(
+        res_b,
+        Ok(true),
+        "second pane-less agent must notify, not collapse into blocked:"
+    );
 }
 
 #[test]
@@ -301,26 +352,34 @@ exit 0
     let bus = quaqua::bus::FarmBus::open(&db_path).expect("open bus");
     let now = quaqua::bus::now_ms();
     let past = now.saturating_sub(40 * 60 * 1000);
-    bus.conn_for_test().execute(
-        r#"
+    bus.conn_for_test()
+        .execute(
+            r#"
         INSERT INTO mail (msg_key, ts_ms, from_name, from_role, to_name, kind, project, body)
         VALUES ('k1', ?1, 'mu-lead', 'lead', 'cos', 'escalate', 'mu', 'help needed')
         "#,
-        rusqlite::params![past as i64],
-    ).expect("insert mail");
+            rusqlite::params![past as i64],
+        )
+        .expect("insert mail");
 
     // Run inbox digest which triggers unacked check
     let _ = bus.inbox_digest(&runs_dir, "cos").expect("digest");
 
     // Notification must have been pushed!
     let log1 = fs::read_to_string(&notif_log).unwrap_or_default();
-    let count1 = log1.lines().filter(|l| l.contains("notification show") && l.contains("unacked")).count();
+    let count1 = log1
+        .lines()
+        .filter(|l| l.contains("notification show") && l.contains("unacked"))
+        .count();
     assert_eq!(count1, 1, "must push 1 notification for unacked mail");
 
     // Second digest must not duplicate notification
     let _ = bus.inbox_digest(&runs_dir, "cos").expect("digest 2");
     let log2 = fs::read_to_string(&notif_log).unwrap_or_default();
-    let count2 = log2.lines().filter(|l| l.contains("notification show") && l.contains("unacked")).count();
+    let count2 = log2
+        .lines()
+        .filter(|l| l.contains("notification show") && l.contains("unacked"))
+        .count();
     assert_eq!(count2, 1, "notification count must remain exactly 1");
 }
 
@@ -355,7 +414,8 @@ exit 0
         "pane_id": "pane-hang",
         "agent": "worker-hang",
         "agent_status": "blocked"
-    }).to_string();
+    })
+    .to_string();
 
     let start = std::time::Instant::now();
     let output = Command::new(quaqua_bin)
@@ -368,7 +428,11 @@ exit 0
         .expect("run events hook");
     let elapsed = start.elapsed();
 
-    assert_eq!(output.status.code(), Some(0), "hook must exit 0 within deadline");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "hook must exit 0 within deadline"
+    );
     assert!(
         elapsed < std::time::Duration::from_millis(2500),
         "hook must finish within hard timeout (<2.5s) even if herdr hangs, took {:?}",
@@ -426,12 +490,95 @@ exit 0
         Some(&foreign_payload),
         &herdr_ops,
     );
-    assert_eq!(res, Ok(false), "foreign pane must be dropped and return Ok(false)");
+    assert_eq!(
+        res,
+        Ok(false),
+        "foreign pane must be dropped and return Ok(false)"
+    );
 
     let log = fs::read_to_string(&notif_log).unwrap_or_default();
     assert!(
         log.is_empty(),
         "must not send desktop notification for foreign pane"
+    );
+
+    // Verify nothing recorded in DB
+    let db_path = runs_dir.join("quaqua.db");
+    if let Ok(bus) = quaqua::bus::FarmBus::open(&db_path) {
+        let digest = bus.inbox_digest(&runs_dir, "cos").expect("digest");
+        assert_eq!(digest.incidents.len(), 0, "no incident recorded in DB");
+    }
+}
+
+#[test]
+fn test_events_hook_drops_foreign_cos_pane_to_prevent_cross_cos_inbox_leak() {
+    let runs_dir = hermetic_temp_dir("foreign-cos-hook");
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let notif_log = runs_dir.join("notifications.log");
+
+    let bin_dir = runs_dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    let herdr_bin = bin_dir.join("herdr");
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let foreign_cwd = format!("{home}/Work/TTDVKH");
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "notification" ] && [ "$2" = "show" ]; then
+    echo "$*" >> "{}"
+    exit 0
+fi
+if [ "$1" = "pane" ] && [ "$2" = "get" ] && [ "$3" = "w7:p2" ]; then
+    printf '{{"result":{{"pane":{{"pane_id":"w7:p2","cwd":"{}","tokens":{{"grid_role":"cos","grid_owner":"cos","display_agent":"CoS TTDVKH"}}}}}}}}'
+    exit 0
+fi
+exit 0
+"#,
+        notif_log.display(),
+        foreign_cwd
+    );
+    fs::write(&herdr_bin, script).expect("write stub herdr");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&herdr_bin).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&herdr_bin, perms).expect("chmod");
+    }
+
+    std::env::set_var("HERDR_BIN_PATH", &herdr_bin);
+
+    // Foreign CoS pane from another workspace (w7:p2) with grid_role=cos
+    let foreign_cos_payload = serde_json::json!({
+        "type": "pane_agent_status_changed",
+        "pane_id": "w7:p2",
+        "agent": "claude",
+        "agent_status": "blocked",
+        "tokens": {
+            "grid_role": "cos",
+            "grid_owner": "cos",
+            "display_agent": "CoS TTDVKH"
+        }
+    })
+    .to_string();
+
+    let herdr_ops = Herdr::new();
+    let res = quaqua::bus::events::handle_event_hook(
+        &runs_dir,
+        Some("pane.agent_status_changed"),
+        Some(&foreign_cos_payload),
+        &herdr_ops,
+    );
+    assert_eq!(
+        res,
+        Ok(false),
+        "foreign CoS pane must be dropped and return Ok(false)"
+    );
+
+    let log = fs::read_to_string(&notif_log).unwrap_or_default();
+    assert!(
+        log.is_empty(),
+        "must not send desktop notification for foreign CoS pane: {log}"
     );
 
     // Verify nothing recorded in DB
