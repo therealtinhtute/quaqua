@@ -408,6 +408,11 @@ pub fn query_workflows(db_path: &Path) -> Result<Vec<WorkflowStatusRow>, String>
             }
         }
     }
+    for entry in map.values_mut() {
+        if entry.last_event_kind.as_deref() == Some("workflow_cancelled") {
+            entry.phase = Some("cancelled".to_string());
+        }
+    }
 
     Ok(map.into_values().collect())
 }

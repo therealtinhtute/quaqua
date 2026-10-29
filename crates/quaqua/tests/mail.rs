@@ -981,6 +981,9 @@ All criteria satisfied.
 
 struct MockUntaggedLeadHerdr {
     tokens_json: std::cell::RefCell<String>,
+    cwd: std::cell::RefCell<String>,
+    /// Whole `pane get` stdout override — models a dead pane or a broken daemon answer.
+    pane_raw: std::cell::RefCell<Option<String>>,
     calls: std::cell::RefCell<Vec<String>>,
 }
 
@@ -988,8 +991,20 @@ impl MockUntaggedLeadHerdr {
     fn new() -> Self {
         Self {
             tokens_json: std::cell::RefCell::new(r#"{"logo":"\ue1a3"}"#.to_string()),
+            cwd: std::cell::RefCell::new(String::new()),
+            pane_raw: std::cell::RefCell::new(None),
             calls: std::cell::RefCell::new(Vec::new()),
         }
+    }
+    /// herdr always reports the pane's cwd; the caller-farm gate needs it.
+    fn set_cwd(&self, cwd: &Path) {
+        *self.cwd.borrow_mut() = cwd.to_string_lossy().to_string();
+    }
+    fn set_tokens(&self, tokens_json: &str) {
+        *self.tokens_json.borrow_mut() = tokens_json.to_string();
+    }
+    fn set_pane_raw(&self, raw: &str) {
+        *self.pane_raw.borrow_mut() = Some(raw.to_string());
     }
 }
 
@@ -997,10 +1012,14 @@ impl quaqua::herdr::HerdrOps for MockUntaggedLeadHerdr {
     fn run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
         self.calls.borrow_mut().push(args.join(" "));
         let stdout = if args.first() == Some(&"pane") && args.get(1) == Some(&"get") {
-            format!(
-                r#"{{"result":{{"pane":{{"pane_id":"wB:p1","tokens":{}}}}}}}"#,
-                self.tokens_json.borrow()
-            )
+            match self.pane_raw.borrow().as_ref() {
+                Some(raw) => raw.clone(),
+                None => format!(
+                    r#"{{"result":{{"pane":{{"pane_id":"wB:p1","cwd":"{}","tokens":{}}}}}}}"#,
+                    self.cwd.borrow(),
+                    self.tokens_json.borrow()
+                ),
+            }
         } else if args.first() == Some(&"pane") && args.get(1) == Some(&"report-metadata") {
             let mut role = None;
             let mut owner = None;
@@ -1086,6 +1105,7 @@ fn test_mail_send_from_untagged_lead_pane_self_heals() {
     ).expect("write INDEX.md");
 
     let herdr = MockUntaggedLeadHerdr::new();
+    herdr.set_cwd(&ws);
     let opts = SendMailOpts {
         to: "cos".to_string(),
         kind: "accept".to_string(),
@@ -1119,6 +1139,7 @@ fn test_mail_send_unresolvable_error_names_pane_and_repair_command() {
     guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
 
     let herdr = MockUntaggedLeadHerdr::new();
+    herdr.set_cwd(&ws);
     let opts = SendMailOpts {
         to: "cos".to_string(),
         kind: "accept".to_string(),
@@ -1131,4 +1152,200 @@ fn test_mail_send_unresolvable_error_names_pane_and_repair_command() {
     let err = mail::send_mail(&runs, &opts, &herdr).expect_err("unresolvable pane must fail");
     assert!(err.contains("wX:p99"), "error must name pane wX:p99, got: {err}");
     assert!(err.contains("quaqua lead repair"), "error must name 'quaqua lead repair', got: {err}");
+}
+fn farm_gate_opts() -> SendMailOpts {
+    SendMailOpts {
+        to: "cos".to_string(),
+        kind: "accept".to_string(),
+        body: "verdict: farm gate".to_string(),
+        project: None,
+        reply_to: None,
+        client_id: None,
+    }
+}
+
+#[test]
+fn test_mail_send_refuses_pane_from_another_workspace() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_HOME",
+        "QUAQUA_ROOT",
+    ]);
+    guard.remove("QUAQUA_TEST");
+    guard.remove("QUAQUA_OWNER");
+    guard.remove("QUAQUA_HOME");
+    guard.set("HERDR_PANE_ID", "w7:p2");
+
+    let ws = hermetic_temp_dir("foreign-farm-ws");
+    let runs = ws.join("runs");
+    std::fs::create_dir_all(&runs).expect("create runs");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+
+    // A pane from another workspace: no grid_farm token, cwd outside this workspace.
+    let foreign_ws = hermetic_temp_dir("foreign-farm-other-ws");
+    let herdr = MockUntaggedLeadHerdr::new();
+    herdr.set_cwd(&foreign_ws);
+
+    let err = mail::send_mail(&runs, &farm_gate_opts(), &herdr)
+        .expect_err("a caller pane from another farm must be refused");
+    assert!(
+        err.contains("w7:p2"),
+        "error must name the caller pane, got: {err}"
+    );
+    assert!(
+        err.contains("QUAQUA_HOME"),
+        "error must name QUAQUA_HOME, got: {err}"
+    );
+    assert!(
+        !runs.join("quaqua.db").exists(),
+        "refusal must not create the mailbox database"
+    );
+    assert!(
+        !runs.join("cos.inbox.md").exists(),
+        "refusal must not write the markdown inbox either"
+    );
+}
+
+#[test]
+fn test_mail_send_refuses_pane_carrying_another_farm_token() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_HOME",
+        "QUAQUA_ROOT",
+    ]);
+    guard.remove("QUAQUA_TEST");
+    guard.remove("QUAQUA_OWNER");
+    guard.remove("QUAQUA_HOME");
+    guard.set("HERDR_PANE_ID", "wA:p9");
+
+    let ws = hermetic_temp_dir("farm-token-ws");
+    let runs = ws.join("runs");
+    std::fs::create_dir_all(&runs).expect("create runs");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+
+    // cwd sits inside this workspace, but the pane is stamped as another farm's.
+    let herdr = MockUntaggedLeadHerdr::new();
+    herdr.set_cwd(&ws);
+    herdr.set_tokens(
+        r#"{"grid_role":"orchestrator","grid_owner":"mu-lead","grid_farm":"otherfarm"}"#,
+    );
+
+    let err = mail::send_mail(&runs, &farm_gate_opts(), &herdr)
+        .expect_err("a pane stamped with another farm must be refused");
+    assert!(
+        err.contains("QUAQUA_HOME"),
+        "error must name QUAQUA_HOME, got: {err}"
+    );
+    assert!(
+        !runs.join("quaqua.db").exists(),
+        "refusal must not create the mailbox database"
+    );
+}
+
+#[test]
+fn test_mail_send_refuses_dead_caller_pane() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_HOME",
+        "QUAQUA_ROOT",
+    ]);
+    guard.remove("QUAQUA_TEST");
+    guard.remove("QUAQUA_OWNER");
+    guard.remove("QUAQUA_HOME");
+    guard.set("HERDR_PANE_ID", "w8:p1");
+
+    let ws = hermetic_temp_dir("dead-pane-ws");
+    let runs = ws.join("runs");
+    std::fs::create_dir_all(&runs).expect("create runs");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+
+    let herdr = MockUntaggedLeadHerdr::new();
+    herdr.set_pane_raw(r#"{"error":{"code":"pane_not_found","message":"no such pane"}}"#);
+
+    let err = mail::send_mail(&runs, &farm_gate_opts(), &herdr)
+        .expect_err("a caller pane herdr reports as gone must be refused");
+    assert!(
+        err.contains("w8:p1"),
+        "error must name pane w8:p1, got: {err}"
+    );
+    assert!(
+        err.contains("QUAQUA_HOME"),
+        "error must name QUAQUA_HOME, got: {err}"
+    );
+}
+
+#[test]
+fn test_mail_send_same_farm_pane_stamps_local_farm() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_HOME",
+        "QUAQUA_ROOT",
+    ]);
+    guard.remove("QUAQUA_TEST");
+    guard.remove("QUAQUA_OWNER");
+    guard.remove("QUAQUA_HOME");
+    guard.set("HERDR_PANE_ID", "wA:p1");
+
+    let ws = hermetic_temp_dir("same-farm-ws");
+    let runs = ws.join("runs");
+    std::fs::create_dir_all(&runs).expect("create runs");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let local_farm = quaqua::workspace::farm_of_runs_dir(&runs);
+
+    let herdr = MockUntaggedLeadHerdr::new();
+    herdr.set_cwd(&ws);
+    herdr.set_tokens(&format!(
+        r#"{{"grid_role":"orchestrator","grid_owner":"mu-lead","grid_group":"mu","grid_farm":"{local_farm}"}}"#
+    ));
+
+    let res = mail::send_mail(&runs, &farm_gate_opts(), &herdr).expect("same-farm send must work");
+    assert!(res.id > 0);
+
+    let bus = FarmBus::open(&runs.join("quaqua.db")).expect("open bus");
+    let (sender, row_farm): (String, String) = bus
+        .conn_for_test()
+        .query_row(
+            "SELECT from_name, farm FROM mail WHERE id = ?",
+            [res.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("get mail row");
+    assert_eq!(sender, "mu-lead");
+    assert_eq!(row_farm, local_farm, "mail row must carry the local farm");
+}
+
+#[test]
+fn test_mail_send_fails_open_when_pane_get_is_unreadable() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_TEST",
+        "QUAQUA_OWNER",
+        "HERDR_PANE_ID",
+        "QUAQUA_HOME",
+        "QUAQUA_ROOT",
+    ]);
+    guard.set("QUAQUA_TEST", "1");
+    guard.set("QUAQUA_OWNER", "mu-lead");
+    guard.remove("QUAQUA_HOME");
+    guard.set("HERDR_PANE_ID", "wB:p1");
+
+    let ws = hermetic_temp_dir("fail-open-ws");
+    let runs = ws.join("runs");
+    std::fs::create_dir_all(&runs).expect("create runs");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+
+    // herdr answering garbage must not block mail: the gate fails open.
+    let herdr = MockUntaggedLeadHerdr::new();
+    herdr.set_pane_raw("herdr: socket closed");
+
+    let res = mail::send_mail(&runs, &farm_gate_opts(), &herdr)
+        .expect("an unreadable pane answer must not block mail");
+    assert!(res.id > 0);
 }

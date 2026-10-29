@@ -325,7 +325,8 @@ pub fn resolve_sender<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result<(String
         let pane_id = pane_id.trim();
         if !pane_id.is_empty() {
             if let Some(slug) = try_find_lead_slug_for_pane(herdr, pane_id) {
-                if crate::lead::tag::tag_lead_pane(herdr, &slug, pane_id).is_ok() {
+                let farm = crate::workspace::farm_of_runs_dir(runs_dir);
+                if crate::lead::tag::tag_lead_pane(herdr, &slug, pane_id, &farm).is_ok() {
                     let healed = crate::identity::resolve_caller(herdr, runs_dir);
                     if healed.role != crate::identity::Role::Unknown {
                         return Ok((healed.name, healed.role.to_string()));
@@ -342,6 +343,33 @@ pub fn resolve_sender<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result<(String
     }
 
     Err("cannot determine sender identity from harness (unresolved caller); run 'quaqua lead repair <slug>' to re-stamp tokens".to_string())
+}
+
+/// Refuses mail when the caller's pane belongs to another farm than `runs_dir`.
+///
+/// The farm answer comes from the same ladder ingest uses (`bus::events::attribute_pane`),
+/// so a pane carrying `grid_farm`, a pane whose `cwd` sits in another workspace, and a
+/// dead pane are all rejected — while a caller with no pane (`HERDR_PANE_ID` unset) and a
+/// pane herdr cannot describe pass through, because the ladder fails open on an unreadable
+/// answer and the notification/mail channel must not go dark when herdr hiccups.
+fn refuse_foreign_caller_farm<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result<(), String> {
+    let pane_id = match std::env::var("HERDR_PANE_ID") {
+        Ok(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => return Ok(()),
+    };
+    let db_farm = crate::workspace::farm_of_runs_dir(runs_dir);
+    let attribution = match super::events::resolve_pane_value(herdr, &pane_id) {
+        Some(val) => super::events::attribute_pane(&val, &db_farm, runs_dir),
+        None => return Ok(()),
+    };
+    match attribution {
+        super::events::PaneAttribution::Foreign => Err(format!(
+            "error: mail send refused: caller pane {pane_id} is not in farm '{db_farm}' \
+             (database: {}); set QUAQUA_HOME to the caller's workspace, or send from inside it",
+            runs_dir.join("quaqua.db").display()
+        )),
+        super::events::PaneAttribution::Local { .. } => Ok(()),
+    }
 }
 
 /// Escapes a single line of mail body so that lines starting with `## ` or `<!--`
@@ -487,17 +515,18 @@ pub fn get_mail_ack_timeout_ms() -> u64 {
 pub fn check_unacked_incidents(
     conn: &rusqlite::Connection,
     ack_timeout_ms: u64,
+    farm: &str,
 ) -> rusqlite::Result<usize> {
     let now = crate::bus::now_ms();
     let cutoff = now.saturating_sub(ack_timeout_ms);
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT id, ts_ms, from_name, to_name, kind, project
+        SELECT id, ts_ms, from_name, to_name, kind, project, farm
         FROM mail
-        WHERE acked_ms IS NULL AND ts_ms <= ?1
+        WHERE acked_ms IS NULL AND ts_ms <= ?1 AND (farm = ?2 OR farm IS NULL)
         "#,
     )?;
-    let rows = stmt.query_map(rusqlite::params![cutoff as i64], |row| {
+    let rows = stmt.query_map(rusqlite::params![cutoff as i64, farm], |row| {
         Ok((
             row.get::<_, i64>(0)? as u64,
             row.get::<_, i64>(1)? as u64,
@@ -505,6 +534,7 @@ pub fn check_unacked_incidents(
             row.get::<_, String>(3)?,
             row.get::<_, String>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
 
@@ -515,7 +545,7 @@ pub fn check_unacked_incidents(
     drop(stmt);
 
     let mut inserted_count = 0;
-    for (id, ts_ms, from_name, to_name, kind, project) in incidents {
+    for (id, ts_ms, from_name, to_name, kind, project, row_farm) in incidents {
         let incident_key = format!("mail_unacked:{id}");
         let payload = serde_json::json!({
             "mail_id": id,
@@ -524,11 +554,12 @@ pub fn check_unacked_incidents(
         })
         .to_string();
 
+        let farm_to_insert = row_farm.as_deref().unwrap_or(farm);
         let mut insert_stmt = conn.prepare_cached(
             r#"
             INSERT OR IGNORE INTO farm_events (
-                ts_ms, type, actor, subject, owner, project, incident_key, payload_json
-            ) VALUES (?1, 'mail_unacked', ?2, ?3, ?4, ?5, ?6, ?7)
+                ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
+            ) VALUES (?1, 'mail_unacked', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
         )?;
         let rows_affected = insert_stmt.execute(rusqlite::params![
@@ -539,6 +570,7 @@ pub fn check_unacked_incidents(
             project,
             incident_key,
             payload,
+            farm_to_insert,
         ])?;
         if rows_affected > 0 {
             inserted_count += 1;
@@ -566,6 +598,11 @@ pub fn send_mail<H: HerdrOps>(
             opts.body.chars().count()
         ));
     }
+
+    // A pane from another farm must not write into this database, not even through the
+    // markdown fallback: `mail send` typed in a foreign workspace's pane resolves the DB
+    // from *this* workspace (`default_runs_dir` is QUAQUA_HOME-aware, never pane-aware).
+    refuse_foreign_caller_farm(herdr, runs_dir)?;
 
     let (from_name, from_role) = resolve_sender(herdr, runs_dir)?;
     let now = crate::bus::now_ms();
@@ -626,7 +663,7 @@ pub fn send_mail<H: HerdrOps>(
 
     // Check unacked incidents on every mail verb (Finding 8)
     let timeout_ms = get_mail_ack_timeout_ms();
-    let _ = check_unacked_incidents(&conn, timeout_ms);
+    let _ = check_unacked_incidents(&conn, timeout_ms, bus.farm());
 
     let tx_res: rusqlite::Result<SendMailResult> = crate::engine::sqlite::retry_while_busy(|| {
         let tx = conn.transaction()?;
@@ -635,8 +672,8 @@ pub fn send_mail<H: HerdrOps>(
             let mut insert_mail = tx.prepare_cached(
                 r#"
                 INSERT INTO mail (
-                    msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to, body
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to, body, farm
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 ON CONFLICT(msg_key) DO NOTHING
                 "#,
             )?;
@@ -650,6 +687,7 @@ pub fn send_mail<H: HerdrOps>(
                 project,
                 opts.reply_to.map(|id| id as i64),
                 opts.body,
+                bus.farm(),
             ])?
         };
 
@@ -674,8 +712,8 @@ pub fn send_mail<H: HerdrOps>(
                 let mut insert_event = tx.prepare_cached(
                     r#"
                     INSERT INTO farm_events (
-                        ts_ms, type, actor, subject, owner, project, incident_key, payload_json
-                    ) VALUES (?1, 'mail_sent', ?2, ?3, ?4, ?5, ?6, ?7)
+                        ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
+                    ) VALUES (?1, 'mail_sent', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                     "#,
                 )?;
                 insert_event.execute(rusqlite::params![
@@ -686,6 +724,7 @@ pub fn send_mail<H: HerdrOps>(
                     project,
                     incident_key,
                     payload,
+                    bus.farm(),
                 ])?;
             }
 
@@ -776,7 +815,7 @@ pub fn read_unacked_mail_since(
     let conn = bus.conn.lock().unwrap();
 
     let timeout_ms = get_mail_ack_timeout_ms();
-    let _ = check_unacked_incidents(&conn, timeout_ms);
+    let _ = check_unacked_incidents(&conn, timeout_ms, bus.farm());
 
     let now = crate::bus::now_ms();
     let mut stmt = conn
@@ -785,31 +824,34 @@ pub fn read_unacked_mail_since(
             SELECT id, msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to,
                    body, deliveries, last_delivered_ms, acked_ms, acked_by
             FROM mail
-            WHERE to_name = ?1 AND acked_ms IS NULL AND id > ?2
+            WHERE to_name = ?1 AND acked_ms IS NULL AND id > ?2 AND (farm = ?3 OR farm IS NULL)
             ORDER BY id ASC
             "#,
         )
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
-        .query_map(rusqlite::params![to_name, since_id as i64], |row| {
-            Ok(MailMessage {
-                id: row.get::<_, i64>(0)? as u64,
-                msg_key: row.get(1)?,
-                ts_ms: row.get::<_, i64>(2)? as u64,
-                from_name: row.get(3)?,
-                from_role: row.get(4)?,
-                to_name: row.get(5)?,
-                kind: row.get(6)?,
-                project: row.get(7)?,
-                reply_to: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
-                body: row.get(9)?,
-                deliveries: row.get::<_, i64>(10)? as u64,
-                last_delivered_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
-                acked_ms: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
-                acked_by: row.get(13)?,
-            })
-        })
+        .query_map(
+            rusqlite::params![to_name, since_id as i64, bus.farm()],
+            |row| {
+                Ok(MailMessage {
+                    id: row.get::<_, i64>(0)? as u64,
+                    msg_key: row.get(1)?,
+                    ts_ms: row.get::<_, i64>(2)? as u64,
+                    from_name: row.get(3)?,
+                    from_role: row.get(4)?,
+                    to_name: row.get(5)?,
+                    kind: row.get(6)?,
+                    project: row.get(7)?,
+                    reply_to: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                    body: row.get(9)?,
+                    deliveries: row.get::<_, i64>(10)? as u64,
+                    last_delivered_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+                    acked_ms: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
+                    acked_by: row.get(13)?,
+                })
+            },
+        )
         .map_err(|e| e.to_string())?;
 
     let mut messages = Vec::new();
@@ -873,18 +915,20 @@ pub fn ack_mail(runs_dir: &Path, caller_name: &str, mail_ids: &[u64]) -> Result<
     let conn = bus.conn.lock().unwrap();
 
     let timeout_ms = get_mail_ack_timeout_ms();
-    let _ = check_unacked_incidents(&conn, timeout_ms);
+    let _ = check_unacked_incidents(&conn, timeout_ms, bus.farm());
 
     let now = crate::bus::now_ms();
     let mut acked_ids = Vec::new();
 
     for &id in mail_ids {
         let mut query = conn
-            .prepare_cached("SELECT to_name, acked_ms FROM mail WHERE id = ?1")
+            .prepare_cached(
+                "SELECT to_name, acked_ms FROM mail WHERE id = ?1 AND (farm = ?2 OR farm IS NULL)",
+            )
             .map_err(|e| e.to_string())?;
 
         let mut rows = query
-            .query(rusqlite::params![id as i64])
+            .query(rusqlite::params![id as i64, bus.farm()])
             .map_err(|e| e.to_string())?;
         if let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let to_name: String = row.get(0).map_err(|e| e.to_string())?;
@@ -925,8 +969,8 @@ pub fn ack_mail(runs_dir: &Path, caller_name: &str, mail_ids: &[u64]) -> Result<
                     .prepare_cached(
                         r#"
                         INSERT INTO farm_events (
-                            ts_ms, type, actor, subject, owner, project, incident_key, payload_json
-                        ) VALUES (?1, 'mail_acked', ?2, ?3, ?4, NULL, NULL, ?5)
+                            ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
+                        ) VALUES (?1, 'mail_acked', ?2, ?3, ?4, NULL, NULL, ?5, ?6)
                         "#,
                     )
                     .map_err(|e| e.to_string())?;
@@ -936,6 +980,7 @@ pub fn ack_mail(runs_dir: &Path, caller_name: &str, mail_ids: &[u64]) -> Result<
                     format!("mail:{id}"),
                     caller_name,
                     payload,
+                    bus.farm(),
                 ]);
             }
         } else {
@@ -956,7 +1001,7 @@ pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResu
     let conn = bus.conn.lock().unwrap();
 
     let timeout_ms = get_mail_ack_timeout_ms();
-    let _ = check_unacked_incidents(&conn, timeout_ms);
+    let _ = check_unacked_incidents(&conn, timeout_ms, bus.farm());
 
     let mut result = ImportResult::default();
 
@@ -1076,8 +1121,8 @@ pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResu
             .prepare_cached(
                 r#"
                 INSERT INTO mail (
-                    msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to, body
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)
+                    msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to, body, farm
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)
                 ON CONFLICT(msg_key) DO NOTHING
                 "#,
             )
@@ -1093,6 +1138,7 @@ pub fn import_inbox_file(runs_dir: &Path, file_path: &Path) -> Result<ImportResu
                 kind,
                 project,
                 body_str,
+                bus.farm(),
             ])
             .map_err(|e| e.to_string())?;
 
@@ -1119,12 +1165,12 @@ pub fn list_mail(
     let conn = bus.conn.lock().unwrap();
 
     let timeout_ms = get_mail_ack_timeout_ms();
-    let _ = check_unacked_incidents(&conn, timeout_ms);
+    let _ = check_unacked_incidents(&conn, timeout_ms, bus.farm());
 
     let mut query = String::from(
-        "SELECT id, msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to, body, deliveries, last_delivered_ms, acked_ms, acked_by FROM mail WHERE 1=1"
+        "SELECT id, msg_key, ts_ms, from_name, from_role, to_name, kind, project, reply_to, body, deliveries, last_delivered_ms, acked_ms, acked_by FROM mail WHERE (farm = ? OR farm IS NULL)"
     );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(bus.farm().to_string())];
     if let Some(to) = filter_to {
         query.push_str(" AND to_name = ?");
         params.push(Box::new(to.to_string()));

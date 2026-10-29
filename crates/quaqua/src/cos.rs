@@ -154,6 +154,109 @@ pub fn resolve_cos_pane<H: HerdrOps>(
         })
 }
 
+/// Resolve the CoS display agent name and pane title for a workspace.
+/// Ensures display_agent always contains "CoS" to trigger sidebar pink-highlighting.
+pub fn resolve_cos_display_info(ws_dir: &Path) -> (String, String) {
+    let identity_path = if ws_dir.join("identity.md").is_file() {
+        Some(ws_dir.join("identity.md"))
+    } else if ws_dir.join(".cos/identity.md").is_file() {
+        Some(ws_dir.join(".cos/identity.md"))
+    } else {
+        None
+    };
+
+    let dir_name = ws_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| {
+            if s == ".cos" {
+                ws_dir
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(s)
+            } else {
+                s
+            }
+        })
+        .unwrap_or("quaqua");
+
+    if dir_name.contains("quaqua") {
+        return (COS_DISPLAY_AGENT.to_string(), COS_PANE_TITLE.to_string());
+    }
+
+    if let Some(path) = identity_path {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Some(first_line) = content.lines().next() {
+                let trimmed = first_line.trim().trim_start_matches('#').trim();
+                if trimmed.contains("Quả Quả") {
+                    return (COS_DISPLAY_AGENT.to_string(), COS_PANE_TITLE.to_string());
+                }
+                let name_part = if let Some((left, right)) =
+                    trimmed.split_once('—').or_else(|| trimmed.split_once('-'))
+                {
+                    let left = left.trim();
+                    let right = right.trim();
+                    if left.eq_ignore_ascii_case("identity") || left.eq_ignore_ascii_case("agents")
+                    {
+                        dir_name.to_string()
+                    } else if left.eq_ignore_ascii_case("cos") {
+                        let cleaned = right
+                            .replace("Chief of Staff", "")
+                            .replace("CoS", "")
+                            .trim()
+                            .to_string();
+                        if !cleaned.is_empty() {
+                            cleaned
+                        } else {
+                            dir_name.to_string()
+                        }
+                    } else {
+                        left.to_string()
+                    }
+                } else {
+                    dir_name.to_string()
+                };
+
+                let display = if name_part.contains("CoS") {
+                    name_part
+                } else {
+                    format!("CoS {name_part}")
+                };
+                return (display.clone(), display);
+            }
+        }
+    }
+
+    let display = format!("CoS {dir_name}");
+    (display.clone(), display)
+}
+
+/// Resolve the effective runs_dir for CoS tagging in `ws_dir`.
+pub fn resolve_cos_runs_dir(ws_dir: &Path) -> std::path::PathBuf {
+    if ws_dir.join(".cos/runs").is_dir() {
+        ws_dir.join(".cos/runs")
+    } else if ws_dir.join("runs").is_dir() {
+        ws_dir.join("runs")
+    } else {
+        crate::worker::cleanup::default_runs_dir()
+    }
+}
+
+/// Tag the specified pane as the CoS pane for a specific workspace directory:
+/// - Reports metadata: `--source herdr-quaqua --token grid_role=cos --token grid_owner=cos --display-agent "<display_agent>"`
+/// - Renames pane: `"<pane_title>"`
+/// - Records `<runs_dir>/cos.identity.json = {agent_session, pane_id}` if an agent session is present
+pub fn tag_cos_pane_for_workspace<H: HerdrOps>(
+    herdr: &H,
+    pane: &str,
+    ws_dir: &Path,
+) -> Result<String, String> {
+    let (display_agent, pane_title) = resolve_cos_display_info(ws_dir);
+    let runs_dir = resolve_cos_runs_dir(ws_dir);
+    tag_cos_pane_with(herdr, pane, &runs_dir, &display_agent, &pane_title)
+}
+
 /// Tag the specified pane as the CoS pane:
 /// - Reports metadata: `--source herdr-quaqua --token grid_role=cos --display-agent "🍑 CoS Quả Quả"`
 /// - Renames pane: `"🍑 CoS"`
@@ -176,6 +279,17 @@ pub fn tag_cos_pane_in<H: HerdrOps>(
     pane: &str,
     runs_dir: &Path,
 ) -> Result<String, String> {
+    tag_cos_pane_with(herdr, pane, runs_dir, COS_DISPLAY_AGENT, COS_PANE_TITLE)
+}
+
+/// Tag the specified pane as the CoS pane with explicit runs_dir, display_agent, and pane_title.
+pub fn tag_cos_pane_with<H: HerdrOps>(
+    herdr: &H,
+    pane: &str,
+    runs_dir: &Path,
+    display_agent: &str,
+    pane_title: &str,
+) -> Result<String, String> {
     // 1. Report metadata
     let report_out = herdr
         .run(&[
@@ -189,7 +303,7 @@ pub fn tag_cos_pane_in<H: HerdrOps>(
             "--token",
             COS_OWNER_TOKEN,
             "--display-agent",
-            COS_DISPLAY_AGENT,
+            display_agent,
         ])
         .map_err(|e| format!("herdr pane report-metadata failed for {pane}: {e}"))?;
 
@@ -202,7 +316,7 @@ pub fn tag_cos_pane_in<H: HerdrOps>(
 
     // 2. Rename pane
     let rename_out = herdr
-        .run(&["pane", "rename", pane, COS_PANE_TITLE])
+        .run(&["pane", "rename", pane, pane_title])
         .map_err(|e| format!("herdr pane rename failed for {pane}: {e}"))?;
 
     if !rename_out.status.success() {
@@ -216,7 +330,7 @@ pub fn tag_cos_pane_in<H: HerdrOps>(
     let snippet = sidebar_chip_snippet();
     let msg = if sess_recorded.is_some() {
         format!(
-            "Tagged pane {pane} as grid_role=cos ({COS_DISPLAY_AGENT})\n\
+            "Tagged pane {pane} as grid_role=cos ({display_agent})\n\
              \n\
              Hint: to display the CoS badge in the herdr sidebar, add this snippet to ~/.config/herdr/config.toml:\n\
              {snippet}\n\
@@ -224,7 +338,7 @@ pub fn tag_cos_pane_in<H: HerdrOps>(
         )
     } else {
         format!(
-            "Tagged pane {pane} as grid_role=cos ({COS_DISPLAY_AGENT}) [no agent_session recorded]\n\
+            "Tagged pane {pane} as grid_role=cos ({display_agent}) [no agent_session recorded]\n\
              \n\
              Hint: to display the CoS badge in the herdr sidebar, add this snippet to ~/.config/herdr/config.toml:\n\
              {snippet}\n\

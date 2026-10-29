@@ -1022,7 +1022,7 @@ fn gate_inner<H: HerdrOps>(
     if effective_caller.role == crate::identity::Role::Unknown {
         if let Some(h) = herdr {
             if crate::identity::caller_pane_tokens(h).is_some() {
-                let _ = crate::identity::heal_with_runs_dir(h, runs_dir, None);
+                let _ = crate::identity::heal_with_runs_dir(h, runs_dir, None, false);
                 caller_healed = crate::identity::resolve_caller(h, runs_dir);
                 if caller_healed.role != crate::identity::Role::Unknown {
                     effective_caller = &caller_healed;

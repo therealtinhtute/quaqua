@@ -25,7 +25,18 @@ Automatic agent grid layout reconciler for Herdr.
   - Early-exits on `pane.agent_status_changed` events when the status change does not affect layout execution (e.g. non-worker panes or transitions between non-working states `idle`, `done`, `unknown`).
   - Runs in **shadow mode** by default: calculates layout ops using the Rust planner and logs them without modifying panes.
   - When shadow mode is disabled (`HERDR_QUAQUA_SHADOW=0`), applies non-deferred moves itself (was `apply.sh`).
-- **`quaqua identity heal`**: lifecycle hook handler triggered on `[[startup]]` and `pane.agent_detected`. Restores lost identity tokens (`grid_role`, `grid_group`, `grid_owner`, `grid_tab`) across herdr server restarts for Leads, workers, and CoS.
+- **`quaqua identity heal`**: lifecycle hook handler triggered on `[[startup]]` and `pane.agent_detected`. Restores lost identity tokens (`grid_role`, `grid_group`, `grid_owner`, `grid_tab`, and `grid_farm` for Leads and workers) across herdr server restarts for Leads, workers, and CoS.
+
+## Farm scoping
+
+A plugin is registered per herdr **daemon**, so `quaqua events hook` (`pane.agent_status_changed`, `pane.exited`) receives events from every workspace on the machine, while `runs/quaqua.db` belongs to exactly one workspace — a *farm*, whose id is the last component of the canonicalized root (`~/quaqua` → `quaqua`). The hook attributes each event before writing.
+
+- **Ingest rule** (`bus::events::attribute_pane`, evaluated in order): token `grid_farm` equal to the local farm → local; token present and different → foreign; `cwd` canonical-prefixed by the farm root → local; a `cwd` ancestor carrying `runs/<ancestor>.owner` → local (worker worktrees under `.wt/<name>`, subdirectories included); `pane get` answering `pane_not_found` → foreign; any other failure or unparseable output (herdr down, timeout, empty stdout) → local with one warning on stderr — fail-open, so an unhealthy herdr never silences the notification channel.
+- A **foreign** event is dropped before `FarmBus::record` and before `herdr notification show`: another workspace's blocked pane neither enters this farm's inbox nor pops a desktop notification here.
+- `pane.exited` skips the ladder — the pane is already gone — and is recorded as local with `owner`/`project` read from `runs/<agent>.owner` / `runs/<agent>.repo`.
+- A local event is stamped with the farm plus `owner` = token `grid_owner` (falling back to `runs/<name>.owner`) and `project` = token `grid_group` (falling back to the basename of the worktree's `runs/<name>.repo`). Readers filter on that stamp: the CoS sees every local incident, a Lead only those whose `owner` is its own name; mail is scoped the same way.
+- `grid_farm` is written by `worker spawn`, `lead spawn` / `lead tag` / `lead repair`, and re-applied by `quaqua identity heal` (Leads through `lead tag`, plus worker panes) after a herdr restart. The CoS pane (`quaqua cos tag`) carries no `grid_farm` and is attributed by its `cwd`.
+- Cost: one `herdr pane get` per status-change event, inside the same `QUAQUA_HOOK_TIMEOUT_MS` (default 1500 ms) deadline as the existing notification call.
 
 ## Configuration
 

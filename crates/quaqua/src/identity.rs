@@ -328,7 +328,7 @@ pub fn resolve_caller<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Caller {
         .unwrap_or(false);
 
     if tokens.is_some() && !has_grid_role {
-        let _ = heal_with_runs_dir(herdr, runs_dir, None);
+        let _ = heal_with_runs_dir(herdr, runs_dir, None, false);
         let healed_tokens = caller_pane_tokens(herdr);
         let healed_caller = resolve_caller_from_tokens(healed_tokens.as_ref(), runs_dir);
         if healed_caller.role != Role::Unknown {
@@ -352,11 +352,41 @@ impl std::ops::Deref for HealReport {
     }
 }
 
+fn find_index_file(runs_dir: &Path) -> Option<std::path::PathBuf> {
+    if let Some(parent) = runs_dir.parent() {
+        let candidate = parent.join("projects/INDEX.md");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    if let Ok(root) = crate::workspace::workspace_root_checked() {
+        let candidate = root.join("projects/INDEX.md");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let default_candidate = crate::workspace::workspace_root().join("projects/INDEX.md");
+    if default_candidate.is_file() {
+        return Some(default_candidate);
+    }
+    None
+}
+
+fn is_registered_lead(runs_dir: &Path, slug: &str, lead_name: &str) -> bool {
+    if let Some(index_file) = find_index_file(runs_dir) {
+        if let Ok(content) = std::fs::read_to_string(&index_file) {
+            let rows = crate::worker::leadgate::index_rows(&content);
+            return rows.iter().any(|r| r.slug == slug && r.owner == lead_name);
+        }
+    }
+    false
+}
+
 /// Heal lost pane identity tokens after a herdr server restart.
 ///
 /// Order of repair:
-/// (a) Lead: a herdr agent named `<slug>-lead` with `runs/<slug>-lead.owner` ->
-///     `crate::lead::tag::ensure_lead_pane_tagged`
+/// (a) Lead: a herdr agent named `<slug>-lead` (or carrying grid_owner=<slug>-lead) registered in `projects/INDEX.md` ->
+///     restores `runs/<slug>-lead.owner` and tags `grid_role=orchestrator grid_owner=<slug>-lead`
 /// (b) Worker: a herdr-named agent with `runs/<name>.owner`, `runs/<name>.grid`, and `runs/<name>.repo` ->
 ///     re-report its `grid_*` tokens (`grid_role=worker`, `grid_group`, `grid_owner`, `grid_tab`)
 /// (c) CoS: tag `cos` ONLY when the pane's herdr-persisted `agent_session.value` matches
@@ -364,13 +394,28 @@ impl std::ops::Deref for HealReport {
 ///     At most one CoS pane is ever crowned; multiple matches resolve via recorded pane ID or fail closed.
 /// Every other case: no-op (fail closed).
 pub fn heal<H: HerdrOps>(herdr: &H) -> Result<HealReport, String> {
-    heal_with_runs_dir(herdr, &crate::worker::cleanup::default_runs_dir(), None)
+    heal_with_runs_dir(
+        herdr,
+        &crate::worker::cleanup::default_runs_dir(),
+        None,
+        false,
+    )
+}
+
+pub fn heal_dry_run<H: HerdrOps>(herdr: &H) -> Result<HealReport, String> {
+    heal_with_runs_dir(
+        herdr,
+        &crate::worker::cleanup::default_runs_dir(),
+        None,
+        true,
+    )
 }
 
 pub fn heal_with_runs_dir<H: HerdrOps>(
     herdr: &H,
     runs_dir: &Path,
     filter_pane: Option<&str>,
+    dry_run: bool,
 ) -> Result<HealReport, String> {
     let agents_val = match crate::lead::tag::get_agent_list_json(herdr) {
         Some(val) => val,
@@ -384,7 +429,11 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
         None => return Ok(HealReport::default()),
     };
 
-    let cos_ident = crate::cos::load_cos_identity(runs_dir);
+    // Farm of the runs_dir this heal was given: a heal never stamps another workspace's id
+    // onto a pane, and a pane is only "already tagged" when its token names this farm.
+    let local_farm = crate::workspace::farm_of_runs_dir(runs_dir);
+
+    let mut cos_ident = crate::cos::load_cos_identity(runs_dir);
 
     let mut actions = Vec::new();
     let mut errors = Vec::new();
@@ -401,29 +450,81 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
             }
         }
 
-        let agent_name = agent
+        let mut agent_name = agent
             .get("name")
             .and_then(|n| n.as_str())
             .unwrap_or("")
-            .trim();
+            .trim()
+            .to_string();
 
-        // (a) Lead — a herdr agent named `<slug>-lead` with `runs/<slug>-lead.owner`
+        if agent_name.is_empty() {
+            if let Some(tokens) = agent.get("tokens").and_then(|t| t.as_object()) {
+                if tokens.get("grid_role").and_then(|v| v.as_str()) == Some("orchestrator") {
+                    if let Some(owner) = tokens.get("grid_owner").and_then(|v| v.as_str()) {
+                        if owner.ends_with("-lead") {
+                            agent_name = owner.to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        // (a) Lead — an agent named `<slug>-lead` (or carrying grid_owner=<slug>-lead)
         if agent_name.ends_with("-lead") && agent_name.len() > "-lead".len() {
             let slug = &agent_name[..agent_name.len() - "-lead".len()];
             let owner_file = runs_dir.join(format!("{agent_name}.owner"));
-            if owner_file.is_file() {
-                match crate::lead::tag::ensure_lead_pane_tagged(herdr, slug, pane_id) {
-                    Ok(true) => {
+            let is_registered = is_registered_lead(runs_dir, slug, &agent_name);
+            if is_registered || owner_file.is_file() {
+                let mut already_tagged = false;
+                if let Ok(out) = herdr.run(&["pane", "get", pane_id]) {
+                    if out.status.success() {
+                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                            if let Some(tokens) = val.pointer("/result/pane/tokens") {
+                                let has_role = tokens.get("grid_role").and_then(|v| v.as_str())
+                                    == Some("orchestrator");
+                                let has_owner = tokens.get("grid_owner").and_then(|v| v.as_str())
+                                    == Some(&agent_name);
+                                let has_farm = tokens.get("grid_farm").and_then(|v| v.as_str())
+                                    == Some(local_farm.as_str());
+                                if has_role && has_owner && has_farm {
+                                    already_tagged = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let owner_missing = !owner_file.is_file();
+                if owner_missing && !dry_run {
+                    if let Err(e) = std::fs::write(&owner_file, "cos\n") {
+                        errors.push(format!("failed to restore {}: {e}", owner_file.display()));
+                    }
+                }
+
+                if !already_tagged {
+                    if dry_run {
                         actions.push(format!(
-                            "healed lead '{slug}' (pane {pane_id}): tagged grid_role=orchestrator grid_owner={agent_name}"
+                            "[dry-run] healed lead '{slug}' (pane {pane_id}): tagged grid_role=orchestrator grid_owner={agent_name} grid_farm={local_farm}"
                         ));
+                    } else {
+                        match crate::lead::tag::tag_lead_pane(herdr, slug, pane_id, &local_farm) {
+                            Ok(_) => {
+                                actions.push(format!(
+                                    "healed lead '{slug}' (pane {pane_id}): tagged grid_role=orchestrator grid_owner={agent_name} grid_farm={local_farm}"
+                                ));
+                            }
+                            Err(e) => {
+                                errors.push(format!(
+                                    "failed to heal lead '{slug}' (pane {pane_id}): {e}"
+                                ));
+                            }
+                        }
                     }
-                    Ok(false) => {}
-                    Err(e) => {
-                        errors.push(format!(
-                            "failed to heal lead '{slug}' (pane {pane_id}): {e}"
-                        ));
-                    }
+                } else if owner_missing {
+                    let prefix = if dry_run { "[dry-run] " } else { "" };
+                    actions.push(format!(
+                        "{prefix}healed lead '{slug}' (pane {pane_id}): restored {agent_name}.owner=cos"
+                    ));
                 }
                 continue;
             }
@@ -455,6 +556,7 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
                     .to_string();
 
                 if !owner.is_empty() && !grid_tab.is_empty() && !group.is_empty() {
+                    let farm_id = local_farm.as_str();
                     let mut already_tagged = false;
                     if let Ok(out) = herdr.run(&["pane", "get", pane_id]) {
                         if out.status.success() {
@@ -472,7 +574,9 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
                                     let has_group =
                                         tokens.get("grid_group").and_then(|v| v.as_str())
                                             == Some(&group);
-                                    if has_role && has_owner && has_tab && has_group {
+                                    let has_farm = tokens.get("grid_farm").and_then(|v| v.as_str())
+                                        == Some(farm_id);
+                                    if has_role && has_owner && has_tab && has_group && has_farm {
                                         already_tagged = true;
                                     }
                                 }
@@ -484,8 +588,9 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
                         let owner_tok = format!("grid_owner={owner}");
                         let tab_tok = format!("grid_tab={grid_tab}");
                         let group_tok = format!("grid_group={group}");
+                        let farm_tok = format!("grid_farm={farm_id}");
 
-                        match herdr.run(&[
+                        let tags = [
                             "pane",
                             "report-metadata",
                             pane_id,
@@ -499,19 +604,30 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
                             &owner_tok,
                             "--token",
                             &tab_tok,
-                        ]) {
-                            Ok(out) if out.status.success() => {
-                                actions.push(format!(
-                                    "healed worker '{agent_name}' (pane {pane_id}): tagged grid_role=worker grid_owner={owner}"
-                                ));
-                            }
-                            Ok(out) => {
-                                let stderr = String::from_utf8_lossy(&out.stderr);
-                                errors
-                                    .push(format!("failed to tag worker pane {pane_id}: {stderr}"));
-                            }
-                            Err(e) => {
-                                errors.push(format!("failed to tag worker pane {pane_id}: {e}"));
+                            "--token",
+                            &farm_tok,
+                        ];
+                        if dry_run {
+                            actions.push(format!(
+                                "[dry-run] healed worker '{agent_name}' (pane {pane_id}): tagged grid_role=worker grid_owner={owner} grid_farm={farm_id}"
+                            ));
+                        } else {
+                            match herdr.run(&tags) {
+                                Ok(out) if out.status.success() => {
+                                    actions.push(format!(
+                                        "healed worker '{agent_name}' (pane {pane_id}): tagged grid_role=worker grid_owner={owner} grid_farm={farm_id}"
+                                    ));
+                                }
+                                Ok(out) => {
+                                    let stderr = String::from_utf8_lossy(&out.stderr);
+                                    errors.push(format!(
+                                        "failed to tag worker pane {pane_id}: {stderr}"
+                                    ));
+                                }
+                                Err(e) => {
+                                    errors
+                                        .push(format!("failed to tag worker pane {pane_id}: {e}"));
+                                }
                             }
                         }
                     }
@@ -520,52 +636,80 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
             }
         }
 
-        // (c) CoS candidate collection — unnamed pane, carries no grid_role, agent_session matches
+        // (c) CoS candidate collection — unnamed pane
         if agent_name.is_empty() {
-            if let Some((expected_session, _)) = &cos_ident {
-                let mut carries_grid_role = false;
-                if let Some(tokens) = agent.get("tokens").and_then(|t| t.as_object()) {
-                    if tokens.contains_key("grid_role") {
-                        carries_grid_role = true;
-                    }
+            let mut carries_grid_role = false;
+            let mut is_cos_tagged = false;
+            if let Some(tokens) = agent.get("tokens").and_then(|t| t.as_object()) {
+                if tokens.get("grid_role").and_then(|v| v.as_str()) == Some("cos") {
+                    is_cos_tagged = true;
                 }
-                let mut pane_session = agent
-                    .get("agent_session")
-                    .and_then(|s| {
-                        s.get("value")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| s.as_str())
-                    })
-                    .map(String::from);
+                if tokens.contains_key("grid_role") {
+                    carries_grid_role = true;
+                }
+            }
+            let mut pane_session = agent
+                .get("agent_session")
+                .and_then(|s| {
+                    s.get("value")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| s.as_str())
+                })
+                .map(String::from);
 
-                if let Ok(out) = herdr.run(&["pane", "get", pane_id]) {
-                    if out.status.success() {
-                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                            if let Some(tokens) = val
-                                .pointer("/result/pane/tokens")
-                                .and_then(|t| t.as_object())
-                            {
-                                if tokens.contains_key("grid_role") {
-                                    carries_grid_role = true;
-                                }
+            if let Ok(out) = herdr.run(&["pane", "get", pane_id]) {
+                if out.status.success() {
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                        if let Some(tokens) = val
+                            .pointer("/result/pane/tokens")
+                            .and_then(|t| t.as_object())
+                        {
+                            if tokens.get("grid_role").and_then(|v| v.as_str()) == Some("cos") {
+                                is_cos_tagged = true;
                             }
-                            if pane_session.is_none() {
-                                pane_session = val
-                                    .pointer("/result/pane/agent_session/value")
-                                    .and_then(|v| v.as_str())
-                                    .or_else(|| {
-                                        val.pointer("/result/pane/agent_session")
-                                            .and_then(|v| v.as_str())
-                                    })
-                                    .map(String::from);
+                            if tokens.contains_key("grid_role") {
+                                carries_grid_role = true;
                             }
+                        }
+                        if pane_session.is_none() {
+                            pane_session = val
+                                .pointer("/result/pane/agent_session/value")
+                                .and_then(|v| v.as_str())
+                                .or_else(|| {
+                                    val.pointer("/result/pane/agent_session")
+                                        .and_then(|v| v.as_str())
+                                })
+                                .map(String::from);
                         }
                     }
                 }
+            }
 
+            // If runs/cos.identity.json is missing, but this pane carries grid_role=cos and agent_session, restore it
+            if cos_ident.is_none() && is_cos_tagged {
+                if let Some(sess) = &pane_session {
+                    let prefix = if dry_run { "[dry-run] " } else { "" };
+                    if !dry_run {
+                        let ident_json = serde_json::json!({
+                            "agent_session": sess,
+                            "pane_id": pane_id,
+                        });
+                        let ident_path = runs_dir.join(crate::cos::COS_IDENTITY_FILE);
+                        if let Ok(content) = serde_json::to_string_pretty(&ident_json) {
+                            let _ = std::fs::write(&ident_path, content);
+                        }
+                    }
+                    actions.push(format!(
+                        "{prefix}healed CoS (pane {pane_id}): restored cos.identity.json"
+                    ));
+                    cos_ident = Some((sess.clone(), pane_id.to_string()));
+                }
+            }
+
+            if let Some((expected_session, _)) = &cos_ident {
                 if !carries_grid_role {
-                    if let Some(sess) = pane_session {
-                        if sess == *expected_session {
+                    if let Some(sess) = &pane_session {
+                        if sess == expected_session {
                             cos_candidates.push(pane_id.to_string());
                         }
                     }
@@ -578,25 +722,37 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
     if let Some((expected_session, recorded_pane)) = &cos_ident {
         if cos_candidates.len() == 1 {
             let target = &cos_candidates[0];
-            match crate::cos::tag_cos_pane_in(herdr, target, runs_dir) {
-                Ok(_) => {
-                    actions.push(format!("healed CoS (pane {target}): tagged grid_role=cos"));
-                }
-                Err(e) => {
-                    errors.push(format!("failed to tag CoS pane {target}: {e}"));
+            if dry_run {
+                actions.push(format!(
+                    "[dry-run] healed CoS (pane {target}): tagged grid_role=cos"
+                ));
+            } else {
+                match crate::cos::tag_cos_pane_in(herdr, target, runs_dir) {
+                    Ok(_) => {
+                        actions.push(format!("healed CoS (pane {target}): tagged grid_role=cos"));
+                    }
+                    Err(e) => {
+                        errors.push(format!("failed to tag CoS pane {target}: {e}"));
+                    }
                 }
             }
         } else if cos_candidates.len() > 1 {
             let recorded = recorded_pane.trim();
             if !recorded.is_empty() && cos_candidates.iter().any(|p| p == recorded) {
-                match crate::cos::tag_cos_pane_in(herdr, recorded, runs_dir) {
-                    Ok(_) => {
-                        actions.push(format!(
-                            "healed CoS (pane {recorded}): tagged grid_role=cos"
-                        ));
-                    }
-                    Err(e) => {
-                        errors.push(format!("failed to tag CoS pane {recorded}: {e}"));
+                if dry_run {
+                    actions.push(format!(
+                        "[dry-run] healed CoS (pane {recorded}): tagged grid_role=cos"
+                    ));
+                } else {
+                    match crate::cos::tag_cos_pane_in(herdr, recorded, runs_dir) {
+                        Ok(_) => {
+                            actions.push(format!(
+                                "healed CoS (pane {recorded}): tagged grid_role=cos"
+                            ));
+                        }
+                        Err(e) => {
+                            errors.push(format!("failed to tag CoS pane {recorded}: {e}"));
+                        }
                     }
                 }
             } else {

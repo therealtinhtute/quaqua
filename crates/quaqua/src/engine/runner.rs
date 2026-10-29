@@ -373,6 +373,16 @@ pub(crate) fn run_until_blocked<W: Workflow, C: RunnerClock>(
                 reason: data.reason,
             });
         }
+        if rec.kind == "workflow_cancelled" {
+            let reason = serde_json::from_str::<serde_json::Value>(&rec.payload_json)
+                .ok()
+                .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(str::to_string))
+                .unwrap_or_else(|| "workflow cancelled".to_string());
+            return Ok(RunnerOutcome::Failed {
+                code: 1,
+                reason: format!("workflow cancelled: {reason}"),
+            });
+        }
     }
 
     // Map scheduled_seq -> (id, scheduled_ts_ms, duration) across ALL history for timer restoration

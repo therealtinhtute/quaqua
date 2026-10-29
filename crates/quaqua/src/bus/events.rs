@@ -203,6 +203,95 @@ pub fn resolve_pane_tokens_from_record(
     None
 }
 
+/// True when `cwd` is `root` or below it, comparing canonical paths when both resolve.
+fn path_is_within(cwd: &Path, root: &Path) -> bool {
+    if let (Ok(can_cwd), Ok(can_root)) = (cwd.canonicalize(), root.canonicalize()) {
+        can_cwd.starts_with(&can_root)
+    } else {
+        cwd.starts_with(root)
+    }
+}
+
+/// Checks whether a pane belongs to the workspace corresponding to `runs_dir`.
+pub fn is_pane_in_runs_workspace(
+    pid: &str,
+    pane_cwd: Option<&str>,
+    runs_dir: &Path,
+    tokens_val: Option<&serde_json::Value>,
+) -> bool {
+    // 1. Check if it matches this workspace's recorded CoS pane
+    if let Ok(content) = std::fs::read_to_string(runs_dir.join(crate::cos::COS_IDENTITY_FILE)) {
+        if let Ok(ident) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(recorded_pane) = ident.get("pane_id").and_then(|p| p.as_str()) {
+                if recorded_pane == pid {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 2. Check worker metadata
+    if crate::state::WorkerMetadata::owner_path(runs_dir, pid).is_file() {
+        return true;
+    }
+
+    let ws_root = runs_dir.parent().unwrap_or(runs_dir);
+
+    // 3. Check pane_cwd if known
+    if let Some(cwd_str) = pane_cwd {
+        let cwd_path = Path::new(cwd_str);
+        // A `.cos` install keeps its runs under `<workspace>/.cos/runs`, so the pane's own
+        // workspace root is one level above `ws_root`.
+        let factory_root = if ws_root.file_name().and_then(|n| n.to_str()) == Some(".cos") {
+            ws_root.parent()
+        } else {
+            None
+        };
+        for root in std::iter::once(ws_root).chain(factory_root) {
+            if path_is_within(cwd_path, root) {
+                return true;
+            }
+        }
+
+        // Check project repos from projects/INDEX.md
+        for repo in crate::merge::resolve_project_repos_from_workspace(ws_root) {
+            if path_is_within(cwd_path, &repo) {
+                return true;
+            }
+        }
+
+        // Check if cwd is inside a worker worktree of this workspace (<repo>/.wt/<name>)
+        if let Some(name) = cwd_path.file_name().and_then(|n| n.to_str()) {
+            if crate::state::WorkerMetadata::owner_path(runs_dir, name).is_file() {
+                return true;
+            }
+        }
+
+        // cwd is known and does not belong to ws_root or any of its repos/worktrees
+        return false;
+    }
+
+    // 4. If cwd is unknown but grid_role is cos:
+    // If cos.identity.json exists with a different pane_id, then this pane is definitely not the local CoS
+    if tokens_val
+        .and_then(|t| t.get("grid_role"))
+        .and_then(|v| v.as_str())
+        == Some("cos")
+    {
+        if let Ok(content) = std::fs::read_to_string(runs_dir.join(crate::cos::COS_IDENTITY_FILE)) {
+            if let Ok(ident) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(recorded_pane) = ident.get("pane_id").and_then(|p| p.as_str()) {
+                    if recorded_pane != pid {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    true
+}
+
 /// Checks whether an incident record belongs to the consumer's own group (quaqua-owned panes).
 pub fn is_incident_in_consumer_group(r: &FarmEventRecord, consumer: &str, runs_dir: &Path) -> bool {
     let (known_leads, known_projects) = resolve_known_leads_and_projects(runs_dir);
@@ -335,42 +424,16 @@ impl FarmBus {
             if consumer == "cos" {
                 let mut stmt = conn.prepare_cached(
                     r#"
-                    SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json
+                    SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
                     FROM farm_events
                     WHERE seq > ?1 AND incident_key IS NOT NULL
+                      AND (farm = ?2 OR (farm IS NULL AND seq <= ?3))
                     ORDER BY seq ASC
                     "#,
                 )?;
-                let rows = stmt.query_map(rusqlite::params![since_seq as i64], |row| {
-                    Ok(FarmEventRecord {
-                        seq: row.get::<_, i64>(0)? as u64,
-                        ts_ms: row.get::<_, i64>(1)? as u64,
-                        event_type: row.get(2)?,
-                        actor: row.get(3)?,
-                        subject: row.get(4)?,
-                        owner: row.get(5)?,
-                        project: row.get(6)?,
-                        incident_key: row.get(7)?,
-                        payload_json: row.get(8)?,
-                    })
-                })?;
-                let mut res = Vec::new();
-                for r in rows {
-                    res.push(r?);
-                }
-                Ok(res)
-            } else {
-                let mut stmt = conn.prepare_cached(
-                    r#"
-                    SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json
-                    FROM farm_events
-                    WHERE seq > ?1 AND incident_key IS NOT NULL
-                      AND (owner = ?2 OR project = ?2 OR owner IS NULL)
-                    ORDER BY seq ASC
-                    "#,
-                )?;
-                let rows =
-                    stmt.query_map(rusqlite::params![since_seq as i64, consumer], |row| {
+                let rows = stmt.query_map(
+                    rusqlite::params![since_seq as i64, &self.farm, self.events_watermark as i64],
+                    |row| {
                         Ok(FarmEventRecord {
                             seq: row.get::<_, i64>(0)? as u64,
                             ts_ms: row.get::<_, i64>(1)? as u64,
@@ -381,8 +444,48 @@ impl FarmBus {
                             project: row.get(6)?,
                             incident_key: row.get(7)?,
                             payload_json: row.get(8)?,
+                            farm: row.get(9)?,
                         })
-                    })?;
+                    },
+                )?;
+                let mut res = Vec::new();
+                for r in rows {
+                    res.push(r?);
+                }
+                Ok(res)
+            } else {
+                let mut stmt = conn.prepare_cached(
+                    r#"
+                    SELECT seq, ts_ms, type, actor, subject, owner, project, incident_key, payload_json, farm
+                    FROM farm_events
+                    WHERE seq > ?1 AND incident_key IS NOT NULL
+                      AND (farm = ?2 OR (farm IS NULL AND seq <= ?3))
+                      AND owner = ?4
+                    ORDER BY seq ASC
+                    "#,
+                )?;
+                let rows = stmt.query_map(
+                    rusqlite::params![
+                        since_seq as i64,
+                        &self.farm,
+                        self.events_watermark as i64,
+                        consumer
+                    ],
+                    |row| {
+                        Ok(FarmEventRecord {
+                            seq: row.get::<_, i64>(0)? as u64,
+                            ts_ms: row.get::<_, i64>(1)? as u64,
+                            event_type: row.get(2)?,
+                            actor: row.get(3)?,
+                            subject: row.get(4)?,
+                            owner: row.get(5)?,
+                            project: row.get(6)?,
+                            incident_key: row.get(7)?,
+                            payload_json: row.get(8)?,
+                            farm: row.get(9)?,
+                        })
+                    },
+                )?;
                 let mut res = Vec::new();
                 for r in rows {
                     res.push(r?);
@@ -414,7 +517,7 @@ impl FarmBus {
         {
             let conn = self.conn_for_test();
             let timeout = crate::bus::mail::get_mail_ack_timeout_ms();
-            let _ = crate::bus::mail::check_unacked_incidents(&conn, timeout);
+            let _ = crate::bus::mail::check_unacked_incidents(&conn, timeout, &self.farm);
         }
 
         let unacked_mail =
@@ -496,7 +599,7 @@ impl FarmBus {
         {
             let conn = self.conn_for_test();
             let timeout = crate::bus::mail::get_mail_ack_timeout_ms();
-            let _ = crate::bus::mail::check_unacked_incidents(&conn, timeout);
+            let _ = crate::bus::mail::check_unacked_incidents(&conn, timeout, &self.farm);
         }
 
         let new_mail = {
@@ -508,6 +611,7 @@ impl FarmBus {
                            body, deliveries, last_delivered_ms, acked_ms, acked_by
                     FROM mail
                     WHERE to_name = ?1 AND acked_ms IS NULL AND id > ?2
+                      AND (farm = ?3 OR farm IS NULL)
                     ORDER BY id ASC
                     "#,
                 )
@@ -515,7 +619,7 @@ impl FarmBus {
 
             let rows = stmt
                 .query_map(
-                    rusqlite::params![consumer, *last_seen_mail_id as i64],
+                    rusqlite::params![consumer, *last_seen_mail_id as i64, &self.farm],
                     |row| {
                         Ok(MailMessage {
                             id: row.get::<_, i64>(0)? as u64,
@@ -583,6 +687,191 @@ impl FarmBus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneAttribution {
+    Local {
+        owner: Option<String>,
+        project: Option<String>,
+        farm: String,
+    },
+    Foreign,
+}
+
+/// Fetches a pane once for attribution. `None` means herdr failed or answered
+/// unparseable JSON, and the caller fails open to local.
+pub fn resolve_pane_value<H: HerdrOps>(herdr: &H, pane: &str) -> Option<serde_json::Value> {
+    match herdr.pane_get(pane) {
+        Ok((_ok, text)) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                eprintln!("warning: [resolve_pane_value] unparseable JSON for pane {pane}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("warning: [resolve_pane_value] cannot get pane {pane}: {e}");
+            None
+        }
+    }
+}
+
+/// Evaluates the pane attribution ladder to determine if a pane is Local or Foreign.
+/// Ladder order:
+/// 1. token `grid_farm == local` -> Local
+/// 2. token `grid_farm != local` -> Foreign
+/// 3. `cwd` canonical-prefixed by local root -> Local
+/// 4. `basename(cwd)` has `runs/<basename>.owner` -> Local
+/// 5. no `result.pane` -> Local (fail-open)
+pub(crate) fn attribute_pane(
+    val: &serde_json::Value,
+    local: &str,
+    runs_dir: &Path,
+) -> PaneAttribution {
+    // F1: Foreign only on error.code == pane_not_found; any other error code or shape -> Local (fail-open)
+    if let Some(err) = val.get("error") {
+        if err.get("code").and_then(|c| c.as_str()) == Some("pane_not_found") {
+            return PaneAttribution::Foreign;
+        }
+        return PaneAttribution::Local {
+            owner: None,
+            project: None,
+            farm: local.to_string(),
+        };
+    }
+
+    let pane_obj = match val.get("result").and_then(|r| r.get("pane")) {
+        Some(p) => p,
+        None => {
+            return PaneAttribution::Local {
+                owner: None,
+                project: None,
+                farm: local.to_string(),
+            };
+        }
+    };
+
+    let tokens = pane_obj.get("tokens");
+    let cwd_str = pane_obj.get("cwd").and_then(|c| c.as_str()).unwrap_or("");
+    let cwd_path = Path::new(cwd_str);
+    let base_name = if !cwd_str.is_empty() {
+        cwd_path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+    } else {
+        ""
+    };
+
+    // F2: check ancestors of cwd for runs/<name>.owner
+    let mut ancestor_worker_name: Option<String> = None;
+    if !cwd_str.is_empty() {
+        for ancestor in cwd_path.ancestors() {
+            if let Some(comp) = ancestor.file_name().and_then(|c| c.to_str()) {
+                if !comp.is_empty() && runs_dir.join(format!("{comp}.owner")).is_file() {
+                    ancestor_worker_name = Some(comp.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    // Ladder 1 & 2: token grid_farm
+    let grid_farm_opt = tokens
+        .and_then(|t| t.get("grid_farm"))
+        .and_then(|f| f.as_str());
+    let is_local = if let Some(grid_farm) = grid_farm_opt {
+        if grid_farm == local {
+            true
+        } else {
+            return PaneAttribution::Foreign;
+        }
+    } else {
+        // Ladder 3: cwd canonical-prefixed by local root
+        let local_root = runs_dir.parent().unwrap_or(runs_dir);
+        let canonical_local = local_root
+            .canonicalize()
+            .unwrap_or_else(|_| local_root.to_path_buf());
+        let in_local_root = if !cwd_str.is_empty() {
+            let canonical_cwd = cwd_path
+                .canonicalize()
+                .unwrap_or_else(|_| cwd_path.to_path_buf());
+            canonical_cwd.starts_with(&canonical_local)
+        } else {
+            false
+        };
+
+        if in_local_root {
+            true
+        } else if ancestor_worker_name.is_some() {
+            // Ladder 4: ancestor of cwd has runs/<ancestor>.owner -> Local
+            true
+        } else {
+            // None matched -> Foreign
+            return PaneAttribution::Foreign;
+        }
+    };
+
+    if is_local {
+        let worker_name = ancestor_worker_name.as_deref().unwrap_or(base_name);
+        let owner = tokens
+            .and_then(|t| t.get("grid_owner"))
+            .and_then(|o| o.as_str())
+            .map(String::from)
+            .or_else(|| {
+                if !worker_name.is_empty() {
+                    let owner_file = runs_dir.join(format!("{worker_name}.owner"));
+                    std::fs::read_to_string(&owner_file)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                } else {
+                    None
+                }
+            });
+
+        let project = tokens
+            .and_then(|t| t.get("grid_group"))
+            .and_then(|g| g.as_str())
+            .map(String::from)
+            .or_else(|| {
+                if !worker_name.is_empty() {
+                    let repo_file = runs_dir.join(format!("{worker_name}.repo"));
+                    std::fs::read_to_string(&repo_file).ok().and_then(|s| {
+                        let trimmed = s.trim();
+                        Path::new(trimmed)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(String::from)
+                    })
+                } else {
+                    None
+                }
+            });
+
+        PaneAttribution::Local {
+            owner,
+            project,
+            farm: local.to_string(),
+        }
+    } else {
+        PaneAttribution::Foreign
+    }
+}
+
+/// A CoS pane of another workspace must not reach this workspace's inbox. Auto-tagging
+/// gives every workspace's CoS pane the same `grid_role=cos` tokens, so the farm ladder
+/// cannot tell two CoS panes apart on tokens alone; this asks the workspace itself.
+fn is_foreign_workspace_cos_pane(pid: &str, pane_val: &serde_json::Value, runs_dir: &Path) -> bool {
+    let pane_obj = match pane_val.pointer("/result/pane") {
+        Some(p) => p,
+        None => return false,
+    };
+    let tokens = pane_obj.get("tokens");
+    match tokens {
+        Some(t) if crate::cos::is_cos_tokens(t) => {}
+        _ => return false,
+    }
+    let cwd = pane_obj.get("cwd").and_then(|c| c.as_str());
+    !is_pane_in_runs_workspace(pid, cwd, runs_dir, tokens)
+}
+
 /// Handles an incoming herdr plugin hook event:
 /// - Extracts pane, agent, and status.
 /// - On `pane.agent_status_changed` where status is `blocked`, records an incident with
@@ -639,69 +928,6 @@ pub fn handle_event_hook<H: HerdrOps>(
     } else {
         format!("anon-{}", crate::bus::now_ms())
     };
-    let tokens_val = val
-        .get("tokens")
-        .or_else(|| val.get("data").and_then(|d| d.get("tokens")))
-        .cloned()
-        .or_else(|| {
-            if !pid.is_empty() {
-                if let Ok(out) = herdr.run(&["pane", "get", pid]) {
-                    if out.status.success() {
-                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                            return v.pointer("/result/pane/tokens").cloned();
-                        }
-                    }
-                }
-            }
-            None
-        });
-
-    if let Some(tok_map) = tokens_val.as_ref().and_then(|t| t.as_object()) {
-        let is_quaqua_pane = tok_map.contains_key("grid_role")
-            || tok_map.contains_key("grid_owner")
-            || tok_map.contains_key("grid_group");
-        if !is_quaqua_pane {
-            return Ok(false);
-        }
-    }
-
-    let owner = tokens_val
-        .as_ref()
-        .and_then(|t| t.get("grid_owner"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| {
-            if tokens_val
-                .as_ref()
-                .and_then(|t| t.get("grid_role"))
-                .and_then(|v| v.as_str())
-                == Some("cos")
-            {
-                Some("cos".to_string())
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            agent.and_then(|a| {
-                if crate::state::WorkerMetadata::owner_path(runs_dir, a).is_file() {
-                    let o = crate::state::WorkerMetadata::load_owner(runs_dir, a);
-                    if o.is_empty() {
-                        None
-                    } else {
-                        Some(o)
-                    }
-                } else {
-                    None
-                }
-            })
-        });
-
-    let project = tokens_val
-        .as_ref()
-        .and_then(|t| t.get("grid_group"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
 
     let db_path = runs_dir.join("quaqua.db");
     let bus = match FarmBus::open(&db_path) {
@@ -715,6 +941,76 @@ pub fn handle_event_hook<H: HerdrOps>(
         }
     };
 
+    let local_farm = bus.farm().to_string();
+    let attribution = if ev_name == "pane.exited" || ev_name == "pane_exited" {
+        let (owner, project) = if let Some(a) = agent.filter(|s| !s.is_empty()) {
+            let owner = runs_dir
+                .join(format!("{a}.owner"))
+                .is_file()
+                .then(|| {
+                    std::fs::read_to_string(runs_dir.join(format!("{a}.owner")))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+                .flatten();
+            let project = runs_dir
+                .join(format!("{a}.repo"))
+                .is_file()
+                .then(|| {
+                    std::fs::read_to_string(runs_dir.join(format!("{a}.repo")))
+                        .ok()
+                        .and_then(|s| {
+                            let trimmed = s.trim();
+                            Path::new(trimmed)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(String::from)
+                        })
+                })
+                .flatten();
+            (owner, project)
+        } else {
+            (None, None)
+        };
+        PaneAttribution::Local {
+            owner,
+            project,
+            farm: local_farm.clone(),
+        }
+    } else if !pid.is_empty() {
+        match resolve_pane_value(herdr, pid) {
+            Some(pane_val) => {
+                if is_foreign_workspace_cos_pane(pid, &pane_val, runs_dir) {
+                    PaneAttribution::Foreign
+                } else {
+                    attribute_pane(&pane_val, &local_farm, runs_dir)
+                }
+            }
+            None => PaneAttribution::Local {
+                owner: None,
+                project: None,
+                farm: local_farm.clone(),
+            },
+        }
+    } else {
+        PaneAttribution::Local {
+            owner: None,
+            project: None,
+            farm: local_farm.clone(),
+        }
+    };
+
+    let (owner, project, farm) = match attribution {
+        PaneAttribution::Local {
+            owner,
+            project,
+            farm,
+        } => (owner, project, farm),
+        PaneAttribution::Foreign => {
+            return Ok(false);
+        }
+    };
     if ev_name == "pane.agent_status_changed" || ev_name == "pane_agent_status_changed" {
         if agent_status == "blocked" {
             let incident_key = if let Some(k) = val.get("incident_key").and_then(|v| v.as_str()) {
@@ -745,10 +1041,11 @@ pub fn handle_event_hook<H: HerdrOps>(
                 "blocked",
                 Some("herdr"),
                 Some(&subject_str),
-                owner.clone(),
-                project.clone(),
+                owner.as_deref(),
+                project.as_deref(),
             )
-            .with_incident_key(incident_key);
+            .with_incident_key(incident_key)
+            .with_farm(&farm);
 
             if !ej.is_empty() && ej != "{}" {
                 ev = ev.with_payload_json(ej);
@@ -772,10 +1069,11 @@ pub fn handle_event_hook<H: HerdrOps>(
                         "agent_status",
                         Some("herdr"),
                         Some(&subject_str),
-                        owner.clone(),
-                        project.clone(),
+                        owner.as_deref(),
+                        project.as_deref(),
                     )
-                    .with_payload_json(ej);
+                    .with_payload_json(ej)
+                    .with_farm(&farm);
                     let _ = bus.record(&ev);
                 }
             }
@@ -791,9 +1089,10 @@ pub fn handle_event_hook<H: HerdrOps>(
             "agent_exited",
             Some("herdr"),
             Some(&subject_str),
-            owner,
-            project,
-        );
+            owner.as_deref(),
+            project.as_deref(),
+        )
+        .with_farm(&farm);
         if let Some(key) = incident_key {
             ev = ev.with_incident_key(key);
         }
