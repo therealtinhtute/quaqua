@@ -1,9 +1,11 @@
 //! Pipeline engine (`quaqua pipeline`).
 //! Implements build -> review -> fix orchestration state machine.
 
+pub mod cancel;
 pub mod gate;
 pub mod phases;
 pub mod state;
+pub use cancel::{cancel_pipeline, is_terminal_event};
 pub use gate::{decide_build_gate, BuildFacts, BuildGate};
 
 use crate::engine::activities::SystemActivities;
@@ -40,6 +42,7 @@ pub const USAGE: &str = "\
 # Usage: quaqua pipeline <task> <repo> --brief <file> [--builder sude] [--reviewer suhuynh]
 #                    [--review auto|always|skip] [--rounds 2] [--base <ref>] [--approve-kind <kind>...]
 #        quaqua pipeline --resume <task> <repo> [--rounds 2] [--approve-kind <kind>...]
+#        quaqua pipeline --cancel <task> [--reason <text>]
 #   Build -> review -> fix loop on top of
 #   quaqua worker {spawn,prompt,cleanup}; counts as 2 workers
 #   toward the cap. <task> is a slug ([a-z0-9-]): builder <builder>-<task>, a
@@ -286,6 +289,46 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
     let repo_path: PathBuf;
     let state_file: PathBuf;
     let pfile: PathBuf;
+    let is_cancel = args
+        .iter()
+        .any(|a| a == "--cancel" || a.starts_with("--cancel="));
+    if is_cancel {
+        let mut cancel_task: Option<String> = None;
+        let mut reason: Option<String> = None;
+        let mut i = 0;
+        while i < args.len() {
+            let arg = &args[i];
+            if arg == "--cancel" {
+                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    cancel_task = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else if let Some(t) = arg.strip_prefix("--cancel=") {
+                cancel_task = Some(t.to_string());
+                i += 1;
+            } else if arg == "--reason" {
+                if i + 1 < args.len() {
+                    reason = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    return Err((1, format!("{}\n", USAGE)));
+                }
+            } else if let Some(r) = arg.strip_prefix("--reason=") {
+                reason = Some(r.to_string());
+                i += 1;
+            } else if !arg.starts_with('-') && cancel_task.is_none() {
+                cancel_task = Some(arg.clone());
+                i += 1;
+            } else {
+                return Err((1, format!("{}\n", USAGE)));
+            }
+        }
+        let task = cancel_task.ok_or_else(|| (1, format!("{}\n", USAGE)))?;
+        return cancel::cancel_pipeline(&task, reason.as_deref(), &runs_dir, herdr);
+    }
+
     let is_resume = !args.is_empty() && args[0] == "--resume";
     if is_resume {
         let mut resume_rounds: Option<u32> = None;
@@ -381,13 +424,15 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
             ));
         }
         if state.finished == 1 {
-            return Err((
-                1,
+            let msg = if state.phase == "cancelled" {
+                format!("pipeline '{task}' was cancelled — nothing to resume\n")
+            } else {
                 format!(
                     "pipeline '{task}' already finished — see {}\n",
                     pfile.display()
-                ),
-            ));
+                )
+            };
+            return Err((1, msg));
         }
 
         state.pipeline_pid = std::process::id();
@@ -2322,6 +2367,10 @@ impl Workflow for PipelineWorkflow {
                         reason: format!("blocked {code}: {r}"),
                     }
                 }
+                PipelinePhase::Cancelled => StepDecision::Fail {
+                    code: 1,
+                    reason: "pipeline cancelled".to_string(),
+                },
             },
             Some(WorkflowEvent::ApprovalResolved { approved, reason }) => match state.phase {
                 PipelinePhase::PlanReadyGate => {

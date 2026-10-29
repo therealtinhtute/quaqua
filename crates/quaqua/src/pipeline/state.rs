@@ -149,6 +149,7 @@ pub enum PipelinePhase {
     Failed,
     Disputed,
     Blocked,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
