@@ -977,6 +977,8 @@ struct MockHerdrTokens {
     started: std::cell::Cell<bool>,
     calls: std::cell::RefCell<Vec<String>>,
     started_agents: std::cell::RefCell<Vec<String>>,
+    agent_list_json: std::cell::RefCell<Option<String>>,
+    agent_session: std::cell::RefCell<Option<String>>,
 }
 
 impl MockHerdrTokens {
@@ -986,6 +988,23 @@ impl MockHerdrTokens {
             started: std::cell::Cell::new(false),
             calls: std::cell::RefCell::new(Vec::new()),
             started_agents: std::cell::RefCell::new(Vec::new()),
+            agent_list_json: std::cell::RefCell::new(None),
+            agent_session: std::cell::RefCell::new(None),
+        }
+    }
+
+    fn with_session(
+        tokens_json: impl Into<String>,
+        session: impl Into<String>,
+        agent_list: impl Into<String>,
+    ) -> Self {
+        Self {
+            tokens_json: std::cell::RefCell::new(tokens_json.into()),
+            started: std::cell::Cell::new(false),
+            calls: std::cell::RefCell::new(Vec::new()),
+            started_agents: std::cell::RefCell::new(Vec::new()),
+            agent_list_json: std::cell::RefCell::new(Some(agent_list.into())),
+            agent_session: std::cell::RefCell::new(Some(session.into())),
         }
     }
 }
@@ -994,10 +1013,18 @@ impl quaqua::herdr::HerdrOps for MockHerdrTokens {
     fn run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
         self.calls.borrow_mut().push(args.join(" "));
         let stdout = if args.first() == Some(&"pane") && args.get(1) == Some(&"get") {
-            format!(
-                r#"{{"result":{{"pane":{{"pane_id":"w1:p1","tokens":{}}}}}}}"#,
-                self.tokens_json.borrow()
-            )
+            let pane_id = args.get(2).copied().unwrap_or("w1:p1");
+            if let Some(sess) = self.agent_session.borrow().as_deref() {
+                format!(
+                    r#"{{"result":{{"pane":{{"pane_id":"{pane_id}","tokens":{},"agent_session":{{"value":"{sess}"}}}}}}}}"#,
+                    self.tokens_json.borrow()
+                )
+            } else {
+                format!(
+                    r#"{{"result":{{"pane":{{"pane_id":"{pane_id}","tokens":{}}}}}}}"#,
+                    self.tokens_json.borrow()
+                )
+            }
         } else if args.first() == Some(&"pane") && args.get(1) == Some(&"report-metadata") {
             let mut role = None;
             let mut owner = None;
@@ -1011,8 +1038,19 @@ impl quaqua::herdr::HerdrOps for MockHerdrTokens {
             if let (Some(r), Some(o)) = (role, owner) {
                 *self.tokens_json.borrow_mut() =
                     format!(r#"{{"grid_role":"{r}","grid_owner":"{o}","logo":"\ue1a3"}}"#);
+            } else if let Some(r) = role {
+                *self.tokens_json.borrow_mut() =
+                    format!(r#"{{"grid_role":"{r}","logo":"\ue1a3"}}"#);
             }
             r#"{"result":{}}"#.to_string()
+        } else if args.first() == Some(&"pane") && args.get(1) == Some(&"rename") {
+            r#"{"result":{}}"#.to_string()
+        } else if args.first() == Some(&"agent") && args.get(1) == Some(&"list") {
+            if let Some(custom) = self.agent_list_json.borrow().as_deref() {
+                custom.to_string()
+            } else {
+                self.agent_list()?
+            }
         } else if args.first() == Some(&"workspace") && args.get(1) == Some(&"create") {
             r#"{"result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}"#
                 .to_string()
@@ -1031,6 +1069,9 @@ impl quaqua::herdr::HerdrOps for MockHerdrTokens {
         })
     }
     fn agent_list(&self) -> std::io::Result<String> {
+        if let Some(custom) = self.agent_list_json.borrow().as_deref() {
+            return Ok(custom.to_string());
+        }
         let agents: Vec<serde_json::Value> = self
             .started_agents
             .borrow()
@@ -2229,4 +2270,172 @@ fn test_layout_slp_full_matrix_60_cases() {
             want_rule_id, decision.rule_id
         );
     }
+}
+#[test]
+fn test_layout_gate_cos_token_loss_after_herdr_restart_self_heals() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("cos-restart-self-heals");
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    let root = temp.join("workspace");
+    std::fs::create_dir_all(root.join("projects")).unwrap();
+    std::fs::create_dir_all(root.join("rules/_all")).unwrap();
+    std::fs::write(root.join("team.toml"), test_slp_team_toml()).unwrap();
+
+    // Record initial CoS identity in runs/cos.identity.json
+    let cos_session_id = "ses-cos-restart-test-99";
+    std::fs::write(
+        runs_dir.join("cos.identity.json"),
+        format!(r#"{{"agent_session": "{cos_session_id}", "pane_id": "w1:p1"}}"#),
+    )
+    .unwrap();
+
+    let _env = EnvGuard::set(&[
+        ("QUAQUA_HOME", root.to_str().unwrap().to_string()),
+        ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
+        ("QUAQUA_TEST", "1".to_string()),
+        ("GRID_SKIP", "1".to_string()),
+        ("HERDR_PANE_ID", "w1:p1".to_string()),
+    ]);
+    // Ensure QUAQUA_OWNER and QUAQUA_LAYOUT_SHADOW are not set, testing true enforcement without env bypass
+    std::env::remove_var("QUAQUA_OWNER");
+    std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
+
+    let cfg = test_slp_cfg();
+
+    // After a herdr server restart:
+    // 1. Pane tokens are lost (no grid_role or grid_owner; only logo remains)
+    // 2. Herdr still persists agent_session on the pane
+    // 3. herdr agent list reports the pane with matching agent_session and no agent name
+    let agents_json = format!(
+        r#"{{"result":{{"agents":[{{"pane_id":"w1:p1","agent":"claude","tokens":{{"logo":"\ue1a0"}},"agent_session":{{"value":"{cos_session_id}"}}}}]}}}}"#
+    );
+    let herdr = MockHerdrTokens::with_session(r#"{"logo":"\ue1a0"}"#, cos_session_id, agents_json);
+
+    // Call layout gate for CoS spawning a peer (e.g. `quaqua worker spawn`)
+    let res = quaqua::layout::gate(
+        None,
+        Some(&herdr),
+        quaqua::layout::Verb::Spawn,
+        "peer",
+        Some("sude-worker-repro"),
+        quaqua::layout::SpawnOrigin::Cli,
+        Some("cos"),
+        Some("repo"),
+        &runs_dir,
+        Some(&cfg),
+    );
+
+    // Goal: After a herdr restart, CoS call through layout gate must be allowed without manual `quaqua cos tag`
+    assert!(
+        res.is_ok(),
+        "CoS call through layout gate after herdr restart must succeed via self-healing, but got: {:?}",
+        res.err()
+    );
+
+    // And verify that pane tokens were healed to grid_role=cos
+    assert!(
+        herdr.tokens_json.borrow().contains(r#""grid_role":"cos""#),
+        "pane tokens must be healed with grid_role=cos: {}",
+        herdr.tokens_json.borrow()
+    );
+
+    // Also verify spawn_worker directly succeeds using the self-healed identity
+    let git = DummyGit;
+    let opts = quaqua::worker::spawn::parse_spawn_args(&[
+        "sude-worker-repro2".to_string(),
+        "sude".to_string(),
+        repo_dir.to_str().unwrap().to_string(),
+    ])
+    .unwrap();
+
+    let spawn_res = quaqua::worker::spawn::spawn_worker(
+        opts,
+        &cfg,
+        &git,
+        &herdr,
+        quaqua::layout::SpawnOrigin::Cli,
+    );
+    assert!(
+        spawn_res.is_ok(),
+        "spawn_worker from self-healed CoS pane must succeed: {:?}",
+        spawn_res.err()
+    );
+}
+
+#[test]
+fn test_layout_gate_unknown_pane_mismatched_session_fails_closed() {
+    let _lock = env_lock();
+    let temp = hermetic_temp_dir("cos-mismatch-fails-closed");
+    let repo_dir = temp.join("repo");
+    let runs_dir = temp.join("runs");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&runs_dir).unwrap();
+
+    let root = temp.join("workspace");
+    std::fs::create_dir_all(root.join("projects")).unwrap();
+    std::fs::create_dir_all(root.join("rules/_all")).unwrap();
+    std::fs::write(root.join("team.toml"), test_slp_team_toml()).unwrap();
+
+    // Record legitimate CoS identity
+    std::fs::write(
+        runs_dir.join("cos.identity.json"),
+        r#"{"agent_session": "ses-real-cos", "pane_id": "w1:p1"}"#,
+    )
+    .unwrap();
+
+    let _env = EnvGuard::set(&[
+        ("QUAQUA_HOME", root.to_str().unwrap().to_string()),
+        ("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap().to_string()),
+        ("QUAQUA_TEST", "1".to_string()),
+        ("GRID_SKIP", "1".to_string()),
+        ("HERDR_PANE_ID", "w1:p1".to_string()),
+    ]);
+    std::env::remove_var("QUAQUA_OWNER");
+    std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
+
+    let cfg = test_slp_cfg();
+
+    // The pane has a DIFFERENT session ("ses-impostor")
+    let agents_json = r#"{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude","tokens":{"logo":"\ue1a0"},"agent_session":{"value":"ses-impostor"}}]}}"#;
+    let herdr = MockHerdrTokens::with_session(r#"{"logo":"\ue1a0"}"#, "ses-impostor", agents_json);
+
+    let res = quaqua::layout::gate(
+        None,
+        Some(&herdr),
+        quaqua::layout::Verb::Spawn,
+        "peer",
+        Some("sude-worker-fail"),
+        quaqua::layout::SpawnOrigin::Cli,
+        Some("cos"),
+        Some("repo"),
+        &runs_dir,
+        Some(&cfg),
+    );
+
+    // Mismatched session must FAIL closed: denied with identity.unknown
+    assert!(
+        res.is_err(),
+        "unmatched pane session must fail closed with identity denial"
+    );
+    let (code, msg) = res.unwrap_err();
+    assert_eq!(code, 1);
+    assert!(
+        msg.contains("identity.unknown"),
+        "must deny with identity.unknown: {msg}"
+    );
+    assert!(
+        msg.contains("escape hatch: QUAQUA_LAYOUT_SHADOW=1"),
+        "hint must carry QUAQUA_LAYOUT_SHADOW escape hatch: {msg}"
+    );
+
+    // Tokens must NOT have been modified to cos
+    assert!(
+        !herdr.tokens_json.borrow().contains(r#""grid_role":"cos""#),
+        "unmatched pane must not receive cos token: {}",
+        herdr.tokens_json.borrow()
+    );
 }

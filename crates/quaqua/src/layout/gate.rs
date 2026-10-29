@@ -882,7 +882,7 @@ fn identity_unknown_hint() -> String {
     };
     format!(
         "hint: {subject} — usually herdr dropped the pane tokens on a server restart; \
-         CoS: run `quaqua cos tag`; Lead: run `quaqua lead repair <slug>`\n"
+         CoS: run `quaqua cos tag`; Lead: run `quaqua lead repair <slug>` (escape hatch: QUAQUA_LAYOUT_SHADOW=1)\n"
     )
 }
 
@@ -977,7 +977,8 @@ fn gate_inner<H: HerdrOps>(
     force_shadow: bool,
 ) -> Result<Decision, (i32, String)> {
     let caller_resolved;
-    let effective_caller = match caller {
+    let caller_healed;
+    let mut effective_caller = match caller {
         Some(c) => c,
         None => {
             caller_resolved = match herdr {
@@ -1017,6 +1018,18 @@ fn gate_inner<H: HerdrOps>(
             &caller_resolved
         }
     };
+
+    if effective_caller.role == crate::identity::Role::Unknown {
+        if let Some(h) = herdr {
+            if crate::identity::caller_pane_tokens(h).is_some() {
+                let _ = crate::identity::heal_with_runs_dir(h, runs_dir, None);
+                caller_healed = crate::identity::resolve_caller(h, runs_dir);
+                if caller_healed.role != crate::identity::Role::Unknown {
+                    effective_caller = &caller_healed;
+                }
+            }
+        }
+    }
 
     let loaded_cfg;
     let effective_cfg = match cfg {

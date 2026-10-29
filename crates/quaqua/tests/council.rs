@@ -1,7 +1,9 @@
 use quaqua::engine::child::SingleWorkerOutput;
+use quaqua::taskforce::driver::LiveCouncilMemberRunner;
 use quaqua::taskforce::driver::{run_taskforce_workflow, CouncilMemberRunner};
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1142,6 +1144,255 @@ members = ["tieude"]
     let (code, msg) = res.unwrap_err();
     assert_eq!(code, 1);
     assert!(msg.contains("cannot review (can_review = false in [kinds.tieude])"));
+}
+
+struct HybridMemberRunner<'a, G: quaqua::git::GitOps> {
+    live: LiveCouncilMemberRunner<'a, G>,
+    mock: MockMemberRunner,
+    live_member_name: String,
+}
+
+impl<'a, G: quaqua::git::GitOps + Clone + Send + Sync + 'static> CouncilMemberRunner
+    for HybridMemberRunner<'a, G>
+{
+    fn spawn_member(
+        &self,
+        name: &str,
+        kind: &str,
+        repo: &Path,
+        task: &str,
+        approve_kinds: &[String],
+        base: Option<&str>,
+    ) -> Result<(), (i32, String)> {
+        self.mock
+            .spawn_member(name, kind, repo, task, approve_kinds, base)
+    }
+
+    fn prompt_member(
+        &self,
+        name: &str,
+        brief: &str,
+        repo: &Path,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<SingleWorkerOutput, (i32, String)> {
+        if name == self.live_member_name {
+            self.live.prompt_member(name, brief, repo, cancel)
+        } else {
+            self.mock.prompt_member(name, brief, repo, cancel)
+        }
+    }
+
+    fn cleanup_member(&self, name: &str, repo: &Path) -> Result<(), (i32, String)> {
+        self.mock.cleanup_member(name, repo)
+    }
+}
+
+#[test]
+fn council_fail_fast_stops_live_member_promptly() {
+    let tmp = hermetic_temp_dir("fflive");
+    let runs_dir = tmp.join("runs");
+    let repo_dir = tmp.join("repo");
+    let bin_dir = tmp.join("bin");
+    fs::create_dir_all(&runs_dir).unwrap();
+    fs::create_dir_all(&repo_dir).unwrap();
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let fake_herdr_path = bin_dir.join("fake_herdr");
+    let script = r#"#!/bin/sh
+if [ "$1" = "agent" ] && [ "$2" = "get" ]; then
+    sleep 3
+    echo '{"result":{"agent":{"agent":"opencode","pane_id":"%1","cwd":"/tmp","agent_session":{"value":"ses-1"}}}}'
+    exit 0
+fi
+exit 0
+"#;
+    fs::write(&fake_herdr_path, script).unwrap();
+    let mut perms = fs::metadata(&fake_herdr_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake_herdr_path, perms).unwrap();
+
+    let prev_shadow = std::env::var("QUAQUA_LAYOUT_SHADOW").ok();
+    let prev_runs = std::env::var("QUAQUA_RUNS_DIR").ok();
+    std::env::set_var("QUAQUA_LAYOUT_SHADOW", "1");
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+
+    let task = "fflive";
+    let mock = MockMemberRunner::new();
+
+    let m1 = format!("suhuynh-{task}c1");
+    let m2 = format!("quansu-{task}c2");
+    let m3 = format!("truonglao-{task}c3");
+
+    // m1 and m2 fail immediately -> quorum (2/3) unreachable -> fail-fast triggers!
+    mock.set_result(&m1, Err((4, "budget".to_string())));
+    mock.set_result(&m2, Err((3, "stall".to_string())));
+
+    let git = quaqua::git::Git::new();
+    let herdr = quaqua::herdr::Herdr {
+        bin: fake_herdr_path.to_string_lossy().to_string(),
+    };
+    let cfg = quaqua::config::Config::default();
+    let live = LiveCouncilMemberRunner {
+        git: &git,
+        herdr: &herdr,
+        cfg: &cfg,
+        base: None,
+    };
+
+    let hybrid = HybridMemberRunner {
+        live,
+        mock: mock.clone(),
+        live_member_name: m3.clone(),
+    };
+
+    let member_specs = vec![
+        (m1.clone(), "suhuynh".to_string()),
+        (m2.clone(), "quansu".to_string()),
+        (m3.clone(), "truonglao".to_string()),
+    ];
+
+    let start = Instant::now();
+    let res = run_taskforce_workflow(
+        "council",
+        task,
+        &repo_dir,
+        "brief",
+        "council",
+        &member_specs,
+        2,
+        "cos",
+        &[],
+        None,
+        &runs_dir,
+        &hybrid,
+    );
+    let elapsed = start.elapsed();
+
+    if let Some(v) = prev_shadow {
+        std::env::set_var("QUAQUA_LAYOUT_SHADOW", v);
+    } else {
+        std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
+    }
+    if let Some(v) = prev_runs {
+        std::env::set_var("QUAQUA_RUNS_DIR", v);
+    } else {
+        std::env::remove_var("QUAQUA_RUNS_DIR");
+    }
+
+    assert!(res.is_err(), "must fail fast");
+    assert_eq!(res.unwrap_err().0, 3, "exit code must be 3");
+
+    // Live member m3 was sleeping for 3s in fake_herdr, but fail-fast must stop it promptly!
+    assert!(
+        elapsed < Duration::from_millis(1000),
+        "fail-fast must stop live members promptly instead of waiting out the agent, took {:?}",
+        elapsed
+    );
+
+    // Assert that the live member m3 was cleaned up
+    let cleanups = mock.cleaned_up();
+    assert_eq!(
+        cleanups,
+        vec![m3],
+        "cleanup_member must be called for the live unsettled member"
+    );
+}
+
+#[test]
+fn live_council_member_runner_prompt_member_honours_cancel() {
+    let tmp = hermetic_temp_dir("live-cancel");
+    let runs_dir = tmp.join("runs");
+    let repo_dir = tmp.join("repo");
+    let bin_dir = tmp.join("bin");
+    fs::create_dir_all(&runs_dir).unwrap();
+    fs::create_dir_all(&repo_dir).unwrap();
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let fake_herdr_path = bin_dir.join("fake_herdr");
+    let script = r#"#!/bin/sh
+if [ "$1" = "agent" ] && [ "$2" = "get" ]; then
+    sleep 3
+    echo '{"result":{"agent":{"agent":"opencode","pane_id":"%1","cwd":"/tmp","agent_session":{"value":"ses-1"}}}}'
+    exit 0
+fi
+exit 0
+"#;
+    fs::write(&fake_herdr_path, script).unwrap();
+    let mut perms = fs::metadata(&fake_herdr_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake_herdr_path, perms).unwrap();
+
+    let prev_shadow = std::env::var("QUAQUA_LAYOUT_SHADOW").ok();
+    let prev_runs = std::env::var("QUAQUA_RUNS_DIR").ok();
+    std::env::set_var("QUAQUA_LAYOUT_SHADOW", "1");
+    std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
+
+    let git = quaqua::git::Git::new();
+    let herdr = quaqua::herdr::Herdr {
+        bin: fake_herdr_path.to_string_lossy().to_string(),
+    };
+    let cfg = quaqua::config::Config::default();
+    let runner = LiveCouncilMemberRunner {
+        git: &git,
+        herdr: &herdr,
+        cfg: &cfg,
+        base: None,
+    };
+
+    // Case 1: Cancel flag is already true before prompt_member is called
+    let cancel_pre = Arc::new(AtomicBool::new(true));
+    let start_pre = Instant::now();
+    let res_pre = runner.prompt_member("test-pre", "brief", &repo_dir, cancel_pre);
+    let elapsed_pre = start_pre.elapsed();
+
+    assert!(res_pre.is_err(), "must return error on cancel");
+    let (code_pre, msg_pre) = res_pre.unwrap_err();
+    assert_eq!(code_pre, 1);
+    assert!(
+        msg_pre.contains("cancelled by fail-fast"),
+        "error must indicate cancellation: {msg_pre}"
+    );
+    assert!(
+        elapsed_pre < Duration::from_millis(500),
+        "pre-cancelled prompt must return immediately, took {:?}",
+        elapsed_pre
+    );
+
+    // Case 2: Cancel flag is set mid-flight while fake_herdr sleeps
+    let cancel_mid = Arc::new(AtomicBool::new(false));
+    let cancel_mid_clone = cancel_mid.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        cancel_mid_clone.store(true, Ordering::SeqCst);
+    });
+
+    let start_mid = Instant::now();
+    let res_mid = runner.prompt_member("test-mid", "brief", &repo_dir, cancel_mid);
+    let elapsed_mid = start_mid.elapsed();
+
+    if let Some(v) = prev_shadow {
+        std::env::set_var("QUAQUA_LAYOUT_SHADOW", v);
+    } else {
+        std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
+    }
+    if let Some(v) = prev_runs {
+        std::env::set_var("QUAQUA_RUNS_DIR", v);
+    } else {
+        std::env::remove_var("QUAQUA_RUNS_DIR");
+    }
+
+    assert!(res_mid.is_err(), "must return error on cancel");
+    let (code_mid, msg_mid) = res_mid.unwrap_err();
+    assert_eq!(code_mid, 1);
+    assert!(
+        msg_mid.contains("cancelled by fail-fast"),
+        "error must indicate cancellation: {msg_mid}"
+    );
+    assert!(
+        elapsed_mid < Duration::from_millis(1000),
+        "mid-flight cancelled prompt must return promptly without waiting 3s, took {:?}",
+        elapsed_mid
+    );
 }
 
 #[test]

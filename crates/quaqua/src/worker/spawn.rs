@@ -436,9 +436,9 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
         validate_base_ref(git, &repo, base_ref)?;
     }
 
+    let mut caller = crate::identity::resolve_caller(herdr, runs_dir);
     let caller_tokens = crate::identity::caller_pane_tokens(herdr);
     let owner = resolve_owner_from_tokens(caller_tokens.as_ref());
-    let mut caller = crate::identity::resolve_caller_from_tokens(caller_tokens.as_ref(), runs_dir);
     if caller.role == crate::identity::Role::Unknown
         && (std::env::var("QUAQUA_TEST").as_deref() == Ok("1")
             || std::env::var("HERDR_BIN_PATH").is_ok()
