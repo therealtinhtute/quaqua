@@ -753,3 +753,30 @@ exit 0
     let digest = bus.inbox_digest(&runs_dir, "cos").expect("digest");
     assert_eq!(digest.incidents.len(), 0, "no incident recorded in DB");
 }
+
+#[test]
+fn test_is_pane_in_runs_workspace_treats_factory_workspace_parent_as_local() {
+    // A `.cos` install records runs under `<workspace>/.cos/runs`, and its CoS pane sits at
+    // `<workspace>`. Both must count as this workspace; anything else must not.
+    let root = hermetic_temp_dir("factory-ws");
+    let ws = root.join("ttdvkh");
+    let runs = ws.join(".cos/runs");
+    fs::create_dir_all(&runs).expect("cos runs dir");
+    let other = root.join("other");
+    fs::create_dir_all(&other).expect("other workspace");
+
+    assert!(
+        quaqua::bus::events::is_pane_in_runs_workspace(
+            ws.to_str().unwrap(),
+            ws.to_str(),
+            &runs,
+            None
+        ),
+        "the workspace root of a .cos install belongs to the workspace"
+    );
+    assert!(
+        quaqua::bus::events::is_pane_in_runs_workspace("w1:p2", other.to_str(), &runs, None)
+            == false,
+        "a pane from another workspace is not local"
+    );
+}

@@ -203,6 +203,15 @@ pub fn resolve_pane_tokens_from_record(
     None
 }
 
+/// True when `cwd` is `root` or below it, comparing canonical paths when both resolve.
+fn path_is_within(cwd: &Path, root: &Path) -> bool {
+    if let (Ok(can_cwd), Ok(can_root)) = (cwd.canonicalize(), root.canonicalize()) {
+        can_cwd.starts_with(&can_root)
+    } else {
+        cwd.starts_with(root)
+    }
+}
+
 /// Checks whether a pane belongs to the workspace corresponding to `runs_dir`.
 pub fn is_pane_in_runs_workspace(
     pid: &str,
@@ -231,21 +240,22 @@ pub fn is_pane_in_runs_workspace(
     // 3. Check pane_cwd if known
     if let Some(cwd_str) = pane_cwd {
         let cwd_path = Path::new(cwd_str);
-        if let (Ok(can_cwd), Ok(can_ws)) = (cwd_path.canonicalize(), ws_root.canonicalize()) {
-            if can_cwd.starts_with(&can_ws) {
+        // A `.cos` install keeps its runs under `<workspace>/.cos/runs`, so the pane's own
+        // workspace root is one level above `ws_root`.
+        let factory_root = if ws_root.file_name().and_then(|n| n.to_str()) == Some(".cos") {
+            ws_root.parent()
+        } else {
+            None
+        };
+        for root in std::iter::once(ws_root).chain(factory_root) {
+            if path_is_within(cwd_path, root) {
                 return true;
             }
-        } else if cwd_path.starts_with(ws_root) {
-            return true;
         }
 
         // Check project repos from projects/INDEX.md
         for repo in crate::merge::resolve_project_repos_from_workspace(ws_root) {
-            if let (Ok(can_cwd), Ok(can_repo)) = (cwd_path.canonicalize(), repo.canonicalize()) {
-                if can_cwd.starts_with(&can_repo) {
-                    return true;
-                }
-            } else if cwd_path.starts_with(&repo) {
+            if path_is_within(cwd_path, &repo) {
                 return true;
             }
         }
