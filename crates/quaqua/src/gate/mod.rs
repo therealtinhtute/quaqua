@@ -153,10 +153,14 @@ fn is_eligible_workspace(cwd: &Path, ws_root: &Path) -> bool {
     if is_worker_worktree(cwd) || is_worker_worktree(ws_root) {
         return false;
     }
-    if !ws_root.join("projects/INDEX.md").is_file() {
-        return false;
+    if is_same_path(cwd, ws_root) && ws_root.join("projects/INDEX.md").is_file() {
+        return true;
     }
-    is_same_path(cwd, ws_root)
+    // Check if cwd is a CoS workspace outside ws_root
+    cwd.join("identity.md").is_file()
+        || cwd.join(".cos/identity.md").is_file()
+        || cwd.join("projects/INDEX.md").is_file()
+        || cwd.join(".cos/projects/INDEX.md").is_file()
 }
 
 fn auto_tag_cos_pane_if_eligible<H: crate::herdr::HerdrOps>(
@@ -203,7 +207,7 @@ fn auto_tag_cos_pane_if_eligible<H: crate::herdr::HerdrOps>(
     }
 
     // Tag pane as CoS (idempotent / harmless retag)
-    if let Err(e) = crate::cos::tag_cos_pane(herdr, &pane) {
+    if let Err(e) = crate::cos::tag_cos_pane_for_workspace(herdr, &pane, &cwd) {
         eprintln!("quaqua: auto-tag CoS pane failed: {e}");
     }
 }

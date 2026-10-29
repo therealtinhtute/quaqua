@@ -203,6 +203,85 @@ pub fn resolve_pane_tokens_from_record(
     None
 }
 
+/// Checks whether a pane belongs to the workspace corresponding to `runs_dir`.
+pub fn is_pane_in_runs_workspace(
+    pid: &str,
+    pane_cwd: Option<&str>,
+    runs_dir: &Path,
+    tokens_val: Option<&serde_json::Value>,
+) -> bool {
+    // 1. Check if it matches this workspace's recorded CoS pane
+    if let Ok(content) = std::fs::read_to_string(runs_dir.join(crate::cos::COS_IDENTITY_FILE)) {
+        if let Ok(ident) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(recorded_pane) = ident.get("pane_id").and_then(|p| p.as_str()) {
+                if recorded_pane == pid {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 2. Check worker metadata
+    if crate::state::WorkerMetadata::owner_path(runs_dir, pid).is_file() {
+        return true;
+    }
+
+    let ws_root = runs_dir.parent().unwrap_or(runs_dir);
+
+    // 3. Check pane_cwd if known
+    if let Some(cwd_str) = pane_cwd {
+        let cwd_path = Path::new(cwd_str);
+        if let (Ok(can_cwd), Ok(can_ws)) = (cwd_path.canonicalize(), ws_root.canonicalize()) {
+            if can_cwd.starts_with(&can_ws) {
+                return true;
+            }
+        } else if cwd_path.starts_with(ws_root) {
+            return true;
+        }
+
+        // Check project repos from projects/INDEX.md
+        for repo in crate::merge::resolve_project_repos_from_workspace(ws_root) {
+            if let (Ok(can_cwd), Ok(can_repo)) = (cwd_path.canonicalize(), repo.canonicalize()) {
+                if can_cwd.starts_with(&can_repo) {
+                    return true;
+                }
+            } else if cwd_path.starts_with(&repo) {
+                return true;
+            }
+        }
+
+        // Check if cwd is inside a worker worktree of this workspace (<repo>/.wt/<name>)
+        if let Some(name) = cwd_path.file_name().and_then(|n| n.to_str()) {
+            if crate::state::WorkerMetadata::owner_path(runs_dir, name).is_file() {
+                return true;
+            }
+        }
+
+        // cwd is known and does not belong to ws_root or any of its repos/worktrees
+        return false;
+    }
+
+    // 4. If cwd is unknown but grid_role is cos:
+    // If cos.identity.json exists with a different pane_id, then this pane is definitely not the local CoS
+    if tokens_val
+        .and_then(|t| t.get("grid_role"))
+        .and_then(|v| v.as_str())
+        == Some("cos")
+    {
+        if let Ok(content) = std::fs::read_to_string(runs_dir.join(crate::cos::COS_IDENTITY_FILE)) {
+            if let Ok(ident) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(recorded_pane) = ident.get("pane_id").and_then(|p| p.as_str()) {
+                    if recorded_pane != pid {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    true
+}
+
 /// Checks whether an incident record belongs to the consumer's own group (quaqua-owned panes).
 pub fn is_incident_in_consumer_group(r: &FarmEventRecord, consumer: &str, runs_dir: &Path) -> bool {
     let (known_leads, known_projects) = resolve_known_leads_and_projects(runs_dir);
@@ -608,48 +687,32 @@ pub enum PaneAttribution {
     Foreign,
 }
 
+/// Fetches a pane once for attribution. `None` means herdr failed or answered
+/// unparseable JSON, and the caller fails open to local.
+pub fn resolve_pane_value<H: HerdrOps>(herdr: &H, pane: &str) -> Option<serde_json::Value> {
+    match herdr.pane_get(pane) {
+        Ok((_ok, text)) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                eprintln!("warning: [resolve_pane_value] unparseable JSON for pane {pane}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("warning: [resolve_pane_value] cannot get pane {pane}: {e}");
+            None
+        }
+    }
+}
+
 /// Evaluates the pane attribution ladder to determine if a pane is Local or Foreign.
 /// Ladder order:
 /// 1. token `grid_farm == local` -> Local
 /// 2. token `grid_farm != local` -> Foreign
 /// 3. `cwd` canonical-prefixed by local root -> Local
 /// 4. `basename(cwd)` has `runs/<basename>.owner` -> Local
-/// 5. `pane get` answers `pane_not_found` / no `result.pane` -> Foreign
-/// 6. `pane get` fails or is unparseable -> Local (fail-open)
-pub fn attribute_pane<H: HerdrOps>(
-    herdr: &H,
-    pane: &str,
-    local: &str,
-    runs_dir: &Path,
-) -> PaneAttribution {
-    let (_ok, text) = match herdr.pane_get(pane) {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!(
-                "warning: [attribute_pane] cannot get pane {pane}: {e}; failing open to local"
-            );
-            return PaneAttribution::Local {
-                owner: None,
-                project: None,
-                farm: local.to_string(),
-            };
-        }
-    };
-
-    let val: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!(
-                "warning: [attribute_pane] unparseable JSON for pane {pane}; failing open to local"
-            );
-            return PaneAttribution::Local {
-                owner: None,
-                project: None,
-                farm: local.to_string(),
-            };
-        }
-    };
-
+/// 5. no `result.pane` -> Local (fail-open)
+fn attribute_pane(val: &serde_json::Value, local: &str, runs_dir: &Path) -> PaneAttribution {
     // F1: Foreign only on error.code == pane_not_found; any other error code or shape -> Local (fail-open)
     if let Some(err) = val.get("error") {
         if err.get("code").and_then(|c| c.as_str()) == Some("pane_not_found") {
@@ -778,6 +841,23 @@ pub fn attribute_pane<H: HerdrOps>(
     }
 }
 
+/// A CoS pane of another workspace must not reach this workspace's inbox. Auto-tagging
+/// gives every workspace's CoS pane the same `grid_role=cos` tokens, so the farm ladder
+/// cannot tell two CoS panes apart on tokens alone; this asks the workspace itself.
+fn is_foreign_workspace_cos_pane(pid: &str, pane_val: &serde_json::Value, runs_dir: &Path) -> bool {
+    let pane_obj = match pane_val.pointer("/result/pane") {
+        Some(p) => p,
+        None => return false,
+    };
+    let tokens = pane_obj.get("tokens");
+    match tokens {
+        Some(t) if crate::cos::is_cos_tokens(t) => {}
+        _ => return false,
+    }
+    let cwd = pane_obj.get("cwd").and_then(|c| c.as_str());
+    !is_pane_in_runs_workspace(pid, cwd, runs_dir, tokens)
+}
+
 /// Handles an incoming herdr plugin hook event:
 /// - Extracts pane, agent, and status.
 /// - On `pane.agent_status_changed` where status is `blocked`, records an incident with
@@ -834,6 +914,7 @@ pub fn handle_event_hook<H: HerdrOps>(
     } else {
         format!("anon-{}", crate::bus::now_ms())
     };
+
     let db_path = runs_dir.join("quaqua.db");
     let bus = match FarmBus::open(&db_path) {
         Ok(b) => b,
@@ -884,7 +965,20 @@ pub fn handle_event_hook<H: HerdrOps>(
             farm: local_farm.clone(),
         }
     } else if !pid.is_empty() {
-        attribute_pane(herdr, pid, &local_farm, runs_dir)
+        match resolve_pane_value(herdr, pid) {
+            Some(pane_val) => {
+                if is_foreign_workspace_cos_pane(pid, &pane_val, runs_dir) {
+                    PaneAttribution::Foreign
+                } else {
+                    attribute_pane(&pane_val, &local_farm, runs_dir)
+                }
+            }
+            None => PaneAttribution::Local {
+                owner: None,
+                project: None,
+                farm: local_farm.clone(),
+            },
+        }
     } else {
         PaneAttribution::Local {
             owner: None,
