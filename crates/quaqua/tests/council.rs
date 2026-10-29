@@ -1087,11 +1087,13 @@ members = ["tieude"]
 "#;
     fs::write(&team_toml, team_content).unwrap();
 
-    let prev_team = std::env::var("QUAQUA_TEAM_TOML").ok();
-    let prev_runs = std::env::var("QUAQUA_RUNS_DIR").ok();
-    let prev_owner = std::env::var("QUAQUA_OWNER").ok();
-    let prev_test = std::env::var("QUAQUA_TEST").ok();
-    let prev_sock = std::env::var("HERDR_SOCKET_PATH").ok();
+    let _env = EnvGuard::new(&[
+        "QUAQUA_TEAM_TOML",
+        "QUAQUA_RUNS_DIR",
+        "QUAQUA_OWNER",
+        "QUAQUA_TEST",
+        "HERDR_SOCKET_PATH",
+    ]);
 
     std::env::set_var("QUAQUA_TEAM_TOML", &team_toml);
     std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
@@ -1110,33 +1112,6 @@ members = ["tieude"]
     ];
 
     let res = quaqua::taskforce::handle_taskforce(&args, &git, &herdr);
-
-    if let Some(v) = prev_team {
-        std::env::set_var("QUAQUA_TEAM_TOML", v);
-    } else {
-        std::env::remove_var("QUAQUA_TEAM_TOML");
-    }
-    if let Some(v) = prev_runs {
-        std::env::set_var("QUAQUA_RUNS_DIR", v);
-    } else {
-        std::env::remove_var("QUAQUA_RUNS_DIR");
-    }
-    if let Some(v) = prev_owner {
-        std::env::set_var("QUAQUA_OWNER", v);
-    } else {
-        std::env::remove_var("QUAQUA_OWNER");
-    }
-    if let Some(v) = prev_test {
-        std::env::set_var("QUAQUA_TEST", v);
-    } else {
-        std::env::remove_var("QUAQUA_TEST");
-    }
-    if let Some(v) = prev_sock {
-        std::env::set_var("HERDR_SOCKET_PATH", v);
-    } else {
-        std::env::remove_var("HERDR_SOCKET_PATH");
-    }
-
     assert!(
         res.is_err(),
         "must reject member kind with can_review = false"
@@ -1211,8 +1186,7 @@ exit 0
     perms.set_mode(0o755);
     fs::set_permissions(&fake_herdr_path, perms).unwrap();
 
-    let prev_shadow = std::env::var("QUAQUA_LAYOUT_SHADOW").ok();
-    let prev_runs = std::env::var("QUAQUA_RUNS_DIR").ok();
+    let _env = EnvGuard::new(&["QUAQUA_LAYOUT_SHADOW", "QUAQUA_RUNS_DIR"]);
     std::env::set_var("QUAQUA_LAYOUT_SHADOW", "1");
     std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
 
@@ -1268,17 +1242,6 @@ exit 0
     );
     let elapsed = start.elapsed();
 
-    if let Some(v) = prev_shadow {
-        std::env::set_var("QUAQUA_LAYOUT_SHADOW", v);
-    } else {
-        std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
-    }
-    if let Some(v) = prev_runs {
-        std::env::set_var("QUAQUA_RUNS_DIR", v);
-    } else {
-        std::env::remove_var("QUAQUA_RUNS_DIR");
-    }
-
     assert!(res.is_err(), "must fail fast");
     assert_eq!(res.unwrap_err().0, 3, "exit code must be 3");
 
@@ -1322,8 +1285,7 @@ exit 0
     perms.set_mode(0o755);
     fs::set_permissions(&fake_herdr_path, perms).unwrap();
 
-    let prev_shadow = std::env::var("QUAQUA_LAYOUT_SHADOW").ok();
-    let prev_runs = std::env::var("QUAQUA_RUNS_DIR").ok();
+    let _env = EnvGuard::new(&["QUAQUA_LAYOUT_SHADOW", "QUAQUA_RUNS_DIR"]);
     std::env::set_var("QUAQUA_LAYOUT_SHADOW", "1");
     std::env::set_var("QUAQUA_RUNS_DIR", &runs_dir);
 
@@ -1369,17 +1331,6 @@ exit 0
     let start_mid = Instant::now();
     let res_mid = runner.prompt_member("test-mid", "brief", &repo_dir, cancel_mid);
     let elapsed_mid = start_mid.elapsed();
-
-    if let Some(v) = prev_shadow {
-        std::env::set_var("QUAQUA_LAYOUT_SHADOW", v);
-    } else {
-        std::env::remove_var("QUAQUA_LAYOUT_SHADOW");
-    }
-    if let Some(v) = prev_runs {
-        std::env::set_var("QUAQUA_RUNS_DIR", v);
-    } else {
-        std::env::remove_var("QUAQUA_RUNS_DIR");
-    }
 
     assert!(res_mid.is_err(), "must return error on cancel");
     let (code_mid, msg_mid) = res_mid.unwrap_err();
