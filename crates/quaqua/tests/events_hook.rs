@@ -685,6 +685,9 @@ fn test_events_hook_drops_foreign_cos_pane_to_prevent_cross_cos_inbox_leak() {
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let foreign_cwd = format!("{home}/Work/TTDVKH");
+    let db_path = runs_dir.join("quaqua.db");
+    let bus = FarmBus::open(&db_path).expect("open bus");
+    let local_farm = bus.farm().to_string();
     let script = format!(
         r#"#!/bin/sh
 if [ "$1" = "notification" ] && [ "$2" = "show" ]; then
@@ -692,7 +695,7 @@ if [ "$1" = "notification" ] && [ "$2" = "show" ]; then
     exit 0
 fi
 if [ "$1" = "pane" ] && [ "$2" = "get" ] && [ "$3" = "w7:p2" ]; then
-    printf '{{"result":{{"pane":{{"pane_id":"w7:p2","cwd":"{}","tokens":{{"grid_role":"cos","grid_owner":"cos","display_agent":"CoS TTDVKH"}}}}}}}}'
+    printf '{{"result":{{"pane":{{"pane_id":"w7:p2","cwd":"{}","tokens":{{"grid_role":"cos","grid_owner":"cos","grid_farm":"{local_farm}","display_agent":"CoS TTDVKH"}}}}}}}}'
     exit 0
 fi
 exit 0
@@ -711,7 +714,8 @@ exit 0
 
     std::env::set_var("HERDR_BIN_PATH", &herdr_bin);
 
-    // Foreign CoS pane from another workspace (w7:p2) with grid_role=cos
+    // Foreign CoS pane from another workspace (w7:p2) with grid_role=cos. It carries this
+    // farm's token, so only the workspace check can keep it out of this inbox.
     let foreign_cos_payload = serde_json::json!({
         "type": "pane_agent_status_changed",
         "pane_id": "w7:p2",
@@ -720,6 +724,7 @@ exit 0
         "tokens": {
             "grid_role": "cos",
             "grid_owner": "cos",
+            "grid_farm": local_farm,
             "display_agent": "CoS TTDVKH"
         }
     })
@@ -745,9 +750,6 @@ exit 0
     );
 
     // Verify nothing recorded in DB
-    let db_path = runs_dir.join("quaqua.db");
-    if let Ok(bus) = quaqua::bus::FarmBus::open(&db_path) {
-        let digest = bus.inbox_digest(&runs_dir, "cos").expect("digest");
-        assert_eq!(digest.incidents.len(), 0, "no incident recorded in DB");
-    }
+    let digest = bus.inbox_digest(&runs_dir, "cos").expect("digest");
+    assert_eq!(digest.incidents.len(), 0, "no incident recorded in DB");
 }
