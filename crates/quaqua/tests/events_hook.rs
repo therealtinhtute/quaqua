@@ -548,7 +548,6 @@ exit 0
     }
 }
 
-
 #[test]
 fn test_events_hook_fails_open_when_pane_get_unparseable() {
     let runs_dir = hermetic_temp_dir("fail-open");

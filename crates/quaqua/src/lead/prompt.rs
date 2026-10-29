@@ -103,7 +103,12 @@ pub fn prompt_lead<H: HerdrOps>(args: &[String], herdr: &H) -> Result<(), (i32, 
     if pane.is_empty() {
         return Err((1, format!("error: lead '{name}' has no pane\n")));
     }
-    let _ = crate::lead::tag::ensure_lead_pane_tagged(herdr, slug, &pane);
+    let _ = crate::lead::tag::ensure_lead_pane_tagged(
+        herdr,
+        slug,
+        &pane,
+        &crate::workspace::farm_of_runs_dir(&runs_dir),
+    );
     send_prompt(herdr, &name, &pane, &msg)
 }
 

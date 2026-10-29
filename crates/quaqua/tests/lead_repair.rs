@@ -1339,3 +1339,207 @@ fn test_cos_tag_without_session_on_unrelated_pane_keeps_existing_record() {
         "record for w1:p1 must be removed when tagging w1:p1 itself without session"
     );
 }
+
+#[test]
+fn test_identity_heal_recovers_lead_and_cos_from_live_agent_list_fixture() {
+    let guard = EnvGuard::new(&[
+        "QUAQUA_ROOT",
+        "QUAQUA_RUNS_DIR",
+        "HERDR_PANE_ID",
+        "QUAQUA_TEST",
+    ]);
+    let ws = hermetic_temp_dir("live-shape-repro-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    // Registered leads in projects/INDEX.md
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole |\n| llmhub | ~/Lab/llmhub | llmhub-lead | active | CLI |\n| quaqua-rs | ~/Lab/quaqua | quaqua-rs-lead | active | Engine |\n",
+    ).unwrap();
+
+    // Neither mu-lead.owner, llmhub-lead.owner, quaqua-rs-lead.owner NOR cos.identity.json exists in runs_dir!
+    let mut panes = HashMap::new();
+    let mut cos_tokens = HashMap::new();
+    cos_tokens.insert("grid_owner".to_string(), "cos".to_string());
+    cos_tokens.insert("grid_role".to_string(), "cos".to_string());
+    cos_tokens.insert("logo".to_string(), "\u{e1a0}".to_string());
+    panes.insert(
+        "w1:p1X".to_string(),
+        MockPaneInfo {
+            tokens: cos_tokens,
+            agent_session: Some("ses-cos-target-42".to_string()),
+            label: Some("🍑 CoS".to_string()),
+        },
+    );
+
+    let mut mu_tokens = HashMap::new();
+    mu_tokens.insert("grid_owner".to_string(), "mu-lead".to_string());
+    mu_tokens.insert("grid_role".to_string(), "orchestrator".to_string());
+    mu_tokens.insert("logo".to_string(), "\u{e1a3}".to_string());
+    panes.insert(
+        "wB:p1".to_string(),
+        MockPaneInfo {
+            tokens: mu_tokens,
+            agent_session: None,
+            label: Some("mu-lead".to_string()),
+        },
+    );
+
+    let mut llmhub_tokens = HashMap::new();
+    llmhub_tokens.insert("grid_owner".to_string(), "llmhub-lead".to_string());
+    llmhub_tokens.insert("grid_role".to_string(), "orchestrator".to_string());
+    panes.insert(
+        "wA:p1".to_string(),
+        MockPaneInfo {
+            tokens: llmhub_tokens,
+            agent_session: None,
+            label: Some("llmhub-lead".to_string()),
+        },
+    );
+
+    let mut quaqua_tokens = HashMap::new();
+    quaqua_tokens.insert("grid_owner".to_string(), "quaqua-rs-lead".to_string());
+    quaqua_tokens.insert("grid_role".to_string(), "orchestrator".to_string());
+    panes.insert(
+        "wE:p1".to_string(),
+        MockPaneInfo {
+            tokens: quaqua_tokens,
+            agent_session: None,
+            label: Some("quaqua-rs-lead".to_string()),
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[
+        {"pane_id":"w1:p1X","agent":"claude","tokens":{"grid_owner":"cos","grid_role":"cos","logo":"\ue1a0"},"agent_session":{"value":"ses-cos-target-42"}},
+        {"name":"mu-lead","pane_id":"wB:p1","agent":"omp","tokens":{"logo":"\ue1a3"}},
+        {"name":"llmhub-lead","pane_id":"wA:p1","agent":"omp","tokens":{"grid_owner":"llmhub-lead","grid_role":"orchestrator"}},
+        {"name":"quaqua-rs-lead","pane_id":"wE:p1","agent":"omp","tokens":{"grid_owner":"quaqua-rs-lead","grid_role":"orchestrator"}}
+    ]}}"#;
+
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    // Simulate token-less Lead pane wB:p1 (lost tokens after herdr restart)
+    herdr
+        .panes
+        .borrow_mut()
+        .get_mut("wB:p1")
+        .unwrap()
+        .tokens
+        .clear();
+    herdr
+        .panes
+        .borrow_mut()
+        .get_mut("wB:p1")
+        .unwrap()
+        .tokens
+        .insert("logo".to_string(), "\u{e1a3}".to_string());
+
+    // Before heal: the pane carries no grid_role token, so resolution can only come
+    // from tokens the heal itself restores (`resolve_caller` already attempts that
+    // repair on its own, so the token-less state is asserted directly).
+    guard.set("HERDR_PANE_ID", "wB:p1");
+    let caller_before = quaqua::identity::resolve_caller_from_tokens(
+        quaqua::identity::caller_pane_tokens(&herdr).as_ref(),
+        &runs_dir,
+    );
+    assert_eq!(caller_before.role, quaqua::identity::Role::Unknown);
+
+    // Run identity heal
+    let report = heal(&herdr).expect("heal should succeed");
+    assert!(
+        !report.actions.is_empty(),
+        "heal must perform recovery actions when tokens/ledger are missing, got 0 actions"
+    );
+
+    // After heal: wB:p1 must be tagged grid_role=orchestrator, grid_owner=mu-lead
+    let p = herdr.panes.borrow();
+    assert_eq!(
+        p["wB:p1"].tokens.get("grid_role").map(String::as_str),
+        Some("orchestrator")
+    );
+    assert_eq!(
+        p["wB:p1"].tokens.get("grid_owner").map(String::as_str),
+        Some("mu-lead")
+    );
+
+    // And runs/mu-lead.owner must be restored
+    assert!(
+        runs_dir.join("mu-lead.owner").is_file(),
+        "runs/mu-lead.owner must be restored"
+    );
+
+    // And caller resolution from wB:p1 now succeeds
+    let caller_after = quaqua::identity::resolve_caller(&herdr, &runs_dir);
+    assert_eq!(caller_after.role, quaqua::identity::Role::Lead);
+    assert_eq!(caller_after.name, "mu-lead");
+    assert_eq!(
+        caller_after.depth,
+        quaqua::identity::CallerDepth::Resolved(1)
+    );
+
+    // And mail send resolves sender successfully
+    let sender = quaqua::bus::mail::resolve_sender(&herdr, &runs_dir)
+        .expect("sender should resolve after heal");
+    assert_eq!(sender, ("mu-lead".to_string(), "lead".to_string()));
+}
+
+#[test]
+fn test_identity_heal_dry_run_previews_actions_without_mutation() {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir("dry-run-ws");
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+
+    let projects_dir = ws.join("projects");
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    std::fs::write(
+        projects_dir.join("INDEX.md"),
+        "| slug | repo | owner | status | goal |\n|---|---|---|---|---|\n| mu | ~/Lab/mu | mu-lead | active | Mole |\n",
+    ).unwrap();
+
+    let mut panes = HashMap::new();
+    let mut mu_tokens = HashMap::new();
+    mu_tokens.insert("logo".to_string(), "\u{e1a3}".to_string());
+    panes.insert(
+        "wB:p1".to_string(),
+        MockPaneInfo {
+            tokens: mu_tokens,
+            agent_session: None,
+            label: Some("mu-lead".to_string()),
+        },
+    );
+
+    let agents_json = r#"{"result":{"agents":[{"name":"mu-lead","pane_id":"wB:p1","tokens":{"logo":"\ue1a3"}}]}}"#;
+    let herdr = MockMultiPaneHerdr::new(panes, agents_json);
+
+    let report = quaqua::identity::heal_dry_run(&herdr).expect("heal_dry_run should succeed");
+    assert_eq!(report.actions.len(), 1);
+    assert!(
+        report.actions[0].starts_with("[dry-run] healed lead 'mu'"),
+        "got: {}",
+        report.actions[0]
+    );
+
+    // Ensure nothing was mutated on the pane or filesystem
+    assert!(
+        herdr.reported_tokens.borrow().is_empty(),
+        "dry-run must make no report-metadata calls"
+    );
+    let p = herdr.panes.borrow();
+    assert_eq!(
+        p["wB:p1"].tokens.get("grid_role"),
+        None,
+        "pane must not be modified in dry-run"
+    );
+    assert!(
+        !runs_dir.join("mu-lead.owner").exists(),
+        "owner file must not be created in dry-run"
+    );
+}

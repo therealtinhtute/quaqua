@@ -495,7 +495,12 @@ pub fn spawn_lead<G: GitOps, H: HerdrOps>(
     }
     // Re-verify and ensure Lead pane tokens are stamped after agent start succeeds,
     // preventing token loss if harness startup or plugins wipe in-memory metadata.
-    let _ = crate::lead::tag::ensure_lead_pane_tagged(herdr, &slug, pane);
+    let _ = crate::lead::tag::ensure_lead_pane_tagged(
+        herdr,
+        &slug,
+        pane,
+        &crate::workspace::farm_of_runs_dir(&runs_dir),
+    );
 
     // Record .owner file only after the Lead agent successfully starts, so failed
     // spawns leave no phantom owner rows for status scanners (issue R1).

@@ -2118,7 +2118,8 @@ fn test_layout_pre_p3_untagged_lead_pane_reproduction_and_healing() {
     );
 
     // Step 2: Heal the Lead pane via tag_lead_pane (setting grid_role=orchestrator, grid_owner=mu-lead)
-    let tag_res = quaqua::lead::tag::tag_lead_pane(&herdr, "mu", "wB:p1");
+    let tag_res =
+        quaqua::lead::tag::tag_lead_pane(&herdr, "mu", "wB:p1", &quaqua::workspace::farm_id());
     assert!(tag_res.is_ok(), "tagging lead pane must succeed");
     // Update herdr tokens to reflect the tag
 

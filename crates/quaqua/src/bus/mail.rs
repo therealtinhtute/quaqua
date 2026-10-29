@@ -325,7 +325,8 @@ pub fn resolve_sender<H: HerdrOps>(herdr: &H, runs_dir: &Path) -> Result<(String
         let pane_id = pane_id.trim();
         if !pane_id.is_empty() {
             if let Some(slug) = try_find_lead_slug_for_pane(herdr, pane_id) {
-                if crate::lead::tag::tag_lead_pane(herdr, &slug, pane_id).is_ok() {
+                let farm = crate::workspace::farm_of_runs_dir(runs_dir);
+                if crate::lead::tag::tag_lead_pane(herdr, &slug, pane_id, &farm).is_ok() {
                     let healed = crate::identity::resolve_caller(herdr, runs_dir);
                     if healed.role != crate::identity::Role::Unknown {
                         return Ok((healed.name, healed.role.to_string()));
