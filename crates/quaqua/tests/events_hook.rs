@@ -375,3 +375,69 @@ exit 0
         elapsed
     );
 }
+
+#[test]
+fn test_events_hook_drops_foreign_pane_without_notifying() {
+    let runs_dir = hermetic_temp_dir("foreign-hook");
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let notif_log = runs_dir.join("notifications.log");
+
+    let bin_dir = runs_dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    let herdr_bin = bin_dir.join("herdr");
+
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "notification" ] && [ "$2" = "show" ]; then
+    echo "$*" >> "{}"
+    exit 0
+fi
+exit 0
+"#,
+        notif_log.display()
+    );
+    fs::write(&herdr_bin, script).expect("write stub herdr");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&herdr_bin).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&herdr_bin, perms).expect("chmod");
+    }
+
+    std::env::set_var("HERDR_BIN_PATH", &herdr_bin);
+
+    // Foreign pane from another workspace (w7:p2) with only logo token (no grid_* tokens)
+    let foreign_payload = serde_json::json!({
+        "type": "pane_agent_status_changed",
+        "pane_id": "w7:p2",
+        "agent": "claude",
+        "agent_status": "blocked",
+        "tokens": {
+            "logo": "\u{e1a3}"
+        }
+    })
+    .to_string();
+
+    let herdr_ops = Herdr::new();
+    let res = quaqua::bus::events::handle_event_hook(
+        &runs_dir,
+        Some("pane.agent_status_changed"),
+        Some(&foreign_payload),
+        &herdr_ops,
+    );
+    assert_eq!(res, Ok(false), "foreign pane must be dropped and return Ok(false)");
+
+    let log = fs::read_to_string(&notif_log).unwrap_or_default();
+    assert!(
+        log.is_empty(),
+        "must not send desktop notification for foreign pane"
+    );
+
+    // Verify nothing recorded in DB
+    let db_path = runs_dir.join("quaqua.db");
+    if let Ok(bus) = quaqua::bus::FarmBus::open(&db_path) {
+        let digest = bus.inbox_digest(&runs_dir, "cos").expect("digest");
+        assert_eq!(digest.incidents.len(), 0, "no incident recorded in DB");
+    }
+}
