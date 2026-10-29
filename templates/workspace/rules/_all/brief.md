@@ -38,7 +38,7 @@ Write the report to the path the brief gives (`runs/<name>.md`). One format, six
 then the machine-read headings:
 
 ```
-Outcome:         COMPLETE | REOPEN_REQUEST | DEPENDENCY_REQUEST | BLOCKED
+Outcome:         COMPLETE | NO_CHANGES | BLOCKED | DISPUTED | REOPEN_REQUEST | DEPENDENCY_REQUEST
 Snapshot:        SHA + branch + worktree path (omit if nothing was written)
 Scope:           files changed / read, concrete paths
 Verification:    commands run + REAL output, and what you deliberately skipped
@@ -52,7 +52,7 @@ none
 none
 ```
 
-- `Outcome:` starts its line at column 1, no list marker: the pipeline reads it to tell an unfinished phase (`BLOCKED`/`PARTIAL`/`INCOMPLETE`/`FAILED`) from a finished one, and a builder that changed nothing says `Outcome: no changes`.
+- `Outcome:` starts its line at column 1, no list marker: delivery rejects a missing or unrecognised Outcome (allowed: `COMPLETE`, `NO_CHANGES`, `BLOCKED`, `DISPUTED`, `REOPEN_REQUEST`, `DEPENDENCY_REQUEST`; `no changes` counts as `NO_CHANGES`). The pipeline reads it to tell an unfinished phase (`BLOCKED`) or clean no-op (`NO_CHANGES`) from a finished one.
 - `## Blockers` body: write `none` when there are none. Any other non-empty line is read as an unfinished-work blocker and the pipeline stops.
 - `## Lessons` may be numbered (`## 5. Lessons` passes) but must be an `##` heading (`###` fails). The watchdog checks that the heading exists, not where it sits; keep it last so the machine-read tail stays one block.
 - Pipeline reviewers end with exactly one `Verdict: clean` or `Verdict: <N> findings` line instead of `## Lessons`.

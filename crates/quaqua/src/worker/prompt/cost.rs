@@ -591,11 +591,13 @@ pub fn opencode_spend_in(
     )
     .ok()?;
 
-    let query_dir = "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
+    let query_dir =
+        "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
                      tokens_cache_write, model, time_created \
                      FROM session_v2 WHERE directory = ?1 ORDER BY time_created ASC;";
 
-    let query_id = "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
+    let query_id =
+        "SELECT cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, \
                     tokens_cache_write, model, time_created \
                     FROM session_v2 WHERE id = ?1 ORDER BY time_created ASC;";
 
@@ -844,7 +846,8 @@ fn opencode_session_mtime(session_id: &str) -> Option<u64> {
         }
     }
     if let Ok(home) = std::env::var("HOME") {
-        db_candidates.push(std::path::PathBuf::from(home).join(".local/share/opencode/opencode.db"));
+        db_candidates
+            .push(std::path::PathBuf::from(home).join(".local/share/opencode/opencode.db"));
     }
     for db_path in db_candidates {
         if !db_path.is_file() {
@@ -1052,9 +1055,15 @@ fn notify_escalate(name: &str, pct: u32, cost: f64, budget: f64) {
         return;
     }
     let _ = std::process::Command::new(crate::herdr::bin_path())
-        .args(["notification", "show", &format!("quaqua: {name} at {pct}% cost")])
+        .args([
+            "notification",
+            "show",
+            &format!("quaqua: {name} at {pct}% cost"),
+        ])
         .arg("--body")
-        .arg(format!("spent ${cost:.2} of ${budget:.2} budget; decide: stop or extend"))
+        .arg(format!(
+            "spent ${cost:.2} of ${budget:.2} budget; decide: stop or extend"
+        ))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1258,7 +1267,12 @@ mod tests {
         assert!(t.observe(&d, "k", 0.99).iter().all(|l| !l.contains("STOP")));
         assert!(!t.take_stop());
         let lines = t.observe(&d, "k", 1.0);
-        assert!(lines.contains(&"WATCHDOG cost 100% | name=k cost=$1.0000 budget=$1.0000 | STOP".to_string()), "{lines:?}");
+        assert!(
+            lines.contains(
+                &"WATCHDOG cost 100% | name=k cost=$1.0000 budget=$1.0000 | STOP".to_string()
+            ),
+            "{lines:?}"
+        );
         assert!(t.take_stop());
         assert!(!t.take_stop());
         t.observe(&d, "k", 1.5);
@@ -1283,7 +1297,10 @@ mod tests {
     fn test_escalate_at_buffer_once_and_survives_restart() {
         let d = cost_dir("once");
         let esc = |lines: Vec<String>| -> Vec<String> {
-            lines.into_iter().filter(|l| l.contains("ESCALATE")).collect()
+            lines
+                .into_iter()
+                .filter(|l| l.contains("ESCALATE"))
+                .collect()
         };
         let mut t = CostTracker::new(&d, "w", Some(1.0));
         assert!(esc(t.observe(&d, "w", 1.19)).is_empty());
@@ -1302,10 +1319,14 @@ mod tests {
     fn test_escalate_buffer_is_configurable() {
         let d = cost_dir("buffer");
         let mut t = CostTracker::new(&d, "w", Some(2.0)).with_buffer(0.5);
-        assert!(t.observe(&d, "w", 2.9).iter().all(|l| !l.contains("ESCALATE")));
+        assert!(t
+            .observe(&d, "w", 2.9)
+            .iter()
+            .all(|l| !l.contains("ESCALATE")));
         let at = t.observe(&d, "w", 3.0);
         assert!(
-            at.iter().any(|l| l.starts_with("WATCHDOG cost 150% |") && l.ends_with("| ESCALATE")),
+            at.iter()
+                .any(|l| l.starts_with("WATCHDOG cost 150% |") && l.ends_with("| ESCALATE")),
             "{at:?}"
         );
         let _ = std::fs::remove_dir_all(&d);
@@ -1445,11 +1466,11 @@ mod tests {
         assert_eq!(report_state(prev2, &res3, Some("")), ReportState::Pending);
 
         // Stable mtime + valid content -> Ready
-        let valid = "## Lessons\nnone";
+        let valid = "Outcome: COMPLETE\n\n## Lessons\nnone";
         assert_eq!(report_state(prev2, &res3, Some(valid)), ReportState::Ready);
 
         // Stable mtime + malformed content -> Malformed
-        let invalid = "## Summary\nDone";
+        let invalid = "Outcome: COMPLETE\n\n## Summary\nDone";
         assert_eq!(
             report_state(prev2, &res3, Some(invalid)),
             ReportState::Malformed("missing '## Lessons' section".to_string())
@@ -1467,18 +1488,18 @@ mod tests {
 
     #[test]
     fn test_report_state_content_lessons_valid() {
-        let valid_builder = "# Run Summary\n\n## Outcome\nDone\n\n## Lessons\nnone\n";
+        let valid_builder = "Outcome: COMPLETE\n\n## Lessons\nnone\n";
         let res = ReportFileResult::Content(valid_builder.to_string());
         assert_eq!(report_state(None, &res, None), ReportState::Ready);
 
-        let valid_numbered = "# Run Summary\n\n## 5. Lessons\n- Note\n";
+        let valid_numbered = "Outcome: COMPLETE\n\n## 5. Lessons\n- Note\n";
         let res2 = ReportFileResult::Content(valid_numbered.to_string());
         assert_eq!(report_state(None, &res2, None), ReportState::Ready);
     }
 
     #[test]
     fn test_report_state_content_lessons_malformed() {
-        let missing_lessons = "# Run Summary\n\n## Outcome\nDone\n\n## Changes\nNone\n";
+        let missing_lessons = "Outcome: COMPLETE\n\n## Changes\nNone\n";
         let res = ReportFileResult::Content(missing_lessons.to_string());
         assert_eq!(
             report_state(None, &res, None),
@@ -1486,10 +1507,9 @@ mod tests {
         );
 
         // Subheading ### Lessons does not count
-        let deep_heading = "# Run Summary\n\n### Lessons\nnone\n";
+        let deep_heading = "Outcome: COMPLETE\n\n### Lessons\nnone\n";
         let res2 = ReportFileResult::Content(deep_heading.to_string());
         assert_eq!(
-
             report_state(None, &res2, None),
             ReportState::Malformed("missing '## Lessons' section".to_string())
         );
@@ -1511,12 +1531,12 @@ mod tests {
             report_state(None, &ReportFileResult::Exists(true), None),
             ReportState::Pending
         );
-        let valid = "## Lessons\nnone";
+        let valid = "Outcome: COMPLETE\n\n## Lessons\nnone";
         assert_eq!(
             report_state(None, &ReportFileResult::Exists(true), Some(valid)),
             ReportState::Ready
         );
-        let invalid = "## Summary\nDone";
+        let invalid = "Outcome: COMPLETE\n\n## Summary\nDone";
         assert_eq!(
             report_state(None, &ReportFileResult::Exists(true), Some(invalid)),
             ReportState::Malformed("missing '## Lessons' section".to_string())
@@ -1542,7 +1562,7 @@ mod tests {
 
     #[test]
     fn test_report_state_from_activity_result() {
-        let valid = "# Report\n\n## Lessons\nnone";
+        let valid = "Outcome: COMPLETE\n\n## Lessons\nnone";
         let act = ActivityResult::ReportFile(ReportFileResult::Content(valid.to_string()));
         assert_eq!(
             report_state_from_activity(None, &act, None),
@@ -1682,7 +1702,8 @@ pub(crate) mod spend {
 
     #[test]
     fn test_opencode_sum_multiple_sessions() {
-        let tmp = std::env::temp_dir().join(format!("opencode-spend-fixture-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("opencode-spend-fixture-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let db_path = tmp.join("opencode.db");
@@ -1837,7 +1858,10 @@ pub(crate) mod spend {
         let tmp = std::env::temp_dir().join(format!("claude-model-fixture-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let cwd = "/path/to/worktree/truonglao-switch";
-        let slug = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+        let slug = cwd
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>();
         let project_dir = tmp.join(&slug);
         std::fs::create_dir_all(&project_dir).unwrap();
         let session_id = "test-model-session";
@@ -1881,7 +1905,10 @@ pub(crate) mod spend {
         let tmp = std::env::temp_dir().join(format!("claude-spend-fixture-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let cwd = "/path/to/worktree/truonglao-test";
-        let slug = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+        let slug = cwd
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>();
         let project_dir = tmp.join(&slug);
         std::fs::create_dir_all(&project_dir).unwrap();
 
@@ -1904,7 +1931,10 @@ pub(crate) mod spend {
         ).unwrap();
 
         let spend = claude_spend_in(&tmp, session_id, cwd, None).unwrap();
-        assert_eq!(spend.usd, None, "claude records tokens only, usd must be None");
+        assert_eq!(
+            spend.usd, None,
+            "claude records tokens only, usd must be None"
+        );
         assert_eq!(spend.spend_src, "claude-tokens");
         assert_eq!(spend.model.as_deref(), Some("claude-opus-5-5"));
 
@@ -1932,7 +1962,10 @@ pub(crate) mod spend {
     fn test_parse_iso_timestamp_ms() {
         let utc = parse_iso_timestamp_ms("2026-10-21T13:40:00Z").unwrap();
         let vn = parse_iso_timestamp_ms("2026-10-21T20:40:00+07:00").unwrap();
-        assert_eq!(utc, vn, "UTC and +07:00 representations must yield identical epoch ms");
+        assert_eq!(
+            utc, vn,
+            "UTC and +07:00 representations must yield identical epoch ms"
+        );
 
         let frac = parse_iso_timestamp_ms("2026-10-21T13:40:00.500Z").unwrap();
         assert_eq!(frac, utc + 500);
@@ -1954,7 +1987,10 @@ pub(crate) mod spend {
         ).unwrap();
 
         let spend_usage = omp_spend_in(&root, cwd, "/path/to/worktree", None).unwrap();
-        assert_eq!(spend_usage.usd, None, "usage-only transcript must have usd: None, not 0.0");
+        assert_eq!(
+            spend_usage.usd, None,
+            "usage-only transcript must have usd: None, not 0.0"
+        );
         let tok = spend_usage.tokens.unwrap();
         assert_eq!(tok.in_tokens, 100);
         assert_eq!(tok.out_tokens, 20);
@@ -1969,14 +2005,18 @@ pub(crate) mod spend {
 
         let spend_cost = omp_spend_in(&root, cwd, "/path/to/worktree", None).unwrap();
         assert!((spend_cost.usd.unwrap() - 0.042).abs() < 1e-9);
-        assert_eq!(spend_cost.tokens, None, "cost-only transcript must have tokens: None, not 0s");
+        assert_eq!(
+            spend_cost.tokens, None,
+            "cost-only transcript must have tokens: None, not 0s"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn test_opencode_fallback_to_session_id_when_cwd_mismatch() {
-        let tmp = std::env::temp_dir().join(format!("opencode-fallback-fixture-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("opencode-fallback-fixture-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let db_path = tmp.join("opencode.db");
@@ -2006,7 +2046,8 @@ pub(crate) mod spend {
         ).unwrap();
 
         // CWD mismatch: herdr reports '/tmp/scratchpad' instead of '/private/tmp/scratchpad'
-        let spend = opencode_spend_in(&db_path, "ses-fallback-99", "/tmp/scratchpad", None).unwrap();
+        let spend =
+            opencode_spend_in(&db_path, "ses-fallback-99", "/tmp/scratchpad", None).unwrap();
         assert!((spend.usd.unwrap() - 0.123).abs() < 1e-9);
         assert_eq!(spend.tokens.unwrap().in_tokens, 500);
         assert_eq!(spend.spend_src, "opencode-db");

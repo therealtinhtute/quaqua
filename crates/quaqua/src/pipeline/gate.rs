@@ -84,7 +84,7 @@ pub struct BuildFacts {
     pub head: String,
     /// Base commit sha the builder started from.
     pub base_sha: String,
-    /// Whether the builder report declared 'Outcome: no changes'.
+    /// Whether the builder report declared 'Outcome: no changes' (see [`crate::worker::prompt::outcome::OutcomeLevel::NoChanges`]).
     pub declared_no_changes: bool,
     /// Configured review strategy (auto, always, skip).
     pub strategy: ReviewStrategy,
@@ -126,6 +126,14 @@ impl BuildFacts {
             task: String::new(),
             repo: String::new(),
         }
+    }
+
+    /// Checks whether report content declared 'Outcome: no changes' using the typed outcome parser.
+    pub fn declared_no_changes_from_report(report_content: &str) -> bool {
+        matches!(
+            crate::worker::prompt::outcome::parse_report_outcome(report_content),
+            Ok(crate::worker::prompt::outcome::OutcomeLevel::NoChanges)
+        )
     }
 
     pub fn with_context(
@@ -392,14 +400,8 @@ mod tests {
     fn test_build_gate_wire_and_pfile_line() {
         assert_eq!(BuildGate::NoChanges.wire_gate(), "no_changes");
         assert_eq!(BuildGate::Review.wire_gate(), "review");
-        assert_eq!(
-            BuildGate::Skip("gate: auto".into()).wire_gate(),
-            "skip"
-        );
-        assert_eq!(
-            BuildGate::Blocked("error".into()).wire_gate(),
-            "blocked"
-        );
+        assert_eq!(BuildGate::Skip("gate: auto".into()).wire_gate(), "skip");
+        assert_eq!(BuildGate::Blocked("error".into()).wire_gate(), "blocked");
 
         assert_eq!(
             BuildGate::NoChanges.pfile_line(),
@@ -422,16 +424,8 @@ mod tests {
 
     #[test]
     fn test_build_facts_builder_helpers() {
-        let facts = BuildFacts::new(
-            "head123",
-            "base123",
-            true,
-            ReviewStrategy::Auto,
-            15,
-            1,
-            50,
-        )
-        .with_context("detu", "fix-bug", "quaqua");
+        let facts = BuildFacts::new("head123", "base123", true, ReviewStrategy::Auto, 15, 1, 50)
+            .with_context("detu", "fix-bug", "quaqua");
 
         assert_eq!(facts.head, "head123");
         assert_eq!(facts.base_sha, "base123");

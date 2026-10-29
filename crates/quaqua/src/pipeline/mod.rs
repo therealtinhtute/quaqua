@@ -52,7 +52,7 @@ pub const USAGE: &str = "\
 #   any worker runs file (builder or reviewer) stops the pipeline as disputed
 #   (Lead decides); a reviewer runs file without a 'Verdict: clean | <N>
 #   findings' line stops it as blocked. A phase report that declares itself
-#   unfinished ('Outcome: BLOCKED|PARTIAL|INCOMPLETE|FAILED' or a non-empty
+#   unfinished ('Outcome: BLOCKED' or a non-empty
 #   '## Blockers' section — e.g. written after the watchdog nudge) never
 #   advances: the pipeline stops blocked with the evidence copied in, and the
 #   state stays resumable ('--resume' continues the same phase) — only a
@@ -1144,7 +1144,13 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                         let spawn_res = (|| -> Result<(), (i32, String)> {
                             let mut opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
                             opts.approve_kinds = state.approve_kinds.clone();
-                            crate::worker::spawn::spawn_worker(opts, &ctx.cfg, ctx.git, ctx.herdr, crate::layout::SpawnOrigin::Pipeline)
+                            crate::worker::spawn::spawn_worker(
+                                opts,
+                                &ctx.cfg,
+                                ctx.git,
+                                ctx.herdr,
+                                crate::layout::SpawnOrigin::Pipeline,
+                            )
                         })();
 
                         if let Some(pt) = prev_pt {
@@ -1211,7 +1217,13 @@ pub fn handle_pipeline(args: &[String], git: &Git, herdr: &Herdr) -> Result<(), 
                         let spawn_res = (|| -> Result<(), (i32, String)> {
                             let mut opts = crate::worker::spawn::parse_spawn_args(&sargs)?;
                             opts.approve_kinds = state.approve_kinds.clone();
-                            crate::worker::spawn::spawn_worker(opts, &ctx.cfg, ctx.git, ctx.herdr, crate::layout::SpawnOrigin::Pipeline)
+                            crate::worker::spawn::spawn_worker(
+                                opts,
+                                &ctx.cfg,
+                                ctx.git,
+                                ctx.herdr,
+                                crate::layout::SpawnOrigin::Pipeline,
+                            )
                         })();
 
                         if let Some(pt) = prev_pt {
@@ -2196,9 +2208,10 @@ impl PipelineWorkflow {
 
         state.review_changed = true;
         if state.round >= state.input.max_rounds {
+            let rep_path = state.last_review_report.as_deref().unwrap_or("unknown");
             let reason = format!(
-                "review rounds exhausted ({} rounds, {} findings remain) — Lead decides how to proceed",
-                state.round, state.last_findings
+                "review rounds exhausted ({} rounds, {} findings remain; findings: {} in {}) — Lead decides how to proceed",
+                state.round, state.last_findings, state.last_findings, rep_path
             );
             return block(
                 state,
@@ -2374,10 +2387,12 @@ impl Workflow for PipelineWorkflow {
                                     input: input_val,
                                 }
                             } else {
+                                let rep_path =
+                                    state.last_review_report.as_deref().unwrap_or("unknown");
                                 let reason = format!(
-                                        "review rounds exhausted ({} rounds, {} findings remain) — Lead decides how to proceed",
-                                        state.round, state.last_findings
-                                    );
+                                    "review rounds exhausted ({} rounds, {} findings remain; findings: {} in {}) — Lead decides how to proceed",
+                                    state.round, state.last_findings, state.last_findings, rep_path
+                                );
                                 block(
                                     state,
                                     PipelinePhase::Review,
@@ -2599,18 +2614,25 @@ impl Workflow for PipelineWorkflow {
                                         input: input_val,
                                     }
                                 }
-                                PipelinePhase::Review => match parse_report_content(&content) {
-                                    Ok((findings, is_challenge)) => {
-                                        self.handle_review_verdict(state, findings, is_challenge)
+                                PipelinePhase::Review => {
+                                    if state.last_review_report.is_none() {
+                                        state.last_review_report = Some(pending_path.clone());
                                     }
-                                    Err(reason) => block(
-                                        state,
-                                        PipelinePhase::Review,
-                                        state::BlockedKind::Restart,
-                                        6,
-                                        reason,
-                                    ),
-                                },
+                                    match parse_report_content(&content) {
+                                        Ok((findings, is_challenge)) => self.handle_review_verdict(
+                                            state,
+                                            findings,
+                                            is_challenge,
+                                        ),
+                                        Err(reason) => block(
+                                            state,
+                                            PipelinePhase::Review,
+                                            state::BlockedKind::Restart,
+                                            6,
+                                            reason,
+                                        ),
+                                    }
+                                }
                                 PipelinePhase::Fix => {
                                     if content
                                         .lines()
@@ -2743,21 +2765,11 @@ fn diff_gate_stats<G: crate::git::GitOps>(
 }
 
 fn report_is_unfinished(content: &str) -> Option<&'static str> {
-    for line in content.lines() {
-        let t = line.trim();
-        if let Some(rest) = t
-            .strip_prefix("Outcome:")
-            .or_else(|| t.strip_prefix("outcome:"))
-        {
-            let upper = rest.trim().to_ascii_uppercase();
-            if upper.starts_with("BLOCKED")
-                || upper.starts_with("PARTIAL")
-                || upper.starts_with("INCOMPLETE")
-                || upper.starts_with("FAILED")
-            {
-                return Some("phase report declared itself unfinished");
-            }
-        }
+    if matches!(
+        crate::worker::prompt::outcome::parse_report_outcome(content),
+        Ok(crate::worker::prompt::outcome::OutcomeLevel::Blocked)
+    ) {
+        return Some("phase report declared itself unfinished");
     }
     if has_real_blockers(content) {
         return Some("phase report reports real blockers");
@@ -2766,19 +2778,10 @@ fn report_is_unfinished(content: &str) -> Option<&'static str> {
 }
 
 fn report_has_outcome_no_changes(content: &str) -> bool {
-    for line in content.lines() {
-        let t = line.trim();
-        if let Some(rest) = t
-            .strip_prefix("Outcome:")
-            .or_else(|| t.strip_prefix("outcome:"))
-        {
-            let lower = rest.trim().to_ascii_lowercase();
-            if lower.starts_with("no changes") {
-                return true;
-            }
-        }
-    }
-    false
+    matches!(
+        crate::worker::prompt::outcome::parse_report_outcome(content),
+        Ok(crate::worker::prompt::outcome::OutcomeLevel::NoChanges)
+    )
 }
 
 pub(crate) fn parse_verdict_str(verdict_line: &str) -> Result<(u32, bool), String> {
@@ -3496,6 +3499,7 @@ mod tests {
                 assert!(reason.starts_with("blocked 5:"));
                 assert!(reason.contains("exhausted"));
                 assert!(reason.contains("3 findings remain"));
+                assert!(reason.contains("findings: 3 in runs/suhuynh-task-exhaustr1.md"));
             }
             other => panic!("expected PauseForApproval (blocked 5), got {other:?}"),
         }
@@ -4079,7 +4083,32 @@ mod tests {
         }
         assert_eq!(state.phase, PipelinePhase::Build);
 
-        // Subcase B: RoundsExhausted with directive max_rounds: 3
+        // Subcase B: RoundsExhausted
+        // B1: Plain approval without directive stays blocked and carries reviewer report path in payload
+        state.phase = PipelinePhase::Blocked;
+        state.round = 1;
+        state.last_findings = 2;
+        state.last_review_report = Some("runs/suhuynh-testr1.md".to_string());
+        state.blocked_kind = Some(state::BlockedKind::RoundsExhausted);
+        state.blocked_from = Some(PipelinePhase::Review);
+        state.blocked_code = 5;
+
+        let d_stay = wf.step(
+            &mut state,
+            &mut ctx,
+            Some(WorkflowEvent::ApprovalResolved {
+                approved: true,
+                reason: None,
+            }),
+        );
+        match d_stay {
+            StepDecision::PauseForApproval { reason } => {
+                assert!(reason.contains("findings: 2 in runs/suhuynh-testr1.md"));
+            }
+            other => panic!("expected PauseForApproval, got {other:?}"),
+        }
+
+        // B2: Directive with max_rounds: 3 raises rounds and starts fix child
         state.phase = PipelinePhase::Blocked;
         state.round = 1;
         state.blocked_kind = Some(state::BlockedKind::RoundsExhausted);
@@ -4249,6 +4278,7 @@ case "$1" in
             case "$PROMPT" in
               *PLAN*)
                 cat <<'REPEOF' > "$QUAQUA_RUNS_DIR/$NAME.md"
+Outcome: COMPLETE
 # Plan
 Implementation steps.
 ## Lessons
@@ -4263,6 +4293,7 @@ REPEOF
                 if [ -f "$QUAQUA_RUNS_DIR/stub_build_verified" ]; then
                   HEAD_SHA="$(cd "$WT" && git rev-parse HEAD 2>/dev/null)"
                   cat <<REPEOF > "$QUAQUA_RUNS_DIR/$NAME.md"
+Outcome: COMPLETE
 # Build
 Implemented plan.
 Verified: unit-test-verified $HEAD_SHA
@@ -4271,6 +4302,7 @@ none
 REPEOF
                 else
                   cat <<'REPEOF' > "$QUAQUA_RUNS_DIR/$NAME.md"
+Outcome: COMPLETE
 # Build
 Implemented plan.
 ## Lessons
@@ -4288,6 +4320,7 @@ REPEOF
                   (cd "$WT" && git commit --allow-empty -m "fix commit" 2>/dev/null)
                 fi
                 cat <<'REPEOF' > "$QUAQUA_RUNS_DIR/$NAME.md"
+Outcome: COMPLETE
 # Fix
 Fixed defect.
 ## Lessons

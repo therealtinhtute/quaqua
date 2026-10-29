@@ -265,9 +265,9 @@ if [[ "$cmd" == "agent prompt" ]]; then
     exit 0
   fi
   if [[ "$phase" == "PLAN" ]]; then
-    printf '%s\n' '# plan' '' 'Goal: test' '' '## Lessons' '- none' > "{runs}/$worker.md"
+    printf '%s\n' 'Outcome: COMPLETE' '# plan' '' 'Goal: test' '' '## Lessons' '- none' > "{runs}/$worker.md"
   else
-    printf '%s\n' 'fake build report' 'Outcome: BLOCKED' '' '## Blockers' \
+    printf '%s\n' 'Outcome: BLOCKED' 'fake build report' '' '## Blockers' \
       '- fake builder stopped early: this report only proves the prompt was sent' '' \
       '## Lessons' '- none' > "{runs}/$worker.md"
   fi

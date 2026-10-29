@@ -1,6 +1,5 @@
 //! Pipeline execution phases and shared context.
 
-
 use crate::git::GitOps;
 use crate::herdr::HerdrOps;
 use crate::pipeline::state::PipelineState;
@@ -137,7 +136,6 @@ impl<'a, G: GitOps, H: HerdrOps> PipelineContext<'a, G, H> {
     }
 }
 
-
 pub fn pipeline_finished(final_st: &str, code: i32) -> bool {
     code == 0 && final_st != "blocked"
 }
@@ -190,25 +188,11 @@ pub fn blocked_outcome(path: &Path) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    for line in content.lines() {
-        let t = line.trim();
-        if let Some(rest) = t
-            .strip_prefix("Outcome:")
-            .or_else(|| t.strip_prefix("outcome:"))
-            .or_else(|| t.strip_prefix("Status:"))
-            .or_else(|| t.strip_prefix("status:"))
-            .or_else(|| t.strip_prefix("Result:"))
-            .or_else(|| t.strip_prefix("result:"))
-        {
-            let val = rest.trim().to_ascii_uppercase();
-            if val.starts_with("BLOCKED")
-                || val.starts_with("PARTIAL")
-                || val.starts_with("INCOMPLETE")
-                || val.starts_with("FAILED")
-            {
-                return true;
-            }
-        }
+    if matches!(
+        crate::worker::prompt::outcome::parse_report_outcome(&content),
+        Ok(crate::worker::prompt::outcome::OutcomeLevel::Blocked)
+    ) {
+        return true;
     }
     has_real_blockers(&content)
 }
@@ -250,7 +234,7 @@ pub fn log_blockers(source: &Path, pfile: &Path) {
 
         for line in content.lines() {
             let t = line.trim();
-            if t.starts_with("Outcome:") || t.starts_with("Status:") || t.starts_with("Result:") {
+            if t.starts_with("Outcome:") || t.starts_with("outcome:") {
                 extract.push_str(line);
                 extract.push('\n');
             }

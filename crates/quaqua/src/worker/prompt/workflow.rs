@@ -840,7 +840,7 @@ mod tests {
             config(30, 200),
             vec![Poll {
                 report_mtime: 1000,
-                report: Some("# Report\nDone!\n\n## Lessons\n- none\n"),
+                report: Some("Outcome: COMPLETE\n# Report\nDone!\n\n## Lessons\n- none\n"),
                 ..Poll::default()
             }],
         );
@@ -876,7 +876,7 @@ mod tests {
             cfg,
             vec![Poll {
                 report_mtime: 1000,
-                report: Some("# Report\n\n## Lessons\nnone\n"),
+                report: Some("Outcome: COMPLETE\n# Report\n\n## Lessons\nnone\n"),
                 ..Poll::default()
             }],
         );
@@ -900,7 +900,7 @@ mod tests {
             vec![Poll {
                 report_mtime: 1000,
                 report: Some(
-                    "# Report\n\n## Playbook\n1: done\n2: skip: unsupported on omp\n\n## Lessons\nnone\n",
+                    "Outcome: COMPLETE\n# Report\n\n## Playbook\n1: done\n2: skip: unsupported on omp\n\n## Lessons\nnone\n",
                 ),
                 ..Poll::default()
             }],
@@ -1101,7 +1101,9 @@ mod tests {
             Poll {
                 diff: "dh1",
                 report_mtime: 1000,
-                report: Some("# Report\nLanded in grace\n\n## Lessons\n- none\n"),
+                report: Some(
+                    "Outcome: COMPLETE\n# Report\nLanded in grace\n\n## Lessons\n- none\n",
+                ),
                 ..Poll::default()
             },
         ];
@@ -1132,7 +1134,7 @@ mod tests {
             Poll::default(),
             Poll {
                 report_mtime: 1000,
-                report: Some("# Report\nNudged\n\n## Lessons\n- none\n"),
+                report: Some("Outcome: COMPLETE\n# Report\nNudged\n\n## Lessons\n- none\n"),
                 ..Poll::default()
             },
         ];
@@ -1155,7 +1157,7 @@ mod tests {
             },
             Poll {
                 report_mtime: 1000,
-                report: Some("# Report\nRecovered\n\n## Lessons\n- none\n"),
+                report: Some("Outcome: COMPLETE\n# Report\nRecovered\n\n## Lessons\n- none\n"),
                 ..Poll::default()
             },
         ];
@@ -1174,7 +1176,7 @@ mod tests {
             Poll {
                 diff: "dh1",
                 report_mtime: 1000,
-                report: Some("# Report\nDeterministic\n\n## Lessons\n- none\n"),
+                report: Some("Outcome: COMPLETE\n# Report\nDeterministic\n\n## Lessons\n- none\n"),
                 ..Poll::default()
             },
         ];
@@ -1201,7 +1203,7 @@ mod tests {
             1,
             Poll {
                 report_mtime: 1000,
-                report: Some("# Report\nRecovered\n\n## Lessons\n- none\n"),
+                report: Some("Outcome: COMPLETE\n# Report\nRecovered\n\n## Lessons\n- none\n"),
                 ..Poll::default()
             },
         );
