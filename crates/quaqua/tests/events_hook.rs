@@ -672,3 +672,82 @@ exit 0
     assert_eq!(ev.project.as_deref(), Some("myproj"));
     assert_eq!(ev.farm.as_deref(), Some(local_farm.as_str()));
 }
+
+#[test]
+fn test_events_hook_drops_foreign_cos_pane_to_prevent_cross_cos_inbox_leak() {
+    let runs_dir = hermetic_temp_dir("foreign-cos-hook");
+    let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let notif_log = runs_dir.join("notifications.log");
+
+    let bin_dir = runs_dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    let herdr_bin = bin_dir.join("herdr");
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let foreign_cwd = format!("{home}/Work/TTDVKH");
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "notification" ] && [ "$2" = "show" ]; then
+    echo "$*" >> "{}"
+    exit 0
+fi
+if [ "$1" = "pane" ] && [ "$2" = "get" ] && [ "$3" = "w7:p2" ]; then
+    printf '{{"result":{{"pane":{{"pane_id":"w7:p2","cwd":"{}","tokens":{{"grid_role":"cos","grid_owner":"cos","display_agent":"CoS TTDVKH"}}}}}}}}'
+    exit 0
+fi
+exit 0
+"#,
+        notif_log.display(),
+        foreign_cwd
+    );
+    fs::write(&herdr_bin, script).expect("write stub herdr");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&herdr_bin).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&herdr_bin, perms).expect("chmod");
+    }
+
+    std::env::set_var("HERDR_BIN_PATH", &herdr_bin);
+
+    // Foreign CoS pane from another workspace (w7:p2) with grid_role=cos
+    let foreign_cos_payload = serde_json::json!({
+        "type": "pane_agent_status_changed",
+        "pane_id": "w7:p2",
+        "agent": "claude",
+        "agent_status": "blocked",
+        "tokens": {
+            "grid_role": "cos",
+            "grid_owner": "cos",
+            "display_agent": "CoS TTDVKH"
+        }
+    })
+    .to_string();
+
+    let herdr_ops = Herdr::new();
+    let res = quaqua::bus::events::handle_event_hook(
+        &runs_dir,
+        Some("pane.agent_status_changed"),
+        Some(&foreign_cos_payload),
+        &herdr_ops,
+    );
+    assert_eq!(
+        res,
+        Ok(false),
+        "foreign CoS pane must be dropped and return Ok(false)"
+    );
+
+    let log = fs::read_to_string(&notif_log).unwrap_or_default();
+    assert!(
+        log.is_empty(),
+        "must not send desktop notification for foreign CoS pane: {log}"
+    );
+
+    // Verify nothing recorded in DB
+    let db_path = runs_dir.join("quaqua.db");
+    if let Ok(bus) = quaqua::bus::FarmBus::open(&db_path) {
+        let digest = bus.inbox_digest(&runs_dir, "cos").expect("digest");
+        assert_eq!(digest.incidents.len(), 0, "no incident recorded in DB");
+    }
+}

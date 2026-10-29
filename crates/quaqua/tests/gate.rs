@@ -1215,3 +1215,87 @@ fn session_start_herdr_error_still_exits_zero() {
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn session_start_tags_cos_pane_outside_quaqua_workspace_with_own_display_name() {
+    let ws = std::env::temp_dir().join(format!("quaqua-cos-ws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join("projects")).unwrap();
+    std::fs::create_dir_all(ws.join("rules/_all")).unwrap();
+    std::fs::write(ws.join("projects/INDEX.md"), "# Projects\n").unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "CoS instructions").unwrap();
+
+    // A second workspace "ttdvkh" outside ws
+    let ttdvkh = std::env::temp_dir().join(format!("ttdvkh-cos-ws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ttdvkh);
+    std::fs::create_dir_all(ttdvkh.join(".cos/runs")).unwrap();
+    std::fs::create_dir_all(ttdvkh.join(".cos/projects")).unwrap();
+    std::fs::write(
+        ttdvkh.join(".cos/identity.md"),
+        "# CoS — TTDVKH Chief of Staff\n\nYou are fen's Chief of Staff.\n",
+    )
+    .unwrap();
+    std::fs::write(ttdvkh.join(".cos/projects/INDEX.md"), "# Projects\n").unwrap();
+
+    let fake =
+        FakeSessionStartHerdr::new(Some("w7:p2")).with_pane("w7:p2", None, Some("sess-ttdvkh-123"));
+
+    let _env = EnvGuard::set(&[("HERDR_PANE", "w7:p2")]);
+
+    let code = quaqua::gate::run_session_start_with(
+        &fake,
+        r#"{"session_id":"s-ttdvkh","source":"startup"}"#,
+        &ws,
+        Some(&ttdvkh),
+    );
+    assert_eq!(code, 0);
+
+    let calls = fake.calls.borrow();
+    let has_metadata = calls.iter().any(|c| {
+        c.len() >= 4
+            && c[0] == "pane"
+            && c[1] == "report-metadata"
+            && c[2] == "w7:p2"
+            && c.contains(&"grid_role=cos".to_string())
+    });
+    assert!(
+        has_metadata,
+        "must call pane report-metadata with grid_role=cos for workspace outside quaqua: {calls:?}"
+    );
+
+    let has_display_agent = calls.iter().any(|c| {
+        c.iter()
+            .position(|a| a == "--display-agent")
+            .and_then(|idx| c.get(idx + 1))
+            .map(|s| s.contains("CoS") && s.contains("TTDVKH"))
+            .unwrap_or(false)
+    });
+    assert!(
+        has_display_agent,
+        "must set display-agent containing CoS and TTDVKH: {calls:?}"
+    );
+
+    let has_rename = calls.iter().any(|c| {
+        c.len() >= 4
+            && c[0] == "pane"
+            && c[1] == "rename"
+            && c[2] == "w7:p2"
+            && c[3].contains("TTDVKH")
+    });
+    assert!(
+        has_rename,
+        "must rename pane to display name with TTDVKH: {calls:?}"
+    );
+
+    assert!(
+        ttdvkh.join(".cos/runs/cos.identity.json").is_file(),
+        "must record cos.identity.json in ttdvkh/.cos/runs"
+    );
+    assert!(
+        !ws.join("runs/cos.identity.json").is_file(),
+        "must not record cos.identity.json in quaqua ws runs"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+    let _ = std::fs::remove_dir_all(&ttdvkh);
+}
