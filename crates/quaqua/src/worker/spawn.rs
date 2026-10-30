@@ -609,6 +609,9 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
     } else {
         let _ = std::fs::remove_file(runs_dir.join(format!("{}.base", opts.name)));
     }
+    // A rework reuses the name: the previous agent's hook report must not make
+    // the new one look blocked (or working) before its own hooks fire.
+    let _ = std::fs::remove_file(WorkerMetadata::state_path(runs_dir, &opts.name));
 
     let rf_str = rf.to_string_lossy().to_string();
     let runs_str = runs_dir.to_string_lossy().to_string();
@@ -630,6 +633,20 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
             &wt_str,
             opts.review,
         )?;
+        if launch.harness == "claude" {
+            let read_root = if opts.review {
+                Some(crate::launch::review_read_root(&wt_str))
+            } else {
+                None
+            };
+            let settings_val =
+                crate::launch::claude_settings(&opts.name, &runs_str, read_root.as_deref());
+            let settings_file = WorkerMetadata::settings_path(runs_dir, &opts.name);
+            let _ = std::fs::write(
+                &settings_file,
+                serde_json::to_string_pretty(&settings_val).unwrap_or_default(),
+            );
+        }
         let split_envs = worker_split_envs(&cmd);
 
         let split_out = herdr

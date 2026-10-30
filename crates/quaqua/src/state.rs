@@ -70,6 +70,14 @@ impl WorkerMetadata {
         atomic_write(&Self::review_path(runs_dir, name), "")
     }
 
+    pub fn state_path(runs_dir: &Path, name: &str) -> PathBuf {
+        runs_dir.join(format!(".{name}.state"))
+    }
+
+    pub fn settings_path(runs_dir: &Path, name: &str) -> PathBuf {
+        runs_dir.join(format!(".{name}.settings.json"))
+    }
+
     /// Residual helper for `src/status.rs:307` (out of scope for this task).
     #[doc(hidden)]
     pub fn budget_path(runs_dir: &Path, name: &str) -> PathBuf {
@@ -256,6 +264,8 @@ impl WorkerMetadata {
         let _ = fs::remove_file(Self::elapsed_path(runs_dir, name));
         let _ = fs::remove_file(Self::nudged_path(runs_dir, name));
         let _ = fs::remove_file(Self::submit_log_path(runs_dir, name));
+        let _ = fs::remove_file(Self::state_path(runs_dir, name));
+        let _ = fs::remove_file(Self::settings_path(runs_dir, name));
         let _ = fs::remove_dir_all(runs_dir.join(".opencode-state").join(name));
     }
 }

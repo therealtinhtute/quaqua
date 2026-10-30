@@ -468,6 +468,29 @@ pub fn resolve_team(runs_dir: &Path, name: &str) -> String {
     }
 }
 
+/// Status of one named entity as `quaqua status` shows it: the hook-reported
+/// state in `runs/.<name>.state` when it is fresh, else herdr's screen status,
+/// else `missing` when herdr does not list the agent at all.
+fn resolved_status(
+    runs_dir: &Path,
+    name: &str,
+    live_agents: &BTreeMap<String, String>,
+    now_sec: u64,
+) -> String {
+    let screen = live_agents
+        .get(name)
+        .map(String::as_str)
+        .unwrap_or("missing");
+    crate::liveness::resolve_worker_state(
+        runs_dir,
+        name,
+        screen,
+        now_sec,
+        crate::liveness::DEFAULT_STATE_STALENESS_SEC,
+    )
+    .as_str()
+    .to_string()
+}
 
 pub fn scan_orchestration<H: HerdrOps>(
     runs_dir: &Path,
@@ -516,13 +539,14 @@ pub fn scan_orchestration<H: HerdrOps>(
         }
     }
 
+    let now_sec = crate::util::now_sec();
     let mut rows = Vec::new();
     for name in entity_names {
         let owner = WorkerMetadata::load_owner(runs_dir, &name);
-        let agent_status = live_agents
-            .get(&name)
-            .cloned()
-            .unwrap_or_else(|| "missing".to_string());
+        // A fresh `runs/.<name>.state` (written by the agent's own Claude Code
+        // hooks) wins over herdr's screen inference; with no fresh state file
+        // this is exactly the screen status.
+        let agent_status = resolved_status(runs_dir, &name, &live_agents, now_sec);
 
         let report_path = runs_dir.join(format!("{name}.md"));
         let report_exists = report_path.is_file();
@@ -563,17 +587,18 @@ pub fn scan_orchestration<H: HerdrOps>(
             false
         };
 
-        let owner_status = live_agents.get(&owner).map(|s| s.as_str());
-
         let mut flags = Vec::new();
 
         let worker_running = agent_status == "working";
         let owner_is_cos = owner == "cos";
 
-        let owner_inactive = match owner_status {
-            Some("idle") | Some("done") => true,
-            None if !owner_is_cos => true,
-            _ => false,
+        let owner_inactive = if live_agents.contains_key(&owner) {
+            matches!(
+                resolved_status(runs_dir, &owner, &live_agents, now_sec).as_str(),
+                "idle" | "done"
+            )
+        } else {
+            !owner_is_cos
         };
 
         // WAITER-LOST:
@@ -2758,6 +2783,76 @@ mod tests {
     }
 
     #[test]
+    fn test_status_rows_take_status_from_state_file_with_screen_fallback() {
+        let tmp = temp_test_dir("status-hook-state");
+        let _cleaner = TempDirCleaner(tmp.clone());
+        let now = crate::util::now_sec();
+
+        let mock = MockHerdr::new(
+            r#"{
+            "result": {
+                "agents": [
+                    {"name": "gate-lead", "agent_status": "idle"},
+                    {"name": "sude-h1", "agent_status": "idle"},
+                    {"name": "sude-h2", "agent_status": "working"},
+                    {"name": "sude-h3", "agent_status": "done"},
+                    {"name": "sude-h4", "agent_status": "working"}
+                ]
+            }
+        }"#,
+        );
+        for worker in ["sude-h1", "sude-h2", "sude-h3", "sude-h4"] {
+            let owner = if worker == "sude-h1" {
+                "gate-lead"
+            } else {
+                "cos"
+            };
+            fs::write(tmp.join(format!("{worker}.owner")), format!("{owner}\n")).unwrap();
+        }
+        // h1: screen says idle, the hook says working -> working, and its idle
+        // lead still raises WAITER-LOST (flags follow the resolved state).
+        fs::write(tmp.join(".sude-h1.state"), format!("working {now}\n")).unwrap();
+        // h2: screen says working, the hook says blocked -> blocked.
+        fs::write(tmp.join(".sude-h2.state"), format!("blocked {now}\n")).unwrap();
+        // h3: no state file -> screen ("done").
+        // h4: state file older than the staleness bound -> screen ("working").
+        fs::write(
+            tmp.join(".sude-h4.state"),
+            format!(
+                "blocked {}\n",
+                now.saturating_sub(crate::liveness::DEFAULT_STATE_STALENESS_SEC + 60)
+            ),
+        )
+        .unwrap();
+
+        let rows = scan_orchestration(&tmp, &mock, &test_team_cfg()).expect("scan orchestration");
+        let row = |name: &str| {
+            rows.iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("row '{name}' not found"))
+                .clone()
+        };
+
+        assert_eq!(row("sude-h1").agent_status, "working");
+        assert_eq!(row("sude-h2").agent_status, "blocked");
+        assert_eq!(row("sude-h3").agent_status, "done");
+        assert_eq!(row("sude-h4").agent_status, "working");
+
+        // Flags read the resolved status: h1 is working while its lead is idle.
+        assert!(
+            row("sude-h1").flags.contains(&WarningFlag::WaiterLost),
+            "WAITER-LOST must follow the hook-reported working state: {:?}",
+            row("sude-h1").flags
+        );
+        // h2 is not working any more, so nothing is left waiting on it.
+        assert!(
+            !row("sude-h2").flags.contains(&WarningFlag::WaiterLost),
+            "a blocked worker raises no WAITER-LOST: {:?}",
+            row("sude-h2").flags
+        );
+    }
+
+    #[test]
     fn test_status_renders_all_sections_when_team_config_fails_to_load() {
         let tmp = temp_test_dir("bad-team-config");
         let _cleaner = TempDirCleaner(tmp.clone());
@@ -4353,7 +4448,8 @@ pub(crate) mod metrics {
 
     #[test]
     fn test_metrics_g1_ref_stays_capped_when_all_commits_deduped() {
-        let tmp = std::env::temp_dir().join(format!("quaqua-test-metrics-dedup-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("quaqua-test-metrics-dedup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let projects = tmp.join("projects");
         std::fs::create_dir_all(&projects).unwrap();

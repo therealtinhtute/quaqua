@@ -1271,17 +1271,34 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     )
     .unwrap();
     assert!(cmd.split_envs.is_empty());
+    // A lead is a Claude agent like any worker: it reports its own state through
+    // the same hooks (`runs/.<name>.state`), so `quaqua status` shows it from
+    // hook state instead of guessing from the screen.
+    let settings_at = cmd
+        .agent_args
+        .iter()
+        .position(|a| a == "--settings")
+        .expect("claude lead must launch with hook settings");
+    let settings: serde_json::Value = serde_json::from_str(&cmd.agent_args[settings_at + 1])
+        .expect("lead settings must be valid JSON");
     assert_eq!(
-        cmd.agent_args,
-        vec![
-            "--",
-            "--model",
-            "claude-opus-5-5",
-            "--effort",
-            "low",
-            "--append-system-prompt-file",
-            "/runs/test.rules.md",
-        ]
+        cmd.agent_args[..settings_at].to_vec(),
+        vec!["--", "--model", "claude-opus-5-5", "--effort", "low"]
+    );
+    assert_eq!(
+        cmd.agent_args[settings_at + 2..].to_vec(),
+        vec!["--append-system-prompt-file", "/runs/test.rules.md"]
+    );
+    assert!(
+        settings.get("permissions").is_none(),
+        "a lead keeps its own permissions; only the state hooks are added"
+    );
+    let stop_hook = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("lead Stop hook");
+    assert!(
+        stop_hook.contains("/runs/.quaqua-rs-lead.state") && stop_hook.contains("idle"),
+        "lead Stop hook must report idle: {stop_hook}"
     );
 
     // 2. LEAD_KIND env override switches lead to sude (omp)
@@ -2179,6 +2196,149 @@ fn test_claude_review_settings_allow_readonly_evidence_deny_writes() {
 }
 
 #[test]
+fn test_claude_launch_settings_hooks_for_regular_and_review_worker() {
+    let cl = resolve_launch(&kind("claude", "opus-5.5", Some("high")), "truonglao").unwrap();
+
+    // 1. Regular worker (review = false): must have --settings with PreToolUse, Stop, Notification hooks
+    let cmd_regular = build_launch_cmd(
+        &cl,
+        "truonglao-build",
+        "/r/x.rules.md",
+        "/my/runs",
+        "/repo/.wt/truonglao-build",
+        false,
+    )
+    .unwrap();
+    let args_reg = &cmd_regular.agent_args;
+    let si_reg = args_reg
+        .iter()
+        .position(|a| a == "--settings")
+        .expect("regular claude launch must pass --settings");
+    let settings_reg: serde_json::Value =
+        serde_json::from_str(&args_reg[si_reg + 1]).expect("settings must be valid JSON");
+    assert!(
+        settings_reg.get("permissions").is_none(),
+        "regular worker should have no permissions block in settings"
+    );
+    let hooks_reg = &settings_reg["hooks"];
+    assert!(
+        hooks_reg.get("PreToolUse").is_some(),
+        "missing PreToolUse hook"
+    );
+    assert!(hooks_reg.get("Stop").is_some(), "missing Stop hook");
+    assert!(
+        hooks_reg.get("Notification").is_some(),
+        "missing Notification hook"
+    );
+
+    // PreToolUse command targets .truonglao-build.state
+    let pre_cmd = hooks_reg["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        pre_cmd.contains("/my/runs/.truonglao-build.state"),
+        "{pre_cmd}"
+    );
+    assert!(pre_cmd.contains("AskUserQuestion"), "{pre_cmd}");
+    assert!(pre_cmd.contains("ExitPlanMode"), "{pre_cmd}");
+
+    let stop_cmd = hooks_reg["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        stop_cmd.contains("/my/runs/.truonglao-build.state"),
+        "{stop_cmd}"
+    );
+    assert!(stop_cmd.contains("idle"), "{stop_cmd}");
+
+    let notif_cmd = hooks_reg["Notification"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        notif_cmd.contains("/my/runs/.truonglao-build.state"),
+        "{notif_cmd}"
+    );
+    assert!(notif_cmd.contains("blocked"), "{notif_cmd}");
+
+    // 2. Review worker (review = true): must have both permissions and hooks
+    let cmd_rev = build_launch_cmd(
+        &cl,
+        "truonglao-rev",
+        "/r/x.rules.md",
+        "/my/runs",
+        "/repo/.wt/truonglao-rev",
+        true,
+    )
+    .unwrap();
+    let args_rev = &cmd_rev.agent_args;
+    let si_rev = args_rev
+        .iter()
+        .position(|a| a == "--settings")
+        .expect("review claude launch must pass --settings");
+    let settings_rev: serde_json::Value =
+        serde_json::from_str(&args_rev[si_rev + 1]).expect("settings must be valid JSON");
+    assert!(
+        settings_rev.get("permissions").is_some(),
+        "review must have permissions block"
+    );
+    let hooks_rev = &settings_rev["hooks"];
+    assert!(
+        hooks_rev.get("PreToolUse").is_some(),
+        "missing PreToolUse hook"
+    );
+    assert!(hooks_rev.get("Stop").is_some(), "missing Stop hook");
+    assert!(
+        hooks_rev.get("Notification").is_some(),
+        "missing Notification hook"
+    );
+
+    // 3. Non-claude harness (omp, pi, opencode): must NOT pass --settings
+    let omp = resolve_launch(&kind("omp", "opus", Some("high")), "sude").unwrap();
+    let cmd_omp = build_launch_cmd(
+        &omp,
+        "sude-w",
+        "/r/x.rules.md",
+        "/my/runs",
+        "/repo/.wt/sude-w",
+        false,
+    )
+    .unwrap();
+    assert!(!cmd_omp.agent_args.iter().any(|a| a == "--settings"));
+
+    let pi = resolve_launch(
+        &kind("pi", "opencode-go/deepseek-v4.1-flash", Some("max")),
+        "tieude",
+    )
+    .unwrap();
+    let cmd_pi = build_launch_cmd(
+        &pi,
+        "tieude-w",
+        "/r/x.rules.md",
+        "/my/runs",
+        "/repo/.wt/tieude-w",
+        false,
+    )
+    .unwrap();
+    assert!(!cmd_pi.agent_args.iter().any(|a| a == "--settings"));
+
+    let oc = resolve_launch(
+        &kind("opencode", "opencode-go/deepseek-v4.1-flash", Some("max")),
+        "tieude",
+    )
+    .unwrap();
+    let cmd_oc = build_launch_cmd(
+        &oc,
+        "tieude-w",
+        "/r/x.rules.md",
+        "/my/runs",
+        "/repo/.wt/tieude-w",
+        false,
+    )
+    .unwrap();
+    assert!(!cmd_oc.agent_args.iter().any(|a| a == "--settings"));
+}
+
+#[test]
 fn test_launch_fails_closed_without_model_or_effort() {
     let e = resolve_launch(&kind("opencode", "m", None), "tieude")
         .unwrap_err()
@@ -2995,6 +3155,15 @@ fn test_spawn_worker_fallback_scenarios() {
         ])
         .unwrap();
 
+        // A previous run of this name left a hook report behind; the respawn
+        // must not inherit it.
+        let stale_state = runs_dir.join(".sude-fbtest.state");
+        std::fs::write(
+            &stale_state,
+            format!("blocked {}\n", quaqua::util::now_sec()),
+        )
+        .unwrap();
+
         let res = quaqua::worker::spawn::spawn_worker(
             opts,
             &cfg,
@@ -3006,6 +3175,10 @@ fn test_spawn_worker_fallback_scenarios() {
             res.is_ok(),
             "spawn should succeed with fallback: {:?}",
             res.err()
+        );
+        assert!(
+            !stale_state.exists(),
+            "respawn must drop the previous run's hook state"
         );
 
         let starts = herdr.agent_starts();
@@ -3820,6 +3993,8 @@ fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
         runs_dir.join(format!(".{worker_name}.elapsed")),
         runs_dir.join(format!(".{worker_name}.nudged")),
         runs_dir.join(format!(".{worker_name}.submit.log")),
+        runs_dir.join(format!(".{worker_name}.state")),
+        runs_dir.join(format!(".{worker_name}.settings.json")),
     ];
 
     for f in &files_to_create {
