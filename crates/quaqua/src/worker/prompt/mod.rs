@@ -441,9 +441,25 @@ impl Activity for PromptActivities {
                         cwd,
                         ..
                     },
-                )) = &res
+                )) = &mut res
                 {
                     let now = now_sec();
+                    // The agent's own hook report (`runs/.<name>.state`) is the
+                    // primary signal; herdr's screen inference is the fallback
+                    // when the file is absent or stale. Never override a
+                    // herdr error: a gone/failed agent is not a hook reading.
+                    if err.is_empty() || err.as_str() == "timeout" {
+                        let screen = status.clone();
+                        *status = crate::liveness::resolve_worker_state(
+                            &self.runs_dir,
+                            name,
+                            &screen,
+                            now,
+                            crate::liveness::DEFAULT_STATE_STALENESS_SEC,
+                        )
+                        .as_str()
+                        .to_string();
+                    }
                     let mut tracker = self.cost_tracker.lock().unwrap();
                     tracker.check(&self.runs_dir, name, session_value, cwd, harness);
                     stop_now = tracker.take_stop();
@@ -1383,6 +1399,54 @@ esac
                 .iter()
                 .any(|e| e.event_type == "report_written" && e.subject.as_deref() == Some(name)),
             "exit 0 must record report_written event in farm_events"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A fresh `runs/.<name>.state` from the agent's hooks decides the wait:
+    /// herdr's screen says `idle`, the hook says `blocked`, and the watchdog
+    /// ends at exit 5 instead of idling to exit 3.
+    #[test]
+    fn test_prompt_exits_5_when_the_state_file_reports_blocked() {
+        let _env_lock = lock_env();
+        let tmp = temp_runs("hook-blocked");
+        let stub = stub_herdr(&tmp);
+        let _g_runs = TestEnvVarGuard::set("QUAQUA_RUNS_DIR", tmp.to_str().unwrap());
+        let _g_skip = TestEnvVarGuard::set("GRID_SKIP", "1");
+        let _g_test = TestEnvVarGuard::set("QUAQUA_TEST", "1");
+        let _g_poll = TestEnvVarGuard::set("PROMPT_WORKER_POLL_SEC", "1");
+        let _g_herdr = TestEnvVarGuard::set("HERDR_BIN_PATH", stub.to_str().unwrap());
+        fs::write(
+            tmp.join(".sude-hook.state"),
+            format!("blocked {}\n", now_sec()),
+        )
+        .unwrap();
+
+        let herdr = Herdr {
+            bin: stub.to_string_lossy().to_string(),
+        };
+        let res = prompt_worker(
+            "sude-hook",
+            None,
+            false,
+            None,
+            &crate::git::Git::new(),
+            &herdr,
+        );
+
+        assert_eq!(
+            res,
+            Err((5, String::new())),
+            "a fresh blocked state file must end the wait as blocked"
+        );
+        let bus = crate::bus::FarmBus::open(&tmp.join("quaqua.db")).expect("open bus");
+        let farm_events = bus.load_events(0).expect("load farm events");
+        assert!(
+            farm_events
+                .iter()
+                .any(|e| e.event_type == "blocked" && e.subject.as_deref() == Some("sude-hook")),
+            "exit 5 must record a blocked event in farm_events"
         );
 
         let _ = fs::remove_dir_all(&tmp);

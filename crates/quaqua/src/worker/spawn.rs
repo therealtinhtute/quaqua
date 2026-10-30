@@ -609,6 +609,9 @@ fn spawn_worker_inner<G: GitOps, H: HerdrOps>(
     } else {
         let _ = std::fs::remove_file(runs_dir.join(format!("{}.base", opts.name)));
     }
+    // A rework reuses the name: the previous agent's hook report must not make
+    // the new one look blocked (or working) before its own hooks fire.
+    let _ = std::fs::remove_file(WorkerMetadata::state_path(runs_dir, &opts.name));
 
     let rf_str = rf.to_string_lossy().to_string();
     let runs_str = runs_dir.to_string_lossy().to_string();

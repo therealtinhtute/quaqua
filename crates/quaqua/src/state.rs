@@ -264,6 +264,8 @@ impl WorkerMetadata {
         let _ = fs::remove_file(Self::elapsed_path(runs_dir, name));
         let _ = fs::remove_file(Self::nudged_path(runs_dir, name));
         let _ = fs::remove_file(Self::submit_log_path(runs_dir, name));
+        let _ = fs::remove_file(Self::state_path(runs_dir, name));
+        let _ = fs::remove_file(Self::settings_path(runs_dir, name));
         let _ = fs::remove_dir_all(runs_dir.join(".opencode-state").join(name));
     }
 }

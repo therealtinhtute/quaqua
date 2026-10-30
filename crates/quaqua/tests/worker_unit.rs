@@ -1271,17 +1271,34 @@ fn test_lead_launch_uses_strategy_lead_kind_and_override() {
     )
     .unwrap();
     assert!(cmd.split_envs.is_empty());
+    // A lead is a Claude agent like any worker: it reports its own state through
+    // the same hooks (`runs/.<name>.state`), so `quaqua status` shows it from
+    // hook state instead of guessing from the screen.
+    let settings_at = cmd
+        .agent_args
+        .iter()
+        .position(|a| a == "--settings")
+        .expect("claude lead must launch with hook settings");
+    let settings: serde_json::Value = serde_json::from_str(&cmd.agent_args[settings_at + 1])
+        .expect("lead settings must be valid JSON");
     assert_eq!(
-        cmd.agent_args,
-        vec![
-            "--",
-            "--model",
-            "claude-opus-5-5",
-            "--effort",
-            "low",
-            "--append-system-prompt-file",
-            "/runs/test.rules.md",
-        ]
+        cmd.agent_args[..settings_at].to_vec(),
+        vec!["--", "--model", "claude-opus-5-5", "--effort", "low"]
+    );
+    assert_eq!(
+        cmd.agent_args[settings_at + 2..].to_vec(),
+        vec!["--append-system-prompt-file", "/runs/test.rules.md"]
+    );
+    assert!(
+        settings.get("permissions").is_none(),
+        "a lead keeps its own permissions; only the state hooks are added"
+    );
+    let stop_hook = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("lead Stop hook");
+    assert!(
+        stop_hook.contains("/runs/.quaqua-rs-lead.state") && stop_hook.contains("idle"),
+        "lead Stop hook must report idle: {stop_hook}"
     );
 
     // 2. LEAD_KIND env override switches lead to sude (omp)
@@ -3138,6 +3155,15 @@ fn test_spawn_worker_fallback_scenarios() {
         ])
         .unwrap();
 
+        // A previous run of this name left a hook report behind; the respawn
+        // must not inherit it.
+        let stale_state = runs_dir.join(".sude-fbtest.state");
+        std::fs::write(
+            &stale_state,
+            format!("blocked {}\n", quaqua::util::now_sec()),
+        )
+        .unwrap();
+
         let res = quaqua::worker::spawn::spawn_worker(
             opts,
             &cfg,
@@ -3149,6 +3175,10 @@ fn test_spawn_worker_fallback_scenarios() {
             res.is_ok(),
             "spawn should succeed with fallback: {:?}",
             res.err()
+        );
+        assert!(
+            !stale_state.exists(),
+            "respawn must drop the previous run's hook state"
         );
 
         let starts = herdr.agent_starts();
@@ -3963,6 +3993,8 @@ fn test_cleanup_worker_cleans_budget_grace_cost_and_metadata() {
         runs_dir.join(format!(".{worker_name}.elapsed")),
         runs_dir.join(format!(".{worker_name}.nudged")),
         runs_dir.join(format!(".{worker_name}.submit.log")),
+        runs_dir.join(format!(".{worker_name}.state")),
+        runs_dir.join(format!(".{worker_name}.settings.json")),
     ];
 
     for f in &files_to_create {
