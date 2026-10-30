@@ -14,7 +14,7 @@ Owner: CoS. Source of truth for what is left; each row ends in a check.
 - S0 baseline: DROPPED (anh iu 2026-10-28) — no measurement window; no G1–G3 delta to compute.
 - P4 gate enforce: SKIPPED (anh iu 2026-10-28) — no shadow window, no enforce flip.
 - P8 user layouts + council: DONE — gate (P4) skipped, so CP4 no longer gated it.
-- #138 report frontmatter: IN PROGRESS (sude-rptenum) — verdict vocabulary landed (3e09c7e), unblocked.
+- #138 report frontmatter: DONE 453cf64 (#160).
 
 ## Needs anh iu (irreversible / preference)
 - Push + PR: DONE 2026-10-28 — commits are in main (3d04669, 5951d54, 3e09c7e, fa5144f).
