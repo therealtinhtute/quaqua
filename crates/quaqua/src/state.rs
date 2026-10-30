@@ -70,6 +70,14 @@ impl WorkerMetadata {
         atomic_write(&Self::review_path(runs_dir, name), "")
     }
 
+    pub fn state_path(runs_dir: &Path, name: &str) -> PathBuf {
+        runs_dir.join(format!(".{name}.state"))
+    }
+
+    pub fn settings_path(runs_dir: &Path, name: &str) -> PathBuf {
+        runs_dir.join(format!(".{name}.settings.json"))
+    }
+
     /// Residual helper for `src/status.rs:307` (out of scope for this task).
     #[doc(hidden)]
     pub fn budget_path(runs_dir: &Path, name: &str) -> PathBuf {

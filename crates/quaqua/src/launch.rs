@@ -25,15 +25,26 @@ pub fn resolve_launch(
     let Some(harness) = crate::harness::Harness::parse(&kind.harness) else {
         return Err((
             1,
-            format!("error: unsupported harness '{}' for kind '{kind_name}'\n", kind.harness),
+            format!(
+                "error: unsupported harness '{}' for kind '{kind_name}'\n",
+                kind.harness
+            ),
         ));
     };
     if kind.model.trim().is_empty() {
-        return Err((1, format!("error: kind '{kind_name}' has no model in team.toml\n")));
+        return Err((
+            1,
+            format!("error: kind '{kind_name}' has no model in team.toml\n"),
+        ));
     }
     let effort = match kind.effort.as_deref() {
         Some(e) if !e.trim().is_empty() => e,
-        _ => return Err((1, format!("error: kind '{kind_name}' has no effort in team.toml\n"))),
+        _ => {
+            return Err((
+                1,
+                format!("error: kind '{kind_name}' has no effort in team.toml\n"),
+            ))
+        }
     };
     if !harness.effort_allowed(effort) {
         return Err((
@@ -134,7 +145,7 @@ pub const CLAUDE_REVIEW_BASH_DENY: &[&str] = &[
 /// The worktree family a reviewer may read: worktrees sit side by side in
 /// `<repo>/.wt/<name>`, so the sibling directory holds the builder's branch.
 /// Falls back to the worktree itself when the caller's path is not `<…>/.wt/<name>`.
-fn review_read_root(wt: &str) -> String {
+pub fn review_read_root(wt: &str) -> String {
     Path::new(wt)
         .parent()
         .filter(|p| p.file_name().is_some_and(|n| n == ".wt"))
@@ -142,20 +153,46 @@ fn review_read_root(wt: &str) -> String {
         .unwrap_or_else(|| wt.to_string())
 }
 
-/// `--settings` for a claude reviewer: `dontAsk` runs only what is pre-approved
-/// here, so this list is the reviewer's whole capability — read-only evidence
-/// gathering plus writing its report, and nothing that writes a worktree.
-fn claude_review_settings(runs_dir: &str, read_root: &str) -> String {
-    let runs_clean = runs_dir.trim_start_matches('/');
-    let read_clean = read_root.trim_start_matches('/');
-    let mut allow = vec![
-        format!("Edit(//{runs_clean}/**)"),
-        "Bash(mv *runs/.*.tmp *runs/*.md)".to_string(),
-    ];
-    allow.extend(CLAUDE_REVIEW_BASH_ALLOW.iter().map(|r| r.to_string()));
-    let mut deny = vec![format!("Edit(//{read_clean}/**)")];
-    deny.extend(CLAUDE_REVIEW_BASH_DENY.iter().map(|r| r.to_string()));
-    serde_json::json!({"permissions": {"allow": allow, "deny": deny}}).to_string()
+/// Build settings JSON for Claude Code containing per-worker hooks for liveness
+/// state (`runs/.<name>.state`), and reviewer permissions if `read_root` is provided.
+pub fn claude_settings(name: &str, runs_dir: &str, read_root: Option<&str>) -> serde_json::Value {
+    let state_file = format!("{runs_dir}/.{name}.state");
+    let state_tmp = format!("{runs_dir}/.{name}.state.tmp");
+    let pre_tool_cmd = format!(
+        "sh -c 'if grep -Eq \"\\\"tool_name\\\"[[:space:]]*:[[:space:]]*\\\"(AskUserQuestion|ExitPlanMode)\\\"\"; then s=\"blocked\"; else s=\"working\"; fi; echo \"$s $(date +%s)\" > \"{state_tmp}\" && mv \"{state_tmp}\" \"{state_file}\"'"
+    );
+    let stop_cmd = format!(
+        "sh -c 'echo \"idle $(date +%s)\" > \"{state_tmp}\" && mv \"{state_tmp}\" \"{state_file}\"'"
+    );
+    let notif_cmd = format!(
+        "sh -c 'echo \"blocked $(date +%s)\" > \"{state_tmp}\" && mv \"{state_tmp}\" \"{state_file}\"'"
+    );
+
+    let hooks = serde_json::json!({
+        "PreToolUse": [{ "hooks": [{ "type": "command", "command": pre_tool_cmd }] }],
+        "Stop": [{ "hooks": [{ "type": "command", "command": stop_cmd }] }],
+        "Notification": [{ "hooks": [{ "type": "command", "command": notif_cmd }] }]
+    });
+
+    if let Some(read_root) = read_root {
+        let runs_clean = runs_dir.trim_start_matches('/');
+        let read_clean = read_root.trim_start_matches('/');
+        let mut allow = vec![
+            format!("Edit(//{runs_clean}/**)"),
+            "Bash(mv *runs/.*.tmp *runs/*.md)".to_string(),
+        ];
+        allow.extend(CLAUDE_REVIEW_BASH_ALLOW.iter().map(|r| r.to_string()));
+        let mut deny = vec![format!("Edit(//{read_clean}/**)")];
+        deny.extend(CLAUDE_REVIEW_BASH_DENY.iter().map(|r| r.to_string()));
+        serde_json::json!({
+            "permissions": { "allow": allow, "deny": deny },
+            "hooks": hooks
+        })
+    } else {
+        serde_json::json!({
+            "hooks": hooks
+        })
+    }
 }
 
 /// One attempt's `herdr` invocation: the pane-split envs and the args after
@@ -195,7 +232,11 @@ pub fn build_launch_cmd(
             split_envs.push(("OPENCODE_CONFIG_CONTENT".to_string(), cfg));
             let state_dir = format!("{runs_dir}/.opencode-state/{name}");
             split_envs.push(("XDG_STATE_HOME".to_string(), state_dir));
-            vec!["--".to_string(), "--standalone".to_string(), "--auto".to_string()]
+            vec![
+                "--".to_string(),
+                "--standalone".to_string(),
+                "--auto".to_string(),
+            ]
         }
         "omp" => {
             let mut args = vec![
@@ -263,7 +304,10 @@ pub fn build_launch_cmd(
                 args.push(runs_dir.to_string());
                 args.push(read_root.clone());
                 args.push("--settings".to_string());
-                args.push(claude_review_settings(runs_dir, &read_root));
+                args.push(claude_settings(name, runs_dir, Some(&read_root)).to_string());
+            } else {
+                args.push("--settings".to_string());
+                args.push(claude_settings(name, runs_dir, None).to_string());
             }
             args.push("--append-system-prompt-file".to_string());
             args.push(rules_file.to_string());
@@ -272,7 +316,10 @@ pub fn build_launch_cmd(
         other => return Err((1, format!("error: unsupported harness '{other}'\n"))),
     };
 
-    Ok(LaunchCmd { split_envs, agent_args })
+    Ok(LaunchCmd {
+        split_envs,
+        agent_args,
+    })
 }
 
 /// Is Claude Code's workspace-trust dialog still on screen? Its wording varies
