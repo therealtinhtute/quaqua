@@ -282,6 +282,53 @@ pub fn tag_cos_pane_in<H: HerdrOps>(
     tag_cos_pane_with(herdr, pane, runs_dir, COS_DISPLAY_AGENT, COS_PANE_TITLE)
 }
 
+/// Stamps `grid_role=cos grid_owner=cos grid_farm=<farm>` on `pane` and nothing
+/// else: no rename, no `runs/cos.identity.json` write, no display-agent change.
+///
+/// `identity heal` uses this to add the farm token to a CoS pane tagged before
+/// farm stamping existed, leaving the pane title and recorded identity alone.
+/// Idempotent: `pane report-metadata` merges tokens, so re-running converges.
+pub fn stamp_cos_farm<H: HerdrOps>(herdr: &H, pane: &str, farm: &str) -> Result<(), String> {
+    report_cos_metadata(herdr, pane, farm, None)
+}
+
+fn report_cos_metadata<H: HerdrOps>(
+    herdr: &H,
+    pane: &str,
+    farm: &str,
+    display_agent: Option<&str>,
+) -> Result<(), String> {
+    let farm_tok = format!("grid_farm={farm}");
+    let mut args = vec![
+        "pane",
+        "report-metadata",
+        pane,
+        "--source",
+        "herdr-quaqua",
+        "--token",
+        COS_ROLE_TOKEN,
+        "--token",
+        COS_OWNER_TOKEN,
+        "--token",
+        &farm_tok,
+    ];
+    if let Some(agent) = display_agent {
+        args.push("--display-agent");
+        args.push(agent);
+    }
+    let report_out = herdr
+        .run(&args)
+        .map_err(|e| format!("herdr pane report-metadata failed for {pane}: {e}"))?;
+
+    if !report_out.status.success() {
+        let err = String::from_utf8_lossy(&report_out.stderr);
+        return Err(format!(
+            "herdr pane report-metadata failed for {pane}: {err}"
+        ));
+    }
+    Ok(())
+}
+
 /// Tag the specified pane as the CoS pane with explicit runs_dir, display_agent, and pane_title.
 pub fn tag_cos_pane_with<H: HerdrOps>(
     herdr: &H,
@@ -291,31 +338,12 @@ pub fn tag_cos_pane_with<H: HerdrOps>(
     pane_title: &str,
 ) -> Result<String, String> {
     // 1. Report metadata
-    let farm_tok = format!("grid_farm={}", crate::workspace::farm_id());
-    let report_out = herdr
-        .run(&[
-            "pane",
-            "report-metadata",
-            pane,
-            "--source",
-            "herdr-quaqua",
-            "--token",
-            COS_ROLE_TOKEN,
-            "--token",
-            COS_OWNER_TOKEN,
-            "--token",
-            &farm_tok,
-            "--display-agent",
-            display_agent,
-        ])
-        .map_err(|e| format!("herdr pane report-metadata failed for {pane}: {e}"))?;
-
-    if !report_out.status.success() {
-        let err = String::from_utf8_lossy(&report_out.stderr);
-        return Err(format!(
-            "herdr pane report-metadata failed for {pane}: {err}"
-        ));
-    }
+    report_cos_metadata(
+        herdr,
+        pane,
+        &crate::workspace::farm_id(),
+        Some(display_agent),
+    )?;
 
     // 2. Rename pane
     let rename_out = herdr

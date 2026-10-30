@@ -1554,3 +1554,267 @@ fn test_identity_heal_dry_run_previews_actions_without_mutation() {
         "owner file must not be created in dry-run"
     );
 }
+
+/// Pane state for the CoS farm-heal tests: like `MockMultiPaneHerdr`, but each
+/// pane also reports a `cwd`, which `heal` reads to prove a pane is local
+/// before stamping `grid_farm`.
+struct MockFarmHerdr {
+    panes: RefCell<HashMap<String, (HashMap<String, String>, String)>>,
+    reported_tokens: RefCell<Vec<(String, Vec<String>)>>,
+    agent_list_json: String,
+}
+
+impl MockFarmHerdr {
+    fn new(
+        panes: HashMap<String, (HashMap<String, String>, String)>,
+        agent_list_json: &str,
+    ) -> Self {
+        Self {
+            panes: RefCell::new(panes),
+            reported_tokens: RefCell::new(Vec::new()),
+            agent_list_json: agent_list_json.to_string(),
+        }
+    }
+
+    fn tokens(&self, pane: &str) -> HashMap<String, String> {
+        self.panes
+            .borrow()
+            .get(pane)
+            .cloned()
+            .map(|(tokens, _)| tokens)
+            .unwrap_or_default()
+    }
+}
+
+impl HerdrOps for MockFarmHerdr {
+    fn run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        let stdout = if args.first() == Some(&"pane") && args.get(1) == Some(&"get") {
+            let pane_id = args.get(2).copied().unwrap_or("");
+            let panes = self.panes.borrow();
+            let (tokens, cwd) = panes.get(pane_id).cloned().unwrap_or_default();
+            serde_json::json!({
+                "result": {"pane": {"pane_id": pane_id, "cwd": cwd, "tokens": tokens}}
+            })
+            .to_string()
+        } else if args.first() == Some(&"pane") && args.get(1) == Some(&"report-metadata") {
+            let pane_id = args.get(2).copied().unwrap_or("").to_string();
+            let mut toks = Vec::new();
+            let mut i = 3;
+            while i < args.len() {
+                if args[i] == "--token" && i + 1 < args.len() {
+                    toks.push(args[i + 1].to_string());
+                    if let Some((k, v)) = args[i + 1].split_once('=') {
+                        self.panes
+                            .borrow_mut()
+                            .entry(pane_id.clone())
+                            .or_default()
+                            .0
+                            .insert(k.to_string(), v.to_string());
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            self.reported_tokens.borrow_mut().push((pane_id, toks));
+            r#"{"result":{}}"#.to_string()
+        } else if args.first() == Some(&"agent") && args.get(1) == Some(&"list") {
+            self.agent_list_json.clone()
+        } else {
+            r#"{"result":{}}"#.to_string()
+        };
+        Ok(std::process::Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(0),
+            stdout: stdout.into_bytes(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn agent_list(&self) -> std::io::Result<String> {
+        Ok(self.agent_list_json.clone())
+    }
+    fn agent_get(&self, _n: &str) -> std::io::Result<(bool, String)> {
+        unimplemented!()
+    }
+    fn agent_read(&self, _n: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+        Ok(String::new())
+    }
+    fn agent_start(
+        &self,
+        _n: &str,
+        _k: &str,
+        _p: &str,
+        _t: u32,
+        _a: &[&str],
+    ) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn pane_split(
+        &self,
+        _c: &str,
+        _o: &str,
+        _e: &[(&str, &str)],
+    ) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn pane_close(&self, _p: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn pane_report_metadata(&self, _p: &str, _t: &[&str]) -> std::io::Result<std::process::Output> {
+        let mut args = vec!["pane", "report-metadata", _p];
+        for t in _t {
+            args.push("--token");
+            args.push(t);
+        }
+        self.run(&args)
+    }
+    fn pane_wait_output(&self, _p: &str, _m: &str, _t: u32) -> bool {
+        true
+    }
+    fn pane_read(&self, _p: &str, _s: &str, _l: u32) -> std::io::Result<String> {
+        Ok(String::new())
+    }
+    fn pane_send_keys(&self, _p: &str, _k: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_send_keys(&self, _n: &str, _key: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_wait_idle(&self, _n: &str, _t: u32) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_nowait(&self, _n: &str, _p: &str) -> std::io::Result<std::process::Output> {
+        unimplemented!()
+    }
+    fn agent_prompt_wait_background(
+        &self,
+        _n: &str,
+        _p: &str,
+        _t: u32,
+        _f: std::fs::File,
+    ) -> std::io::Result<std::process::Child> {
+        unimplemented!()
+    }
+}
+
+/// Hermetic workspace root + pinned runs dir, so `heal` resolves the same farm
+/// the fixture writes into.
+fn cos_farm_workspace(prefix: &str) -> (EnvGuard, PathBuf) {
+    let guard = EnvGuard::new(&["QUAQUA_ROOT", "QUAQUA_RUNS_DIR"]);
+    let ws = hermetic_temp_dir(prefix);
+    guard.set("QUAQUA_ROOT", ws.to_str().unwrap());
+    let runs_dir = ws.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    guard.set("QUAQUA_RUNS_DIR", runs_dir.to_str().unwrap());
+    (guard, ws)
+}
+
+#[test]
+fn test_identity_heal_cos_tagged_without_farm_stamps_local_farm() {
+    let (_guard, ws) = cos_farm_workspace("heal-cos-farm-ws");
+    let runs_dir = ws.join("runs");
+    std::fs::write(
+        runs_dir.join("cos.identity.json"),
+        r#"{"agent_session":"ses-cos","pane_id":"w1:p1"}"#,
+    )
+    .unwrap();
+
+    // A CoS pane tagged before farm stamping existed: role and owner, no farm.
+    let mut tokens = HashMap::new();
+    tokens.insert("grid_role".to_string(), "cos".to_string());
+    tokens.insert("grid_owner".to_string(), "cos".to_string());
+    let mut panes = HashMap::new();
+    panes.insert(
+        "w1:p1".to_string(),
+        (tokens, ws.to_string_lossy().to_string()),
+    );
+
+    let agents_json = r#"{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude","tokens":{"grid_role":"cos","grid_owner":"cos"},"agent_session":{"value":"ses-cos"}}]}}"#;
+    let herdr = MockFarmHerdr::new(panes, agents_json);
+
+    let farm = quaqua::workspace::farm_of_runs_dir(&runs_dir);
+    let actions = heal(&herdr).expect("heal should succeed");
+    assert_eq!(
+        actions.actions,
+        vec![format!("healed CoS (pane w1:p1): tagged grid_farm={farm}")]
+    );
+    assert_eq!(
+        herdr.tokens("w1:p1").get("grid_farm").map(String::as_str),
+        Some(farm.as_str()),
+        "CoS pane must carry the local farm token"
+    );
+    assert_eq!(
+        herdr.tokens("w1:p1").get("grid_role").map(String::as_str),
+        Some("cos")
+    );
+
+    // Idempotent: the token already names this farm, so a second heal does nothing.
+    let again = heal(&herdr).expect("second heal should succeed");
+    assert!(
+        again.is_empty(),
+        "second heal must be a no-op, got: {again:?}"
+    );
+    assert_eq!(herdr.reported_tokens.borrow().len(), 1);
+}
+
+#[test]
+fn test_identity_heal_does_not_stamp_foreign_farm_cos_pane() {
+    let (_guard, ws) = cos_farm_workspace("heal-cos-foreign-ws");
+
+    // Another farm's CoS pane: explicit foreign farm wins over its local-looking cwd.
+    let mut tokens = HashMap::new();
+    tokens.insert("grid_role".to_string(), "cos".to_string());
+    tokens.insert("grid_owner".to_string(), "cos".to_string());
+    tokens.insert("grid_farm".to_string(), "other-farm".to_string());
+    let mut panes = HashMap::new();
+    panes.insert(
+        "w1:p1".to_string(),
+        (tokens, ws.to_string_lossy().to_string()),
+    );
+
+    let agents_json = r#"{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude","tokens":{"grid_role":"cos","grid_owner":"cos","grid_farm":"other-farm"}}]}}"#;
+    let herdr = MockFarmHerdr::new(panes, agents_json);
+
+    let actions = heal(&herdr).expect("heal should succeed");
+    assert!(
+        actions.is_empty(),
+        "foreign pane must not be healed: {actions:?}"
+    );
+    assert!(
+        herdr.reported_tokens.borrow().is_empty(),
+        "foreign pane must receive no metadata call"
+    );
+    assert_eq!(
+        herdr.tokens("w1:p1").get("grid_farm").map(String::as_str),
+        Some("other-farm")
+    );
+}
+
+#[test]
+fn test_identity_heal_does_not_stamp_cos_pane_outside_local_farm() {
+    let (_guard, ws) = cos_farm_workspace("heal-cos-outside-ws");
+    let elsewhere = hermetic_temp_dir("heal-cos-elsewhere");
+
+    // A CoS-tagged pane whose cwd is not inside this farm: no farm token to read,
+    // and no local proof either, so heal must leave it alone.
+    let mut tokens = HashMap::new();
+    tokens.insert("grid_role".to_string(), "cos".to_string());
+    tokens.insert("grid_owner".to_string(), "cos".to_string());
+    let mut panes = HashMap::new();
+    panes.insert(
+        "w1:p1".to_string(),
+        (tokens, elsewhere.to_string_lossy().to_string()),
+    );
+
+    let agents_json = r#"{"result":{"agents":[{"pane_id":"w1:p1","agent":"claude","tokens":{"grid_role":"cos","grid_owner":"cos"}}]}}"#;
+    let herdr = MockFarmHerdr::new(panes, agents_json);
+
+    let actions = heal(&herdr).expect("heal should succeed");
+    assert!(
+        actions.is_empty(),
+        "pane outside the local farm must not be healed: {actions:?}"
+    );
+    assert!(herdr.reported_tokens.borrow().is_empty());
+    assert_eq!(herdr.tokens("w1:p1").get("grid_farm"), None);
+    let _ = ws;
+}

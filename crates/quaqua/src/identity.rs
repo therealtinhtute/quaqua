@@ -392,6 +392,8 @@ fn is_registered_lead(runs_dir: &Path, slug: &str, lead_name: &str) -> bool {
 /// (c) CoS: tag `cos` ONLY when the pane's herdr-persisted `agent_session.value` matches
 ///     `runs/cos.identity.json`, the pane has no herdr agent name, and it carries no `grid_role`.
 ///     At most one CoS pane is ever crowned; multiple matches resolve via recorded pane ID or fail closed.
+///     A pane already carrying `grid_role=cos` but no `grid_farm` also gets `grid_farm=<local farm>`,
+///     but only when its cwd places it inside this farm (a foreign CoS pane is never stamped).
 /// Every other case: no-op (fail closed).
 pub fn heal<H: HerdrOps>(herdr: &H) -> Result<HealReport, String> {
     heal_with_runs_dir(
@@ -640,6 +642,7 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
         if agent_name.is_empty() {
             let mut carries_grid_role = false;
             let mut is_cos_tagged = false;
+            let mut cos_role_without_farm = false;
             if let Some(tokens) = agent.get("tokens").and_then(|t| t.as_object()) {
                 if tokens.get("grid_role").and_then(|v| v.as_str()) == Some("cos") {
                     is_cos_tagged = true;
@@ -666,6 +669,8 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
                         {
                             if tokens.get("grid_role").and_then(|v| v.as_str()) == Some("cos") {
                                 is_cos_tagged = true;
+                                cos_role_without_farm =
+                                    tokens.get("grid_farm").and_then(|v| v.as_str()).is_none();
                             }
                             if tokens.contains_key("grid_role") {
                                 carries_grid_role = true;
@@ -680,6 +685,33 @@ pub fn heal_with_runs_dir<H: HerdrOps>(
                                         .and_then(|v| v.as_str())
                                 })
                                 .map(String::from);
+                        }
+
+                        // A CoS pane tagged before farm stamping (or after herdr
+                        // dropped the token) resolves as cos but carries no farm, so
+                        // attribution falls back to its cwd. Add the farm only when
+                        // the pane is provably local: a pane carrying another farm's
+                        // token, or one whose cwd sits outside this farm, is not ours
+                        // to stamp.
+                        if cos_role_without_farm
+                            && matches!(
+                                crate::bus::events::attribute_pane(&val, &local_farm, runs_dir),
+                                crate::bus::events::PaneAttribution::Local { .. }
+                            )
+                        {
+                            if dry_run {
+                                actions.push(format!(
+                                    "[dry-run] healed CoS (pane {pane_id}): tagged grid_farm={local_farm}"
+                                ));
+                            } else {
+                                match crate::cos::stamp_cos_farm(herdr, pane_id, &local_farm) {
+                                    Ok(_) => actions.push(format!(
+                                        "healed CoS (pane {pane_id}): tagged grid_farm={local_farm}"
+                                    )),
+                                    Err(e) => errors
+                                        .push(format!("failed to tag CoS pane {pane_id}: {e}")),
+                                }
+                            }
                         }
                     }
                 }
